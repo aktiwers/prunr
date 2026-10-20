@@ -158,6 +158,8 @@ const SHARED_GRAPH_FILE: &str = "optimized.onnx";
 pub struct GraphDraft {
     draft: PathBuf,
     path: PathBuf,
+    /// The disk space the graph will take, held until it is written.
+    _room: Option<Reserved>,
 }
 
 /// A draft left by a build that died is older than any build takes.
@@ -174,7 +176,7 @@ impl GraphDraft {
         if let Some(dir) = path.parent() {
             remove_abandoned_drafts(dir, &name);
         }
-        Self { draft, path: path.to_path_buf() }
+        Self { draft, path: path.to_path_buf(), _room: None }
     }
 
     /// Where ORT writes the graph.
@@ -214,10 +216,17 @@ pub(crate) fn attach_draft(
     ep_name: &str,
     part: Option<&str>,
 ) -> (ort::session::builder::SessionBuilder, Option<GraphDraft>) {
-    let draft = GraphDraft::for_path(path);
-    if !writable(draft.draft(), graph_bytes) {
-        tracing::warn!(?model_id, ep = %ep_name, part, path = %path.display(), "optimized graph cannot be written here; built uncached");
+    if !take_draft_slot() {
+        tracing::debug!(?model_id, ep = %ep_name, part, "built again without its optimized graph");
         return (builder, None);
+    }
+    let mut draft = GraphDraft::for_path(path);
+    match writable(draft.draft(), graph_bytes) {
+        Some(room) => draft._room = Some(room),
+        None => {
+            tracing::warn!(?model_id, ep = %ep_name, part, path = %path.display(), "optimized graph cannot be written here; built uncached");
+            return (builder, None);
+        }
     }
     match builder.with_optimized_model_path(draft.draft()) {
         Ok(builder) => {
@@ -231,12 +240,82 @@ pub(crate) fn attach_draft(
     }
 }
 
-/// The draft can be made and the graph fits, twice over: ORT fails a whole
-/// session it cannot write the graph for (a read-only or missing folder, a
-/// full disk), and the cache must never cost the model.
-fn writable(draft: &Path, graph_bytes: u64) -> bool {
-    std::fs::File::create(draft).is_ok()
-        && crate::sysmem::free_disk_bytes(draft).is_none_or(|free| free / 2 >= graph_bytes)
+/// The draft can be made and the graph fits, twice over, beside the
+/// graphs other builds are writing: ORT fails a whole session it cannot
+/// write the graph for (a read-only or missing folder, a full disk), and
+/// the cache must never cost the model. The room stays reserved while the
+/// returned guard lives.
+fn writable(draft: &Path, graph_bytes: u64) -> Option<Reserved> {
+    std::fs::File::create(draft).ok()?;
+    IN_FLIGHT.reserve(crate::sysmem::free_disk_bytes(draft), graph_bytes)
+}
+
+/// Disk space the optimized graphs being written will take: the parts of
+/// one model build in parallel, and each finding room for itself alone
+/// they filled the disk together.
+struct InFlight(std::sync::atomic::AtomicU64);
+
+static IN_FLIGHT: InFlight = InFlight::new();
+
+impl InFlight {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(0))
+    }
+
+    /// Room for `bytes` more on a disk with `free` (twice over, with what
+    /// is in flight; unknown free space is trusted), until the guard drops.
+    fn reserve(&'static self, free: Option<u64>, bytes: u64) -> Option<Reserved> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let others = self.0.fetch_add(bytes, SeqCst);
+        if free.is_none_or(|free| free / 2 >= others + bytes) {
+            Some(Reserved { by: self, bytes })
+        } else {
+            self.0.fetch_sub(bytes, SeqCst);
+            None
+        }
+    }
+}
+
+struct Reserved {
+    by: &'static InFlight,
+    bytes: u64,
+}
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        self.by.0.fetch_sub(self.bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+thread_local! {
+    /// Drafts this thread attached, and whether it may attach them now.
+    static DRAFTS: std::cell::Cell<(u32, bool)> = const { std::cell::Cell::new((0, true)) };
+}
+
+/// A draft may be written for the session this thread builds; counted,
+/// so a failed build can tell it was writing one.
+pub(crate) fn take_draft_slot() -> bool {
+    DRAFTS.with(|d| {
+        let (attached, allowed) = d.get();
+        if allowed {
+            d.set((attached + 1, allowed));
+        }
+        allowed
+    })
+}
+
+/// Drafts this thread has attached so far.
+pub(crate) fn drafts_attached() -> u32 {
+    DRAFTS.with(|d| d.get().0)
+}
+
+/// `build` with no optimized graph written: the retry of a session that
+/// failed while writing one.
+pub(crate) fn without_drafts<T>(build: impl FnOnce() -> T) -> T {
+    let before = DRAFTS.with(|d| d.replace((d.get().0, false)));
+    let built = build();
+    DRAFTS.with(|d| d.set((d.get().0, before.1)));
+    built
 }
 
 fn remove_abandoned_drafts(dir: &Path, name: &str) {
@@ -419,13 +498,13 @@ mod tests {
     fn a_draft_is_attached_only_where_the_graph_can_be_written() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        assert!(writable(&dir.path().join("graph.draft"), 1024), "a folder with room");
-        assert!(!writable(&dir.path().join("missing/graph.draft"), 1024), "a folder that is not there");
-        assert!(!writable(&dir.path().join("graph.draft"), u64::MAX / 4), "a graph the disk cannot hold");
+        assert!(writable(&dir.path().join("graph.draft"), 1024).is_some(), "a folder with room");
+        assert!(writable(&dir.path().join("missing/graph.draft"), 1024).is_none(), "a folder that is not there");
+        assert!(writable(&dir.path().join("graph.draft"), u64::MAX / 4).is_none(), "a graph the disk cannot hold");
         let locked = dir.path().join("locked");
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        assert!(!writable(&locked.join("graph.draft"), 1024), "a read-only folder");
+        assert!(writable(&locked.join("graph.draft"), 1024).is_none(), "a read-only folder");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
@@ -492,6 +571,22 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
     }
 
+    /// Graphs written side by side (the parts of one model build at once)
+    /// each count the space the others in flight will take, so they cannot
+    /// all find room alone and overrun the disk together; a draft done
+    /// gives its share back.
+    #[test]
+    fn graphs_written_at_once_share_the_free_space() {
+        static IN_FLIGHT: InFlight = InFlight::new();
+        const GB: u64 = 1 << 30;
+        let free = Some(10 * GB);
+        let first = IN_FLIGHT.reserve(free, 3 * GB).expect("3 GB of 10 fits twice over");
+        assert!(IN_FLIGHT.reserve(free, 3 * GB).is_none(), "with the first's 3 GB it no longer does");
+        drop(first);
+        assert!(IN_FLIGHT.reserve(free, 3 * GB).is_some(), "the first's share is back");
+        assert!(IN_FLIGHT.reserve(None, 100 * GB).is_some(), "an unknown disk is trusted");
+    }
+
     /// `writable` creates the draft before ORT runs, so a session that
     /// built without writing its graph leaves an empty draft: that must
     /// not become a cache the next launch reads as a hit and fails on.
@@ -500,7 +595,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("optimized.onnx");
         let draft = GraphDraft::for_path(&path);
-        assert!(writable(draft.draft(), 1));
+        assert!(writable(draft.draft(), 1).is_some());
         draft.publish();
         assert!(!path.exists(), "an empty draft is not a cache");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nor is it left behind");
