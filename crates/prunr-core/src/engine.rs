@@ -543,7 +543,16 @@ pub(crate) fn walk_ladder<S>(
             walk.skipped.push(skip.text(ep));
             continue;
         }
-        match commit(ep) {
+        let drafted = crate::cache::drafts_attached();
+        let mut committed = commit(ep);
+        // A build that failed while writing its optimized graph (the disk
+        // filled meanwhile) says nothing about the provider until it fails
+        // without one too.
+        if matches!(committed, Err(Miss::Failed { suspect_cache: None, .. })) && crate::cache::drafts_attached() > drafted {
+            tracing::warn!(?model, ep = %ep, "{prefix}session failed while writing its optimized graph; building it without");
+            committed = crate::cache::without_drafts(|| commit(ep));
+        }
+        match committed {
             Ok(session) => return Ok((session, ep, walk.failed)),
             Err(Miss::Unusable(error)) => {
                 tracing::warn!(?model, ep = %ep, %error, "{prefix}GPU EP unusable — trying next EP");
@@ -1070,11 +1079,16 @@ pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep_name: &st
 /// from the model: the CPU is the last provider, so a bad cache must not
 /// stop a model loading.
 pub(crate) fn commit_past_bad_cache<T, E: std::fmt::Display>(mut commit: impl FnMut() -> Result<T, (E, Option<PathBuf>)>) -> Result<T, E> {
+    let drafted = crate::cache::drafts_attached();
     match commit() {
         Err((error, Some(cached))) => {
             tracing::warn!(%error, cache = %cached.display(), "CPU session failed on its cached graph; building it again");
             clear_suspect_cache(&cached);
             commit().map_err(|(error, _)| error)
+        }
+        Err((error, None)) if crate::cache::drafts_attached() > drafted => {
+            tracing::warn!(%error, "CPU session failed while writing its optimized graph; building it without");
+            crate::cache::without_drafts(&mut commit).map_err(|(error, _)| error)
         }
         done => done.map_err(|(error, _)| error),
     }
@@ -1325,6 +1339,30 @@ mod tests {
         assert!(pick.failed.is_empty(), "{:?}", pick.failed);
         assert_ne!(pick.weights, Weights::Fp16);
         assert_eq!(engine.model_kind(), ModelKind::Silueta);
+    }
+
+    /// A session that fails while writing its optimized graph (a disk
+    /// filled up meanwhile) is built again without it, and the failure is
+    /// not held against the provider: the cache must never cost the model.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_session_that_fails_writing_its_graph_builds_again_without_it() {
+        use prunr_models::ModelId;
+        let (ep, model) = (EpKind::Cuda, ModelId::Migan);
+        let tries = std::cell::Cell::new(0);
+        let walk = walk_ladder("", model, Weights::Fp32, &[ep], |_| {
+            tries.set(tries.get() + 1);
+            if crate::cache::take_draft_slot() {
+                Err(Miss::Failed { error: "ORT session creation failed (CUDA): Protobuf serialization failed.".into(), suspect_cache: None })
+            } else {
+                Ok("session")
+            }
+        });
+        assert_eq!(walk, Ok(("session", ep, Vec::new())));
+        assert_eq!(tries.get(), 2);
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32));
+        let cpu = commit_past_bad_cache(|| if crate::cache::take_draft_slot() { Err(("write failed", None)) } else { Ok("cpu session") });
+        assert_eq!(cpu, Ok("cpu session"), "the CPU's commit too");
     }
 
     /// A provider that cannot start on this machine (DirectML without a
