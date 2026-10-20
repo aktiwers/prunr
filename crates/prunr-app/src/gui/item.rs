@@ -1588,9 +1588,9 @@ impl BatchItem {
     }
 
     /// Hold the start a render read back, while it is still the start a
-    /// run redoes from.
+    /// run redoes from and the image is on screen.
     pub(crate) fn keep_loaded_start(&mut self, start: Arc<image::RgbaImage>) {
-        if self.run_start(Engine::Segment).is_some_and(|s| s.holds(&start)) {
+        if self.on_screen && self.run_start(Engine::Segment).is_some_and(|s| s.holds(&start)) {
             self.start_photo = Some(start);
         }
     }
@@ -3185,6 +3185,21 @@ mod tests {
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         item.commit(StepKind::Process);
         assert!(item.warm_steps.lock().unwrap().iter().all(Option::is_none));
+    }
+
+    /// Nor does it keep the start a late frame read back: nothing drops
+    /// it off screen.
+    #[test]
+    fn an_image_off_screen_keeps_no_loaded_start() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+        item.commit(StepKind::Process);
+        let start = |item: &BatchItem| item.timeline.current().result.as_ref().and_then(|r| r.load()).expect("the step's result");
+        item.keep_loaded_start(start(&item));
+        assert!(item.start_photo.is_none(), "off screen");
+        item.on_screen = true;
+        item.keep_loaded_start(start(&item));
+        assert!(item.start_photo.is_some(), "on screen it is kept");
     }
 
     /// After an undo, the step a redo goes to is kept unpacked too.
