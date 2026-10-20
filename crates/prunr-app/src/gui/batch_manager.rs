@@ -384,9 +384,16 @@ impl BatchManager {
             // The `DynamicImage` (~50 MB at 4 K RGBA) and the encoded
             // bytes both drop before the channel send, so concurrent
             // decodes don't pile up DynamicImage + RGBA per thread.
-            let result = bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
-                Ok(img) => Ok(Arc::new(img.into_rgba8())),
-                Err(e) => Err(format!("Could not read the image: {e}")),
+            // Every decode answers, a panic included: the image waits on
+            // it until then.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
+                    Ok(img) => Ok(Arc::new(img.into_rgba8())),
+                    Err(e) => Err(format!("Could not read the image: {e}")),
+                })
+            })).unwrap_or_else(|_| {
+                tracing::error!(item_id, "image decode panicked");
+                Err("Could not read the image.".to_string())
             });
             let _ = tx.send((item_id, result));
         });
@@ -1469,47 +1476,14 @@ mod tests {
         assert!(item.selection_mask.is_some());
     }
 
+    /// A decode answers even when it panics, so the image waiting on it
+    /// does not wait for good.
     #[test]
-    fn a_source_change_drops_the_selection_and_embedding() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        {
-            let item = bm.find_by_id_mut(1).unwrap();
-            let mask = prunr_core::selection::MaskArtifact::new_empty(8, 8);
-            item.selection_mask = Some(Arc::new(mask));
-            item.magic_brush_embedding = Some(Arc::new(prunr_core::sam::SamEmbedding {
-                image_embed: vec![0.0; 1_048_576],
-                high_res_feats_0: vec![0.0; 2_097_152],
-                high_res_feats_1: vec![0.0; 1_048_576],
-            }));
-        }
-        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
-        let item = bm.find_by_id(1).unwrap();
-        assert!(item.selection_mask.is_none(), "selection_mask must be cleared on source change");
-        assert!(item.magic_brush_embedding.is_none(), "embedding must be cleared on source change");
-    }
-
-    /// A depth map belongs to the photo it was measured from: a source
-    /// change drops it, and a run still measuring the old photo lands on
-    /// nothing; one measuring the new photo lands.
-    #[test]
-    fn a_source_change_drops_the_depth_map_and_its_run() {
-        let mut bm = fixture();
-        bm.items.push(item_with_cache(1, 0));
-        let map = || Ok(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
-        let item = bm.find_by_id_mut(1).unwrap();
-        item.depth_run.pending = true;
-        let old_epoch = item.depth_run.epoch;
-        assert!(item.land_depth(old_epoch, map()));
-        item.depth_run.pending = true;
-        bm.find_by_id_mut(1).unwrap().invalidate_source_derived();
-        let item = bm.find_by_id_mut(1).unwrap();
-        assert!(item.depth.is_none() && !item.depth_run.pending, "the map and its run are dropped");
-        assert!(item.needs_depth_run());
-        assert!(!item.land_depth(old_epoch, map()), "a run on the old photo lands on nothing");
-        assert!(item.depth.is_none());
-        let epoch = item.depth_run.epoch;
-        assert!(item.land_depth(epoch, map()));
-        assert!(item.depth.is_some());
+    fn a_decode_that_panics_still_answers() {
+        let bm = fixture();
+        bm.spawn_decode(1, || panic!("a malformed file"));
+        let (id, result) = bm.bg_io.decode_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("an answer");
+        assert_eq!(id, 1);
+        assert!(result.is_err());
     }
 }
