@@ -314,6 +314,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
         row.verdict = Verdict::CpuByDesign;
         return row;
     };
+    stage("reading weights");
     warm_weights(id);
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
@@ -349,19 +350,31 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
 }
 
 /// Bring `id`'s own weights in before either side is timed, so neither
-/// session time includes the disk: a download (its file, or each part of
-/// a bundle) is read through once into the page cache, keeping nothing (holding it would pin hundreds of MB
+/// session time includes the disk: a download (its file, or a bundle's
+/// parts) is read through once into the page cache, keeping nothing (holding it would pin hundreds of MB
 /// per model for the rest of the run); bundled weights decompress into the
 /// copy every session of the process shares.
 fn warm_weights(id: ModelId) {
-    let downloaded = prunr_models::download_path(id).map(|path| vec![path])
-        .or_else(|| prunr_models::multi_part_paths(id).map(|parts| parts.into_iter().map(|(_, path)| path).collect()));
-    let Some(files) = downloaded else {
+    let files: Vec<_> = prunr_models::download_path(id).into_iter()
+        .chain(prunr_models::multi_part_paths(id).into_iter().flatten().map(|(_, path)| path))
+        .collect();
+    if files.is_empty() {
         let _ = prunr_models::resolve_bytes(id);
         return;
-    };
+    }
+    // More than the page cache can hold evicts itself as it reads, and the
+    // session reads the disk again.
+    let total: u64 = files.iter().filter_map(|path| std::fs::metadata(path).ok()).map(|m| m.len()).sum();
+    if total > crate::hardware::available_ram_bytes_now() {
+        return;
+    }
+    let mut buf = vec![0u8; 1 << 20];
     for path in files {
-        if let Err(e) = std::fs::File::open(&path).and_then(|mut f| std::io::copy(&mut f, &mut std::io::sink())) {
+        let read = std::fs::File::open(&path).and_then(|mut f| {
+            while std::io::Read::read(&mut f, &mut buf)? > 0 {}
+            Ok(())
+        });
+        if let Err(e) = read {
             tracing::debug!(model = ?id, path = %path.display(), %e, "could not read the weights ahead");
         }
     }
