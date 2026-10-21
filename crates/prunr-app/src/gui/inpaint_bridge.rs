@@ -130,7 +130,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             poll_spawn_result(&mut sub_state, &mut strokes, &res_tx);
         }
 
-        // Watchdog for `working_set_mb` underestimates and mid-load RAM shifts
+        // Watchdog for `needs` underestimates and mid-load RAM shifts
         // the pre-flight gate can't see; only once Ready, since a spawning
         // worker has loaded nothing yet.
         if !strokes.is_empty() && matches!(sub_state, SubState::Ready(_)) {

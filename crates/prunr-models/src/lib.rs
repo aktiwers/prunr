@@ -299,6 +299,95 @@ pub struct ModelPart {
     pub size_bytes: u64,
 }
 
+/// What one loaded model needs while it runs a typical input (load
+/// peaks included), on each accelerator. One field per accelerator and no
+/// `Default`: a new accelerator does not build until every model prices
+/// it. Size-dependent parts (upscale tiles, Nomos2's ways, SD's tall crop)
+/// are added by their own tested formulas on top of these.
+///
+/// Err high: under-counting crashes the GUI with an OOM; over-counting
+/// only throttles admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Needs {
+    pub cpu: Cost,
+    pub cuda: Priced,
+    pub directml: Priced,
+    pub coreml: Priced,
+    pub openvino: Priced,
+    pub migraphx: Priced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cost {
+    /// System RAM, MB.
+    pub host_mb: u32,
+    /// Memory on the card, MB; 0 on the CPU and on unified memory
+    /// (CoreML), where everything is in `host_mb`.
+    pub card_mb: u32,
+    pub basis: Basis,
+}
+
+/// Where a figure comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// Measured: the machine, the date and the settings.
+    Measured(&'static str),
+    /// Not measured: why the figure is what it is.
+    Estimate(&'static str),
+}
+
+/// A model's needs on one accelerator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priced {
+    Same(Cost),
+    /// Not measured there yet: the CPU's figure is charged to system RAM,
+    /// as every accelerator was before card memory was counted.
+    Unmeasured,
+    /// The model is never run there (`incompatible_eps` names it).
+    Never,
+}
+
+impl Cost {
+    pub const fn measured(host_mb: u32, card_mb: u32, on: &'static str) -> Self {
+        Self { host_mb, card_mb, basis: Basis::Measured(on) }
+    }
+
+    pub const fn estimate(host_mb: u32, card_mb: u32, why: &'static str) -> Self {
+        Self { host_mb, card_mb, basis: Basis::Estimate(why) }
+    }
+}
+
+impl Needs {
+    /// Its needs on the provider ORT names `provider` ("CPU", "CUDA", …);
+    /// an accelerator this table does not know is priced as unmeasured.
+    pub fn on(&self, provider: &str) -> Priced {
+        match provider {
+            "CPU" => Priced::Same(self.cpu),
+            "CUDA" => self.cuda,
+            "DirectML" => self.directml,
+            "CoreML" => self.coreml,
+            "OpenVINO" => self.openvino,
+            "MIGraphX" => self.migraphx,
+            _ => Priced::Unmeasured,
+        }
+    }
+
+    /// Every accelerator's entry with the provider name ORT gives it.
+    pub fn accelerators(&self) -> [(&'static str, Priced); 5] {
+        [
+            ("CUDA", self.cuda),
+            ("DirectML", self.directml),
+            ("CoreML", self.coreml),
+            ("OpenVINO", self.openvino),
+            ("MIGraphX", self.migraphx),
+        ]
+    }
+}
+
+/// The figure the registry carried as one number per model before card
+/// memory was counted: measured or estimated per the comment beside it.
+const CARRIED: &str = "the registry's earlier single figure; not re-measured since";
+
 #[derive(Debug, Clone, Copy)]
 pub struct ModelDescriptor {
     pub id: ModelId,
@@ -314,13 +403,9 @@ pub struct ModelDescriptor {
     ///
     /// `&str`, not `EpKind`: this crate has no workspace deps.
     pub incompatible_eps: &'static [&'static str],
-    /// Resident RSS in MB while this model is loaded and running on a
-    /// typical input, load-transient peaks included. Segmentation / edge:
-    /// the per-engine admission cost; inpaint: the pre-flight RAM gate.
-    ///
-    /// Err high: under-counting causes OOMs that crash the GUI;
-    /// over-counting only throttles admission.
-    pub working_set_mb: u32,
+    /// What the model needs on each accelerator: no default, so a new
+    /// model does not build without its numbers.
+    pub needs: Needs,
     /// For a segmentation model: whether a batch on the host CPU runs
     /// faster with an engine per job. One run of a heavy model already
     /// fills every core, so a second engine only doubles RAM (BiRefNet-lite:
@@ -472,7 +557,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // than ORT's CPU EP). FP16 variant additionally fails on a
         // quantized_cast type mismatch. Both verified 2026-04-26.
         incompatible_eps: &["OpenVINO"],
-        working_set_mb: 200,
+        needs: Needs {
+            cpu: Cost::estimate(200, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Never,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -500,7 +592,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 800,
+        needs: Needs {
+            cpu: Cost::estimate(800, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -523,7 +622,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 2500,
+        needs: Needs {
+            cpu: Cost::estimate(2500, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -546,7 +652,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 300,
+        needs: Needs {
+            cpu: Cost::estimate(300, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -574,7 +687,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 700,
+        needs: Needs {
+            cpu: Cost::estimate(700, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -602,7 +722,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 700,
+        needs: Needs {
+            cpu: Cost::estimate(700, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -630,7 +757,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 150,
+        needs: Needs {
+            cpu: Cost::estimate(150, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -690,7 +824,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // which has this one's architecture and size. An estimate of
         // 10 GB let erases start that the memory watchdog then killed
         // halfway through the load.
-        working_set_mb: 14000,
+        needs: Needs {
+            cpu: Cost::estimate(14000, 0, "the Fast bundle's 13.6-14.1 GB peak on OpenVINO's CPU device: same architecture and size"),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -749,7 +890,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         // Measured peak while the bundle loads on OpenVINO's CPU device:
         // 13.6-14.1 GB.
-        working_set_mb: 14000,
+        needs: Needs {
+            cpu: Cost::measured(14000, 0, "i7-6700, OpenVINO CPU device, bundle load peak 13.6-14.1 GB"),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -826,7 +974,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured on ORT's CPU EP: 15.6 GiB anonymous peak (the fp16
         // weights widened for the CPU kernels, the VAE, activations);
         // the 4.8 GiB of mapped weight files on top are reclaimable.
-        working_set_mb: 16000,
+        needs: Needs {
+            cpu: Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Never,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -868,7 +1023,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
-        working_set_mb: 100,
+        needs: Needs {
+            cpu: Cost::estimate(100, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -901,7 +1063,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 600,
+        needs: Needs {
+            cpu: Cost::estimate(600, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
@@ -936,7 +1105,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 1200,
+        needs: Needs {
+            cpu: Cost::estimate(1200, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(16),
         recommended_tile: Some(256),
@@ -975,7 +1151,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 1000,
+        needs: Needs {
+            cpu: Cost::estimate(1000, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(2),
         recommended_tile: Some(512),
@@ -1014,7 +1197,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 600,
+        needs: Needs {
+            cpu: Cost::estimate(600, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
@@ -1085,7 +1275,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // provider held 0.95 GB, compiled nothing, and ran the same
         // 960×635 image in 67 s against OpenVINO's 55 s.
         incompatible_eps: &["OpenVINO"],
-        working_set_mb: 750,
+        needs: Needs {
+            cpu: Cost::estimate(750, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Never,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1127,7 +1324,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
-        working_set_mb: 600,
+        needs: Needs {
+            cpu: Cost::estimate(600, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
@@ -1162,7 +1366,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
-        working_set_mb: 1600,
+        needs: Needs {
+            cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1192,7 +1403,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
-        working_set_mb: 500,
+        needs: Needs {
+            cpu: Cost::estimate(500, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1230,7 +1448,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Conservative estimate: encoder weights ~200 MB; transformer
         // activation scratch typical 2-3× = 400-800 MB peak.
         // Validate empirically on a 4 GB RAM machine before bumping.
-        working_set_mb: 800,
+        needs: Needs {
+            cpu: Cost::estimate(800, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1264,7 +1489,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 1200,
+        needs: Needs {
+            cpu: Cost::estimate(1200, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1298,7 +1530,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
-        working_set_mb: 1200,
+        needs: Needs {
+            cpu: Cost::estimate(1200, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1325,7 +1564,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
-        working_set_mb: 64,
+        needs: Needs {
+            cpu: Cost::estimate(64, 0, CARRIED),
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1995,16 +2241,41 @@ mod tests {
         // Floor catches accidental zero-init when adding a new model;
         // ceiling catches obvious typos (no real model needs > 64 GB).
         for desc in REGISTRY {
-            assert!(
-                desc.working_set_mb >= 50,
-                "{:?} working_set_mb={} too small — every real model uses ≥ 50 MB resident",
-                desc.id, desc.working_set_mb,
-            );
-            assert!(
-                desc.working_set_mb < 65_536,
-                "{:?} working_set_mb={} suspiciously large (> 64 GB)",
-                desc.id, desc.working_set_mb,
-            );
+            let costs = std::iter::once(desc.needs.cpu).chain(desc.needs.accelerators().into_iter().filter_map(|(_, p)| match p {
+                Priced::Same(cost) => Some(cost),
+                Priced::Unmeasured | Priced::Never => None,
+            }));
+            for cost in costs {
+                assert!(cost.host_mb + cost.card_mb >= 50, "{:?} {cost:?} too small: every real model uses ≥ 50 MB", desc.id);
+                assert!(cost.host_mb < 65_536 && cost.card_mb < 65_536, "{:?} {cost:?} suspiciously large (> 64 GB)", desc.id);
+                let (Basis::Measured(why) | Basis::Estimate(why)) = cost.basis;
+                assert!(!why.trim().is_empty(), "{:?} {cost:?}: a figure says where it comes from", desc.id);
+            }
+        }
+    }
+
+    /// A model is priced on every accelerator: never run exactly where
+    /// `incompatible_eps` bans it, and no more accelerators left
+    /// unmeasured than counted here. Measuring one lowers its count;
+    /// a new model left unmeasured raises it, on purpose, here.
+    #[test]
+    fn every_model_prices_every_accelerator() {
+        const UNMEASURED_AT_MOST: [(&str, usize); 5] =
+            [("CUDA", 23), ("DirectML", 23), ("CoreML", 23), ("OpenVINO", 20), ("MIGraphX", 23)];
+        let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
+        for desc in REGISTRY {
+            for (provider, priced) in desc.needs.accelerators() {
+                let banned = desc.incompatible_eps.contains(&provider);
+                assert_eq!(priced == Priced::Never, banned, "{:?} on {provider}: Never exactly where incompatible_eps bans it", desc.id);
+                if priced == Priced::Unmeasured {
+                    // provider names come from the same table
+                    unmeasured.iter_mut().find(|(p, _)| *p == provider).unwrap().1.push(desc.id);
+                }
+            }
+        }
+        for ((provider, at_most), (_, models)) in UNMEASURED_AT_MOST.iter().zip(&unmeasured) {
+            assert!(models.len() <= *at_most, "{} models unmeasured on {provider}, more than {at_most}: measure them ({models:?})", models.len());
+            assert!(models.len() == *at_most, "only {} unmeasured on {provider} now: lower its count to {}", models.len(), models.len());
         }
     }
 
@@ -2396,7 +2667,7 @@ mod tests {
             .expect("Sam21HieraSmall must be registered");
         assert_eq!(desc.category, ModelCategory::Selection);
         assert!(matches!(desc.source, ModelSource::MultiPartBundled { .. }));
-        assert_eq!(desc.working_set_mb, 800);
+        assert_eq!(desc.needs.cpu.host_mb, 800);
         assert!(!desc.attribution_required);
         assert!(desc.upscale.is_none());
     }

@@ -47,7 +47,7 @@ pub fn colorize_input(src: &RgbaImage) -> Vec<f32> {
 /// `COLORIZE_INPUT²`, to hand to `colorized` at any strength.
 ///
 /// Peak working set: the 3 MB input tensor, the 2 MB plane and the
-/// session's own scratch (`ModelDescriptor.working_set_mb`).
+/// session's own scratch (`ModelDescriptor.needs`).
 pub fn colorize_plane(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) -> Result<ColorPlane, CoreError> {
     progress.step(Step::Colorizing);
     let side = COLORIZE_INPUT as usize;

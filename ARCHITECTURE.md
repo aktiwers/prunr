@@ -269,15 +269,15 @@ Timeline states carry their recipe, so undo also restores what the next Process 
 
 ### Admission and parallel jobs
 
-Budget = 85 % of available RAM − `working_set_mb` × engines (GPU pools cap at 2). Per-image cost (`2 × W × H × 4` + file + history residue) is pessimistic on purpose: undercounting OOMs long batches, overcounting only slows them. Best-fit admits the largest image that fits; with nothing in flight the smallest is forced in, so oversized images can't deadlock. Admission also pauses while the child's RSS exceeds 80 % of available RAM (resume at 70 % of that). `safe_max_jobs` (half of available RAM ÷ `working_set_mb`) caps the jobs slider, clamps on model switch and at batch start.
+Budget = 85 % of available RAM − the model's CPU needs × engines (GPU pools cap at 2). Per-image cost (`2 × W × H × 4` + file + history residue) is pessimistic on purpose: undercounting OOMs long batches, overcounting only slows them. Best-fit admits the largest image that fits; with nothing in flight the smallest is forced in, so oversized images can't deadlock. Admission also pauses while the child's RSS exceeds 80 % of available RAM (resume at 70 % of that). `safe_max_jobs` (half of available RAM ÷ the CPU needs) caps the jobs slider, clamps on model switch and at batch start.
 
 ### Per-model working set
 
-`ModelDescriptor.working_set_mb` is the one RAM figure per model, derived from the architecture (weights + ORT workspace + load transient + worst-case EP) so it holds across hardware. Batch admission, `safe_max_jobs`, the upscale gate and the SD gate all read it; a new model is one registry entry.
+`ModelDescriptor.needs` holds each model's needs per accelerator (system RAM and card memory, each figure marked measured or estimated with its reason), one field per accelerator and no default, so a model does not build without its numbers and a test holds the count of unmeasured accelerators. An accelerator not measured yet is charged the CPU figure in system RAM. Batch admission, `safe_max_jobs`, the upscale gate and the SD gate read it; a new model is one registry entry.
 
 ### SD RAM policy
 
-One gate, `prunr_core::inpaint_sd::check_ram_for`, run by the process that runs the stroke: need = `working_set_mb` (zero if the bundle is already resident) + the user's safety margin (default 2 GB), + 3 GB for a tall crop. A region up to 768 px long runs as one crop instead of 512² tiles when that fits (faster, no seam), as tiles when only they fit, and is refused otherwise. The GUI never decides: a kept bundle lives in the SD subprocess, so only that process can see it is loaded rather than count it twice.
+One gate, `prunr_core::inpaint_sd::check_ram_for`, run by the process that runs the stroke: need = the model's needs (zero if the bundle is already resident) + the user's safety margin (default 2 GB), + 3 GB for a tall crop. A region up to 768 px long runs as one crop instead of 512² tiles when that fits (faster, no seam), as tiles when only they fit, and is refused otherwise. The GUI never decides: a kept bundle lives in the SD subprocess, so only that process can see it is loaded rather than count it twice.
 
 ## Data Flow
 
@@ -347,7 +347,7 @@ Feather runs after the guided filter: sharpen to colour edges first, then soften
 
 Upscaling runs **in-process**: tiled `OrtEngine` inference on a background thread, outside the subprocess (`crates/prunr-core/src/upscale/`), or part by part for a model that normalizes over its whole input. Its tiler is separate from the LaMa inpaint tiler because the two have different shapes: upscale maps an image to scale × its size, while inpaint maps an image and mask to the same size. They share only the smoothstep seam weight.
 
-Models are registry data: tile size, tile multiple, `working_set_mb`, an optional fp16 sibling, and `UpscaleModelKnobs` (native scale, window attention, input name, dtype).
+Models are registry data: tile size, tile multiple, `needs`, an optional fp16 sibling, and `UpscaleModelKnobs` (native scale, window attention, input name, dtype).
 
 | Model | Native | Tile | Overlap | ORT level |
 |-------|-------:|-----:|--------:|-----------|
@@ -365,7 +365,7 @@ Models are registry data: tile size, tile multiple, `working_set_mb`, an optiona
 - **Output scale.** The model runs at its native scale, and `fit_to_scale` Lanczos3-resamples to the requested 2×, 3× or 4× whenever the two differ. 4× two-pass chains x2plus twice and is offered only on Real-ESRGAN x4plus once x2plus is installed.
 - **Knobs.** Denoise and Brightness lift run before the model, so changing either is an `UpscaleRerun`: live preview refuses it, and the user commits with Process. Sharpen (default 0.2), AI blend (toward a cached CatmullRom resize), Saturation and Color match run after the model as `UpscaleTier2` and preview live on the cached output.
 - **Single flight, fast cancel.** One job runs at a time. Cancel also calls `RunOptions::terminate`, which stops the running tile in about 50 ms. OpenVINO checks only between tiles, so its tiles are capped at 256: on an HD 530 a cancel lands in 11 s instead of 51 s, for 5 % more run time.
-- **Admission.** Dispatch is refused when free RAM is below `working_set_mb`, the same field subprocess admission uses.
+- **Admission.** Dispatch is refused when free RAM is below the model's CPU needs, the same figure subprocess admission uses.
 
 ## Colorize (DDColor)
 

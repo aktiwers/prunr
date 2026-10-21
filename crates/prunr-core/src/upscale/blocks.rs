@@ -10,7 +10,7 @@
 //! blocks hold the image (12 B), the features (256 B) and each block's
 //! output before its norm, held the first way that fits free memory; the
 //! tail holds the image, the features and the output's bytes (316 B at
-//! 4×). The parts and one crop through one add ~0.73 GB (`working_set_mb`).
+//! 4×). The parts and one crop through one add ~0.73 GB (`needs`).
 //!
 //! | A block's output                     | Blocks             | Cost                           |
 //! |--------------------------------------|--------------------|--------------------------------|
@@ -89,7 +89,7 @@ pub(crate) fn least_peak_bytes(layout: PartLayout, w: u32, h: u32, scale: u32) -
 
 /// What a part-by-part upscale of `w × h` by `scale` holds in its planes
 /// at its peak, its blocks' outputs held as `pre` (see the module doc);
-/// the parts and a crop's scratch are the model's `working_set_mb`.
+/// the parts and a crop's scratch are the model's `needs`.
 pub(crate) fn peak_bytes(layout: PartLayout, w: u32, h: u32, scale: u32, pre: PreNorm) -> u64 {
     let (w, h) = (u64::from(w), u64::from(h));
     let features = layout.features as u64 * 4;
