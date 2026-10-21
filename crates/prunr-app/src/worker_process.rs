@@ -169,6 +169,14 @@ fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), S
     Ok(())
 }
 
+/// The cache files written for a result that could not be written: the
+/// answer is an error, so nothing would read or remove them.
+fn remove_cache_files(tensor: Option<&TensorCacheFile>, edge: Option<&EdgeCacheFile>) {
+    for path in tensor.map(|f| &f.path).into_iter().chain(edge.map(|f| &f.path)) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The detector's planes the run made, written to `path`; `None` when
 /// it made none or the write failed.
 fn write_edge_cache(
@@ -612,7 +620,7 @@ pub fn run_worker() -> ! {
                     // (non-destructive — result_rgba always stores the transparent version)
 
                     let mut spare_token = None;
-                    match result {
+                    let answered = match result {
                         Ok(pr) => {
                             let tensor_cache = tensor_for_cache.as_ref().and_then(|(tdata, height, width)| {
                                 let path = IpcKind::Tensor.path_for(&ipc, item_id);
@@ -639,7 +647,7 @@ pub fn run_worker() -> ! {
                             match written {
                                 Ok(()) => {
                                     spare_token = spare_scales;
-                                    let _ = evt_tx.send(SubprocessEvent::ImageDone {
+                                    SubprocessEvent::ImageDone {
                                         item_id,
                                         result_path,
                                         width: w,
@@ -648,25 +656,17 @@ pub fn run_worker() -> ! {
                                         tensor_cache,
                                         edge_cache,
                                         spare_scales,
-                                    });
+                                    }
                                 }
                                 Err(error) => {
-                                    for path in tensor_cache.iter().map(|f| &f.path).chain(edge_cache.iter().map(|f| &f.path)) {
-                                        let _ = std::fs::remove_file(path);
-                                    }
-                                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                                    remove_cache_files(tensor_cache.as_ref(), edge_cache.as_ref());
+                                    SubprocessEvent::ImageError { item_id, error }
                                 }
                             }
                         }
-                        Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError {
-                                item_id,
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-                    // Answered: a beat now would report a finished image's step.
-                    drop(pulse);
+                        Err(e) => SubprocessEvent::ImageError { item_id, error: e.to_string() },
+                    };
+                    prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
 
                     send_rss(&evt_tx);
 
@@ -816,7 +816,7 @@ pub fn run_worker() -> ! {
                     })();
 
                     let mut spare_token = None;
-                    match produce {
+                    let answered = match produce {
                         Ok((rgba, edge_res)) => {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
@@ -827,14 +827,12 @@ pub fn run_worker() -> ! {
                             let written = write_result(&result_path, &rgba);
                             drop(rgba);
                             if let Err(error) = written {
-                                if let Some(file) = &edge_cache {
-                                    let _ = std::fs::remove_file(&file.path);
-                                }
+                                remove_cache_files(None, edge_cache.as_ref());
                                 cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
-                                let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
+                                SubprocessEvent::ImageError { item_id, error }
                             } else {
                                 spare_token = spare_scales;
-                                let _ = evt_tx.send(SubprocessEvent::ImageDone {
+                                SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
                                     width: w,
@@ -846,16 +844,15 @@ pub fn run_worker() -> ! {
                                     tensor_cache: Some(TensorCacheFile { path: seg_tensor_path.clone(), height: seg_tensor_height, width: seg_tensor_width }),
                                     edge_cache,
                                     spare_scales,
-                                });
+                                }
                             }
                         }
                         Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
                             cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
+                            SubprocessEvent::ImageError { item_id, error: e }
                         }
-                    }
-
-                    drop(pulse);
+                    };
+                    prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
                     cleanup_ipc_temps(&ipc, &[&image_path]);
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
@@ -1019,6 +1016,21 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A result that could not be written answers with an error, so the
+    /// cache files written beside it are removed, not left in the IPC
+    /// folder (RAM-backed on Linux) until the next sweep.
+    #[test]
+    fn a_failed_result_takes_its_cache_files_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tensor, edge) = (dir.path().join("t.bin"), dir.path().join("e.bin"));
+        std::fs::write(&tensor, b"t").unwrap();
+        std::fs::write(&edge, b"e").unwrap();
+        let tensor_file = TensorCacheFile { path: tensor.clone(), height: 1, width: 1 };
+        let edge_file = EdgeCacheFile { path: edge.clone(), height: 1, width: 1, scales: Vec::new() };
+        remove_cache_files(Some(&tensor_file), Some(&edge_file));
+        assert!(!tensor.exists() && !edge.exists());
+    }
 
     /// A stroke whose work panics still answers, in the eraser's own
     /// words: its thread dying without one left the stroke busy for good.
