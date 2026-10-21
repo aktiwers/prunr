@@ -119,6 +119,52 @@ fn reveal_asks_egui_to_scroll_the_control_into_view() {
     assert_eq!(request.target_node, accesskit::NodeId(target["id"].as_u64().unwrap()));
 }
 
+/// A control below its list's fold is scrolled into view before the
+/// press, and the press lands on the part of it that shows.
+#[test]
+fn click_reveals_a_control_below_the_fold_first() {
+    let (mut h, tx) = socket();
+    super::harness::click(&mut h, "Settings");
+    super::harness::click(&mut h, "Shortcuts");
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let names = super::harness::names(&h);
+    let below = super::harness::tree(&h)
+        .iter()
+        .filter(|n| n.is_control() && !n.disabled)
+        .filter(|n| n.name.as_ref().is_some_and(|name| names.iter().filter(|m| *m == name).count() == 1))
+        .find(|n| crate::gui::automation::shown_part(&ctx, n.id).is_some_and(|r| !r.is_positive()))
+        .cloned()
+        .expect("the Shortcuts page runs below its fold");
+    let name = below.name.clone().unwrap();
+    let request: Request = serde_json::from_value(serde_json::json!({ "cmd": "click", "name": name })).unwrap();
+    let (reply, answer) = mpsc::channel();
+    tx.send(Pending { request, reply }).unwrap();
+    let mut revealed = false;
+    let mut pressed_at = None;
+    let response = (0..200)
+        .find_map(|_| {
+            if let Some(frame) = h.state_mut().automation.as_mut().unwrap().take_frame() {
+                for event in &frame.events {
+                    match event {
+                        egui::Event::AccessKitActionRequest(r) => revealed |= r.action == accesskit::Action::ScrollIntoView,
+                        egui::Event::PointerButton { pos, pressed: true, .. } => pressed_at = Some(*pos),
+                        _ => {}
+                    }
+                }
+                h.input_mut().events.extend(frame.events);
+            }
+            h.step();
+            answer.try_recv().ok()
+        })
+        .expect("a reply");
+    assert!(response.ok, "{:?}", response.error);
+    assert!(revealed, "{name:?} was scrolled into view");
+    let shown = crate::gui::automation::shown_part(&ctx, below.id).expect("still a widget");
+    let pressed_at = pressed_at.expect("a press");
+    assert!(shown.is_positive() && shown.contains(pressed_at), "{name:?}: press {pressed_at:?} in {shown:?}");
+}
+
 #[test]
 fn resize_asks_the_window_for_the_size() {
     let (mut h, tx) = socket();
