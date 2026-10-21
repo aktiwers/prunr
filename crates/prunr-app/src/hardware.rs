@@ -147,7 +147,7 @@ pub fn available_ram_bytes_now() -> u64 {
 }
 
 /// `available_ram_bytes_throttled` in MiB, the unit the admission gates
-/// compare against `working_set_mb`.
+/// compare against a model's `needs`.
 pub fn available_ram_mb_throttled() -> u32 {
     (available_ram_bytes_throttled() / (1024 * 1024)) as u32
 }

@@ -658,8 +658,8 @@ pub(crate) struct ColorizeOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
-pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
-    free_ram_mb >= working_set_mb
+pub(crate) fn admission_check(need_mb: u32, free_ram_mb: u32) -> bool {
+    free_ram_mb >= need_mb
 }
 
 /// Whether free RAM covers the model's working set, or why not; a
@@ -667,16 +667,17 @@ pub(crate) fn admission_check(working_set_mb: u32, free_ram_mb: u32) -> bool {
 /// stopped the run already; this is the last guard at the dispatch layer.
 fn admitted(descriptor: &prunr_models::ModelDescriptor) -> Result<(), String> {
     let free_mb = crate::hardware::available_ram_mb_throttled();
-    if admission_check(descriptor.working_set_mb, free_mb) {
+    let need_mb = descriptor.needs.cpu.host_mb;
+    if admission_check(need_mb, free_mb) {
         return Ok(());
     }
     tracing::warn!(
         model = ?descriptor.id,
-        working_set_mb = descriptor.working_set_mb,
+        need_mb,
         free_mb,
         "admission refused: insufficient RAM"
     );
-    Err(format!("needs about {} MB of free memory", descriptor.working_set_mb))
+    Err(format!("needs about {need_mb} MB of free memory"))
 }
 
 /// The image the upscale model reads: the input, denoised first when

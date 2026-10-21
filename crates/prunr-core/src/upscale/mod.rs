@@ -243,7 +243,7 @@ fn parted_room(free: Option<u64>, working_set: u64, resident: u64) -> u64 {
 }
 
 fn working_set_bytes(model: prunr_models::ModelId) -> u64 {
-    prunr_models::descriptor(model).map_or(0, |d| u64::from(d.working_set_mb)) * 1024 * 1024
+    prunr_models::descriptor(model).map_or(0, |d| u64::from(d.needs.cpu.host_mb)) * 1024 * 1024
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
@@ -278,7 +278,7 @@ fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) ->
 ///     ~12 MB at 512→2048 4× tile.
 ///   - scale=2 with a 4× model only: the full 4× RgbaImage (~16× input
 ///     bytes) lives until the Lanczos3 downscale completes.
-///   - ONNX session: model-dependent (see `ModelDescriptor.working_set_mb`).
+///   - ONNX session: model-dependent (see `ModelDescriptor.needs`).
 pub fn upscale_rgba(
     input: &RgbaImage,
     model_id: prunr_models::ModelId,

@@ -44,7 +44,7 @@ fn pool_jobs(jobs: usize, first_burst: usize) -> usize {
 
 /// When the worker that just ran a batch of `model` is released if unused.
 fn idle_after_run(model: ModelKind) -> Duration {
-    if super::memory::working_set_mb(model) >= HEAVY_WORKING_SET_MB { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
+    if super::memory::cpu_need_mb(model) >= HEAVY_WORKING_SET_MB { WARM_IDLE_AFTER_HEAVY_RUN } else { WARM_IDLE }
 }
 
 /// A full run on one image (Tier 1). Its file and start are handles,

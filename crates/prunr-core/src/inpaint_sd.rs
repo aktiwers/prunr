@@ -17,7 +17,7 @@
 //!   linear-alpha seam blending (`tile_bbox` + `blend_tile`).
 //!
 //! Safety guards on CPU-class hardware:
-//! - Bundle load refuses below the model's `working_set_mb` free RAM.
+//! - Bundle load refuses below the model's `needs` in free RAM.
 //!   ORT graph optimization + UNet activations together push 6-10 GB
 //!   transient on this codepath; the floor protects against swap thrash.
 //! - Idle bundle release (`crate::IDLE_RELEASE`) drops the cached 4
@@ -222,7 +222,7 @@ impl SdTuning {
 /// Free RAM a stroke needs: the model's working set unless its bundle
 /// is already resident, the headroom, and the tall crop's extra.
 fn ram_need_mb(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: bool) -> u64 {
-    let working_set = if resident { 0 } else { prunr_models::descriptor(id).map_or(0, |d| d.working_set_mb as u64) };
+    let working_set = if resident { 0 } else { prunr_models::descriptor(id).map_or(0, |d| u64::from(d.needs.cpu.host_mb)) };
     working_set + margin_mb + if tall { SD_TALL_CROP_EXTRA_MB } else { 0 }
 }
 
@@ -1510,7 +1510,7 @@ impl SdSession {
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
 
-        // Parts build in parallel (the `working_set_mb` gate above bounds
+        // Parts build in parallel (the `needs` gate above bounds
         // the four scratch arenas); DirectML stays sequential, its session
         // build races in AbiCustomRegistry.
         type SmokeFn = fn(&mut Session, &str) -> Result<(), String>;

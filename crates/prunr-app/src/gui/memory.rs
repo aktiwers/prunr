@@ -124,15 +124,15 @@ pub fn under_memory_pressure() -> bool {
 }
 
 /// Per inference slot: session weights, ORT workspace, tensors and image
-/// buffers, as the registry's `working_set_mb`.
+/// buffers, as the registry's CPU needs.
 fn per_engine_cost(model: ModelKind) -> usize {
-    working_set_mb(model) as usize * 1024 * 1024
+    cpu_need_mb(model) as usize * 1024 * 1024
 }
 
-pub(crate) fn working_set_mb(model: ModelKind) -> u32 {
+pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
     let id: prunr_models::ModelId = model.into();
     // unreachable fallback: every ModelKind has a descriptor.
-    prunr_models::descriptor(id).map_or(800, |d| d.working_set_mb)
+    prunr_models::descriptor(id).map_or(800, |d| d.needs.cpu.host_mb)
 }
 
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
