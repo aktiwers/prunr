@@ -142,6 +142,7 @@ pub struct Pending {
 }
 
 /// When a held reply goes out.
+#[derive(Clone, Copy)]
 enum Release {
     /// Once this many more frames have run; zero or one is the next.
     After(u32),
@@ -154,8 +155,22 @@ enum Release {
 struct Deferred {
     release: Release,
     reply: mpsc::Sender<Response>,
-    response: Response,
+    then: Then,
 }
+
+/// What a released `Deferred` does.
+enum Then {
+    Reply(Response),
+    /// Click a control asked to scroll into view, once it shows; `waits`
+    /// more frames before giving up.
+    Click { name: String, secondary: bool, last: bool, waits: u32 },
+}
+
+/// Frames for egui to scroll a revealed control into place and lay it out
+/// there: the scroll lands a pass after the request, the new place a pass
+/// after that.
+const REVEAL_FRAMES: u32 = 3;
+const REVEAL_WAITS: u32 = 10;
 
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 /// How often an idle window checks the inbox. The socket thread's
@@ -262,13 +277,44 @@ impl Automation {
         self.locate(name, false)
     }
 
-    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(Release, Response), String> {
-        if let Request::WaitIdle { timeout_ms } = request {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-            return Ok((Release::Idle(deadline), Response::ok(())));
+    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(Release, Then), String> {
+        match request {
+            Request::WaitIdle { timeout_ms } => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                Ok((Release::Idle(deadline), Then::Reply(Response::ok(()))))
+            }
+            Request::Click { name, secondary, last } => self.click(ctx, name, secondary, last, None),
+            request => {
+                let (frames, response) = self.answer(app, ctx, request)?;
+                Ok((Release::After(frames), Then::Reply(response)))
+            }
         }
-        let (frames, response) = self.answer(app, ctx, request)?;
-        Ok((Release::After(frames), response))
+    }
+
+    /// Press and release on the part of the control that shows. A control
+    /// below its list's fold is in the tree, but a press at its place lands
+    /// on whatever covers it, so it is scrolled into view first.
+    /// `waits`: `None` before the control was asked to scroll into view,
+    /// then the frames left to wait for it to show.
+    fn click(&mut self, ctx: &egui::Context, name: String, secondary: bool, last: bool, waits: Option<u32>) -> Result<(Release, Then), String> {
+        let (target, centre) = self.locate_among(&name, false, last)?;
+        let pos = match (shown_part(ctx, target.id), waits) {
+            (Some(shown), _) if shown.is_positive() => shown.center(),
+            (Some(_), None) => {
+                self.frames.push_back(vec![scroll_into_view(target.id)].into());
+                return Ok((Release::After(REVEAL_FRAMES), Then::Click { name, secondary, last, waits: REVEAL_WAITS }));
+            }
+            (Some(_), Some(0)) => return Err(format!("{name:?} stays out of view")),
+            (Some(_), Some(waits)) => return Ok((Release::After(1), Then::Click { name, secondary, last, waits: waits - 1 })),
+            (None, _) => centre,
+        };
+        let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+        self.frames.extend([
+            vec![egui::Event::PointerMoved(pos)].into(),
+            vec![press(pos, button, true, None)].into(),
+            vec![press(pos, button, false, None)].into(),
+        ]);
+        Ok((Release::After(4), Then::Reply(Response::ok(target))))
     }
 
     /// The reply and how many frames to wait before sending it.
@@ -278,16 +324,6 @@ impl Automation {
             Request::Tree { all: true } => (0, Response::ok(self.snapshot()?)),
             Request::Tree { all: false } => (0, Response::ok(controls(&self.snapshot()?))),
             Request::Find { name } => (0, Response::ok(find(&self.snapshot()?, &name))),
-            Request::Click { name, secondary, last } => {
-                let (target, pos) = self.locate_among(&name, false, last)?;
-                let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
-                self.frames.extend([
-                    vec![egui::Event::PointerMoved(pos)].into(),
-                    vec![press(pos, button, true, None)].into(),
-                    vec![press(pos, button, false, None)].into(),
-                ]);
-                (4, Response::ok(target))
-            }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
                 self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, egui::PointerButton::Primary, true, None)].into()]);
@@ -390,22 +426,38 @@ impl Automation {
             }
             Request::Reveal { name } => {
                 let (target, _) = self.locate(&name, true)?;
-                let scroll = accesskit::ActionRequest {
-                    action: accesskit::Action::ScrollIntoView,
-                    target_tree: accesskit::TreeId::ROOT,
-                    target_node: accesskit::NodeId(target.id),
-                    data: None,
-                };
-                self.frames.push_back(vec![egui::Event::AccessKitActionRequest(scroll)].into());
-                (3, Response::ok(target))
+                self.frames.push_back(vec![scroll_into_view(target.id)].into());
+                (REVEAL_FRAMES, Response::ok(target))
             }
             Request::Resize { w, h } => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
                 (6, Response::ok(()))
             }
-            Request::WaitIdle { .. } => unreachable!("answered by `run`"),
+            Request::WaitIdle { .. } | Request::Click { .. } => unreachable!("answered by `run`"),
         })
     }
+}
+
+fn failed(error: String) -> (Release, Then) {
+    (Release::After(0), Then::Reply(Response::err(error)))
+}
+
+fn scroll_into_view(node: u64) -> egui::Event {
+    egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
+        action: accesskit::Action::ScrollIntoView,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: accesskit::NodeId(node),
+        data: None,
+    })
+}
+
+/// The part of control `node` its scroll areas let through, in points;
+/// `None` when no widget of the last frames has that id.
+pub(crate) fn shown_part(ctx: &egui::Context, node: u64) -> Option<egui::Rect> {
+    // SAFETY: not a memory-safety contract; the value is a widget id egui
+    // handed AccessKit, high-entropy as egui requires, and never zero.
+    let id = (node != 0).then(|| unsafe { egui::Id::from_high_entropy_bits(node) })?;
+    ctx.read_response(id).map(|r| r.interact_rect)
 }
 
 /// Serves queued requests and releases replies whose frames have run.
@@ -415,25 +467,26 @@ pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     // Input still queued is work the app has not seen yet.
     let idle = auto.frames.is_empty() && !state::busy(app);
     let now = std::time::Instant::now();
-    for mut d in std::mem::take(&mut auto.deferred) {
-        match d.release {
-            Release::After(n) if n > 1 => {
-                d.release = Release::After(n - 1);
-                auto.deferred.push(d);
+    for Deferred { release, reply, then } in std::mem::take(&mut auto.deferred) {
+        match (release, then) {
+            (Release::After(n), then) if n > 1 => auto.deferred.push(Deferred { release: Release::After(n - 1), reply, then }),
+            (Release::Idle(deadline), then) if !idle && now < deadline => auto.deferred.push(Deferred { release, reply, then }),
+            (Release::Idle(_), _) => {
+                let _ = reply.send(Response::ok(serde_json::json!({ "idle": idle })));
             }
-            Release::After(_) => {
-                let _ = d.reply.send(d.response);
+            (Release::After(_), Then::Reply(response)) => {
+                let _ = reply.send(response);
             }
-            Release::Idle(deadline) if !idle && now < deadline => auto.deferred.push(d),
-            Release::Idle(_) => {
-                let _ = d.reply.send(Response::ok(serde_json::json!({ "idle": idle })));
+            (Release::After(_), Then::Click { name, secondary, last, waits }) => {
+                let (release, then) = auto.click(ctx, name, secondary, last, Some(waits)).unwrap_or_else(failed);
+                auto.deferred.push(Deferred { release, reply, then });
             }
         }
     }
     while let Ok(Pending { request, reply }) = auto.inbox.try_recv() {
         tracing::debug!(?request, "control request");
-        let (release, response) = auto.run(app, ctx, request).unwrap_or_else(|e| (Release::After(0), Response::err(e)));
-        auto.deferred.push(Deferred { release, reply, response });
+        let (release, then) = auto.run(app, ctx, request).unwrap_or_else(failed);
+        auto.deferred.push(Deferred { release, reply, then });
     }
     ctx.request_repaint_after(if auto.busy() { FRAME_INTERVAL } else { POLL_INTERVAL });
     app.automation = Some(auto);
