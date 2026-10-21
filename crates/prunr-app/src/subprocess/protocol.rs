@@ -277,10 +277,11 @@ fn pulsing_progress(
 }
 
 /// Calls `beat` now and every `every` after, on a thread of its own,
-/// until dropped or until `beat` returns false.
+/// until dropped or until `beat` returns false. Dropping it waits out a
+/// beat under way, so nothing it sends lands after.
 pub struct Pulse {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    beating: std::thread::Thread,
+    beating: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Pulse {
@@ -293,15 +294,25 @@ impl Pulse {
                 std::thread::park_timeout(every);
             }
         });
-        Self { stop, beating: beating.thread().clone() }
+        Self { stop, beating: Some(beating) }
     }
 }
 
 impl Drop for Pulse {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
-        self.beating.unpark();
+        if let Some(beating) = self.beating.take() {
+            beating.thread().unpark();
+            let _ = beating.join();
+        }
     }
+}
+
+/// Send a run's answer as the last thing it sends: its pulse stops first,
+/// so no beat repeats the finished image's step after it.
+pub fn answer(tx: &std::sync::mpsc::Sender<SubprocessEvent>, pulse: Pulse, event: SubprocessEvent) {
+    drop(pulse);
+    let _ = tx.send(event);
 }
 
 /// A raw f32 segmentation tensor a worker left in a file, `height` × `width`.
@@ -978,6 +989,25 @@ mod tests {
             }
         };
         assert_eq!(end, std::sync::mpsc::RecvTimeoutError::Disconnected);
+    }
+
+    /// A run's answer is the last thing it sends: its pulse stops first,
+    /// so no beat repeats the finished image's step after it (the spare
+    /// edge scales can keep the job going for minutes).
+    #[test]
+    fn nothing_follows_a_runs_answer() {
+        use std::time::Duration;
+        for _ in 0..20 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (progress, pulse) = super::pulsing_progress(4, tx.clone(), Duration::from_millis(1), Duration::from_secs(600));
+            progress.step(prunr_core::Step::FindingSubject);
+            std::thread::sleep(Duration::from_millis(5));
+            super::answer(&tx, pulse, SubprocessEvent::ImageError { item_id: 4, error: "done".into() });
+            std::thread::sleep(Duration::from_millis(5));
+            drop((progress, tx));
+            let events: Vec<_> = rx.iter().collect();
+            assert!(matches!(events.last(), Some(SubprocessEvent::ImageError { .. })), "{events:?}");
+        }
     }
 
     /// The limit counts from the run's last step of its own: a run that
