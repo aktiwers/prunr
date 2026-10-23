@@ -47,7 +47,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
 use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
-use crate::sysmem::{available_ram_bytes, process_rss_mb};
+use crate::sysmem::process_rss_mb;
 use crate::types::CoreError;
 
 /// SD 1.5 native input side length.
@@ -219,32 +219,45 @@ impl SdTuning {
     }
 }
 
-/// Free RAM a stroke needs: the model's working set unless its bundle
-/// is already resident, the headroom, and the tall crop's extra.
-fn ram_need_mb(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: bool) -> u64 {
-    let working_set = if resident { 0 } else { prunr_models::descriptor(id).map_or(0, |d| u64::from(d.needs.cpu.host_mb)) };
-    working_set + margin_mb + if tall { SD_TALL_CROP_EXTRA_MB } else { 0 }
+/// What a stroke needs on top of what is free: the bundle where it runs
+/// (`bundle`) unless already resident, the headroom in system RAM, and the
+/// tall crop's extra, on the card when the bundle is on one.
+fn stroke_need(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: bool, bundle: Charge) -> Charge {
+    let (ram_mb, card_mb) = if resident { (0, 0) } else { (bundle.ram_mb, bundle.card_mb) };
+    match (tall, bundle.on_card()) {
+        (true, true) => Charge { ram_mb: ram_mb + margin_mb, card_mb: card_mb + u64::from(sd_spec(id).tall_crop_card_extra_mb) },
+        (true, false) => Charge { ram_mb: ram_mb + margin_mb + SD_TALL_CROP_EXTRA_MB, card_mb },
+        (false, _) => Charge { ram_mb: ram_mb + margin_mb, card_mb },
+    }
 }
 
-/// How a Stable Diffusion erase fits in `free_mb` with no bundle loaded,
-/// by the same rule as the run-time gate.
+/// What `id`'s bundle takes on the provider its parts start on.
+fn bundle_charge(id: prunr_models::ModelId, cpu_only: bool) -> Option<(&'static str, Charge)> {
+    let provider = crate::memory::provider_for(id, cpu_only);
+    crate::memory::charge_on(id, provider).map(|c| (provider, c))
+}
+
+/// How a Stable Diffusion erase fits in `room` with no bundle loaded:
+/// the run-time gate's own answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SdRamFit {
     /// Tall regions run as one crop.
     Full,
     /// It runs, but tall regions fall back to 512 px tiles.
     TilesOnly,
-    /// The gate refuses the erase.
+    /// The gate refuses the erase: system RAM is short.
     Refused,
+    /// The gate refuses the erase: the graphics card's memory is short.
+    CardFull,
 }
 
-pub fn sd_ram_fit(id: prunr_models::ModelId, free_mb: u64, margin_mb: u64) -> SdRamFit {
-    if free_mb < ram_need_mb(id, margin_mb, false, false) {
-        SdRamFit::Refused
-    } else if free_mb < ram_need_mb(id, margin_mb, false, true) {
-        SdRamFit::TilesOnly
-    } else {
-        SdRamFit::Full
+pub fn sd_ram_fit(id: prunr_models::ModelId, room: Room, margin_mb: u64, bundle: Charge) -> SdRamFit {
+    let mut tuning = plan_tuning(false, margin_mb);
+    match fit_ram(id, &mut tuning, room, false, bundle) {
+        Ok(()) if tuning.tall_crop => SdRamFit::Full,
+        Ok(()) => SdRamFit::TilesOnly,
+        Err(Short::Ram { .. }) => SdRamFit::Refused,
+        Err(Short::Card { .. }) => SdRamFit::CardFull,
     }
 }
 
@@ -1504,7 +1517,7 @@ impl SdSession {
     fn new_inner(id: prunr_models::ModelId, session_key: &SdSessionKey, margin_mb: u64) -> Result<SdSession, String> {
         // Prewarm builds bypass `process_inpaint_with`, so gate here too,
         // with the margin the user chose.
-        check_ram_for(id, &mut SdTuning { margin_mb, ..SdTuning::default() })?;
+        check_ram_for(id, &mut SdTuning { margin_mb, cpu_only: session_key.cpu_only, ..SdTuning::default() })?;
         let rss_before_mb = process_rss_mb();
         let parts = prunr_models::multi_part_paths(id)
             .ok_or_else(|| prunr_models::not_installed_error(id))?;
@@ -2376,33 +2389,55 @@ fn step_array(
 
 // ── Safety guards ───────────────────────────────────────────────────────
 
-/// The run-time RAM gate for a stroke. Refuses when the model's base
-/// need is not free; when only the tall crop's extra is missing, the
-/// plan falls back to tiles instead. Unknown free RAM passes.
+use crate::memory::{Charge, Room, Short};
+
+/// The run-time memory gate for a stroke. Refuses when the bundle's base
+/// need is not free, in system RAM or on the card it goes to; when only
+/// the tall crop's extra is missing, the plan falls back to tiles instead.
+/// Unknown free RAM passes.
 pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) -> Result<(), String> {
-    let Some(free_mb) = available_ram_bytes().map(|b| b / (1024 * 1024)) else { return Ok(()) };
-    fit_ram(id, tuning, free_mb, resident(id))
+    let Some((provider, bundle)) = bundle_charge(id, tuning.cpu_only) else { return Ok(()) };
+    let Some(room) = crate::memory::room_now(bundle, provider) else { return Ok(()) };
+    fit_ram(id, tuning, room, resident(id), bundle).map_err(|short| {
+        tracing::info!(?id, provider, ?room, ?short, "SD: refused to load");
+        refusal(short, tuning.margin_mb)
+    })
 }
 
-/// `check_ram_for` with the RAM facts passed in.
-fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, free_mb: u64, resident: bool) -> Result<(), String> {
-    let Some(desc) = prunr_models::descriptor(id) else { return Ok(()) };
-    if tuning.tall_crop && free_mb < ram_need_mb(id, tuning.margin_mb, resident, true) {
-        tracing::info!(free_mb, "SD: no room for the tall crop; tiling instead");
+fn refusal(short: Short, margin_mb: u64) -> String {
+    let gb = |mb: u64| mb as f64 / 1024.0;
+    match short {
+        Short::Ram { need_mb, free_mb } => format!(
+            "This eraser needs {:.1} GB of free memory to load, {:.1} GB of it kept spare \
+             for other apps; {:.1} GB is free. Close other apps, or {LIGHTER_ERASER_HINT}.",
+            gb(need_mb), gb(margin_mb), gb(free_mb),
+        ),
+        Short::Card { need_mb, free_mb } => format!(
+            "This eraser needs {:.1} GB free on the graphics card; {:.1} GB is free. \
+             Close apps that use the graphics card, or {LIGHTER_ERASER_HINT}.",
+            gb(need_mb), gb(free_mb),
+        ),
+    }
+}
+
+/// `check_ram_for` with the memory facts passed in. A model that also
+/// runs right on the CPU takes the CPU's rule when its card is short, as
+/// its parts then land there.
+fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, resident: bool, bundle: Charge) -> Result<(), Short> {
+    let margin_mb = tuning.margin_mb;
+    let need = |tall| stroke_need(id, margin_mb, resident, tall, bundle);
+    if let Err(short @ Short::Card { .. }) = crate::memory::fit(need(false), room) {
+        let on_cpu = prunr_models::descriptor(id).and_then(|d| Charge::of(&d.needs, crate::engine::CPU_NAME));
+        return match on_cpu {
+            Some(cpu) if sd_spec(id).cpu_output_correct => fit_ram(id, tuning, room, resident, cpu),
+            _ => Err(short),
+        };
+    }
+    if tuning.tall_crop && crate::memory::fit(need(true), room).is_err() {
+        tracing::info!(?room, "SD: no room for the tall crop; tiling instead");
         tuning.tall_crop = false;
     }
-    let need_mb = ram_need_mb(id, tuning.margin_mb, resident, false);
-    if free_mb >= need_mb {
-        return Ok(());
-    }
-    tracing::info!(id = ?desc.id, free_mb, need_mb, "SD: refused to load");
-    Err(format!(
-        "This eraser needs {:.1} GB of free memory to load, {:.1} GB of it kept spare \
-         for other apps; {:.1} GB is free. Close other apps, or {LIGHTER_ERASER_HINT}.",
-        need_mb as f64 / 1024.0,
-        tuning.margin_mb as f64 / 1024.0,
-        free_mb as f64 / 1024.0,
-    ))
+    crate::memory::fit(need(false), room)
 }
 
 impl Drop for SdSession {
@@ -3553,13 +3588,14 @@ mod tests {
     fn the_gate_takes_the_tall_crop_only_with_the_extra_ram() {
         let id = prunr_models::ModelId::SdV15InpaintFp16;
         let m = SD_DEFAULT_MARGIN_MB;
-        let base = ram_need_mb(id, m, false, false);
+        let host = on_cpu(id);
+        let base = stroke_need(id, m, false, false, host).ram_mb;
         assert!(base > m, "the working set counts when the bundle is not resident");
-        assert_eq!(ram_need_mb(id, m, true, false), m, "a resident bundle needs only the headroom");
-        assert_eq!(ram_need_mb(id, m, true, true), m + SD_TALL_CROP_EXTRA_MB);
+        assert_eq!(stroke_need(id, m, true, false, host).ram_mb, m, "a resident bundle needs only the headroom");
+        assert_eq!(stroke_need(id, m, true, true, host).ram_mb, m + SD_TALL_CROP_EXTRA_MB);
         let fit = |free: u64, resident: bool| {
             let mut t = plan_tuning(false, m);
-            fit_ram(id, &mut t, free, resident).map(|()| t.tall_crop)
+            fit_ram(id, &mut t, Room { ram_mb: free, card_mb: None }, resident, host).map(|()| t.tall_crop)
         };
         assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB, false), Ok(true));
         assert_eq!(fit(base + SD_TALL_CROP_EXTRA_MB - 1, false), Ok(false), "short of the extra: tiles");
@@ -3609,18 +3645,72 @@ mod tests {
         use prunr_models::ModelId;
         let margin = 2048;
         for id in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16, ModelId::RoremFp16] {
-            let base = ram_need_mb(id, margin, false, false);
-            for free in [base - 1, base, base + SD_TALL_CROP_EXTRA_MB - 1, base + SD_TALL_CROP_EXTRA_MB] {
-                let mut t = plan_tuning(false, margin);
-                let gate = fit_ram(id, &mut t, free, false);
-                let expected = match (gate.is_ok(), t.tall_crop) {
-                    (false, _) => SdRamFit::Refused,
-                    (true, false) => SdRamFit::TilesOnly,
-                    (true, true) => SdRamFit::Full,
-                };
-                assert_eq!(sd_ram_fit(id, free, margin), expected, "{id:?}, free {free} MB");
+            for bundle in [on_cpu(id), TEST_CARD] {
+                let base = stroke_need(id, margin, false, false, bundle).ram_mb;
+                let tall = stroke_need(id, margin, false, true, bundle).ram_mb;
+                for card_mb in [None, Some(0), Some(TEST_CARD.card_mb + crate::memory::CARD_RESERVE_MB), Some(u64::MAX)] {
+                    for free in [base - 1, base, tall.max(base + 1) - 1, tall] {
+                        let room = Room { ram_mb: free, card_mb };
+                        let mut t = plan_tuning(false, margin);
+                        let expected = match fit_ram(id, &mut t, room, false, bundle) {
+                            Err(Short::Card { .. }) => SdRamFit::CardFull,
+                            Err(Short::Ram { .. }) => SdRamFit::Refused,
+                            Ok(()) if t.tall_crop => SdRamFit::Full,
+                            Ok(()) => SdRamFit::TilesOnly,
+                        };
+                        assert_eq!(sd_ram_fit(id, room, margin, bundle), expected, "{id:?} {bundle:?} {room:?}");
+                    }
+                }
             }
         }
+    }
+
+    /// The bundle's needs on the CPU, for the rule's tests.
+    fn on_cpu(id: prunr_models::ModelId) -> Charge {
+        Charge::of(&prunr_models::descriptor(id).unwrap().needs, crate::engine::CPU_NAME).unwrap()
+    }
+
+    /// A bundle on a card, for the rule's own tests apart from any measured one.
+    const TEST_CARD: Charge = Charge { ram_mb: 3_000, card_mb: 5_000 };
+
+    /// On a card the bundle counts the card's memory (with its reserve)
+    /// and only its share of system RAM; the tall crop's extra is the
+    /// card's. A short card refuses SD 1.5, which is wrong on the CPU,
+    /// and sends RORem to the CPU's rule; an unread card is trusted.
+    #[test]
+    fn the_gate_on_a_card_counts_the_cards_memory() {
+        use prunr_models::ModelId::{RoremFp16, SdV15InpaintFp16};
+        let m = SD_DEFAULT_MARGIN_MB;
+        let reserve = crate::memory::CARD_RESERVE_MB;
+        let extra = u64::from(sd_spec(SdV15InpaintFp16).tall_crop_card_extra_mb);
+        assert!(extra > 0, "SD 1.5 runs on CUDA, so its tall crop's card extra is measured");
+        let fit = |id, ram_mb, card_mb, resident| {
+            let mut t = plan_tuning(false, m);
+            fit_ram(id, &mut t, Room { ram_mb, card_mb }, resident, TEST_CARD).map(|()| t.tall_crop)
+        };
+        let (ram, card) = (TEST_CARD.ram_mb + m, TEST_CARD.card_mb + reserve);
+        assert_eq!(fit(SdV15InpaintFp16, ram, Some(card + extra), false), Ok(true), "room for the tall crop on the card");
+        assert_eq!(fit(SdV15InpaintFp16, ram, Some(card + extra - 1), false), Ok(false), "tiles when the card lacks the crop's extra");
+        assert_eq!(fit(SdV15InpaintFp16, ram, Some(card - 1), false), Err(Short::Card { need_mb: card, free_mb: card - 1 }));
+        assert_eq!(fit(SdV15InpaintFp16, ram - 1, Some(card + extra), false), Err(Short::Ram { need_mb: ram, free_mb: ram - 1 }), "the host share and the headroom");
+        assert_eq!(fit(SdV15InpaintFp16, ram, None, false), Ok(true), "an unread card is trusted");
+        assert_eq!(fit(SdV15InpaintFp16, m, Some(extra + reserve), true), Ok(true), "resident: the crop's extra and the headroom");
+        let rorem_on_cpu = stroke_need(RoremFp16, m, false, false, on_cpu(RoremFp16)).ram_mb;
+        assert_eq!(fit(RoremFp16, rorem_on_cpu - 1, Some(0), false), Err(Short::Ram { need_mb: rorem_on_cpu, free_mb: rorem_on_cpu - 1 }), "RORem off the card takes the CPU's need");
+        assert!(fit(RoremFp16, rorem_on_cpu, Some(0), false).is_ok());
+    }
+
+    /// The bundle's weights sit in the card's memory on CUDA: a 16 GB
+    /// machine with 12.5 GB free and a 12 GB card runs SD 1.5, tall crop
+    /// included (it was refused for wanting 16 GB of system RAM, the CPU's need).
+    #[test]
+    fn sd_on_an_nvidia_card_fits_a_12_gb_card_and_a_16_gb_machine() {
+        let id = prunr_models::ModelId::SdV15InpaintFp16;
+        let bundle = Charge::of(&prunr_models::descriptor(id).unwrap().needs, "CUDA").unwrap();
+        assert!(bundle.on_card(), "measured on CUDA");
+        let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
+        assert_eq!(fit_ram(id, &mut t, Room { ram_mb: 12_500, card_mb: Some(11_600) }, false, bundle), Ok(()));
+        assert!(t.tall_crop, "the tall crop fits too");
     }
 
     /// The Fast bundle peaks at about 14 GB while it loads: with 12 GB
@@ -3628,13 +3718,15 @@ mod tests {
     /// starts, not killed by the memory watchdog halfway through.
     #[test]
     fn an_erase_that_cannot_fit_its_load_is_refused_up_front() {
+        let ram = |ram_mb| Room { ram_mb, card_mb: None };
         for id in [prunr_models::ModelId::SdV15LcmInpaintFp16, prunr_models::ModelId::SdV15InpaintFp16] {
             let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
-            assert!(fit_ram(id, &mut t, 12_147, false).is_err(), "{id:?} refused with 12 GB free");
+            assert!(fit_ram(id, &mut t, ram(12_147), false, on_cpu(id)).is_err(), "{id:?} refused with 12 GB free");
             let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
-            assert!(fit_ram(id, &mut t, 16_500, false).is_ok(), "{id:?} runs with 16.5 GB free");
+            assert!(fit_ram(id, &mut t, ram(16_500), false, on_cpu(id)).is_ok(), "{id:?} runs with 16.5 GB free");
         }
-        assert_eq!(sd_ram_fit(prunr_models::ModelId::SdV15InpaintFp16, 12_147, SD_DEFAULT_MARGIN_MB), SdRamFit::Refused);
+        let id = prunr_models::ModelId::SdV15InpaintFp16;
+        assert_eq!(sd_ram_fit(id, ram(12_147), SD_DEFAULT_MARGIN_MB, on_cpu(id)), SdRamFit::Refused);
     }
 
     /// "CPU only" reaches the SD parts through the bundle key, so a

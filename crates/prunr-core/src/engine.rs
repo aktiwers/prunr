@@ -35,7 +35,7 @@ pub(crate) enum EpKind {
 pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 
 /// CUDA's provider name, defined on every platform like OpenVINO's.
-pub(crate) const CUDA_NAME: &str = "CUDA";
+pub const CUDA_NAME: &str = "CUDA";
 
 /// The CPU provider's name: its label, its cache-dir key and the
 /// fallback when no GPU provider is available.
@@ -604,6 +604,12 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
     why
 }
 
+/// The first GPU provider a session of `model` tries, as the ladder walks
+/// them; `None`: it runs on the CPU.
+pub(crate) fn first_gpu_provider(model: prunr_models::ModelId, cpu_only: bool) -> Option<&'static str> {
+    gpu_eps_for(cpu_only).iter().find(|&&ep| gpu_skip(model, ep).is_none()).map(EpKind::as_str)
+}
+
 /// Each GPU provider the loaded runtime offers, in ladder order, with why
 /// a session of `model` would pass it over (`None`: it would try it).
 pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
@@ -891,6 +897,9 @@ impl OrtEngine {
     /// session reports the real one.
     pub fn detect_active_provider() -> String {
         DETECTED_PROVIDER.get_or_init(|| {
+            // The UI walks the ladder only once this has answered, so the
+            // failure store it reads is read here, off the UI thread.
+            crate::ep_compat::warm();
             available_gpu_eps()
                 .first()
                 .map(|ep| ep.as_str().to_string())

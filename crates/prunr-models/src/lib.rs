@@ -87,10 +87,13 @@ impl ModelId {
     /// What the SD pipeline needs to know about an SD-family bundle;
     /// `None` for every other model.
     pub fn sd_spec(&self) -> Option<SdSpec> {
-        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false };
+        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false, tall_crop_card_extra_mb: 0 };
         match self {
-            ModelId::SdV15InpaintFp16 | ModelId::SdV15LcmInpaintFp16 => Some(SD15),
-            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true }),
+            // RTX 3060, 25 steps: the card's peak 7.1 GB for 512 px
+            // tiles, 10.5 GB for the tall 512x768 crop.
+            ModelId::SdV15InpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: 3_400, ..SD15 }),
+            ModelId::SdV15LcmInpaintFp16 => Some(SD15),
+            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true, tall_crop_card_extra_mb: 0 }),
             _ => None,
         }
     }
@@ -826,7 +829,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // halfway through the load.
         needs: Needs {
             cpu: Cost::estimate(14000, 0, "the Fast bundle's 13.6-14.1 GB peak on OpenVINO's CPU device: same architecture and size"),
-            cuda: Priced::Unmeasured,
+            // Load and 512 px tiles, 25 steps, ORT 1.24.1 with the lean
+            // CUDA pool: 4.87 GB of system RAM at the cold load (3.1 GB
+            // after), the card's peak 7.1 GB.
+            cuda: Priced::Same(Cost::measured(4_900, 7_200, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1747,6 +1753,9 @@ pub struct SdSpec {
     /// RORem (prunr-export/rorem_mem): 15 GB peak instead of 21.7 at the
     /// same speed. SD 1.5 is unmeasured, so it keeps ORT's default.
     pub lean_sessions: bool,
+    /// The card's memory the tall crop adds to the bundle's `needs` on a
+    /// card; 0 while the bundle is not measured on one.
+    pub tall_crop_card_extra_mb: u32,
 }
 
 /// The latent space an SD-family model denoises in, named by the VAE
@@ -2254,6 +2263,16 @@ mod tests {
         }
     }
 
+    /// An SD bundle measured on a card says what the tall crop adds there.
+    #[test]
+    fn an_sd_bundle_on_a_card_prices_its_tall_crop_there() {
+        for desc in REGISTRY {
+            let Some(spec) = desc.id.sd_spec() else { continue };
+            let on_a_card = desc.needs.accelerators().into_iter().any(|(_, p)| matches!(p, Priced::Same(c) if c.card_mb > 0));
+            assert_eq!(on_a_card, spec.tall_crop_card_extra_mb > 0, "{:?}", desc.id);
+        }
+    }
+
     /// A model is priced on every accelerator: never run exactly where
     /// `incompatible_eps` bans it, and no more accelerators left
     /// unmeasured than counted here. Measuring one lowers its count;
@@ -2261,7 +2280,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 23), ("DirectML", 23), ("CoreML", 23), ("OpenVINO", 20), ("MIGraphX", 23)];
+            [("CUDA", 22), ("DirectML", 23), ("CoreML", 23), ("OpenVINO", 20), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {

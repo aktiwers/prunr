@@ -76,6 +76,8 @@ pub(crate) struct HardwareSectionContext {
     pub installing: Option<(RuntimeId, String)>,
     pub active_provider: String,
     pub sd_margin_mb: u64,
+    /// Settings › Processor is CPU only: no SD part goes to a card.
+    pub sd_cpu_only: bool,
     /// Why the loaded runtime's GPU provider does not run, when it does not.
     pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
 }
@@ -208,6 +210,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
                 installing: app.runtime_install.as_ref().map(|p| (p.runtime, p.last_event.status_text())),
                 active_provider: app.settings.active_backend.clone(),
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
+                sd_cpu_only: app.settings.cpu_only(),
                 gpu_failure: prunr_core::engine::gpu_start_failure(),
             };
             render_page_hardware(ui, &hw_ctx)
@@ -480,7 +483,8 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         // The same rule as the gate an erase passes, with the user's margin.
         use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
         for (name, id) in ctx.installs.sd_erasers() {
-            let (color, fit) = match sd_ram_fit(id, avail_ram / (1024 * 1024), ctx.sd_margin_mb) {
+            let Some((bundle, room)) = hardware::charge_and_room(id, ctx.sd_cpu_only) else { continue };
+            let (color, fit) = match sd_ram_fit(id, room, ctx.sd_margin_mb, bundle) {
                 SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
                 SdRamFit::TilesOnly => (
                     theme::ADVISORY_TEXT,
@@ -489,6 +493,10 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                 SdRamFit::Refused => (
                     Color32::from_rgb(0xd8, 0x6e, 0x6e),
                     "not enough memory free. Close other apps or use Big-LaMa",
+                ),
+                SdRamFit::CardFull => (
+                    Color32::from_rgb(0xd8, 0x6e, 0x6e),
+                    "not enough free memory on the graphics card. Close apps that use it or use Big-LaMa",
                 ),
             };
             ui.horizontal(|ui| {

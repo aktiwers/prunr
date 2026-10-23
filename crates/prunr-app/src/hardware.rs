@@ -8,7 +8,7 @@ mod adapters;
 #[cfg(windows)]
 mod dxgi;
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuVendor {
@@ -155,20 +155,42 @@ pub fn available_ram_mb_throttled() -> u32 {
 /// Cached available-RAM read with a 1-second TTL; cheap enough for
 /// per-frame UI code (~10 ns on a cache hit).
 pub fn available_ram_bytes_throttled() -> u64 {
-    use std::sync::Mutex;
-    use std::time::Instant;
-    static CACHE: OnceLock<Mutex<Option<(Instant, u64)>>> = OnceLock::new();
-    let cell = CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = Instant::now();
-    if let Some((at, bytes)) = *guard {
-        if now.duration_since(at).as_secs_f32() < 1.0 {
-            return bytes;
+    static CACHE: Reading<u64> = Mutex::new(None);
+    throttled(&CACHE, available_ram_bytes_now)
+}
+
+/// Free memory on CUDA's card in MB, read at most once a second;
+/// `None` with no NVIDIA driver.
+pub fn cuda_card_free_mb_throttled() -> Option<u64> {
+    static CACHE: Reading<Option<u64>> = Mutex::new(None);
+    throttled(&CACHE, || prunr_core::card_memory::cuda_card_memory().map(|c| c.free_mb))
+}
+
+/// What `id` takes where it will run, and what is free there now
+/// (readings at most a second old); until the GPU probe answers, the
+/// CPU's charge.
+pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(prunr_core::memory::Charge, prunr_core::memory::Room)> {
+    let provider = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
+    let charge = prunr_core::memory::charge_on(id, provider)?;
+    let card_mb = (charge.on_card() && provider == prunr_core::engine::CUDA_NAME).then(cuda_card_free_mb_throttled).flatten();
+    Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
+}
+
+/// A reading and when it was taken.
+type Reading<T> = Mutex<Option<(std::time::Instant, T)>>;
+
+/// `cache`'s reading while under a second old, else `read` afresh.
+fn throttled<T: Copy>(cache: &Reading<T>, read: impl FnOnce() -> T) -> T {
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    match *guard {
+        Some((at, value)) if now.duration_since(at) < std::time::Duration::from_secs(1) => value,
+        _ => {
+            let value = read();
+            *guard = Some((now, value));
+            value
         }
     }
-    let bytes = available_ram_bytes_now();
-    *guard = Some((now, bytes));
-    bytes
 }
 
 fn detect_now() -> HardwareProfile {
