@@ -288,7 +288,7 @@ mod tests {
         // more than Silueta — the whole point of model-aware admission.
         assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
         assert!(u2net    > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
-        // Tie back to MB → bytes derivation: 200 MB Silueta ≈ 209 MB.
-        assert_eq!(silueta, 200 * 1024 * 1024);
+        let registry = prunr_models::descriptor(prunr_models::ModelId::Silueta).map(|d| d.needs.cpu.host_mb).unwrap();
+        assert_eq!(silueta, registry as usize * 1024 * 1024, "the registry's MB, as bytes");
     }
 }

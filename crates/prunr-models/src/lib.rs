@@ -562,8 +562,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // quantized_cast type mismatch. Both verified 2026-04-26.
         incompatible_eps: &["OpenVINO"],
         needs: Needs {
-            cpu: Cost::estimate(200, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Never,
@@ -597,11 +597,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(800, 0, CARRIED),
+            cpu: Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
+            openvino: Priced::Same(Cost::measured(800, 0, "i7-6700, 2026-10-23")),
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: true,
@@ -627,11 +627,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(2500, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
+            openvino: Priced::Same(Cost::measured(5_150, 0, "i7-6700, 2026-10-23")),
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
@@ -762,8 +762,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(150, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(750, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1076,8 +1076,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(600, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1164,8 +1164,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(1000, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1210,8 +1210,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(600, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1289,7 +1289,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["OpenVINO"],
         needs: Needs {
             cpu: Cost::estimate(750, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cuda: Priced::Same(Cost::measured(1_550, 7_400, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Never,
@@ -1337,8 +1337,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         incompatible_eps: &[],
         needs: Needs {
-            cpu: Cost::estimate(600, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1380,7 +1380,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
             cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
-            cuda: Priced::Unmeasured,
+            cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -1416,8 +1416,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
-            cpu: Cost::estimate(500, 0, CARRIED),
-            cuda: Priced::Unmeasured,
+            cpu: Cost::measured(350, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -2289,7 +2289,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 20), ("DirectML", 23), ("CoreML", 22), ("OpenVINO", 20), ("MIGraphX", 23)];
+            [("CUDA", 10), ("DirectML", 23), ("CoreML", 22), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
