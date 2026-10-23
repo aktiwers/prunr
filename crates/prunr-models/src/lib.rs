@@ -414,9 +414,11 @@ pub struct ModelDescriptor {
     pub source: ModelSource,
     pub version: &'static str,
     pub gpu: GpuRequirement,
-    /// EPs known to fail this specific model export. Checked before
-    /// the dynamic compat cache so first-time users skip the failed
-    /// load. List verified causes only.
+    /// Providers the ladder skips for this model export, each for a
+    /// verified cause named beside it: it fails there, its output drifts
+    /// from the CPU's, or it builds or runs too slowly there to be worth
+    /// it. Checked before the dynamic compat cache so first-time users
+    /// skip the failed load.
     ///
     /// `&str`, not `EpKind`: this crate has no workspace deps.
     pub incompatible_eps: &'static [&'static str],
@@ -1410,14 +1412,18 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        // Off CoreML on a MacBook Air (macOS 27, 2026-10-23): with ORT's
+        // constant folding off (ORT 1.24-1.28) CoreML cannot plan it (error
+        // -6), and with folding on its colours drifted from the CPU's (27%
+        // of values more than 2/255 apart).
+        incompatible_eps: &["CoreML"],
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
             cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
             mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -1492,9 +1498,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // On CoreML's GPU (a MacBook Air, macOS 27) the encoder's masks drift from
-        // the CPU's: the same candidate on 16 and 19 of 20 clicks, a worst
-        // IoU of 0.73, where CUDA met 20 of 20 at 0.9995 (2026-10-23).
+        // Off CoreML while ORT's constant folding is off (ORT 1.24-1.28): on
+        // a MacBook Air's GPU the encoder then took 4.5 s against the CPU's
+        // 2.5 s, at a 10.7 GB peak. Folded (ORT 1.31) it took 0.95 s with
+        // the CPU's masks on one photo, and IoU 0.973 on one click of
+        // another (2026-10-23).
         incompatible_eps: &["CoreML"],
         // One encode and a click, `prunr bench --needs`: 1.12 GB on the
         // CPU; on CUDA 1.0 GB of RAM and the card's peak 2.18 GB during an
@@ -2329,7 +2337,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 9), ("DirectML", 23), ("CoreML", 21), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 9), ("DirectML", 23), ("CoreML", 20), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
