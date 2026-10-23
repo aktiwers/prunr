@@ -576,7 +576,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["OpenVINO"],
         needs: Needs {
             cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -647,7 +647,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(12_850, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
@@ -786,7 +786,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(1_000, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(750, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1105,7 +1105,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(4_350, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1195,7 +1195,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(1_800, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -2341,7 +2341,7 @@ mod tests {
                 }
             }
         }
-        const MAC_CPU_UNMEASURED_AT_MOST: usize = 23;
+        const MAC_CPU_UNMEASURED_AT_MOST: usize = 18;
         let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
         assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
         assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
