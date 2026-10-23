@@ -149,7 +149,9 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     // Not waiting on the accelerator probe here (the UI thread): until it
     // answers the engines are counted as on the CPU, the larger figure.
     let provider = prunr_core::OrtEngine::detected_provider().unwrap_or_else(|| prunr_core::engine::CPU_NAME.to_string());
+    let id: prunr_models::ModelId = model.into();
     let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &provider);
+    let engines = prunr_core::memory::provider_once_probed(id, cpu_only).map_or(engines, |on| prunr_core::memory::engines_that_fit(id, on, engines));
     per_engine_cost(model, cpu_only) * engines
 }
 
