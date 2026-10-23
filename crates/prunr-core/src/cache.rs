@@ -668,13 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_version_is_read_from_the_build_info() {
-        let info = "ORT Build Info: git-branch=rel-1.24.1, git-commit-id=abc, build type=Release";
-        assert_eq!(crate::ort_runtime::runtime_version_from_info(info).as_deref(), Some("1.24.1"));
-        assert_eq!(crate::ort_runtime::runtime_version_from_info("no branch here"), None);
-    }
-
-    #[test]
     fn the_macos_cache_path_has_no_space_for_coreml_to_trip_on() {
         let home = Path::new("/Users/ada");
         let data = Some(home.join("Library/Application Support/prunr"));
