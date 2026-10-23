@@ -10,16 +10,29 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// The ONNX Runtime version we ship and offer for runtime-store install.
+/// The ONNX Runtime version of the accelerator builds: the DirectML one
+/// Windows ships and the OpenVINO and CUDA ones the runtime store offers.
+/// Their wheels lag the plain one: DirectML's stop at 1.24.4, OpenVINO's
+/// at 1.24.1, and CUDA's need CUDA 13 from 1.27.
 /// The pykeio/ort `api-23` feature refuses a runtime older than 1.23 at
-/// load. The macOS wheel's minimum OS is the Mac app's floor
-/// (`LSMinimumSystemVersion`, 14.0 for 1.24), so a bump checks that too.
+/// load.
 ///
 /// **Upper bound:** past the 1.x line the ABI is expected to change; a
 /// bump without switching the `ort` API feature compiles but crashes at
 /// session creation. Run `cargo xtask probe-load-dynamic <new-dylib>`
-/// before bumping.
+/// before bumping either version.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
+
+/// The version of the plain `onnxruntime` wheel, which the Linux build
+/// ships (CPU) and the macOS one (CPU and CoreML). From 1.24 to 1.28 its
+/// constant folding corrupts weights, and with folding off CoreML loses
+/// the Magic Brush, DDColor and BiRefNet. Not 1.31: it moved CoreML onto
+/// device-based provider selection, and on a MacBook Air our CoreML
+/// options stopped applying (Silueta's output came out wrong). The macOS
+/// wheel's minimum OS is
+/// the Mac app's floor (`LSMinimumSystemVersion`, 14.0 for 1.30), so a
+/// bump checks that too.
+pub const PLAIN_ORT_VERSION: &str = "1.30.0";
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms, for which no wheel fits.
@@ -482,14 +495,14 @@ mod tests {
     /// `contains` check.
     #[test]
     fn yaml_pins_match_const() {
-        // (path, package, expected occurrence count)
-        let cases: &[(&str, &str, usize)] = &[
-            ("/../../.github/workflows/release.yml", "onnxruntime", 1),          // Linux + macOS staging
-            ("/../../.github/workflows/release.yml", "onnxruntime-directml", 1), // Windows staging
-            ("/../../.github/workflows/ci.yml", "onnxruntime", 2),               // Linux install before tests, macOS smoke test
+        // (path, package, version, expected occurrence count)
+        let cases: &[(&str, &str, &str, usize)] = &[
+            ("/../../.github/workflows/release.yml", "onnxruntime", PLAIN_ORT_VERSION, 1),           // Linux + macOS staging
+            ("/../../.github/workflows/release.yml", "onnxruntime-directml", PINNED_ORT_VERSION, 1), // Windows staging
+            ("/../../.github/workflows/ci.yml", "onnxruntime", PLAIN_ORT_VERSION, 2),                // Linux install before tests, macOS smoke test
         ];
-        for (rel, package, expected) in cases {
-            let needle = format!("install-runtime {package} {PINNED_ORT_VERSION}");
+        for (rel, package, version, expected) in cases {
+            let needle = format!("install-runtime {package} {version}");
             let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
             let yml = std::fs::read_to_string(&abs)
                 .unwrap_or_else(|e| panic!("read {abs}: {e}"));
