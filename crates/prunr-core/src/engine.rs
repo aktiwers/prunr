@@ -590,6 +590,7 @@ pub(crate) fn walk_ladder<S>(
             continue;
         }
         let drafted = crate::cache::drafts_attached();
+        let started = std::time::SystemTime::now();
         let mut committed = commit(ep);
         // A build that failed while writing its optimized graph (the disk
         // filled meanwhile) says nothing about the provider until it fails
@@ -606,7 +607,7 @@ pub(crate) fn walk_ladder<S>(
             }
             Err(Miss::Failed { error, suspect_cache }) => {
                 tracing::warn!(?model, ?weights, ep = %ep, %error, "{prefix}GPU session failed — trying next EP");
-                match suspect_cache.or_else(|| compiled_cache_named(model, ep.as_str(), &error)) {
+                match suspect_cache.or_else(|| compiled_cache_named(model, ep.as_str(), &error, started)) {
                     Some(path) => clear_suspect_cache(&path),
                     None => crate::ep_compat::record_failure(ep, model, weights, &error),
                 }
@@ -1131,19 +1132,33 @@ impl OrtEngine {
     }
 }
 
-/// Delete a cached optimized graph a session failed on, so the next
-/// build rebuilds it. `NotFound` is silent: processes race on the path.
 /// CoreML's compiled-model cache of `model` when `error` names a path in
-/// it: a cache left half-written is the cache's fault, not the provider's.
-fn compiled_cache_named(model: prunr_models::ModelId, ep_name: &str, error: &str) -> Option<PathBuf> {
+/// it and the failed build, started at `since`, compiled nothing into it:
+/// a compiled model left half-written is the cache's fault, not the
+/// provider's. One the build had just compiled failed on its own, and
+/// CoreML names its fresh files then too.
+fn compiled_cache_named(model: prunr_models::ModelId, ep_name: &str, error: &str, since: std::time::SystemTime) -> Option<PathBuf> {
     let dir = (ep_name == COREML_NAME).then(|| crate::cache::cache_path_for(model, ep_name)).flatten();
-    named_in(error, dir)
+    named_in(error, dir).filter(|dir| !written_since(dir, since))
 }
 
 fn named_in(error: &str, dir: Option<PathBuf>) -> Option<PathBuf> {
     dir.filter(|dir| error.contains(dir.to_string_lossy().as_ref()))
 }
 
+/// Whether a file under `dir` was written at `since` or later.
+fn written_since(dir: &std::path::Path, since: std::time::SystemTime) -> bool {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => written_since(&path, since),
+            _ => entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|modified| modified >= since),
+        }
+    })
+}
+
+/// Delete a cached optimized graph a session failed on, so the next
+/// build rebuilds it. `NotFound` is silent: processes race on the path.
 fn clear_suspect_cache(path: &std::path::Path) {
     let removed = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
     match removed {
@@ -1345,6 +1360,27 @@ mod tests {
         std::fs::create_dir_all(cache_dir.join("0_dynamic_mlprogram")).unwrap();
         clear_suspect_cache(&cache_dir);
         assert!(!cache_dir.exists(), "a suspect cache folder is removed whole");
+    }
+
+    /// A model CoreML cannot plan fails each fresh compile with the
+    /// compiled file's path in the error; were that read as a bad cache,
+    /// the failure would never be recorded and every launch would
+    /// compile the model again.
+    #[test]
+    fn a_coreml_model_that_fails_its_fresh_compile_is_not_a_bad_cache() {
+        let dir = std::env::temp_dir().join(format!("prunr-fresh-compile-{}", std::process::id()));
+        let compiled = dir.join("1452/1_dynamic_mlprogram/model/compiled_model.mlmodelc");
+        std::fs::create_dir_all(&compiled).unwrap();
+        let mil = compiled.join("model.mil");
+        let build_started = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+
+        std::fs::write(&mil, b"program").unwrap();
+        assert!(written_since(&dir, build_started), "compiled by the failed build: the provider's failure");
+
+        let cached = std::fs::File::options().write(true).open(&mil).unwrap();
+        cached.set_modified(build_started - std::time::Duration::from_secs(3600)).unwrap();
+        assert!(!written_since(&dir, build_started), "compiled before the build: the cache is the suspect");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
