@@ -455,14 +455,19 @@ impl EpKind {
 
 /// CoreML set to compile ML Programs: NeuralNetwork, its default, takes no
 /// fp16 or int64 inputs, ConvTranspose or LayerNorm. A float32 ML
-/// Program runs on the GPU in fp32, never on the Neural Engine.
+/// Program runs on the GPU in fp32, never on the Neural Engine, so the
+/// units are the CPU and the GPU: with all of them CoreML also planned
+/// for the Neural Engine and failed Silueta and Real-ESRGAN x2 on a
+/// MacBook Air ("Error in building plan").
 ///
 /// CoreML reuses what it compiled under `cache_dir` without checking
 /// input shapes: a session that pins its input dims must key the dir on
 /// them, or a model compiled for one tile size is reused for another.
 #[cfg(any(target_os = "macos", test))]
 fn coreml_provider(cache_dir: Option<&std::path::Path>) -> ort::ep::CoreML {
-    let p = ort::ep::CoreML::default().with_model_format(ort::ep::coreml::ModelFormat::MLProgram);
+    let p = ort::ep::CoreML::default()
+        .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
+        .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndGPU);
     match cache_dir {
         Some(dir) => p.with_model_cache_dir(dir.to_string_lossy()),
         None => p,
@@ -1394,6 +1399,7 @@ mod tests {
         let dir = std::path::Path::new("/Users/ada/Library/Caches/prunr/ep_cache/coreml/u2net-1-ort1.24.1-v1");
         let options = format!("{:?}", coreml_provider(Some(dir)));
         assert!(options.contains(r#""ModelFormat": "MLProgram""#), "{options}");
+        assert!(options.contains(r#""MLComputeUnits": "CPUAndGPU""#), "{options}");
         assert!(options.contains(&format!(r#""ModelCacheDirectory": {:?}"#, dir.to_string_lossy())), "{options}");
         assert!(!format!("{:?}", coreml_provider(None)).contains("ModelCacheDirectory"));
     }
