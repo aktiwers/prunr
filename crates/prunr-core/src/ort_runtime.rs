@@ -144,16 +144,16 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
 /// From ORT 1.24.1 constant folding turns an aliasing op (a Reshape of a
 /// weight) into a constant that points at memory freed later in the same
 /// pass (microsoft/onnxruntime#29788, fixed by microsoft/onnxruntime#29789
-/// for 1.28): SAM 2.1's encoder came out as values near 1e28 in some
-/// processes on a MacBook Air. 1.24 to 1.27, and a build that names no
-/// version (ours on macOS), count as affected. Off, the cut-out, upscale,
-/// colorize and depth models ran as fast on the CPU and on CUDA; SAM's
-/// encoder ~30% slower on the CPU.
+/// in 1.29.0; 1.28.3 still lacks it): SAM 2.1's encoder came out as values
+/// near 1e28 in some processes on a MacBook Air. 1.24 to 1.28, and a build
+/// that names no version (ours on macOS), count as affected. Off, the
+/// cut-out, upscale, colorize and depth models ran as fast on the CPU and
+/// on CUDA; SAM's encoder ~30% slower on the CPU.
 fn folding_is_broken(version: Option<&str>) -> bool {
     let Some(version) = version else { return true };
     let mut parts = version.split('.').map(|p| p.parse::<u32>());
     match (parts.next(), parts.next()) {
-        (Some(Ok(1)), Some(Ok(minor))) => (24..28).contains(&minor),
+        (Some(Ok(1)), Some(Ok(minor))) => (24..29).contains(&minor),
         _ => true,
     }
 }
@@ -483,7 +483,8 @@ mod tests {
         assert!(folding_is_broken(None));
         assert!(folding_is_broken(Some("1.27.1")));
         assert!(!folding_is_broken(Some("1.23.2")));
-        assert!(!folding_is_broken(Some("1.28.0")));
+        assert!(folding_is_broken(Some("1.28.3")));
+        assert!(!folding_is_broken(Some("1.29.0")));
         assert!(folding_is_broken(Some("odd")), "an unreadable version counts as affected");
     }
 
