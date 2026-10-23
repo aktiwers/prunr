@@ -282,6 +282,17 @@ pub struct BenchArgs {
     /// Where to write the Markdown report; a JSON copy goes beside it.
     #[arg(long, value_name = "PATH", default_value = "prunr-bench.md")]
     pub out: PathBuf,
+
+    /// Measure memory instead of speed: each model's peak system RAM and
+    /// graphics-card memory on the CPU and on the GPU path, each in a
+    /// fresh process, with the registry lines to paste.
+    #[arg(long)]
+    pub needs: bool,
+
+    /// One `--needs` measurement, `MODEL:cpu` or `MODEL:gpu`, run in its
+    /// own process by `--needs`.
+    #[arg(long, hide = true, value_name = "MODEL:SIDE")]
+    pub needs_one: Option<String>,
 }
 
 /// Upscale model selection.
@@ -1397,6 +1408,9 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 /// a crash still leaves one naming the step it crashed in.
 pub fn run_bench(args: &BenchArgs) -> i32 {
     use prunr_app::bench::{self, report};
+    if let Some(one) = &args.needs_one {
+        return run_needs_one(one, args.image.as_deref());
+    }
     let models = match bench::select(&args.models, args.heavy, prunr_models::is_available) {
         Ok(models) => models,
         Err(e) => {
@@ -1414,6 +1428,9 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
             }
         },
     };
+    if args.needs {
+        return run_needs(&models, args);
+    }
     let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None };
     print!("{}", report::header_text(&report.header));
     println!();
@@ -1437,6 +1454,50 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     println!();
     println!("{}.", report::summary(&report.rows));
     println!("Report: {} and {}", files.md.display(), files.json().display());
+    0
+}
+
+/// `prunr bench --needs`: each model measured in a child process, the
+/// report written to `--out`.
+fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
+    use prunr_app::bench::{needs, report};
+    let header = report::Header::detect("", 0);
+    let machine = format!("{}, {}, {} RAM, {}", header.gpus.join(" + "), header.cpu, header.ram, header.os);
+    let points = needs::measure_all(models, args.image.as_deref(), &mut |p| {
+        let side = if p.gpu_side { "GPU path" } else { "CPU" };
+        match &p.error {
+            Some(e) => eprintln!("{} ({side}): {e}", p.name),
+            None => eprintln!("{} ({side}, {}): RAM {:?} MB, card {:?} MB", p.name, p.provider, p.host_mb, p.card_mb),
+        }
+    });
+    let text = needs::report(&points, &machine);
+    print!("{text}");
+    match std::fs::write(&args.out, &text) {
+        Ok(()) => println!("Report: {}", args.out.display()),
+        Err(e) => eprintln!("error: cannot write {}: {e}", args.out.display()),
+    }
+    0
+}
+
+/// One `--needs` point, in this process, printed for the parent.
+fn run_needs_one(one: &str, image: Option<&std::path::Path>) -> i32 {
+    let Some((name, side)) = one.split_once(':') else {
+        eprintln!("error: --needs-one takes MODEL:cpu or MODEL:gpu");
+        return 1;
+    };
+    let Some(id) = prunr_app::bench::model_named(name) else {
+        eprintln!("error: no model named {name}");
+        return 1;
+    };
+    let photo = match image.map(prunr_core::load_image_from_path) {
+        Some(Err(e)) => {
+            eprintln!("error: cannot read the image: {e}");
+            return 1;
+        }
+        Some(Ok(photo)) => Some(photo),
+        None => None,
+    };
+    prunr_app::bench::needs::measure_here(id, side == "gpu", photo);
     0
 }
 
