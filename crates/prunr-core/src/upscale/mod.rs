@@ -243,7 +243,7 @@ fn parted_room(free: Option<u64>, working_set: u64, resident: u64) -> u64 {
 }
 
 fn working_set_bytes(model: prunr_models::ModelId) -> u64 {
-    prunr_models::descriptor(model).map_or(0, |d| u64::from(d.needs.cpu.host_mb)) * 1024 * 1024
+    prunr_models::descriptor(model).map_or(0, |d| u64::from(d.needs.host_cpu().host_mb)) * 1024 * 1024
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`

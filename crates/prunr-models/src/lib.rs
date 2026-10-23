@@ -314,6 +314,10 @@ pub struct ModelPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Needs {
     pub cpu: Cost,
+    /// The CPU on macOS, where ORT's Arm build and the footprint macOS
+    /// counts (compressed memory in it) differ: BiRefNet-lite peaks at
+    /// 12.8 GB there against 7.1 GB on Linux. Unmeasured: `cpu`'s figure.
+    pub mac_cpu: Priced,
     pub cuda: Priced,
     pub directml: Priced,
     pub coreml: Priced,
@@ -366,13 +370,22 @@ impl Needs {
     /// an accelerator this table does not know is priced as unmeasured.
     pub fn on(&self, provider: &str) -> Priced {
         match provider {
-            "CPU" => Priced::Same(self.cpu),
+            "CPU" => Priced::Same(self.host_cpu()),
             "CUDA" => self.cuda,
             "DirectML" => self.directml,
             "CoreML" => self.coreml,
             "OpenVINO" => self.openvino,
             "MIGraphX" => self.migraphx,
             _ => Priced::Unmeasured,
+        }
+    }
+
+    /// What it needs on this machine's CPU: the Mac's figure on macOS
+    /// where measured, else `cpu`.
+    pub fn host_cpu(&self) -> Cost {
+        match self.mac_cpu {
+            Priced::Same(cost) if cfg!(target_os = "macos") => cost,
+            _ => self.cpu,
         }
     }
 
@@ -563,6 +576,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["OpenVINO"],
         needs: Needs {
             cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -598,6 +612,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -632,6 +647,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
@@ -662,6 +678,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(300, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -697,6 +714,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -732,6 +750,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -767,6 +786,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(750, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -834,6 +854,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // halfway through the load.
         needs: Needs {
             cpu: Cost::estimate(14000, 0, "the Fast bundle's 13.6-14.1 GB peak on OpenVINO's CPU device: same architecture and size"),
+            mac_cpu: Priced::Unmeasured,
             // Load and 512 px tiles, 25 steps, ORT 1.24.1 with the lean
             // CUDA pool: 4.87 GB of system RAM at the cold load (3.1 GB
             // after), the card's peak 7.1 GB.
@@ -903,6 +924,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // 13.6-14.1 GB.
         needs: Needs {
             cpu: Cost::measured(14000, 0, "i7-6700, OpenVINO CPU device, bundle load peak 13.6-14.1 GB"),
+            mac_cpu: Priced::Unmeasured,
             // Load and 512 px tiles, 8 steps at CFG 2 (two UNet passes a
             // step, its heaviest), ORT 1.24.1 with the lean CUDA pool:
             // 4.87 GB of system RAM at the cold load, the card's peak 6.8 GB.
@@ -990,6 +1012,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // the 4.8 GiB of mapped weight files on top are reclaimable.
         needs: Needs {
             cpu: Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"),
+            mac_cpu: Priced::Unmeasured,
             // Load and erase, 4 steps, lean sessions: 1.45 GB of system
             // RAM (the weights go to the card), the card's peak 8.6 GB.
             cuda: Priced::Same(Cost::measured(1_500, 8_650, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
@@ -1041,6 +1064,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
         needs: Needs {
             cpu: Cost::estimate(100, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1081,6 +1105,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1123,6 +1148,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1169,6 +1195,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1215,6 +1242,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1293,6 +1321,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &["OpenVINO"],
         needs: Needs {
             cpu: Cost::estimate(750, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_550, 7_400, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1342,6 +1371,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1384,6 +1414,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
             cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1421,6 +1452,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
             cpu: Cost::measured(350, 0, "i5-11600KF and i7-6700, 2026-10-23"),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1469,6 +1501,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Validate empirically on a 4 GB RAM machine before bumping.
         needs: Needs {
             cpu: Cost::estimate(800, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
@@ -1510,6 +1543,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1551,6 +1585,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -1585,6 +1620,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
         needs: Needs {
             cpu: Cost::estimate(64, 0, CARRIED),
+            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
@@ -2263,7 +2299,7 @@ mod tests {
         // Floor catches accidental zero-init when adding a new model;
         // ceiling catches obvious typos (no real model needs > 64 GB).
         for desc in REGISTRY {
-            let costs = std::iter::once(desc.needs.cpu).chain(desc.needs.accelerators().into_iter().filter_map(|(_, p)| match p {
+            let costs = std::iter::once(desc.needs.cpu).chain([("Mac CPU", desc.needs.mac_cpu)].into_iter().chain(desc.needs.accelerators()).filter_map(|(_, p)| match p {
                 Priced::Same(cost) => Some(cost),
                 Priced::Unmeasured | Priced::Never => None,
             }));
@@ -2305,6 +2341,10 @@ mod tests {
                 }
             }
         }
+        const MAC_CPU_UNMEASURED_AT_MOST: usize = 23;
+        let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
+        assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
+        assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
         for ((provider, at_most), (_, models)) in UNMEASURED_AT_MOST.iter().zip(&unmeasured) {
             assert!(models.len() <= *at_most, "{} models unmeasured on {provider}, more than {at_most}: measure them ({models:?})", models.len());
             assert!(models.len() == *at_most, "only {} unmeasured on {provider} now: lower its count to {}", models.len(), models.len());
