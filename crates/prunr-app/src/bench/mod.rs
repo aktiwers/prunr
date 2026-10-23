@@ -7,6 +7,7 @@
 //! mismatch here is a mismatch a user sees.
 
 pub mod input;
+pub mod needs;
 pub mod report;
 pub mod stats;
 

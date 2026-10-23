@@ -31,6 +31,20 @@ pub fn cuda_card_memory() -> Option<CardMemory> {
     }
 }
 
+/// What process `pid` holds on CUDA's card, MB; `None` with no NVIDIA
+/// driver, or when the driver does not say (Windows' display model).
+pub fn process_card_mb(pid: u32) -> Option<u64> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        nvml::process_card_mb(pid)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Which NVML card to read: the only one, or the one with CUDA's PCI id.
 #[cfg(any(target_os = "linux", windows, test))]
 #[derive(Debug, PartialEq, Eq)]
@@ -75,12 +89,26 @@ mod nvml {
         _used: u64,
     }
 
+    /// NVML's `nvmlProcessInfo_t`.
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct ProcessInfo {
+        pid: c_uint,
+        used: u64,
+        _gpu_instance: c_uint,
+        _compute_instance: c_uint,
+    }
+
+    /// NVML's answer for a figure the driver does not keep.
+    const NOT_AVAILABLE: u64 = u64::MAX;
+
     struct Nvml {
         _lib: libloading::Library,
         count: unsafe extern "C" fn(*mut c_uint) -> c_int,
         by_index: unsafe extern "C" fn(c_uint, *mut Device) -> c_int,
         by_pci_bus_id: unsafe extern "C" fn(*const c_char, *mut Device) -> c_int,
         memory: unsafe extern "C" fn(Device, *mut Memory) -> c_int,
+        processes: unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfo) -> c_int,
     }
 
     // SAFETY: the handles are NVML's, which is thread-safe once initialised.
@@ -103,7 +131,8 @@ mod nvml {
                     let by_index = *lib.get(b"nvmlDeviceGetHandleByIndex_v2").ok()?;
                     let by_pci_bus_id = *lib.get(b"nvmlDeviceGetHandleByPciBusId_v2").ok()?;
                     let memory = *lib.get(b"nvmlDeviceGetMemoryInfo").ok()?;
-                    Some(Nvml { _lib: lib, count, by_index, by_pci_bus_id, memory })
+                    let processes = *lib.get(b"nvmlDeviceGetComputeRunningProcesses_v3").ok()?;
+                    Some(Nvml { _lib: lib, count, by_index, by_pci_bus_id, memory, processes })
                 }
             })
             .as_ref()
@@ -133,27 +162,47 @@ mod nvml {
         .map(|id| id.as_slice())
     }
 
-    pub(super) fn card_memory() -> Option<CardMemory> {
-        let nvml = nvml()?;
+    const MB: u64 = 1024 * 1024;
+
+    /// CUDA's device 0 as NVML's handle.
+    fn device(nvml: &Nvml) -> Option<Device> {
         let mut cards: c_uint = 0;
+        let mut device: Device = std::ptr::null_mut();
         // SAFETY: NVML initialised; each call writes only through the
         // pointer it is given.
         unsafe {
             if (nvml.count)(&mut cards) != SUCCESS {
                 return None;
             }
-            let mut device: Device = std::ptr::null_mut();
             let found = match pick(cards, cuda_device0_pci_bus_id)? {
                 Pick::Index(i) => (nvml.by_index)(i, &mut device),
                 Pick::PciBusId(id) => (nvml.by_pci_bus_id)(id.as_ptr(), &mut device),
             };
-            let mut memory = Memory::default();
-            if found != SUCCESS || (nvml.memory)(device, &mut memory) != SUCCESS {
-                return None;
-            }
-            const MB: u64 = 1024 * 1024;
-            Some(CardMemory { free_mb: memory.free / MB, total_mb: memory.total / MB })
+            (found == SUCCESS).then_some(device)
         }
+    }
+
+    pub(super) fn card_memory() -> Option<CardMemory> {
+        let nvml = nvml()?;
+        let device = device(nvml)?;
+        let mut memory = Memory::default();
+        // SAFETY: a handle NVML gave; the call writes only `memory`.
+        if unsafe { (nvml.memory)(device, &mut memory) } != SUCCESS {
+            return None;
+        }
+        Some(CardMemory { free_mb: memory.free / MB, total_mb: memory.total / MB })
+    }
+
+    pub(super) fn process_card_mb(pid: u32) -> Option<u64> {
+        let nvml = nvml()?;
+        let device = device(nvml)?;
+        let mut infos = [ProcessInfo::default(); 64];
+        let mut count = infos.len() as c_uint;
+        // SAFETY: a handle NVML gave; it writes at most `count` entries.
+        if unsafe { (nvml.processes)(device, &mut count, infos.as_mut_ptr()) } != SUCCESS {
+            return None;
+        }
+        infos[..count as usize].iter().find(|p| p.pid == pid).filter(|p| p.used != NOT_AVAILABLE).map(|p| p.used / MB)
     }
 }
 

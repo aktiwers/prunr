@@ -34,6 +34,11 @@ impl Inputs {
     /// large JPEG never expands to RGBA at full size), with `label` naming
     /// where it came from.
     pub fn from_photo(photo: DynamicImage, label: String) -> Self {
+        Self::from_photo_with_tile(photo, label, UPSCALE_SIDE)
+    }
+
+    /// `from_photo` with the upscalers' tile `tile_side` wide.
+    pub fn from_photo_with_tile(photo: DynamicImage, label: String, tile_side: u32) -> Self {
         let (w, h) = (photo.width(), photo.height());
         let photo = if w.max(h) > MAX_SIDE {
             let (w, h) = formats::fit_long_side(w, h, MAX_SIDE);
@@ -42,7 +47,7 @@ impl Inputs {
             photo.into_rgba8()
         };
         let (w, h) = photo.dimensions();
-        let tile = center_crop(&photo, UPSCALE_SIDE);
+        let tile = center_crop(&photo, tile_side);
         let label = format!("{label}, run at {w}×{h}; upscalers get its middle {}×{}", tile.width(), tile.height());
         Self { mask: center_square_mask(w, h), tile, photo, label }
     }
