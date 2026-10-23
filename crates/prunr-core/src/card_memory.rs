@@ -9,8 +9,8 @@
 //! (the driver library, installed with every driver, not a CUDA runtime,
 //! whose version depends on the pack in use).
 
-use std::ffi::{c_char, c_int, c_uint, c_void};
-use std::sync::OnceLock;
+#[cfg(any(target_os = "linux", windows, test))]
+use std::ffi::{c_char, c_uint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CardMemory {
@@ -32,12 +32,14 @@ pub fn cuda_card_memory() -> Option<CardMemory> {
 }
 
 /// Which NVML card to read: the only one, or the one with CUDA's PCI id.
+#[cfg(any(target_os = "linux", windows, test))]
 #[derive(Debug, PartialEq, Eq)]
 enum Pick<'a> {
     Index(c_uint),
     PciBusId(&'a [c_char]),
 }
 
+#[cfg(any(target_os = "linux", windows, test))]
 fn pick(cards: c_uint, cuda_device0: impl FnOnce() -> Option<&'static [c_char]>) -> Option<Pick<'static>> {
     match cards {
         0 => None,
@@ -49,6 +51,8 @@ fn pick(cards: c_uint, cuda_device0: impl FnOnce() -> Option<&'static [c_char]>)
 #[cfg(any(target_os = "linux", windows))]
 mod nvml {
     use super::*;
+    use std::ffi::{c_int, c_void};
+    use std::sync::OnceLock;
 
     #[cfg(target_os = "linux")]
     const NVML: &str = "libnvidia-ml.so.1";
