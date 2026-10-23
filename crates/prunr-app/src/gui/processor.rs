@@ -2262,6 +2262,51 @@ mod sd_request_tests {
 mod sam_dispatch_tests {
     use super::*;
 
+    /// The Magic Brush on this machine's GPU provider against its CPU: 20
+    /// clicks over a photo, each decoded by the CPU decoder from both
+    /// embeddings. Prints the encode times, how often the chosen
+    /// candidate agrees and the worst IoU of the chosen masks at the
+    /// model's own boundary; fails below what the RTX 3060 met (20 of 20,
+    /// IoU 0.9998), with room for summation order.
+    #[test]
+    #[ignore = "needs the SAM 2 bundle and a GPU provider"]
+    fn sam_on_the_gpu_matches_the_cpu() {
+        let Some(path) = std::env::var_os("PRUNR_SAM_PHOTO") else { return };
+        let photo = image::open(path).expect("photo").to_rgba8();
+        let (w, h) = photo.dimensions();
+        let cpu = ensure_sam_sessions(&SamSessionSlot::default(), true).expect("SAM 2 installed");
+        let gpu = ensure_sam_sessions(&SamSessionSlot::default(), false).expect("SAM 2 installed");
+        let encode = |s: &SamSessions| {
+            let started = std::time::Instant::now();
+            (run_sam_encoder_inline(s, &photo).expect("encode"), started.elapsed().as_secs_f32())
+        };
+        let (on_cpu, cpu_s) = encode(&cpu);
+        let _warm = encode(&gpu);
+        let (on_gpu, gpu_s) = encode(&gpu);
+        let best = |o: &prunr_core::sam::SamDecoderOutput| {
+            (0..3).max_by(|&a, &b| o.iou_predictions[a].total_cmp(&o.iou_predictions[b])).unwrap_or(0)
+        };
+        const CELLS: usize = (prunr_core::sam::SAM_MASK_RESOLUTION * prunr_core::sam::SAM_MASK_RESOLUTION) as usize;
+        let (mut same, mut worst_iou) = (0, 1.0f64);
+        for i in 0..20u32 {
+            let at = |n: u32, side: u32| side as f32 * (0.1 + 0.8 * (n % 20) as f32 / 19.0);
+            let prompt = prunr_core::sam::prompt::build_click_prompt(at(i * 7, w), at(i * 13, h), w, h);
+            let reference = run_sam_decoder_inline(&cpu, &on_cpu, &prompt).expect("decode");
+            let candidate = run_sam_decoder_inline(&cpu, &on_gpu, &prompt).expect("decode");
+            let pick = best(&reference);
+            same += usize::from(pick == best(&candidate));
+            let mask = |o: &prunr_core::sam::SamDecoderOutput| o.masks[pick * CELLS..(pick + 1) * CELLS].iter().map(|&v| v > 0.0).collect::<Vec<_>>();
+            let (a, b) = (mask(&reference), mask(&candidate));
+            let both = a.iter().zip(&b).filter(|(x, y)| **x && **y).count();
+            let either = a.iter().zip(&b).filter(|(x, y)| **x || **y).count();
+            if either > 0 {
+                worst_iou = worst_iou.min(both as f64 / either as f64);
+            }
+        }
+        eprintln!("sam gpu vs cpu: encode {gpu_s:.2}s vs {cpu_s:.2}s, same pick {same}/20, worst IoU {worst_iou:.5}");
+        assert!(same >= 19 && worst_iou >= 0.99, "the GPU's masks drift from the CPU's");
+    }
+
     /// Magic Brush end to end on the installed SAM 2 bundle: encode a
     /// photo, decode a click on its subject. Prints the timings and a
     /// digest of the candidates so two runtimes can be compared.
