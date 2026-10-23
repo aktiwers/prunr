@@ -292,6 +292,10 @@ pub(crate) struct SamSessions {
     decoder: Mutex<ort::session::Session>,
     /// Built under "CPU only": the other setting builds them again.
     cpu_only: bool,
+    /// The encoder runs on CUDA, whose pool it hands back after each
+    /// encode: it held 2.1 GB of the card between photos, room an SD
+    /// erase beside it needs.
+    encoder_on_cuda: bool,
 }
 
 type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
@@ -305,7 +309,8 @@ fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamS
     }
     let (encoder, pick) = prunr_core::sam_session::encoder(cpu_only).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
     tracing::info!(provider = %pick.provider, failed = ?pick.failed, "Magic Brush sessions ready");
-    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only });
+    let encoder_on_cuda = pick.provider == prunr_core::engine::CUDA_NAME;
+    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only, encoder_on_cuda });
     let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Two clicks racing on a cold cache both build; keep whichever landed.
     if let Some(cached) = guard.as_ref().filter(fits) {
@@ -2058,8 +2063,12 @@ fn run_sam_encoder_inline(
         .map_err(|e| format!("encoder input tensor: {e}"))?;
 
     let input_name = session.inputs()[0].name().to_string();
-    let outputs = session.run(inputs![input_name => &tensor])
-        .map_err(|e| format!("encoder session.run: {e}"))?;
+    let inputs = inputs![input_name => &tensor];
+    let outputs = match sessions.encoder_on_cuda.then(prunr_core::engine::shrink_cuda_pool).flatten() {
+        Some(options) => session.run_with_options(inputs, options),
+        None => session.run(inputs),
+    }
+    .map_err(|e| format!("encoder session.run: {e}"))?;
 
     // By NAME: the export emits outputs in reverse of the documented
     // order. Shapes: image_embed [1,256,64,64], high_res_feats_0

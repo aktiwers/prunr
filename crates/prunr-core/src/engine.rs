@@ -620,6 +620,19 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
     why
 }
 
+/// Run options that shrink CUDA device 0's pool as a run ends; `None`
+/// when the runtime refuses them, and the run goes without.
+pub fn shrink_cuda_pool() -> Option<&'static ort::session::RunOptions> {
+    static OPTIONS: std::sync::OnceLock<Option<ort::session::RunOptions>> = std::sync::OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let mut options = ort::session::RunOptions::new().ok()?;
+        options.set("memory.enable_memory_arena_shrinkage", "gpu:0")
+            .map_err(|e| tracing::warn!(%e, "CUDA pool shrinking unavailable"))
+            .ok()?;
+        Some(options)
+    }).as_ref()
+}
+
 /// The first GPU provider a session of `model` tries, as the ladder walks
 /// them; `None`: it runs on the CPU.
 pub(crate) fn first_gpu_provider(model: prunr_models::ModelId, cpu_only: bool) -> Option<&'static str> {
