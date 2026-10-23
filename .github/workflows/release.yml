@@ -148,7 +148,7 @@ jobs:
       # CPU-only (GPU users upgrade through Settings → Hardware); the
       # macOS arm64 wheel carries CoreML.
       # Cached so each release run doesn't re-fetch the wheel. Keyed on
-      # the install logic (the PINNED_ORT_VERSION constant + wheel
+      # the install logic (the PLAIN_ORT_VERSION constant + wheel
       # picker), so a version bump or repackager change busts it.
       - name: Cache runtime-stage (Linux, macOS)
         id: cache-runtime-unix
@@ -160,7 +160,7 @@ jobs:
 
       - name: Stage runtime (Linux, macOS)
         if: runner.os != 'Windows' && steps.cache-runtime-unix.outputs.cache-hit != 'true'
-        run: cargo xtask install-runtime onnxruntime 1.24.1 --stage-to runtime-stage
+        run: cargo xtask install-runtime onnxruntime 1.30.0 --stage-to runtime-stage
 
       # ── Linux: .tar.gz + .AppImage + .deb + .rpm ──
       - name: Package Linux tar.gz

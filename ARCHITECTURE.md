@@ -422,9 +422,11 @@ Every session in the workspace starts from `ort_runtime::session_builder()`, whi
 
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
-| Linux | CPU-only ORT 1.24.1 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
+| Linux | CPU-only ORT 1.30.0 (PyPI wheel) | OpenVINO build via Settings → Hardware (Runtime Store); CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
 | Windows | DirectML ORT 1.24.1 (PyPI `onnxruntime-directml`: `onnxruntime.dll` + `DirectML.dll`, +23.5 MB over the CPU build) | built in; OpenVINO build via Settings → Hardware (Runtime Store), with a choice of which loads; CUDA build via `cargo xtask install-runtime` or `ORT_DYLIB_PATH` |
-| macOS (arm64, 14+) | ORT 1.24.1 PyPI wheel, which carries CoreML | built in |
+| macOS (arm64, 14+) | ORT 1.30.0 PyPI wheel, which carries CoreML | built in |
+
+The plain wheel runs ahead of the accelerator builds (1.24.1; their wheels lag, and CUDA's need CUDA 13 from 1.27): constant folding corrupts weights on 1.24 to 1.28, and sessions there run with it off, which costs CoreML most of its models. 1.31 moved CoreML onto device-based provider selection and stopped applying our CoreML options, so the plain wheel stays at 1.30.
 
 Runtime Store entries come from the official PyPI wheels; `prunr-runtime-install` (shared by the GUI installer and xtask) verifies the SHA and repackages the EP's shared libs under the canonical dylib name. A first-launch install prompt (14-day snooze) offers OpenVINO for an Intel iGPU, unless the built-in DirectML already has a graphics card to run on. GPU detection reads `/sys/class/drm` on Linux and DXGI's adapter list on Windows (no device created), so it needs no graphics context.
 
