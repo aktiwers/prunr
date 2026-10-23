@@ -80,17 +80,42 @@ pub fn loaded_source() -> Option<DylibSource> {
 }
 
 /// Names the loaded runtime build ("1.24.1-3fa2c901"), once it has
-/// loaded: its version where the build info carries one (Microsoft's
-/// own builds say `git-branch=HEAD`), and a fingerprint of the library
-/// file, which every runtime upgrade changes.
+/// loaded: its version and a fingerprint of the library file, which
+/// every runtime upgrade changes.
 pub fn runtime_tag() -> Option<&'static str> {
     static TAG: OnceLock<Option<String>> = OnceLock::new();
     TAG.get_or_init(|| {
         ensure_initialized().ok()?;
         let meta = std::fs::metadata(LOADED.get()?).ok()?;
         let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        Some(tag_for(runtime_version_from_info(ort::info()).as_deref(), meta.len(), modified))
+        Some(tag_for(runtime_version(), meta.len(), modified))
     }).as_deref()
+}
+
+/// The loaded runtime's version ("1.24.1"), as the library reports it.
+/// Its build info names it only on some builds: PyPI's say
+/// `git-branch=HEAD`.
+pub fn runtime_version() -> Option<&'static str> {
+    ensure_initialized().ok()?;
+    VERSION.get()?.as_deref()
+}
+
+static VERSION: OnceLock<Option<String>> = OnceLock::new();
+
+fn version_of(path: &Path) -> Option<String> {
+    // SAFETY: `path` is the runtime already loaded, so this open finds it
+    // loaded; `OrtGetApiBase` returns a static table whose version string
+    // is static too, as ort reads it.
+    unsafe {
+        let lib = libloading::Library::new(path).ok()?;
+        let entry = lib.get::<unsafe extern "C" fn() -> *const ort::sys::OrtApiBase>(b"OrtGetApiBase").ok()?;
+        let base = entry();
+        if base.is_null() {
+            return None;
+        }
+        let version = ((*base).GetVersionString)();
+        (!version.is_null()).then(|| std::ffi::CStr::from_ptr(version).to_string_lossy().into_owned())
+    }
 }
 
 /// The library loaded by `init`.
@@ -107,12 +132,6 @@ pub(crate) fn tag_for(version: Option<&str>, len: u64, modified: u64) -> String 
         hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
     }
     format!("{}-{hash:08x}", version.unwrap_or("build"))
-}
-
-/// The version in ORT's build info, whose branch is `rel-<version>`.
-pub fn runtime_version_from_info(info: &str) -> Option<String> {
-    let branch = info.split("git-branch=").nth(1)?.split(',').next()?.trim();
-    branch.strip_prefix("rel-").map(str::to_string)
 }
 
 /// The process's ORT environment, which every session is built from. ort
@@ -133,7 +152,7 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
         .with_intra_op_spinning(false)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
-    if folding_is_broken(runtime_version_from_info(ort::info()).as_deref()) {
+    if folding_is_broken(runtime_version()) {
         return builder
             .with_disabled_optimizers("ConstantFolding")
             .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")));
@@ -145,8 +164,8 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
 /// weight) into a constant that points at memory freed later in the same
 /// pass (microsoft/onnxruntime#29788, fixed by microsoft/onnxruntime#29789
 /// in 1.29.0; 1.28.3 still lacks it): SAM 2.1's encoder came out as values
-/// near 1e28 in some processes on a MacBook Air. 1.24 to 1.28, and a build
-/// that names no version (ours on macOS), count as affected. Off, the
+/// near 1e28 in some processes on a MacBook Air. 1.24 to 1.28, and a
+/// runtime whose version cannot be read, count as affected. Off, the
 /// cut-out, upscale, colorize and depth models ran as fast on the CPU and
 /// on CUDA; SAM's encoder ~30% slower on the CPU.
 fn folding_is_broken(version: Option<&str>) -> bool {
@@ -180,7 +199,9 @@ fn init() -> Result<DylibSource, String> {
             _ => "The chosen runtime would not load, so Prunr uses another installed one. Install it again in Settings.",
         });
     }
-    tracing::info!(path = %path.display(), %source, "ORT runtime loaded");
+    let version = version_of(path);
+    tracing::info!(path = %path.display(), %source, ?version, "ORT runtime loaded");
+    let _ = VERSION.set(version);
     let _ = LOADED.set(path.clone());
     Ok(*source)
 }
@@ -486,6 +507,15 @@ mod tests {
         assert!(folding_is_broken(Some("1.28.3")));
         assert!(!folding_is_broken(Some("1.29.0")));
         assert!(folding_is_broken(Some("odd")), "an unreadable version counts as affected");
+    }
+
+    #[test]
+    fn the_loaded_runtime_reports_its_version() {
+        if ensure_initialized().is_err() {
+            return;
+        }
+        let version = runtime_version().expect("a loaded runtime reports its version");
+        assert!(version.split('.').take(2).all(|part| part.parse::<u32>().is_ok()), "{version}");
     }
 
     #[test]
