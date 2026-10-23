@@ -292,10 +292,10 @@ pub(crate) struct SamSessions {
     decoder: Mutex<ort::session::Session>,
     /// Built under "CPU only": the other setting builds them again.
     cpu_only: bool,
-    /// The encoder runs on CUDA, whose pool it hands back after each
+    /// Where the encoder landed. On CUDA it hands its pool back after each
     /// encode: it held 2.1 GB of the card between photos, room an SD
     /// erase beside it needs.
-    encoder_on_cuda: bool,
+    encoder_provider: String,
 }
 
 type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
@@ -309,14 +309,25 @@ fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamS
     }
     let (encoder, pick) = prunr_core::sam_session::encoder(cpu_only).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
     tracing::info!(provider = %pick.provider, failed = ?pick.failed, "Magic Brush sessions ready");
-    let encoder_on_cuda = pick.provider == prunr_core::engine::CUDA_NAME;
-    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only, encoder_on_cuda });
+    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only, encoder_provider: pick.provider });
     let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Two clicks racing on a cold cache both build; keep whichever landed.
     if let Some(cached) = guard.as_ref().filter(fits) {
         return Ok(Arc::clone(cached));
     }
     Ok(Arc::clone(guard.insert(built)))
+}
+
+/// One Magic Brush encode of `photo` and a click on its middle, as the
+/// app runs them; the provider the encoder landed on. For `prunr bench
+/// --needs`.
+pub(crate) fn magic_brush_once(photo: &image::RgbaImage, cpu_only: bool) -> Result<String, String> {
+    let sessions = ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)?;
+    let embedding = run_sam_encoder_inline(&sessions, photo)?;
+    let (w, h) = photo.dimensions();
+    let prompt = prunr_core::sam::prompt::build_click_prompt(w as f32 / 2.0, h as f32 / 2.0, w, h);
+    run_sam_decoder_inline(&sessions, &embedding, &prompt)?;
+    Ok(sessions.encoder_provider.clone())
 }
 
 /// Result from a background SAM decoder thread, or a human-readable error.
@@ -2064,7 +2075,8 @@ fn run_sam_encoder_inline(
 
     let input_name = session.inputs()[0].name().to_string();
     let inputs = inputs![input_name => &tensor];
-    let outputs = match sessions.encoder_on_cuda.then(prunr_core::engine::shrink_cuda_pool).flatten() {
+    let on_cuda = sessions.encoder_provider == prunr_core::engine::CUDA_NAME;
+    let outputs = match on_cuda.then(prunr_core::engine::shrink_cuda_pool).flatten() {
         Some(options) => session.run_with_options(inputs, options),
         None => session.run(inputs),
     }
