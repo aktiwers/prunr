@@ -32,9 +32,7 @@ pub fn encoder(cpu_only: bool) -> Result<(Session, SessionPick), String> {
             error,
             suspect_cache: crate::engine::cached_graph(matches!(graph, Cow::Owned(_)), ID, ep.as_str(), Weights::Fp32, Some(ENCODER)),
         };
-        let mut built = builder
-            .with_execution_providers([ep.provider(ID, EpSite::Selection { part: ENCODER })])
-            .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+        let mut built = ep.attach(builder, ID, EpSite::Selection { part: ENCODER })?;
         let mut session = built.commit_from_memory(&graph).map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
         test_run(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
         if let Some(draft) = draft {

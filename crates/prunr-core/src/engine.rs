@@ -285,6 +285,10 @@ pub(crate) enum EpSite<'a> {
     Selection { part: &'a str },
 }
 
+fn disabled_optimizers_on(provider: &str) -> &'static [&'static str] {
+    if provider == COREML_NAME { &["MatMulAddFusion"] } else { &[] }
+}
+
 /// OpenVINO's device for engines once the user lets it use the Intel GPU.
 /// AUTO compiles for the GPU while the CPU serves the first runs, and
 /// stays on the CPU where no GPU or OpenCL driver is. Opt-in because it
@@ -320,6 +324,24 @@ impl EpSite<'_> {
 }
 
 impl EpKind {
+    /// `builder` with this provider tuned for `site` (`provider`) and the
+    /// session options it needs.
+    pub(crate) fn attach(self, builder: ort::session::builder::SessionBuilder, model: prunr_models::ModelId, site: EpSite<'_>) -> Result<ort::session::builder::SessionBuilder, Miss> {
+        crate::ort_runtime::without_optimizers(builder, self.disabled_optimizers())
+            .map_err(|e| Miss::Unusable(e.to_string()))?
+            .with_execution_providers([self.provider(model, site)])
+            .map_err(|e| Miss::Unusable(format!("ORT register {self} EP failed: {e}")))
+    }
+
+    /// ORT optimizers this provider's sessions go without. CoreML: with
+    /// MatMul and Add fused into Gemm, ORT writes each transformer weight
+    /// into the compiled program inline instead of its weight file; such
+    /// models took 27-49 s to load on a MacBook Air instead of 1-2 s, at
+    /// the same speed and output.
+    fn disabled_optimizers(self) -> &'static [&'static str] {
+        disabled_optimizers_on(self.as_str())
+    }
+
     /// This provider tuned for `site`, set to fail its registration
     /// loudly. ort's default logs a failed registration and commits the
     /// session on the CPU, which the ladder would then label with this
@@ -847,9 +869,7 @@ impl OrtEngine {
                 (builder, Cow::Borrowed(model_bytes), None)
             };
             let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-            let mut built = builder
-                .with_execution_providers([ep.provider(model_id, EpSite::Engine { threads: intra_threads, part: None })])
-                .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+            let mut built = ep.attach(builder, model_id, EpSite::Engine { threads: intra_threads, part: None })?;
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
@@ -877,15 +897,17 @@ impl OrtEngine {
         let commit_all = |ep: Option<EpKind>| -> Result<Vec<(&'static str, Session)>, Miss> {
             onnx.iter().map(|(key, bytes)| {
                 let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
-                let (builder, coverage, provider) = match ep {
+                let (mut built, coverage) = match ep {
                     Some(ep) => {
                         let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-                        (builder, coverage, ep.provider(id, EpSite::Engine { threads: intra_threads, part: Some(key) }))
+                        (ep.attach(builder, id, EpSite::Engine { threads: intra_threads, part: Some(key) })?, coverage)
                     }
-                    None => (builder, crate::ep_coverage::CoverageWatch::default(), cpu_provider()),
+                    None => (
+                        builder.with_execution_providers([cpu_provider()])
+                            .map_err(|e| Miss::Unusable(format!("ORT register {CPU_NAME} EP failed: {e}")))?,
+                        crate::ep_coverage::CoverageWatch::default(),
+                    ),
                 };
-                let mut built = builder.with_execution_providers([provider])
-                    .map_err(|e| Miss::Unusable(format!("ORT register {} EP failed: {e}", ep.map_or(CPU_NAME, |ep| ep.as_str()))))?;
                 let session = built.commit_from_memory(bytes)
                     .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({key}): {e}"), suspect_cache: None })?;
                 coverage.report(id, Some(key));
@@ -1374,6 +1396,13 @@ mod tests {
         assert!(options.contains(r#""ModelFormat": "MLProgram""#), "{options}");
         assert!(options.contains(&format!(r#""ModelCacheDirectory": {:?}"#, dir.to_string_lossy())), "{options}");
         assert!(!format!("{:?}", coreml_provider(None)).contains("ModelCacheDirectory"));
+    }
+
+    #[test]
+    fn coreml_sessions_skip_the_fusion_that_inlines_weights() {
+        assert_eq!(disabled_optimizers_on(COREML_NAME), ["MatMulAddFusion"]);
+        assert!(disabled_optimizers_on(CUDA_NAME).is_empty());
+        assert!(disabled_optimizers_on(OPENVINO_NAME).is_empty());
     }
 
     /// A provider the loaded runtime lacks must fail its registration,
