@@ -174,7 +174,8 @@ fn cached_warm_engine(
     }
 }
 
-/// Cached engine for `key`, constructing and caching one when absent.
+/// Cached engine for `key`, constructing and caching one when absent, on
+/// the CPU when its GPU charge does not fit what is free (`admitted`).
 /// The lock is released during construction so the GUI thread's
 /// `release_all_sessions` never waits on a session build.
 fn ensure_warm_engine(
@@ -185,9 +186,29 @@ fn ensure_warm_engine(
     if let Some(cached) = cached_warm_engine(slot, key) {
         return Ok(cached);
     }
-    let fresh = Arc::new(prunr_core::OrtEngine::for_model(key.model.into(), intra_threads, key.cpu_only)?);
+    let model = key.model.into();
+    let on_cpu = match prunr_models::descriptor(model) {
+        Some(descriptor) => admitted(descriptor, key.cpu_only).map_err(prunr_core::CoreError::Inference)?,
+        None => key.cpu_only,
+    };
+    let fresh = Arc::new(prunr_core::OrtEngine::for_model(model, intra_threads, on_cpu)?);
     *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh)));
     Ok(fresh)
+}
+
+/// Whether the slot holds `key`'s engine. Never evicts.
+fn is_warm(slot: &WarmEngine, key: WarmEngineKey) -> bool {
+    lock_warm_engine(slot).as_ref().is_some_and(|(cached, _)| *cached == key)
+}
+
+/// Refused when a run of `key`'s model fits in memory on neither its GPU
+/// nor the CPU. A warm engine is not checked: its session is in memory
+/// and out of what is free, so the check would count it twice.
+fn admitted_unless_warm(slot: &WarmEngine, key: WarmEngineKey, descriptor: &prunr_models::ModelDescriptor) -> Result<(), String> {
+    if is_warm(slot, key) {
+        return Ok(());
+    }
+    admitted(descriptor, key.cpu_only).map(drop)
 }
 
 /// The slot's engine, taken out; it frees where the result drops.
@@ -302,12 +323,16 @@ type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
 
 /// Cached sessions, built outside the lock so a release on the GUI
 /// thread never waits on the encoder's build.
+/// The encoder goes to the CPU when its GPU charge does not fit what is
+/// free (`admitted`).
 fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamSessions>, String> {
     let fits = |s: &&Arc<SamSessions>| s.cpu_only == cpu_only;
     if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(fits) {
         return Ok(Arc::clone(cached));
     }
-    let (encoder, pick) = prunr_core::sam_session::encoder(cpu_only).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
+    let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
+    let on_cpu = admitted(descriptor, cpu_only)?;
+    let (encoder, pick) = prunr_core::sam_session::encoder(on_cpu).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
     tracing::info!(provider = %pick.provider, failed = ?pick.failed, "Magic Brush sessions ready");
     let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only, encoder_provider: pick.provider });
     let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -316,6 +341,11 @@ fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamS
         return Ok(Arc::clone(cached));
     }
     Ok(Arc::clone(guard.insert(built)))
+}
+
+/// Whether the slot holds sessions built for `cpu_only`.
+fn sam_sessions_built(slot: &SamSessionSlot, cpu_only: bool) -> bool {
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|s| s.cpu_only == cpu_only)
 }
 
 /// One Magic Brush encode of `photo` and a click on its middle, as the
@@ -496,7 +526,7 @@ fn measure_depth(
     let DepthJob { item_id, input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
-    admitted(descriptor, cpu_only)?;
+    admitted_unless_warm(engine_slot, WarmEngineKey { model: kind, cpu_only }, descriptor)?;
     let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
     let run = slot.begin_if_idle(initial);
     let progress = run.as_ref().map_or_else(prunr_core::Progress::none, |run| prunr_core::Progress::new(Arc::new(run.clone())));
@@ -672,12 +702,18 @@ pub(crate) struct ColorizeOutput {
 /// memory on a card), or why not; a refusal is logged. The toolbar's
 /// `can_process_intent` gate should have stopped the run already; this
 /// is the last guard at the dispatch layer.
-fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Result<(), String> {
-    let Some((charge, room)) = crate::hardware::charge_and_room(descriptor.id, cpu_only) else { return Ok(()) };
-    prunr_core::memory::fit(charge, room).map_err(|short| {
-        tracing::warn!(model = ?descriptor.id, ?charge, ?room, ?short, "admission refused: not enough memory");
+/// Whether a run of `descriptor`'s model goes to the CPU: its GPU when
+/// its charge there fits what is free, else the CPU when the CPU's does;
+/// refused when it fits neither.
+fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Result<bool, String> {
+    let on_cpu = crate::hardware::runs_on_cpu(descriptor.id, cpu_only).map_err(|short| {
+        tracing::warn!(model = ?descriptor.id, cpu_only, ?short, "admission refused: not enough memory");
         refusal(short)
-    })
+    })?;
+    if on_cpu && !cpu_only {
+        tracing::info!(model = ?descriptor.id, "not enough memory for the GPU provider; running on the CPU");
+    }
+    Ok(on_cpu)
 }
 
 fn refusal(short: prunr_core::memory::Short) -> String {
@@ -1627,7 +1663,6 @@ impl Processor {
             tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
             return Err("the model is not available".into());
         };
-        admitted(descriptor, cpu_only)?;
 
         let output_scale = recipe.upscale.output_scale;
         let scale_factor = output_scale.factor();
@@ -1642,6 +1677,7 @@ impl Processor {
                 return Err("the model is not available".into());
             }
         };
+        admitted_unless_warm(&self.upscale.warm, WarmEngineKey { model: cache_model_kind, cpu_only }, descriptor)?;
 
         // First dispatch initializes the shared RunOptions; subsequent
         // dispatches reuse it. ORT itself is initialised at app start.
@@ -1780,7 +1816,7 @@ impl Processor {
     pub(crate) fn dispatch_colorize(&mut self, item_id: u64, run_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
         let kind = super::settings::COLORIZER;
         let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
-        admitted(descriptor, cpu_only)?;
+        admitted_unless_warm(&self.colorize.warm, WarmEngineKey { model: kind, cpu_only }, descriptor)?;
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize, item_id));
         let done = self.colorize.begin(run.clone());
@@ -1886,8 +1922,9 @@ impl Processor {
     /// does not fit in memory.
     pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: std::sync::Arc<image::RgbaImage>, cpu_only: bool) -> Result<(), String> {
         let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
-        // Its sessions take no GPU provider.
-        admitted(descriptor, true)?;
+        if !sam_sessions_built(&self.sam_sessions, cpu_only) {
+            admitted(descriptor, cpu_only)?;
+        }
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
@@ -3164,6 +3201,19 @@ mod warm_cache_tests {
             "an engine built for Auto is not reused under CPU only",
         );
         assert!(Arc::ptr_eq(&sentinel, &got), "cache hit must return the SAME Arc that was inserted");
+    }
+
+    /// A warm engine's run is not checked against free memory, which no
+    /// longer counts the engine's session; looking must not evict it.
+    #[test]
+    fn a_warm_engine_is_admitted_without_a_memory_check() {
+        let Some((p, _)) = warm("a_warm_engine_is_admitted_without_a_memory_check") else { return };
+        let auto = WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false };
+        assert!(is_warm(&p.upscale.warm, auto));
+        assert!(!is_warm(&p.upscale.warm, WarmEngineKey { cpu_only: true, ..auto }), "an engine built for Auto is not CPU only's");
+        assert!(is_warm(&p.upscale.warm, auto), "looking keeps the engine");
+        let descriptor = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX4Plus).expect("registered");
+        assert_eq!(admitted_unless_warm(&p.upscale.warm, auto, descriptor), Ok(()));
     }
 
     #[test]

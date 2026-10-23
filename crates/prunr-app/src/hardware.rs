@@ -176,6 +176,18 @@ pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(pru
     Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
 }
 
+/// Whether a run of `id` goes to the CPU: when `cpu_only`, or when its
+/// GPU provider's charge does not fit what is free and the CPU's does.
+/// `Err`: it fits neither.
+pub fn runs_on_cpu(id: prunr_models::ModelId, cpu_only: bool) -> Result<bool, prunr_core::memory::Short> {
+    let cpu = charge_and_room(id, true);
+    if cpu_only {
+        return prunr_core::memory::falls_to_cpu(cpu, None).map(|_| true);
+    }
+    let on_gpu = prunr_core::memory::provider_once_probed(id, false).is_some_and(|p| p != prunr_core::engine::CPU_NAME);
+    prunr_core::memory::falls_to_cpu(charge_and_room(id, false), cpu.filter(|_| on_gpu))
+}
+
 /// A reading and when it was taken.
 type Reading<T> = Mutex<Option<(std::time::Instant, T)>>;
 

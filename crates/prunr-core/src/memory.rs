@@ -62,6 +62,20 @@ pub fn fit(charge: Charge, room: Room) -> Result<(), Short> {
     Ok(())
 }
 
+/// Whether a run that asked for a GPU goes to the CPU: its GPU charge
+/// (`asked`, with the room for it) runs where it fits, else the CPU's
+/// (`cpu`, `None` when it asked for the CPU) when that fits. `None` for a
+/// side's charge or room: no reading, and the side is trusted. `Err`: it
+/// fits neither, short of what the CPU would need.
+pub fn falls_to_cpu(asked: Option<(Charge, Room)>, cpu: Option<(Charge, Room)>) -> Result<bool, Short> {
+    let Some((charge, room)) = asked else { return Ok(false) };
+    let Err(short) = fit(charge, room) else { return Ok(false) };
+    match cpu {
+        Some((charge, room)) => fit(charge, room).map(|()| true),
+        None => Err(short),
+    }
+}
+
 /// What `id` takes on `provider`; the CPU's figure where it never runs
 /// there (the ladder then falls to the CPU).
 pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
@@ -125,6 +139,23 @@ mod tests {
             openvino: Priced::Never,
             migraphx: Priced::Unmeasured,
         }
+    }
+
+    /// A GPU run that does not fit goes to the CPU when the CPU's figure
+    /// does, and is refused only when neither fits.
+    #[test]
+    fn a_gpu_run_that_does_not_fit_goes_to_the_cpu() {
+        let coreml = Charge { ram_mb: 6_200, card_mb: 0 };
+        let cuda = Charge { ram_mb: 1_000, card_mb: 2_200 };
+        let cpu = Charge { ram_mb: 2_500, card_mb: 0 };
+        let ram = |ram_mb| Room { ram_mb, card_mb: None };
+        assert_eq!(falls_to_cpu(Some((coreml, ram(8_000))), Some((cpu, ram(8_000)))), Ok(false));
+        assert_eq!(falls_to_cpu(Some((coreml, ram(4_000))), Some((cpu, ram(4_000)))), Ok(true));
+        assert_eq!(falls_to_cpu(Some((coreml, ram(2_000))), Some((cpu, ram(2_000)))), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }));
+        let card = Room { ram_mb: 16_000, card_mb: Some(1_000) };
+        assert_eq!(falls_to_cpu(Some((cuda, card)), Some((cpu, ram(16_000)))), Ok(true), "the card is short, the RAM is not");
+        assert_eq!(falls_to_cpu(Some((cpu, ram(2_000))), None), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }), "asked for the CPU");
+        assert_eq!(falls_to_cpu(None, Some((cpu, ram(0)))), Ok(false), "no reading: trusted");
     }
 
     /// Measured on a provider: its own figures. Unmeasured: the CPU's, in
