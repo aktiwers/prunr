@@ -1850,23 +1850,10 @@ fn run_unet<'s>(
         n1.as_str() => &ts_t,
         n2.as_str() => &cond,
     ];
-    match shrink.then(shrink_cuda_pool).flatten() {
+    match shrink.then(crate::engine::shrink_cuda_pool).flatten() {
         Some(options) => session.run_with_options(inputs, options),
         None => session.run(inputs),
     }.map_err(|e| format!("run: {e}"))
-}
-
-/// Run options that shrink CUDA device 0's pool as a run ends; `None`
-/// when the runtime refuses them, and the run goes without.
-fn shrink_cuda_pool() -> Option<&'static ort::session::RunOptions> {
-    static OPTIONS: OnceLock<Option<ort::session::RunOptions>> = OnceLock::new();
-    OPTIONS.get_or_init(|| {
-        let mut options = ort::session::RunOptions::new().ok()?;
-        options.set("memory.enable_memory_arena_shrinkage", "gpu:0")
-            .map_err(|e| tracing::warn!(%e, "SD: CUDA pool shrinking unavailable"))
-            .ok()?;
-        Some(options)
-    }).as_ref()
 }
 
 /// `run_unet` on the bundle's UNet, its noise prediction as f32.
