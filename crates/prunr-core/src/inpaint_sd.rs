@@ -1640,12 +1640,7 @@ fn build_part_with_ep_ladder(
                 Miss::Unusable(error)
             };
             let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-            let mut built = builder
-                .with_execution_providers([ep.provider(
-                    id,
-                    EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() },
-                )])
-                .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+            let mut built = ep.attach(builder, id, EpSite::SdPart { part: key, ov_device: session_key.ov_device.as_deref() })?;
             let started = Instant::now();
             let mut session = built
                 .commit_from_file(&load_path)

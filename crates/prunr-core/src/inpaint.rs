@@ -654,9 +654,7 @@ fn lama_ladder(
             (builder, Cow::Borrowed(bytes), None)
         };
         let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
-        let mut built = builder
-            .with_execution_providers([ep.provider(id, EpSite::Fill { threads })])
-            .map_err(|e| Miss::Unusable(format!("ORT register {ep} EP failed: {e}")))?;
+        let mut built = ep.attach(builder, id, EpSite::Fill { threads })?;
         let failed = |error| Miss::Failed { error, suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), id, ep.as_str(), Weights::Fp32, None) };
         let started = Instant::now();
         let mut session = built

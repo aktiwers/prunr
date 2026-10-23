@@ -152,12 +152,25 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
         .with_intra_op_spinning(false)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
-    if folding_is_broken(runtime_version()) {
-        return builder
-            .with_disabled_optimizers("ConstantFolding")
-            .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")));
+    without_optimizers(builder, &[])
+}
+
+/// `builder` with `extra` of ORT's optimizers turned off, and constant
+/// folding where it corrupts weights. ORT keeps one list and a second
+/// call replaces the first, so every disabled optimizer goes through here.
+pub(crate) fn without_optimizers(builder: SessionBuilder, extra: &[&str]) -> Result<SessionBuilder, CoreError> {
+    match disabled_optimizers(runtime_version(), extra) {
+        Some(list) => builder
+            .with_disabled_optimizers(list)
+            .map_err(|e| CoreError::Inference(format!("ORT disable optimizers failed: {e}"))),
+        None => Ok(builder),
     }
-    Ok(builder)
+}
+
+fn disabled_optimizers(version: Option<&str>, extra: &[&str]) -> Option<String> {
+    let folding = folding_is_broken(version).then_some("ConstantFolding");
+    let list: Vec<&str> = folding.into_iter().chain(extra.iter().copied()).collect();
+    (!list.is_empty()).then(|| list.join(";"))
 }
 
 /// From ORT 1.24.1 constant folding turns an aliasing op (a Reshape of a
@@ -516,6 +529,14 @@ mod tests {
         }
         let version = runtime_version().expect("a loaded runtime reports its version");
         assert!(version.split('.').take(2).all(|part| part.parse::<u32>().is_ok()), "{version}");
+    }
+
+    #[test]
+    fn a_session_s_own_disabled_optimizers_keep_folding_off() {
+        assert_eq!(disabled_optimizers(Some("1.24.1"), &["MatMulAddFusion"]).as_deref(), Some("ConstantFolding;MatMulAddFusion"));
+        assert_eq!(disabled_optimizers(Some("1.24.1"), &[]).as_deref(), Some("ConstantFolding"));
+        assert_eq!(disabled_optimizers(Some("1.29.0"), &["MatMulAddFusion"]).as_deref(), Some("MatMulAddFusion"));
+        assert_eq!(disabled_optimizers(Some("1.29.0"), &[]), None);
     }
 
     #[test]
