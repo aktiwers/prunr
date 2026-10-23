@@ -315,7 +315,7 @@ impl PrunrApp {
         let mask_work = self.batch.cached_tensor_work(&tiers.mask);
         let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge);
 
-        let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model));
+        let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model, self.settings.cpu_only()));
         self.update_on_screen();
         if tiers.full.len() > 1 {
             self.dispatch_with_admission(&tiers.full, mask_work, add_edge_work, model, jobs);
