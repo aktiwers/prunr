@@ -91,8 +91,8 @@ impl ModelId {
         match self {
             // RTX 3060: the card's peak for the tall 512x768 crop, 10.5 GB
             // (25 steps) and 9.4 GB (LCM, 8 steps at CFG 2).
-            ModelId::SdV15InpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(3_400), ..SD15 }),
-            ModelId::SdV15LcmInpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(2_700), ..SD15 }),
+            ModelId::SdV15InpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(3_350), ..SD15 }),
+            ModelId::SdV15LcmInpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(2_600), ..SD15 }),
             // Its tall region fits its 1024 px tile: the same 8.6 GB.
             ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true, tall_crop_card_extra_mb: Some(0) }),
             _ => None,
@@ -833,7 +833,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             // Load and 512 px tiles, 25 steps, ORT 1.24.1 with the lean
             // CUDA pool: 4.87 GB of system RAM at the cold load (3.1 GB
             // after), the card's peak 7.1 GB.
-            cuda: Priced::Same(Cost::measured(4_900, 7_200, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
+            cuda: Priced::Same(Cost::measured(4_900, 7_150, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -988,7 +988,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cpu: Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"),
             // Load and erase, 4 steps, lean sessions: 1.45 GB of system
             // RAM (the weights go to the card), the card's peak 8.6 GB.
-            cuda: Priced::Same(Cost::measured(1_500, 8_700, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
+            cuda: Priced::Same(Cost::measured(1_500, 8_650, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Never,
