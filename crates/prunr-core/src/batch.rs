@@ -47,9 +47,7 @@ pub fn create_engine_pool(
         ort_intra_threads(pool_size)
     };
 
-    // DirectML session creation is not thread-safe: parallel
-    // `commit_from_memory` raced in AbiCustomRegistry.
-    let serial = pool_size <= 1 || crate::engine::directml_active();
+    let serial = pool_size <= 1 || crate::engine::engines_build_one_at_a_time();
 
     // Held for the whole pool: a bundled model unpacks once for every
     // engine, built in parallel or one after another, and is freed after.

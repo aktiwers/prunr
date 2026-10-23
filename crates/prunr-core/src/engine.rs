@@ -37,6 +37,9 @@ pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 /// CUDA's provider name, defined on every platform like OpenVINO's.
 pub const CUDA_NAME: &str = "CUDA";
 
+/// CoreML's provider name, defined on every platform like CUDA's.
+pub(crate) const COREML_NAME: &str = "CoreML";
+
 /// The CPU provider's name: its label, its cache-dir key and the
 /// fallback when no GPU provider is available.
 pub const CPU_NAME: &str = "CPU";
@@ -52,7 +55,7 @@ impl EpKind {
             #[cfg(target_os = "linux")]
             EpKind::MiGraphX => "MIGraphX",
             #[cfg(target_os = "macos")]
-            EpKind::CoreMl => "CoreML",
+            EpKind::CoreMl => COREML_NAME,
             #[cfg(windows)]
             EpKind::DirectMl => "DirectML",
         }
@@ -576,7 +579,7 @@ pub(crate) fn walk_ladder<S>(
             }
             Err(Miss::Failed { error, suspect_cache }) => {
                 tracing::warn!(?model, ?weights, ep = %ep, %error, "{prefix}GPU session failed — trying next EP");
-                match suspect_cache {
+                match suspect_cache.or_else(|| compiled_cache_named(model, ep.as_str(), &error)) {
                     Some(path) => clear_suspect_cache(&path),
                     None => crate::ep_compat::record_failure(ep, model, weights, &error),
                 }
@@ -980,6 +983,14 @@ pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
 /// Whether DirectML is the active GPU provider. Parallel session builds
 /// go sequential under it: its `commit_from_memory` races in
 /// AbiCustomRegistry on concurrent calls.
+/// Engines of one model build one after another: DirectML's session
+/// creation is not thread-safe, and CoreML compiles each engine into the
+/// model's one cache folder, where two at once left a half-written cache
+/// that was then recorded as CoreML failing the model.
+pub(crate) fn engines_build_one_at_a_time() -> bool {
+    directml_active() || OrtEngine::detect_active_provider().eq_ignore_ascii_case(COREML_NAME)
+}
+
 pub(crate) fn directml_active() -> bool {
     #[cfg(windows)]
     {
@@ -1095,8 +1106,20 @@ impl OrtEngine {
 
 /// Delete a cached optimized graph a session failed on, so the next
 /// build rebuilds it. `NotFound` is silent: processes race on the path.
+/// CoreML's compiled-model cache of `model` when `error` names a path in
+/// it: a cache left half-written is the cache's fault, not the provider's.
+fn compiled_cache_named(model: prunr_models::ModelId, ep_name: &str, error: &str) -> Option<PathBuf> {
+    let dir = (ep_name == COREML_NAME).then(|| crate::cache::cache_path_for(model, ep_name)).flatten();
+    named_in(error, dir)
+}
+
+fn named_in(error: &str, dir: Option<PathBuf>) -> Option<PathBuf> {
+    dir.filter(|dir| error.contains(dir.to_string_lossy().as_ref()))
+}
+
 fn clear_suspect_cache(path: &std::path::Path) {
-    match std::fs::remove_file(path) {
+    let removed = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    match removed {
         Ok(()) => tracing::warn!(cache = %path.display(),
             "deleted suspect cache file after commit failure"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1279,6 +1302,22 @@ mod tests {
             GpuStartFailure::of(GpuStack::Rocm, &failed("libamdhip64.so.7")).text(),
             "MIGraphX could not start: libamdhip64.so.7 is missing. It needs AMD's ROCm 7 with MIGraphX installed.",
         );
+    }
+
+    /// A CoreML failure that names a path in the model's compiled cache
+    /// (seen: "A valid manifest does not exist at path: <cache>/…") makes
+    /// the cache the suspect; any other failure leaves the provider's.
+    #[test]
+    fn a_coreml_error_naming_its_cache_makes_the_cache_the_suspect() {
+        let dir = std::path::PathBuf::from("/c/prunr/ep_cache/coreml/silueta-1.0.0-v1");
+        let manifest = format!("Exception during initialization: A valid manifest does not exist at path: {}/0_dynamic_mlprogram/model/Manifest.json", dir.display());
+        assert_eq!(named_in(&manifest, Some(dir.clone())), Some(dir.clone()));
+        assert_eq!(named_in("Error in building plan", Some(dir.clone())), None);
+        assert_eq!(named_in(&manifest, None), None, "no cache for the provider");
+        let cache_dir = std::env::temp_dir().join(format!("prunr-suspect-dir-{}", std::process::id()));
+        std::fs::create_dir_all(cache_dir.join("0_dynamic_mlprogram")).unwrap();
+        clear_suspect_cache(&cache_dir);
+        assert!(!cache_dir.exists(), "a suspect cache folder is removed whole");
     }
 
     #[test]
