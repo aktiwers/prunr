@@ -194,6 +194,11 @@ impl Store {
 
 /// True when these weights of the model are on the EP's persistent skip
 /// list.
+/// Read the store from disk now, if not yet read.
+pub(crate) fn warm() {
+    let _ = cache();
+}
+
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
     let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     store.failures.contains_key(&key(ep, model, weights))

@@ -26,6 +26,8 @@ pub mod inpaint_blend;
 pub mod ep_compat;
 mod ep_coverage;
 pub mod sysmem;
+pub mod card_memory;
+pub mod memory;
 pub mod upscale;
 pub mod denoise;
 pub mod selection;

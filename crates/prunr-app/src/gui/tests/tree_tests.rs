@@ -93,6 +93,7 @@ fn the_hardware_page_names_every_runtime_control() {
             installing,
             active_provider: "DirectML".into(),
             sd_margin_mb: 2048,
+            sd_cpu_only: false,
             gpu_failure: None,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
@@ -132,6 +133,7 @@ fn a_cuda_runtime_missing_its_stack_points_to_the_install_guide() {
             installing: None,
             active_provider: "CPU".into(),
             sd_margin_mb: 2048,
+            sd_cpu_only: false,
             gpu_failure: Some(failure),
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
