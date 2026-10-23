@@ -352,8 +352,7 @@ impl PrunrApp {
         // Decode still pending: try again next frame.
         let Some(source) = item.source_rgba.clone() else { return };
         let item_id = item.id;
-        let avail_ram = crate::hardware::available_ram_mb_throttled();
-        match self.processor.dispatch_sam_encoder(item_id, source, avail_ram) {
+        match self.processor.dispatch_sam_encoder(item_id, source) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
         }

@@ -486,7 +486,7 @@ fn measure_depth(
     let DepthJob { item_id, input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
-    admitted(descriptor)?;
+    admitted(descriptor, cpu_only)?;
     let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
     let run = slot.begin_if_idle(initial);
     let progress = run.as_ref().map_or_else(prunr_core::Progress::none, |run| prunr_core::Progress::new(Arc::new(run.clone())));
@@ -658,26 +658,23 @@ pub(crate) struct ColorizeOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
-pub(crate) fn admission_check(need_mb: u32, free_ram_mb: u32) -> bool {
-    free_ram_mb >= need_mb
+/// Whether the model fits where it will run (system RAM, and the card's
+/// memory on a card), or why not; a refusal is logged. The toolbar's
+/// `can_process_intent` gate should have stopped the run already; this
+/// is the last guard at the dispatch layer.
+fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Result<(), String> {
+    let Some((charge, room)) = crate::hardware::charge_and_room(descriptor.id, cpu_only) else { return Ok(()) };
+    prunr_core::memory::fit(charge, room).map_err(|short| {
+        tracing::warn!(model = ?descriptor.id, ?charge, ?room, ?short, "admission refused: not enough memory");
+        refusal(short)
+    })
 }
 
-/// Whether free RAM covers the model's working set, or why not; a
-/// refusal is logged. The toolbar's `can_process_intent` gate should have
-/// stopped the run already; this is the last guard at the dispatch layer.
-fn admitted(descriptor: &prunr_models::ModelDescriptor) -> Result<(), String> {
-    let free_mb = crate::hardware::available_ram_mb_throttled();
-    let need_mb = descriptor.needs.cpu.host_mb;
-    if admission_check(need_mb, free_mb) {
-        return Ok(());
+fn refusal(short: prunr_core::memory::Short) -> String {
+    match short {
+        prunr_core::memory::Short::Ram { need_mb, free_mb } => format!("needs about {need_mb} MB of free memory, {free_mb} MB is free"),
+        prunr_core::memory::Short::Card { need_mb, free_mb } => format!("needs about {need_mb} MB free on the graphics card, {free_mb} MB is free"),
     }
-    tracing::warn!(
-        model = ?descriptor.id,
-        need_mb,
-        free_mb,
-        "admission refused: insufficient RAM"
-    );
-    Err(format!("needs about {need_mb} MB of free memory"))
 }
 
 /// The image the upscale model reads: the input, denoised first when
@@ -1620,7 +1617,7 @@ impl Processor {
             tracing::error!(model = ?model_id, "upscale dispatch: model not in REGISTRY");
             return Err("the model is not available".into());
         };
-        admitted(descriptor)?;
+        admitted(descriptor, cpu_only)?;
 
         let output_scale = recipe.upscale.output_scale;
         let scale_factor = output_scale.factor();
@@ -1773,7 +1770,7 @@ impl Processor {
     pub(crate) fn dispatch_colorize(&mut self, item_id: u64, run_id: u64, input: super::item::Pixels, cpu_only: bool, recipe: ProcessingRecipe) -> Result<(), String> {
         let kind = super::settings::COLORIZER;
         let descriptor = prunr_models::descriptor(kind.into()).ok_or("the model is not available")?;
-        admitted(descriptor)?;
+        admitted(descriptor, cpu_only)?;
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize, item_id));
         let done = self.colorize.begin(run.clone());
@@ -1875,21 +1872,12 @@ impl Processor {
         self.colorize.done.drain()
     }
 
-    /// Runs once per source image; `Err(reason)` at once when under
-    /// 800 MB RAM is free.
-    pub(crate) fn dispatch_sam_encoder(
-        &self,
-        item_id: u64,
-        source: std::sync::Arc<image::RgbaImage>,
-        available_ram_mb: u32,
-    ) -> Result<(), String> {
-        const ENCODER_COST_MB: u32 = 800;
-        if !admission_check(ENCODER_COST_MB, available_ram_mb) {
-            return Err(format!(
-                "Magic Brush requires ~{} MB free RAM; only {} MB available.",
-                ENCODER_COST_MB, available_ram_mb,
-            ));
-        }
+    /// Runs once per source image; `Err(reason)` at once when the model
+    /// does not fit in memory.
+    pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: std::sync::Arc<image::RgbaImage>) -> Result<(), String> {
+        let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
+        // Its sessions take no GPU provider.
+        admitted(descriptor, true)?;
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
@@ -2529,15 +2517,6 @@ mod tests {
         p.end_seg_run();
         p.apply_seg_report(prunr_core::ProgressUpdate::Step(prunr_core::Step::RefiningEdges));
         assert_eq!(p.dispatch_progress().unwrap().step_label.as_ref(), "Upscaling", "a finished batch reaches no other run");
-    }
-
-    /// A working set fits when it is no larger than free RAM; nothing
-    /// fits in none.
-    #[test]
-    fn admission_fits_a_working_set_up_to_free_ram() {
-        for (working_set, free, fits) in [(2000, 1500, false), (500, 1500, true), (1500, 1500, true), (600, 0, false)] {
-            assert_eq!(admission_check(working_set, free), fits, "{working_set} MB in {free} MB free");
-        }
     }
 
     /// LCM weights clamp CFG to [1.0, 2.0]; the LCM scheduler without the
