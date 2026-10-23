@@ -39,7 +39,12 @@ pub fn measure_here(id: ModelId, gpu_side: bool, image: Option<image::DynamicIma
 }
 
 fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> Point {
-    let tile = prunr_models::descriptor(id).and_then(|d| d.recommended_tile).unwrap_or(super::input::UPSCALE_SIDE);
+    let runtime = prunr_core::ort_runtime::ensure_initialized();
+    // The tile the upscaler takes on the provider it will run on.
+    let provider = if gpu_side { prunr_core::memory::provider_for(id, false) } else { prunr_core::engine::CPU_NAME };
+    let tile = prunr_models::descriptor(id)
+        .and_then(|d| d.recommended_tile)
+        .map_or(super::input::UPSCALE_SIDE, |tile| prunr_core::upscale::tile_for_provider(tile, provider));
     let photo = image.unwrap_or_else(|| image::DynamicImage::ImageRgba8(super::input::synthetic_photo()));
     let inputs = Inputs::from_photo_with_tile(photo, String::new(), tile);
     let family = Family::of(id);
@@ -52,7 +57,7 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
         point.error = Some("not measured here: the bench does not run this kind of model".into());
         return point;
     };
-    if let Err(e) = prunr_core::ort_runtime::ensure_initialized() {
+    if let Err(e) = runtime {
         point.error = Some(e);
         return point;
     }

@@ -87,7 +87,7 @@ fn pack_output(
 /// attention models stay aligned.
 const OPENVINO_TILE_CAP: u32 = 256;
 
-fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
+pub fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
     if provider == crate::engine::OPENVINO_NAME {
         recommended.min(OPENVINO_TILE_CAP)
     } else {
