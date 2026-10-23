@@ -1496,13 +1496,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // the CPU's: the same candidate on 16 and 19 of 20 clicks, a worst
         // IoU of 0.73, where CUDA met 20 of 20 at 0.9995 (2026-10-23).
         incompatible_eps: &["CoreML"],
-        // Conservative estimate: encoder weights ~200 MB; transformer
-        // activation scratch typical 2-3× = 400-800 MB peak.
-        // Validate empirically on a 4 GB RAM machine before bumping.
+        // One encode and a click, `prunr bench --needs`: 1.12 GB on the
+        // CPU; on CUDA 1.0 GB of RAM and the card's peak 2.18 GB during an
+        // encode (it hands the pool back after).
         needs: Needs {
-            cpu: Cost::estimate(800, 0, CARRIED),
+            cpu: Cost::measured(1_150, 0, "i5-11600KF, 2026-10-23"),
             mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
+            cuda: Priced::Same(Cost::measured(1_000, 2_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
             openvino: Priced::Unmeasured,
@@ -2329,7 +2329,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 10), ("DirectML", 23), ("CoreML", 21), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 9), ("DirectML", 23), ("CoreML", 21), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
@@ -2739,7 +2739,7 @@ mod tests {
             .expect("Sam21HieraSmall must be registered");
         assert_eq!(desc.category, ModelCategory::Selection);
         assert!(matches!(desc.source, ModelSource::MultiPartBundled { .. }));
-        assert_eq!(desc.needs.cpu.host_mb, 800);
+        assert_eq!(desc.needs.cpu.host_mb, 1_150);
         assert!(!desc.attribution_required);
         assert!(desc.upscale.is_none());
     }

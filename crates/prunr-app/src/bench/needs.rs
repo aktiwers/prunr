@@ -53,6 +53,9 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
         _ => inputs.photo.dimensions(),
     };
     let mut point = Point { name: id.stable_name().into(), gpu_side, provider: String::new(), weights: None, input, host_mb: None, card_mb: None, error: None };
+    if id == ModelId::Sam21HieraSmall {
+        return measure_magic_brush(point, &inputs.photo, runtime);
+    }
     let Some(family) = family else {
         point.error = Some("not measured here: the bench does not run this kind of model".into());
         return point;
@@ -76,6 +79,30 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
         Ok((pick, weights)) => {
             point.provider = pick.provider;
             point.weights = weights.map(String::from);
+        }
+        Err(e) => point.error = Some(e),
+    }
+    point
+}
+
+/// The Magic Brush: its encoder down the GPU ladder (or on the CPU), its
+/// decoder on the CPU, one photo encoded and clicked twice over.
+fn measure_magic_brush(mut point: Point, photo: &image::RgbaImage, runtime: Result<prunr_core::ort_runtime::DylibSource, String>) -> Point {
+    if let Err(e) = runtime {
+        point.error = Some(e);
+        return point;
+    }
+    let base = peak::current_mb();
+    peak::reset();
+    let card = point.gpu_side.then(card_sampler::start);
+    let run = crate::gui::processor::magic_brush_once(photo, !point.gpu_side)
+        .and_then(|_| crate::gui::processor::magic_brush_once(photo, !point.gpu_side));
+    point.host_mb = peak::peak_mb().zip(base).map(|(peak, base)| peak.saturating_sub(base));
+    point.card_mb = card.and_then(card_sampler::Sampler::stop);
+    match run {
+        Ok(provider) => {
+            point.provider = provider;
+            point.weights = Some("FP32".into());
         }
         Err(e) => point.error = Some(e),
     }
