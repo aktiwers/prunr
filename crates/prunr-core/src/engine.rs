@@ -278,6 +278,8 @@ pub(crate) enum EpSite<'a> {
     /// One part of a Stable Diffusion bundle. `ov_device` pins OpenVINO's
     /// device (bench only).
     SdPart { part: &'a str, ov_device: Option<&'a str> },
+    /// One part of the Magic Brush's model (SAM 2.1).
+    Selection { part: &'a str },
 }
 
 /// OpenVINO's device for engines once the user lets it use the Intel GPU.
@@ -307,7 +309,7 @@ impl EpSite<'_> {
     /// shapes), and under AUTO it ran ~10% slower than the CPU.
     fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
         match self {
-            EpSite::Engine { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
+            EpSite::Engine { .. } | EpSite::Selection { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
             EpSite::Fill { .. } => None,
             EpSite::SdPart { ov_device, .. } => *ov_device,
         }
@@ -342,8 +344,10 @@ impl EpKind {
                     // reasons, without TF32's lower precision: SD 1.5 on a
                     // 12 GB RTX 3060 took 7.1 GB for 512 px tiles instead
                     // of 9.4, at the same 4.0 s, and its pixels differ from
-                    // the defaults' no more than two default runs do.
-                    EpSite::SdPart { .. } => p
+                    // the defaults' no more than two default runs do. The
+                    // Magic Brush's masks on it match the CPU's (same pick
+                    // on 20 of 20 clicks, IoU 0.9998).
+                    EpSite::SdPart { .. } | EpSite::Selection { .. } => p
                         .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
                         .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
                         .build(),
@@ -356,7 +360,9 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
                 let dir = match site {
-                    EpSite::SdPart { part, .. } | EpSite::Engine { part: Some(part), .. } => crate::cache::cache_dir_for_part(model, self.as_str(), part),
+                    EpSite::SdPart { part, .. } | EpSite::Engine { part: Some(part), .. } | EpSite::Selection { part } => {
+                        crate::cache::cache_dir_for_part(model, self.as_str(), part)
+                    }
                     EpSite::Engine { part: None, .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
                 };
                 coreml_provider(dir.as_deref()).build()
@@ -374,6 +380,16 @@ impl EpKind {
                 // CLI batch wall time).
                 EpSite::Engine { threads, .. } | EpSite::Fill { threads } => {
                     let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
+                    match site.ov_device(intel_gpu_chosen()) {
+                        Some(device) => provider.with_device_type(device),
+                        None => provider,
+                    }
+                    .build()
+                }
+                // Only on the Intel GPU: the Magic Brush leaves OpenVINO's
+                // CPU device to ORT's own CPU provider.
+                EpSite::Selection { .. } => {
+                    let provider = ort::ep::OpenVINO::default();
                     match site.ov_device(intel_gpu_chosen()) {
                         Some(device) => provider.with_device_type(device),
                         None => provider,
@@ -784,8 +800,8 @@ impl OrtEngine {
             crate::cache::gc_stale_for_model(model_id, CPU_NAME);
             let session = commit_past_bad_cache(|| {
                 let builder = Self::builder_with_base(intra_threads, level).map_err(|e| (e, None))?;
-                let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights);
-                let suspect = cached_graph(matches!(bytes, Cow::Owned(_)), model_id, CPU_NAME, weights);
+                let (builder, bytes, draft) = apply_ort_graph_cache(builder, model_bytes, model_id, CPU_NAME, weights, None);
+                let suspect = cached_graph(matches!(bytes, Cow::Owned(_)), model_id, CPU_NAME, weights, None);
                 let started = Instant::now();
                 let session = builder
                     .with_execution_providers([cpu_provider()])
@@ -810,7 +826,7 @@ impl OrtEngine {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
-                apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str(), weights)
+                apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str(), weights, None)
             } else {
                 (builder, Cow::Borrowed(model_bytes), None)
             };
@@ -821,7 +837,7 @@ impl OrtEngine {
             let started = Instant::now();
             let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
-                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep.as_str(), weights),
+                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep.as_str(), weights, None),
             })?;
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
@@ -931,7 +947,7 @@ pub fn openvino_on_gpu() -> bool {
     { false }
 }
 
-fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
+pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
     provider.eq_ignore_ascii_case(CPU_NAME)
         || (provider.eq_ignore_ascii_case(OPENVINO_NAME) && !openvino_on_gpu)
 }
@@ -1078,8 +1094,16 @@ fn clear_suspect_cache(path: &std::path::Path) {
 
 /// The cached optimized graph a session loaded, when `hit` (an
 /// `apply_ort_graph_cache` hit comes back as owned bytes).
-pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep_name: &str, weights: Weights) -> Option<PathBuf> {
-    hit.then(|| crate::cache::optimized_model_path(model, ep_name, weights)).flatten()
+pub(crate) fn cached_graph(hit: bool, model: prunr_models::ModelId, ep_name: &str, weights: Weights, part: Option<&str>) -> Option<PathBuf> {
+    hit.then(|| optimized_graph_path(model, ep_name, weights, part)).flatten()
+}
+
+/// Where the optimized graph of `model` (or of its `part`) is kept.
+fn optimized_graph_path(model: prunr_models::ModelId, ep_name: &str, weights: Weights, part: Option<&str>) -> Option<PathBuf> {
+    match part {
+        Some(part) => crate::cache::optimized_model_path_for_part(model, ep_name, part),
+        None => crate::cache::optimized_model_path(model, ep_name, weights),
+    }
 }
 
 /// Commit a CPU session, where `commit` answers a failure with the cached
@@ -1115,8 +1139,9 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     model_id: prunr_models::ModelId,
     ep_name: &str,
     weights: Weights,
+    part: Option<&str>,
 ) -> (ort::session::builder::SessionBuilder, Cow<'a, [u8]>, Option<crate::cache::GraphDraft>) {
-    let Some(path) = crate::cache::optimized_model_path(model_id, ep_name, weights) else {
+    let Some(path) = optimized_graph_path(model_id, ep_name, weights, part) else {
         return (builder, Cow::Borrowed(model_bytes), None);
     };
     match std::fs::read(&path) {
@@ -1130,10 +1155,14 @@ pub(crate) fn apply_ort_graph_cache<'a>(
                 "cached optimized graph unreadable; rebuilding");
         }
     }
-    if crate::cache::cache_dir_for(model_id, ep_name).is_none() {
+    let dir = match part {
+        Some(part) => crate::cache::cache_dir_for_part(model_id, ep_name, part),
+        None => crate::cache::cache_dir_for(model_id, ep_name),
+    };
+    if dir.is_none() {
         return (builder, Cow::Borrowed(model_bytes), None);
     }
-    let (builder, draft) = crate::cache::attach_draft(builder, &path, model_bytes.len() as u64, model_id, ep_name, None);
+    let (builder, draft) = crate::cache::attach_draft(builder, &path, model_bytes.len() as u64, model_id, ep_name, part);
     (builder, Cow::Borrowed(model_bytes), draft)
 }
 

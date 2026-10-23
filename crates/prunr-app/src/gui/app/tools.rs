@@ -352,7 +352,7 @@ impl PrunrApp {
         // Decode still pending: try again next frame.
         let Some(source) = item.source_rgba.clone() else { return };
         let item_id = item.id;
-        match self.processor.dispatch_sam_encoder(item_id, source) {
+        match self.processor.dispatch_sam_encoder(item_id, source, self.settings.cpu_only()) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
         }
@@ -399,7 +399,7 @@ impl PrunrApp {
     pub(crate) fn fit_brush_models_to_model(&mut self) {
         if self.magic_brush_wanted() {
             if self.magic_brush_ready_ahead() {
-                self.processor.warm_sam_sessions();
+                self.processor.warm_sam_sessions(self.settings.cpu_only());
             }
             // An eraser's only input is a painted region: the brush comes
             // on by itself, unless a tool is in use already.
@@ -517,6 +517,7 @@ impl PrunrApp {
             mode,
             source_dims,
             reading: self.settings.brush.magic_reading(),
+            cpu_only: self.settings.cpu_only(),
         });
     }
 

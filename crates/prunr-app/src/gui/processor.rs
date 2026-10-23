@@ -290,35 +290,28 @@ impl<R> RunDone<R> {
 pub(crate) struct SamSessions {
     encoder: Mutex<ort::session::Session>,
     decoder: Mutex<ort::session::Session>,
+    /// Built under "CPU only": the other setting builds them again.
+    cpu_only: bool,
 }
 
 type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
 
-fn build_sam_session(part: &str) -> Result<ort::session::Session, String> {
-    let bytes = prunr_models::resolve_part_bytes(prunr_models::ModelId::Sam21HieraSmall, part)
-        .map_err(|e| format!("resolve {part} bytes: {e:?}"))?;
-    prunr_core::ort_runtime::session_builder()
-        .map_err(|e| e.to_string())?
-        .commit_from_memory(&bytes)
-        .map_err(|e| {
-            tracing::warn!(part, %e, "Magic Brush model did not load");
-            format!("Could not load the Magic Brush model: {e}")
-        })
-}
-
 /// Cached sessions, built outside the lock so a release on the GUI
-/// thread never waits on the ~1 s encoder parse.
-fn ensure_sam_sessions(slot: &SamSessionSlot) -> Result<Arc<SamSessions>, String> {
-    if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+/// thread never waits on the encoder's build.
+fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamSessions>, String> {
+    let fits = |s: &&Arc<SamSessions>| s.cpu_only == cpu_only;
+    if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(fits) {
         return Ok(Arc::clone(cached));
     }
-    let built = Arc::new(SamSessions {
-        encoder: Mutex::new(build_sam_session("encoder")?),
-        decoder: Mutex::new(build_sam_session("decoder")?),
-    });
+    let (encoder, pick) = prunr_core::sam_session::encoder(cpu_only).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
+    tracing::info!(provider = %pick.provider, failed = ?pick.failed, "Magic Brush sessions ready");
+    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only });
     let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Two clicks racing on a cold cache both build; keep whichever landed.
-    Ok(Arc::clone(guard.get_or_insert(built)))
+    if let Some(cached) = guard.as_ref().filter(fits) {
+        return Ok(Arc::clone(cached));
+    }
+    Ok(Arc::clone(guard.insert(built)))
 }
 
 /// Result from a background SAM decoder thread, or a human-readable error.
@@ -406,6 +399,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) source_dims: (u32, u32),
     pub(crate) reading: prunr_core::MaskReading,
+    pub(crate) cpu_only: bool,
 }
 
 /// A depth map landing for `item_id`.
@@ -1874,14 +1868,14 @@ impl Processor {
 
     /// Runs once per source image; `Err(reason)` at once when the model
     /// does not fit in memory.
-    pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: std::sync::Arc<image::RgbaImage>) -> Result<(), String> {
+    pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: std::sync::Arc<image::RgbaImage>, cpu_only: bool) -> Result<(), String> {
         let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
         // Its sessions take no GPU provider.
         admitted(descriptor, true)?;
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            let result = caught(|| ensure_sam_sessions(&sessions).and_then(|s| run_sam_encoder_inline(&s, &source)))
+            let result = caught(|| ensure_sam_sessions(&sessions, cpu_only).and_then(|s| run_sam_encoder_inline(&s, &source)))
                 .unwrap_or_else(Err);
             let _ = tx.send(SamEncoderResult { item_id, result });
         });
@@ -1940,13 +1934,13 @@ impl Processor {
 
     /// Build the SAM sessions (~180 MB resident, ~1 s parse) on the pool
     /// so the first Magic Brush use never waits for them.
-    pub(crate) fn warm_sam_sessions(&self) {
+    pub(crate) fn warm_sam_sessions(&self, cpu_only: bool) {
         if self.sam_sessions_ready() {
             return;
         }
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            if let Err(err) = ensure_sam_sessions(&sessions) {
+            if let Err(err) = ensure_sam_sessions(&sessions, cpu_only) {
                 tracing::warn!(%err, "SAM session warm-up failed");
             }
         });
@@ -1972,7 +1966,7 @@ impl Processor {
         self.spawn_model(move || {
             let (w, h) = req.source_dims;
             let started = std::time::Instant::now();
-            let result = caught(|| ensure_sam_sessions(&sessions)
+            let result = caught(|| ensure_sam_sessions(&sessions, req.cpu_only)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
                     let decoded = started.elapsed();
@@ -2277,7 +2271,7 @@ mod sam_dispatch_tests {
         let Some(path) = std::env::var_os("PRUNR_SAM_PHOTO") else { return };
         let photo = image::open(path).expect("photo").to_rgba8();
         let (w, h) = photo.dimensions();
-        let sessions = ensure_sam_sessions(&SamSessionSlot::default()).expect("SAM 2 installed");
+        let sessions = ensure_sam_sessions(&SamSessionSlot::default(), std::env::var_os("PRUNR_SAM_CPU").is_some()).expect("SAM 2 installed");
         let started = std::time::Instant::now();
         let embedding = run_sam_encoder_inline(&sessions, &photo).expect("encode");
         let encoded = started.elapsed();

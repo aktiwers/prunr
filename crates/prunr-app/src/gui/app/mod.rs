@@ -1068,6 +1068,9 @@ impl PrunrApp {
     /// the old choice now instead of at their idle timeout.
     pub(crate) fn apply_processor(&mut self) {
         self.processor.release_all_sessions();
+        // Not in `release_all_sessions`: a model switch keeps the Magic
+        // Brush for the next model with brushes.
+        self.processor.release_sam_sessions();
         tracing::info!(processor = ?self.settings.processor, "processor setting applied");
     }
 
