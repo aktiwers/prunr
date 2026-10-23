@@ -87,13 +87,14 @@ impl ModelId {
     /// What the SD pipeline needs to know about an SD-family bundle;
     /// `None` for every other model.
     pub fn sd_spec(&self) -> Option<SdSpec> {
-        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false, tall_crop_card_extra_mb: 0 };
+        const SD15: SdSpec = SdSpec { latent: SdLatent::Sd15, cpu_output_correct: false, lean_sessions: false, tall_crop_card_extra_mb: None };
         match self {
-            // RTX 3060, 25 steps: the card's peak 7.1 GB for 512 px
-            // tiles, 10.5 GB for the tall 512x768 crop.
-            ModelId::SdV15InpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: 3_400, ..SD15 }),
-            ModelId::SdV15LcmInpaintFp16 => Some(SD15),
-            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true, tall_crop_card_extra_mb: 0 }),
+            // RTX 3060: the card's peak for the tall 512x768 crop, 10.5 GB
+            // (25 steps) and 9.4 GB (LCM, 8 steps at CFG 2).
+            ModelId::SdV15InpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(3_400), ..SD15 }),
+            ModelId::SdV15LcmInpaintFp16 => Some(SdSpec { tall_crop_card_extra_mb: Some(2_700), ..SD15 }),
+            // Its tall region fits its 1024 px tile: the same 8.6 GB.
+            ModelId::RoremFp16 => Some(SdSpec { latent: SdLatent::Sdxl, cpu_output_correct: true, lean_sessions: true, tall_crop_card_extra_mb: Some(0) }),
             _ => None,
         }
     }
@@ -898,7 +899,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // 13.6-14.1 GB.
         needs: Needs {
             cpu: Cost::measured(14000, 0, "i7-6700, OpenVINO CPU device, bundle load peak 13.6-14.1 GB"),
-            cuda: Priced::Unmeasured,
+            // Load and 512 px tiles, 8 steps at CFG 2 (two UNet passes a
+            // step, its heaviest), ORT 1.24.1 with the lean CUDA pool:
+            // 4.87 GB of system RAM at the cold load, the card's peak 6.8 GB.
+            cuda: Priced::Same(Cost::measured(4_900, 6_800, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -982,7 +986,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // the 4.8 GiB of mapped weight files on top are reclaimable.
         needs: Needs {
             cpu: Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"),
-            cuda: Priced::Unmeasured,
+            // Load and erase, 4 steps, lean sessions: 1.45 GB of system
+            // RAM (the weights go to the card), the card's peak 8.6 GB.
+            cuda: Priced::Same(Cost::measured(1_500, 8_700, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Never,
@@ -1754,8 +1760,8 @@ pub struct SdSpec {
     /// same speed. SD 1.5 is unmeasured, so it keeps ORT's default.
     pub lean_sessions: bool,
     /// The card's memory the tall crop adds to the bundle's `needs` on a
-    /// card; 0 while the bundle is not measured on one.
-    pub tall_crop_card_extra_mb: u32,
+    /// card; `None` while the bundle is not measured on one.
+    pub tall_crop_card_extra_mb: Option<u32>,
 }
 
 /// The latent space an SD-family model denoises in, named by the VAE
@@ -2269,7 +2275,7 @@ mod tests {
         for desc in REGISTRY {
             let Some(spec) = desc.id.sd_spec() else { continue };
             let on_a_card = desc.needs.accelerators().into_iter().any(|(_, p)| matches!(p, Priced::Same(c) if c.card_mb > 0));
-            assert_eq!(on_a_card, spec.tall_crop_card_extra_mb > 0, "{:?}", desc.id);
+            assert_eq!(on_a_card, spec.tall_crop_card_extra_mb.is_some(), "{:?}", desc.id);
         }
     }
 
@@ -2280,7 +2286,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 22), ("DirectML", 23), ("CoreML", 23), ("OpenVINO", 20), ("MIGraphX", 23)];
+            [("CUDA", 20), ("DirectML", 23), ("CoreML", 23), ("OpenVINO", 20), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
