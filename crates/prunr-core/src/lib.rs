@@ -32,6 +32,7 @@ pub mod upscale;
 pub mod denoise;
 pub mod selection;
 pub mod sam;
+pub mod sam_session;
 pub mod progress;
 pub mod subject;
 
