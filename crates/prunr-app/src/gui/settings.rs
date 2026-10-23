@@ -319,7 +319,7 @@ impl Settings {
     }
 
     fn cap_jobs_for_model(&self, jobs: usize) -> usize {
-        self.model.to_model_kind().map_or(jobs, |model| jobs.min(super::memory::safe_max_jobs(model)))
+        self.model.to_model_kind().map_or(jobs, |model| jobs.min(super::memory::safe_max_jobs(model, self.cpu_only())))
     }
 
     /// A preset's image settings for the active model; factory values for

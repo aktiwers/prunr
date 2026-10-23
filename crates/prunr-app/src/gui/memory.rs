@@ -31,7 +31,7 @@ impl AdmissionController {
     pub fn new(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> Self {
         let available = crate::hardware::available_ram_bytes_now() as usize;
         let overhead = model_overhead(model, jobs, cpu_only)
-            + if first_look { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL) } else { 0 };
+            + if first_look { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL, cpu_only) } else { 0 };
         let budget = ((available as f64) * 0.85) as usize;
         let budget = budget.saturating_sub(overhead);
         Self {
@@ -124,9 +124,19 @@ pub fn under_memory_pressure() -> bool {
 }
 
 /// Per inference slot: session weights, ORT workspace, tensors and image
-/// buffers, as the registry's CPU needs.
-fn per_engine_cost(model: ModelKind) -> usize {
-    cpu_need_mb(model) as usize * 1024 * 1024
+/// buffers in system RAM, as the model needs them where it will run (on
+/// a card only its share of system RAM). Until the GPU probe answers, the
+/// CPU's figure.
+fn per_engine_cost(model: ModelKind, cpu_only: bool) -> usize {
+    let id: prunr_models::ModelId = model.into();
+    let provider = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
+    engine_cost_on(model, provider)
+}
+
+fn engine_cost_on(model: ModelKind, provider: &str) -> usize {
+    let id: prunr_models::ModelId = model.into();
+    let mb = prunr_core::memory::charge_on(id, provider).map_or_else(|| u64::from(cpu_need_mb(model)), |c| c.ram_mb);
+    mb as usize * 1024 * 1024
 }
 
 pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
@@ -140,15 +150,15 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     // answers the engines are counted as on the CPU, the larger figure.
     let provider = prunr_core::OrtEngine::detected_provider().unwrap_or_else(|| prunr_core::engine::CPU_NAME.to_string());
     let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &provider);
-    per_engine_cost(model) * engines
+    per_engine_cost(model, cpu_only) * engines
 }
 
 /// Engines take at most 50% of available RAM, leaving the rest for image
 /// buffers, history and OS headroom.
-pub fn safe_max_jobs(model: ModelKind) -> usize {
+pub fn safe_max_jobs(model: ModelKind, cpu_only: bool) -> usize {
     let available = crate::hardware::available_ram_bytes_now() as usize;
     let budget = available / 2; // 50% of available RAM for engines
-    let cost = per_engine_cost(model);
+    let cost = per_engine_cost(model, cpu_only);
     if cost == 0 { return 4; }
     (budget / cost).clamp(1, 8)
 }
@@ -156,6 +166,17 @@ pub fn safe_max_jobs(model: ModelKind) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An engine on a card is charged its share of system RAM, measured
+    /// there; one where it is not measured yet, its CPU figure.
+    #[test]
+    fn an_engine_is_charged_what_it_takes_where_it_runs() {
+        const MB: usize = 1024 * 1024;
+        let cpu = engine_cost_on(ModelKind::BiRefNetLite, "CPU");
+        let cuda = engine_cost_on(ModelKind::BiRefNetLite, "CUDA");
+        assert!(cuda < cpu / 2, "on CUDA its weights and activations sit on the card: {} vs {} MB", cuda / MB, cpu / MB);
+        assert_eq!(engine_cost_on(ModelKind::BiRefNetLite, "DirectML"), cpu, "unmeasured there: the CPU's figure");
+    }
 
     #[test]
     fn force_admits_when_deadlocked() {
@@ -281,9 +302,9 @@ mod tests {
     /// refactor would silently mis-charge admission for new models.
     #[test]
     fn per_engine_cost_is_descriptor_driven() {
-        let silueta = per_engine_cost(ModelKind::Silueta);
-        let u2net   = per_engine_cost(ModelKind::U2net);
-        let birefnet = per_engine_cost(ModelKind::BiRefNetLite);
+        let silueta = engine_cost_on(ModelKind::Silueta, "CPU");
+        let u2net   = engine_cost_on(ModelKind::U2net, "CPU");
+        let birefnet = engine_cost_on(ModelKind::BiRefNetLite, "CPU");
         // BiRefNet's bigger activation footprint must charge strictly
         // more than Silueta — the whole point of model-aware admission.
         assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
