@@ -1417,10 +1417,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        // Off CoreML on a MacBook Air (macOS 27, 2026-10-23): with ORT's
-        // constant folding off (ORT 1.24-1.28) CoreML cannot plan it (error
-        // -6), and with folding on its colours drifted from the CPU's (27%
-        // of values more than 2/255 apart).
+        // CoreML's colours vary between runs: 4.8% and 14.5% of values more
+        // than 2/255 from the CPU's in two runs on a MacBook Air (ORT 1.30,
+        // 2026-10-23), against a 10% tolerance; with folding off (ORT
+        // 1.24-1.28) CoreML cannot plan it (error -6).
         incompatible_eps: &["CoreML"],
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
@@ -1505,21 +1505,19 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // Off CoreML while ORT's constant folding is off (ORT 1.24-1.28): on
-        // a MacBook Air's GPU the encoder then took 4.5 s against the CPU's
-        // 2.5 s, at a 10.7 GB peak. Folded (ORT 1.31) it took 0.95 s with
-        // the CPU's masks on one photo, and IoU 0.973 on one click of
-        // another (2026-10-23).
-        incompatible_eps: &["CoreML"],
+        incompatible_eps: &[],
         // One encode and a click, `prunr bench --needs`: 1.12 GB on the
         // CPU; on CUDA 1.0 GB of RAM and the card's peak 2.18 GB during an
-        // encode (it hands the pool back after).
+        // encode (it hands the pool back after). On a MacBook Air's GPU
+        // (ORT 1.30) the encoder takes 0.52 s against 1.99 s on its CPU,
+        // with the CPU's masks (20 of 20 clicks, IoU 1.0, two photos), at a
+        // 4.9 GB peak against 1.3 GB (2026-10-23).
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_000, 2_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Same(Cost::measured(4_900, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
