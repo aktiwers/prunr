@@ -87,9 +87,16 @@ fn pack_output(
 /// attention models stay aligned.
 const OPENVINO_TILE_CAP: u32 = 256;
 
+/// On unified memory CoreML's GPU buffers are the RAM: Real-ESRGAN x4 at
+/// a 512 px tile peaked at 11.6 GB on a 16 GB MacBook Air (4.3 GB on its
+/// CPU). A multiple of 16, as OpenVINO's.
+const COREML_TILE_CAP: u32 = 256;
+
 pub fn tile_for_provider(recommended: u32, provider: &str) -> u32 {
     if provider == crate::engine::OPENVINO_NAME {
         recommended.min(OPENVINO_TILE_CAP)
+    } else if provider == crate::engine::COREML_NAME {
+        recommended.min(COREML_TILE_CAP)
     } else {
         recommended
     }
@@ -358,7 +365,19 @@ mod tests {
         assert_eq!(tile_for_provider(256, "OpenVINO"), 256);
         assert_eq!(tile_for_provider(512, "CPU"), 512);
         assert_eq!(tile_for_provider(512, "CUDA"), 512);
+        assert_eq!(tile_for_provider(512, "CoreML"), 256);
+        assert_eq!(COREML_TILE_CAP % 16, 0, "window-attention models need a multiple of 16");
         assert_eq!(OPENVINO_TILE_CAP % 16, 0, "window-attention models need a multiple of 16");
+    }
+
+    #[test]
+    fn every_providers_tile_is_a_multiple_the_model_takes() {
+        for descriptor in prunr_models::REGISTRY {
+            let (Some(tile), Some(multiple)) = (descriptor.recommended_tile, descriptor.tile_size_multiple) else { continue };
+            for provider in ["CPU", "CUDA", "OpenVINO", "CoreML", "DirectML", "MIGraphX"] {
+                assert_eq!(tile_for_provider(tile, provider) % multiple, 0, "{:?} on {provider}", descriptor.id);
+            }
+        }
     }
 
     /// `pick_optimization_level` gates Level2 on `tile_size_multiple.is_some()`.
