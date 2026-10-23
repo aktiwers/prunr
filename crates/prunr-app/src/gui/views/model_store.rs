@@ -427,6 +427,7 @@ mod tests {
             incompatible_eps: &[],
             needs: prunr_models::Needs {
                 cpu: prunr_models::Cost::estimate(100, 0, "a test fixture"),
+                mac_cpu: prunr_models::Priced::Unmeasured,
                 cuda: prunr_models::Priced::Unmeasured,
                 directml: prunr_models::Priced::Unmeasured,
                 coreml: prunr_models::Priced::Unmeasured,

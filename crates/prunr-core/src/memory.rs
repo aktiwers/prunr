@@ -18,7 +18,7 @@ impl Charge {
     pub fn of(needs: &Needs, provider: &str) -> Option<Self> {
         match needs.on(provider) {
             Priced::Same(cost) => Some(Self { ram_mb: cost.host_mb.into(), card_mb: cost.card_mb.into() }),
-            Priced::Unmeasured => Some(Self { ram_mb: needs.cpu.host_mb.into(), card_mb: 0 }),
+            Priced::Unmeasured => Some(Self { ram_mb: needs.host_cpu().host_mb.into(), card_mb: 0 }),
             Priced::Never => None,
         }
     }
@@ -118,6 +118,7 @@ mod tests {
     fn needs(cuda: Priced) -> Needs {
         Needs {
             cpu: Cost::estimate(9_000, 0, "test"),
+            mac_cpu: Priced::Unmeasured,
             cuda,
             directml: Priced::Unmeasured,
             coreml: Priced::Same(Cost::estimate(3_000, 0, "test")),

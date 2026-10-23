@@ -142,7 +142,7 @@ fn engine_cost_on(model: ModelKind, provider: &str) -> usize {
 pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
     let id: prunr_models::ModelId = model.into();
     // unreachable fallback: every ModelKind has a descriptor.
-    prunr_models::descriptor(id).map_or(800, |d| d.needs.cpu.host_mb)
+    prunr_models::descriptor(id).map_or(800, |d| d.needs.host_cpu().host_mb)
 }
 
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
@@ -311,7 +311,7 @@ mod tests {
         // more than Silueta — the whole point of model-aware admission.
         assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
         assert!(u2net    > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
-        let registry = prunr_models::descriptor(prunr_models::ModelId::Silueta).map(|d| d.needs.cpu.host_mb).unwrap();
+        let registry = prunr_models::descriptor(prunr_models::ModelId::Silueta).map(|d| d.needs.host_cpu().host_mb).unwrap();
         assert_eq!(silueta, registry as usize * 1024 * 1024, "the registry's MB, as bytes");
     }
 }
