@@ -20,7 +20,9 @@ use crate::engine::Weights;
 /// blobs are not portable across ORT versions, and we don't put the
 /// ORT version in the key directly because `ort` doesn't expose it
 /// at compile time. Old directories are never read; GC reclaims them.
-const CACHE_FORMAT_VERSION: u32 = 1;
+/// 2: graphs written before constant folding was turned off on ORT 1.24
+/// may hold the constants its folding corrupted.
+const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Recursion bound for `walk_dir_size`, so a symlink loop terminates;
 /// the cache is two levels deep.
