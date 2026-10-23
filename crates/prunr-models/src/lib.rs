@@ -625,12 +625,16 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        // CoreML splits it into dozens of pieces (rank-6 tensors, and convs
+        // without `pads` its builder rejects) and compiles each: on a
+        // MacBook Air the first session was still compiling after 23 min
+        // (2026-10-23), where the CPU builds it in seconds.
+        incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Same(Cost::measured(5_150, 0, "i7-6700, 2026-10-23")),
             migraphx: Priced::Unmeasured,
         },
@@ -2289,7 +2293,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 10), ("DirectML", 23), ("CoreML", 22), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 10), ("DirectML", 23), ("CoreML", 21), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
@@ -2427,7 +2431,7 @@ mod tests {
         }
         // An empty list accepts every provider.
         for ep in ["CPU", "CUDA", "CoreML", "DirectML", "OpenVINO"] {
-            for id in [ModelId::U2net, ModelId::BiRefNetLite, ModelId::SdV15InpaintFp16] {
+            for id in [ModelId::U2net, ModelId::RealEsrganX4Plus, ModelId::SdV15InpaintFp16] {
                 assert!(is_ep_compatible(id, ep), "{id:?} + {ep}");
             }
         }
