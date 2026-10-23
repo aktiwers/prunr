@@ -225,7 +225,11 @@ impl SdTuning {
 fn stroke_need(id: prunr_models::ModelId, margin_mb: u64, resident: bool, tall: bool, bundle: Charge) -> Charge {
     let (ram_mb, card_mb) = if resident { (0, 0) } else { (bundle.ram_mb, bundle.card_mb) };
     match (tall, bundle.on_card()) {
-        (true, true) => Charge { ram_mb: ram_mb + margin_mb, card_mb: card_mb + u64::from(sd_spec(id).tall_crop_card_extra_mb) },
+        (true, true) => {
+            // Not measured on a card: the host's extra, erring high.
+            let extra = sd_spec(id).tall_crop_card_extra_mb.map_or(SD_TALL_CROP_EXTRA_MB, u64::from);
+            Charge { ram_mb: ram_mb + margin_mb, card_mb: card_mb + extra }
+        }
         (true, false) => Charge { ram_mb: ram_mb + margin_mb + SD_TALL_CROP_EXTRA_MB, card_mb },
         (false, _) => Charge { ram_mb: ram_mb + margin_mb, card_mb },
     }
@@ -3682,8 +3686,8 @@ mod tests {
         use prunr_models::ModelId::{RoremFp16, SdV15InpaintFp16};
         let m = SD_DEFAULT_MARGIN_MB;
         let reserve = crate::memory::CARD_RESERVE_MB;
-        let extra = u64::from(sd_spec(SdV15InpaintFp16).tall_crop_card_extra_mb);
-        assert!(extra > 0, "SD 1.5 runs on CUDA, so its tall crop's card extra is measured");
+        let extra = sd_spec(SdV15InpaintFp16).tall_crop_card_extra_mb.map(u64::from).expect("measured on CUDA");
+        assert!(extra > 0);
         let fit = |id, ram_mb, card_mb, resident| {
             let mut t = plan_tuning(false, m);
             fit_ram(id, &mut t, Room { ram_mb, card_mb }, resident, TEST_CARD).map(|()| t.tall_crop)
@@ -3700,17 +3704,20 @@ mod tests {
         assert!(fit(RoremFp16, rorem_on_cpu, Some(0), false).is_ok());
     }
 
-    /// The bundle's weights sit in the card's memory on CUDA: a 16 GB
-    /// machine with 12.5 GB free and a 12 GB card runs SD 1.5, tall crop
-    /// included (it was refused for wanting 16 GB of system RAM, the CPU's need).
+    /// A bundle's weights sit in the card's memory on CUDA: a 16 GB
+    /// machine with 11.6 GB free and a 12 GB card runs every SD eraser,
+    /// tall crop included (each was refused for wanting 14-16 GB of system
+    /// RAM, the CPU's need).
     #[test]
-    fn sd_on_an_nvidia_card_fits_a_12_gb_card_and_a_16_gb_machine() {
-        let id = prunr_models::ModelId::SdV15InpaintFp16;
-        let bundle = Charge::of(&prunr_models::descriptor(id).unwrap().needs, "CUDA").unwrap();
-        assert!(bundle.on_card(), "measured on CUDA");
-        let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
-        assert_eq!(fit_ram(id, &mut t, Room { ram_mb: 12_500, card_mb: Some(11_600) }, false, bundle), Ok(()));
-        assert!(t.tall_crop, "the tall crop fits too");
+    fn every_sd_eraser_on_an_nvidia_card_fits_a_12_gb_card_and_a_16_gb_machine() {
+        use prunr_models::ModelId;
+        for id in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16, ModelId::RoremFp16] {
+            let bundle = Charge::of(&prunr_models::descriptor(id).unwrap().needs, "CUDA").unwrap();
+            assert!(bundle.on_card(), "{id:?} measured on CUDA");
+            let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
+            assert_eq!(fit_ram(id, &mut t, Room { ram_mb: 11_600, card_mb: Some(11_600) }, false, bundle), Ok(()), "{id:?}");
+            assert!(t.tall_crop, "{id:?}: the tall crop fits too");
+        }
     }
 
     /// The Fast bundle peaks at about 14 GB while it loads: with 12 GB
