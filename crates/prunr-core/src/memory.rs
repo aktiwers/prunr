@@ -69,6 +69,23 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
     Charge::of(&needs, provider).or_else(|| Charge::of(&needs, crate::engine::CPU_NAME))
 }
 
+/// How many of `wanted` engines of `id` fit the card `provider` runs it
+/// on, at least one: each engine holds its own pool there (BiRefNet takes
+/// 7.7 GB of an RTX 3060, so a second would run out). Off a card, or with
+/// no reading of it, `wanted`.
+pub fn engines_that_fit(id: ModelId, provider: &str, wanted: usize) -> usize {
+    let Some(charge) = charge_on(id, provider).filter(|c| c.on_card()) else { return wanted };
+    match room_now(charge, provider).and_then(|room| room.card_mb) {
+        Some(free_mb) => fitting(charge.card_mb, free_mb, wanted),
+        None => wanted,
+    }
+}
+
+fn fitting(card_mb: u64, free_mb: u64, wanted: usize) -> usize {
+    let fits = free_mb.saturating_sub(CARD_RESERVE_MB) / card_mb.max(1);
+    usize::try_from(fits).unwrap_or(usize::MAX).clamp(1, wanted.max(1))
+}
+
 /// The provider a session of `id` starts on: the first GPU provider the
 /// engine ladder would try for it, or the CPU.
 pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
@@ -120,6 +137,17 @@ mod tests {
         assert_eq!(Charge::of(&measured, "CoreML"), Some(Charge { ram_mb: 3_000, card_mb: 0 }), "unified memory");
         assert_eq!(Charge::of(&measured, "OpenVINO"), None);
         assert_eq!(Charge::of(&needs(Priced::Unmeasured), "CUDA"), Some(Charge { ram_mb: 9_000, card_mb: 0 }));
+    }
+
+    /// As many engines as the card holds with its reserve free, never
+    /// more than asked for and never none.
+    #[test]
+    fn engines_on_a_card_are_as_many_as_fit() {
+        let free = 7_700 * 2 + CARD_RESERVE_MB;
+        assert_eq!(fitting(7_700, free, 2), 2);
+        assert_eq!(fitting(7_700, free - 1, 2), 1);
+        assert_eq!(fitting(7_700, 0, 2), 1, "one engine even when none fits: it fails or falls to the CPU as before");
+        assert_eq!(fitting(650, 11_000, 2), 2, "never more than asked");
     }
 
     /// The card counts only for a run on it, with the reserve kept free;
