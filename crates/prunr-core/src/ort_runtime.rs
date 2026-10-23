@@ -129,10 +129,33 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     // Measured (4-core i7): LaMa 5.2 s -> 3.5 s alone,
     // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
     // an OpenVINO session is unchanged.
-    Session::builder(env)
+    let builder = Session::builder(env)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
         .with_intra_op_spinning(false)
-        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))
+        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
+    if folding_is_broken(runtime_version_from_info(ort::info()).as_deref()) {
+        return builder
+            .with_disabled_optimizers("ConstantFolding")
+            .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")));
+    }
+    Ok(builder)
+}
+
+/// From ORT 1.24.1 constant folding turns an aliasing op (a Reshape of a
+/// weight) into a constant that points at memory freed later in the same
+/// pass (microsoft/onnxruntime#29788, fixed by microsoft/onnxruntime#29789
+/// for 1.28): SAM 2.1's encoder came out as values near 1e28 in some
+/// processes on a MacBook Air. 1.24 to 1.27, and a build that names no
+/// version (ours on macOS), count as affected. Off, the cut-out, upscale,
+/// colorize and depth models ran as fast on the CPU and on CUDA; SAM's
+/// encoder ~30% slower on the CPU.
+fn folding_is_broken(version: Option<&str>) -> bool {
+    let Some(version) = version else { return true };
+    let mut parts = version.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(1)), Some(Ok(minor))) => (24..28).contains(&minor),
+        _ => true,
+    }
 }
 
 /// Libraries loaded from beside the runtime before the runtime itself.
@@ -450,6 +473,19 @@ fn bundled_dylib() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Folding stays off where ORT's aliasing bug lives (1.24 to 1.27, or
+    /// no readable version); on for the rest.
+    #[test]
+    fn constant_folding_is_off_where_it_corrupts_weights() {
+        assert!(folding_is_broken(Some("1.24.1")));
+        assert!(folding_is_broken(Some("1.24.4")));
+        assert!(folding_is_broken(None));
+        assert!(folding_is_broken(Some("1.27.1")));
+        assert!(!folding_is_broken(Some("1.23.2")));
+        assert!(!folding_is_broken(Some("1.28.0")));
+        assert!(folding_is_broken(Some("odd")), "an unreadable version counts as affected");
+    }
 
     #[test]
     fn bundled_candidates_reach_the_app_bundle_frameworks_on_macos() {
