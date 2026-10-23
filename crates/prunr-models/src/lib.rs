@@ -575,13 +575,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // "graph is not acyclic" (graph-cycle validation is stricter
         // than ORT's CPU EP). FP16 variant additionally fails on a
         // quantized_cast type mismatch. Both verified 2026-04-26.
-        incompatible_eps: &["OpenVINO"],
+        // CoreML runs it slower than the CPU on a MacBook Air (287 ms
+        // against 250 ms, ORT 1.30, 2026-10-23).
+        incompatible_eps: &["OpenVINO", "CoreML"],
         needs: Needs {
             cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Never,
             migraphx: Priced::Unmeasured,
         },
@@ -642,10 +644,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // CoreML splits it into dozens of pieces (rank-6 tensors, and convs
-        // without `pads` its builder rejects) and compiles each: on a
-        // MacBook Air the first session was still compiling after 23 min
-        // (2026-10-23), where the CPU builds it in seconds.
+        // CoreML rejects its convs without `pads` ("Required param 'pad' is
+        // missing", ORT 1.30 on a MacBook Air, 2026-10-23); with MatMul+Add
+        // fused it was still compiling after 23 min.
         incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
@@ -1194,13 +1195,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        // CoreML cannot plan its pixel-unshuffle ("Error in building plan"
+        // on a MacBook Air, ORT 1.24 and 1.30, the tile pinned or free).
+        incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_800, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -1319,14 +1322,16 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // OpenVINO keeps a memory pool per compiled part: 9.7 GB and 73 s
         // compiling the 30 parts on an i7-6700 (2026-10), where the CPU
         // provider held 0.95 GB, compiled nothing, and ran the same
-        // 960×635 image in 67 s against OpenVINO's 55 s.
-        incompatible_eps: &["OpenVINO"],
+        // 960×635 image in 67 s against OpenVINO's 55 s. CoreML rejects the
+        // tail's upsampler ("axis 4 is not in valid range", ORT 1.30, a
+        // MacBook Air) after 10 s building the other parts.
+        incompatible_eps: &["OpenVINO", "CoreML"],
         needs: Needs {
             cpu: Cost::estimate(750, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_550, 7_400, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Never,
             migraphx: Priced::Unmeasured,
         },
@@ -1420,7 +1425,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
             cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(2_500, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
@@ -1453,7 +1458,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        // CoreML runs it slower than the CPU on a MacBook Air (671 ms
+        // against 431 ms, ORT 1.30, 2026-10-23).
+        incompatible_eps: &["CoreML"],
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
@@ -1461,7 +1468,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -1509,7 +1516,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // encode (it hands the pool back after).
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_000, 2_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Never,
@@ -2337,7 +2344,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 9), ("DirectML", 23), ("CoreML", 20), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 9), ("DirectML", 23), ("CoreML", 16), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
@@ -2349,7 +2356,7 @@ mod tests {
                 }
             }
         }
-        const MAC_CPU_UNMEASURED_AT_MOST: usize = 18;
+        const MAC_CPU_UNMEASURED_AT_MOST: usize = 16;
         let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
         assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
         assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
@@ -2466,15 +2473,14 @@ mod tests {
     }
 
     /// Pins the case-insensitive `eq_ignore_ascii_case` contract on
-    /// `incompatible_eps`. Silueta is the only model with a non-empty
-    /// list today (`["OpenVINO"]`) — exercising both casings ensures
-    /// callers passing "openvino" / "OPENVINO" / "OpenVINO" all match.
+    /// `incompatible_eps`: callers passing "openvino" / "OPENVINO" /
+    /// "OpenVINO" all match.
     #[test]
     fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
-        for ep in ["OpenVINO", "openvino", "OPENVINO"] {
+        for ep in ["OpenVINO", "openvino", "OPENVINO", "CoreML", "coreml"] {
             assert!(!is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
         }
-        for ep in ["CPU", "CUDA", "CoreML", "DirectML"] {
+        for ep in ["CPU", "CUDA", "DirectML"] {
             assert!(is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
         }
         // An empty list accepts every provider.
