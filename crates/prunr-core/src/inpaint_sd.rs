@@ -2402,10 +2402,15 @@ use crate::memory::{Charge, Room, Short};
 pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) -> Result<(), String> {
     let Some((provider, bundle)) = bundle_charge(id, tuning.cpu_only) else { return Ok(()) };
     let Some(room) = crate::memory::room_now(bundle, provider) else { return Ok(()) };
+    let wanted_tall_crop = tuning.tall_crop;
     fit_ram(id, tuning, room, resident(id), bundle).map_err(|short| {
         tracing::info!(?id, provider, ?room, ?short, "SD: refused to load");
         refusal(short, tuning.margin_mb)
-    })
+    })?;
+    if wanted_tall_crop && !tuning.tall_crop {
+        tracing::info!(?id, provider, ?room, "SD: no room for the tall crop; tiling instead");
+    }
+    Ok(())
 }
 
 fn refusal(short: Short, margin_mb: u64) -> String {
@@ -2438,7 +2443,6 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, residen
         };
     }
     if tuning.tall_crop && crate::memory::fit(need(true), room).is_err() {
-        tracing::info!(?room, "SD: no room for the tall crop; tiling instead");
         tuning.tall_crop = false;
     }
     crate::memory::fit(need(false), room)
