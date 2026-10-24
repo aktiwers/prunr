@@ -284,7 +284,7 @@ impl PrunrApp {
         let Some(progress) = self.runtime_install.as_mut() else { return };
         while let Ok(event) = progress.rx.try_recv() {
             progress.last_event = event.clone();
-            let name = progress.runtime.display_name();
+            let name = progress.target.display_name();
             let outcome = match event {
                 InstallEvent::Done { .. } => Ok(format!("{name} installed. Restart Prunr to apply")),
                 InstallEvent::Failed { error } => {

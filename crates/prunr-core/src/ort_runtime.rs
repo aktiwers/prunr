@@ -375,6 +375,61 @@ pub fn intel_gpu_file() -> Option<PathBuf> {
     prunr_models::runtime_store_dir().map(|root| root.join(INTEL_GPU_FILE))
 }
 
+/// Where an installed runtime keeps the NVIDIA libraries the app
+/// downloaded for it (CUDA 12, cuDNN 9), beside its own library.
+pub const NVIDIA_LIBS_DIR: &str = "nvidia";
+
+/// The NVIDIA libraries the CUDA provider links, in the order each one's
+/// own links are met. The rest (cuDNN's engines, NVRTC) load later, from
+/// beside these: NVIDIA builds them with `$ORIGIN` as their search path.
+const NVIDIA_LINKED: [&str; 6] = [
+    "libcudart.so.12",
+    "libcublasLt.so.12",
+    "libcublas.so.12",
+    "libcurand.so.10",
+    "libcufft.so.11",
+    "libcudnn.so.9",
+];
+
+/// Load the NVIDIA libraries beside the loaded runtime, when there are
+/// any, so the CUDA provider finds them: it links them by name and has no
+/// search path of its own, and the loader reuses a library already loaded
+/// under that name. Once per process; the libraries stay loaded.
+pub fn preload_nvidia_libraries() {
+    static PRELOADED: OnceLock<()> = OnceLock::new();
+    PRELOADED.get_or_init(|| {
+        let Some(dir) = loaded_dylib().and_then(Path::parent).map(|d| d.join(NVIDIA_LIBS_DIR)) else { return };
+        if !dir.is_dir() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        for name in NVIDIA_LINKED {
+            if let Err(e) = load_global(&dir.join(name)) {
+                tracing::warn!(name, %e, "NVIDIA library did not load");
+            }
+        }
+        tracing::info!(dir = %dir.display(), elapsed_ms = started.elapsed().as_millis() as u64, "NVIDIA libraries loaded");
+    });
+}
+
+/// Load `path` for the whole process and keep it loaded.
+fn load_global(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_LAZY};
+        // SAFETY: NVIDIA's libraries run no initializers that depend on
+        // the caller; they stay loaded for the process (forgotten handle).
+        let lib = unsafe { Library::open(Some(path), RTLD_LAZY | RTLD_GLOBAL) }.map_err(|e| e.to_string())?;
+        std::mem::forget(lib);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err("NVIDIA libraries are preloaded on Linux only".to_string())
+    }
+}
+
 fn read_preferred(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(PREFERRED_FILE)).ok()?;
     let name = text.trim();

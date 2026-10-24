@@ -49,7 +49,7 @@ const RUNTIME_PROMPT_SNOOZE_DAYS: i64 = 14;
 /// Replaced wholesale (never mutated in place) so the borrow checker
 /// stays happy with the receiver living in the struct.
 pub(crate) struct RuntimeInstallProgress {
-    pub(crate) runtime: crate::runtime_install::RuntimeId,
+    pub(crate) target: crate::runtime_install::InstallTarget,
     pub(crate) rx: mpsc::Receiver<crate::runtime_install::InstallEvent>,
     pub(crate) last_event: crate::runtime_install::InstallEvent,
     pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -124,10 +124,10 @@ pub struct PrunrApp {
     pub(crate) bindings: Arc<super::views::shortcuts::Bindings>,
 
     pub(crate) model_store: Option<super::views::adjustments_toolbar::ModelStoreRequest>,
-    /// When `Some`, the license-acceptance dialog is open for that model.
-    /// Set by a Download whose license is not yet accepted; cleared on
-    /// Accept (then the download starts) or Cancel.
-    pub(crate) pending_license_request: Option<prunr_models::ModelId>,
+    /// When `Some`, the license-acceptance dialog is open for that model
+    /// or for the NVIDIA libraries. Set by a Download whose license is not
+    /// yet accepted; cleared on Accept (then the download starts) or Cancel.
+    pub(crate) pending_license_request: Option<super::views::model_store::LicenseRequest>,
     /// Shown on the first frame: egui is not ready while the app is built.
     pub(crate) pending_first_toasts: Vec<String>,
     /// The accelerator runtime that could not start was named in a toast.
@@ -879,10 +879,25 @@ impl PrunrApp {
     /// Install `runtime` in the background; Settings › Hardware and the
     /// first-launch prompt both start it here. One install at a time.
     pub(crate) fn start_runtime_install(&mut self, runtime: crate::runtime_install::RuntimeId) {
+        self.start_install(crate::runtime_install::InstallTarget::Runtime(runtime));
+    }
+
+    /// The NVIDIA libraries the CUDA runtime needs, once their license is
+    /// accepted; asks for it first when it is not.
+    pub(crate) fn request_nvidia_libraries(&mut self) {
+        use super::views::model_store::LicenseRequest;
+        if self.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY) {
+            self.start_install(crate::runtime_install::InstallTarget::NvidiaLibraries);
+        } else {
+            self.pending_license_request = Some(LicenseRequest::NvidiaLibraries);
+        }
+    }
+
+    fn start_install(&mut self, target: crate::runtime_install::InstallTarget) {
         if self.runtime_install.is_some() { return; }
-        let h = crate::runtime_install::start_install(runtime);
+        let h = crate::runtime_install::start_install(target);
         self.runtime_install = Some(RuntimeInstallProgress {
-            runtime,
+            target,
             rx: h.events,
             cancel: h.cancel,
             last_event: crate::runtime_install::InstallEvent::Preparing,
@@ -1377,12 +1392,21 @@ impl PrunrApp {
         if self.model_store.is_some() && model_store::render(ctx, self) {
             self.model_store = None;
         }
-        if let Some(id) = self.pending_license_request {
-            let (close, accepted) = model_store::render_license_dialog(ctx, id);
+        if let Some(request) = self.pending_license_request {
+            use model_store::LicenseRequest;
+            let (close, accepted) = model_store::render_license_dialog(ctx, request);
             if accepted {
                 self.pending_license_request = None;
-                self.settings.accept_license(id);
-                self.download_manager.start_download(id);
+                match request {
+                    LicenseRequest::Model(id) => {
+                        self.settings.accept_license(id);
+                        self.download_manager.start_download(id);
+                    }
+                    LicenseRequest::NvidiaLibraries => {
+                        self.settings.accept(crate::runtime_install::NVIDIA_LICENSE_KEY);
+                        self.start_install(crate::runtime_install::InstallTarget::NvidiaLibraries);
+                    }
+                }
             } else if close {
                 self.pending_license_request = None;
             }

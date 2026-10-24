@@ -18,7 +18,7 @@ use crate::gui::app::PrunrApp;
 use crate::gui::hardware_cache::HardwareInstallCache;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
-use crate::runtime_install::{RuntimeChoice, RuntimeId};
+use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
 
 use super::chip::{button, ButtonKind};
 use super::{hint, kv_row};
@@ -73,13 +73,15 @@ pub(crate) struct HardwareSectionContext {
     pub offered: &'static [RuntimeId],
     pub installs: HardwareInstallCache,
     /// What is being installed, with its progress line.
-    pub installing: Option<(RuntimeId, String)>,
+    pub installing: Option<(InstallTarget, String)>,
     pub active_provider: String,
     pub sd_margin_mb: u64,
     /// Settings › Processor is CPU only: no SD part goes to a card.
     pub sd_cpu_only: bool,
     /// Why the loaded runtime's GPU provider does not run, when it does not.
     pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
+    /// The NVIDIA libraries the CUDA runtime needs are installed.
+    pub nvidia_libraries: bool,
 }
 
 /// View-layer intent the Hardware page returns so platform side effects
@@ -91,6 +93,7 @@ pub(crate) enum HardwareSectionIntent {
     Uninstall(RuntimeId),
     PreferRuntime(RuntimeChoice),
     IntelGpu(bool),
+    GetNvidiaLibraries,
     ClearCompiledCache,
     ForgetGpuFailures,
 }
@@ -186,6 +189,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
                 app.toasts.error("Could not change the Intel graphics setting: no user data folder");
             }
         },
+        HardwareSectionIntent::GetNvidiaLibraries => app.request_nvidia_libraries(),
         HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
         HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
     }
@@ -207,11 +211,12 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
             let hw_ctx = HardwareSectionContext {
                 offered: RuntimeId::OFFERED,
                 installs: app.hardware_install_cache,
-                installing: app.runtime_install.as_ref().map(|p| (p.runtime, p.last_event.status_text())),
+                installing: app.runtime_install.as_ref().map(|p| (p.target, p.last_event.status_text())),
                 active_provider: app.settings.active_backend.clone(),
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
                 sd_cpu_only: app.settings.cpu_only(),
                 gpu_failure: prunr_core::engine::gpu_start_failure(),
+                nvidia_libraries: app.hardware_install_cache.nvidia_libraries,
             };
             render_page_hardware(ui, &hw_ctx)
         }
@@ -519,6 +524,9 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         // never start; one installed anyway stays, to uninstall.
         for &rt in ctx.offered.iter().filter(|&&rt| ctx.installs.has_runtime(rt) || p.runs(rt)) {
             runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
+            if rt == RuntimeId::Cuda {
+                nvidia_libraries_row(rows, ctx, &mut intent);
+            }
         }
         if RuntimeChoice::ALL.iter().filter(|&&c| ctx.installs.can_load(c)).count() > 1 {
             rows.row("Runtime", "Which one Prunr uses. A change takes effect when you restart Prunr.", |ui| {
@@ -572,18 +580,14 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
 /// runs at a time.
 fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId, recommended: bool, intent: &mut Option<HardwareSectionIntent>) {
     let installed = ctx.installs.has_runtime(rt);
-    let installing_this = ctx.installing.as_ref().filter(|(t, _)| *t == rt);
-    let failure = ctx.gpu_failure.filter(|_| ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt)));
-    let failure_text = failure.map(|f| f.text());
+    let installing_this = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::Runtime(rt));
+    let failure = ctx.gpu_failure.filter(|_| ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt))).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
-        None if installed => failure_text.as_deref().unwrap_or("Installed."),
+        None if installed => failure.as_deref().unwrap_or("Installed."),
         None => rt.not_installed(recommended),
     };
     rows.row(rt.display_name(), status, |ui| {
-        if let Some(guide) = failure.filter(|_| installed).and_then(|f| f.install_guide()) {
-            ui.hyperlink_to("How to install", guide);
-        }
         if installing_this.is_some() {
             if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                 *intent = Some(HardwareSectionIntent::CancelInstall);
@@ -596,6 +600,35 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
             let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Install")).inner;
             if super::chip::named(resp, rt.install_button_label()).clicked() {
                 *intent = Some(HardwareSectionIntent::StartInstall(rt));
+            }
+        }
+    });
+}
+
+/// NVIDIA's CUDA and cuDNN libraries, offered once the CUDA runtime is
+/// loaded and could not start for a missing library.
+fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
+    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
+    let installing = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::NvidiaLibraries);
+    let missing_library = matches!(ctx.gpu_failure, Some(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(_) }))
+        && ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(RuntimeId::Cuda));
+    if !(ctx.nvidia_libraries || installing.is_some() || missing_library) {
+        return;
+    }
+    let status = match installing {
+        Some((_, progress)) => progress.clone(),
+        None if ctx.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
+        None => format!("CUDA Runtime needs NVIDIA's CUDA 12 and cuDNN 9 libraries. Prunr can download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
+    };
+    rows.row("NVIDIA libraries", &status, |ui| {
+        if installing.is_some() {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                *intent = Some(HardwareSectionIntent::CancelInstall);
+            }
+        } else if !ctx.nvidia_libraries {
+            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Download")).inner;
+            if super::chip::named(resp, "Download NVIDIA libraries").clicked() {
+                *intent = Some(HardwareSectionIntent::GetNvidiaLibraries);
             }
         }
     });

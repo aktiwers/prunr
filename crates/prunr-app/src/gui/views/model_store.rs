@@ -100,7 +100,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
         match action {
             CardAction::Download | CardAction::Retry => {
                 if requires_license_gate(id, &app.settings) {
-                    app.pending_license_request = Some(id);
+                    app.pending_license_request = Some(LicenseRequest::Model(id));
                 } else {
                     app.download_manager.start_download(id);
                 }
@@ -338,19 +338,37 @@ pub(crate) fn requires_license_gate(id: ModelId, settings: &super::super::settin
     desc.requires_license_acceptance() && !settings.has_accepted_license(id)
 }
 
+/// What a license dialog asks the user to accept before a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LicenseRequest {
+    Model(ModelId),
+    /// NVIDIA's CUDA and cuDNN libraries for the CUDA runtime.
+    NvidiaLibraries,
+}
+
 /// License-acceptance modal. Returns `(close_requested, accepted)`:
 /// - `close_requested`: the modal should be dismissed (Cancel or backdrop)
 /// - `accepted`: the user clicked Accept — caller persists + starts download
 pub(crate) fn render_license_dialog(
     ctx: &egui::Context,
-    id: ModelId,
+    request: LicenseRequest,
 ) -> (bool, bool) {
-    let Some(desc) = model_descriptor(id) else { return (true, false) };
-    // A bundled model was accepted at build time and never asks.
-    if desc.source.is_bundled() {
-        return (true, false);
-    }
-    let license = desc.license();
+    let (name, license, links): (&str, &str, Vec<&str>) = match request {
+        LicenseRequest::Model(id) => {
+            let Some(desc) = model_descriptor(id) else { return (true, false) };
+            // A bundled model was accepted at build time and never asks.
+            if desc.source.is_bundled() {
+                return (true, false);
+            }
+            let license = desc.license();
+            (desc.display_name, license.license, vec![license.license_url, license.source_url])
+        }
+        LicenseRequest::NvidiaLibraries => (
+            "NVIDIA CUDA 12 and cuDNN 9 libraries",
+            "NVIDIA CUDA Toolkit EULA and cuDNN Software License Agreement",
+            crate::runtime_install::NVIDIA_LICENSE_URLS.to_vec(),
+        ),
+    };
 
     let mut close_requested = false;
     let mut accepted = false;
@@ -360,27 +378,28 @@ pub(crate) fn render_license_dialog(
         [theme::STANDARD_MODAL_WIDTH, 360.0],
         |ui| {
             ui.label(
-                RichText::new(desc.display_name)
+                RichText::new(name)
                     .size(theme::FONT_SIZE_BODY)
                     .strong()
                     .color(theme::TEXT_PRIMARY),
             );
             ui.label(
-                RichText::new(format!("License: {}", license.license))
+                RichText::new(format!("License: {license}"))
                     .size(theme::FONT_SIZE_BODY)
                     .color(theme::TEXT_PRIMARY),
             );
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new("This model is distributed under terms that you must \
+                RichText::new("This download comes under terms that you must \
                      review and accept before downloading. The full text \
                      is published at the links below.".to_string())
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(theme::SPACE_XS);
-            ui.hyperlink_to(license.license_url, license.license_url);
-            ui.hyperlink_to(license.source_url, license.source_url);
+            for link in &links {
+                ui.hyperlink_to(*link, *link);
+            }
             ui.add_space(theme::SPACE_MD);
 
             ui.horizontal(|ui| {
