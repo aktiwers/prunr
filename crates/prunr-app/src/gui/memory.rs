@@ -304,14 +304,14 @@ mod tests {
     /// refactor would silently mis-charge admission for new models.
     #[test]
     fn per_engine_cost_is_descriptor_driven() {
-        let silueta = engine_cost_on(ModelKind::Silueta, "CPU");
-        let u2net   = engine_cost_on(ModelKind::U2net, "CPU");
-        let birefnet = engine_cost_on(ModelKind::BiRefNetLite, "CPU");
-        // BiRefNet's bigger activation footprint must charge strictly
-        // more than Silueta — the whole point of model-aware admission.
-        assert!(birefnet > u2net,   "BiRefNet ({birefnet}) ≤ U2Net ({u2net})");
-        assert!(u2net    > silueta, "U2Net ({u2net}) ≤ Silueta ({silueta})");
-        let registry = prunr_models::descriptor(prunr_models::ModelId::Silueta).map(|d| d.needs.host_cpu().host_mb).unwrap();
-        assert_eq!(silueta, registry as usize * 1024 * 1024, "the registry's MB, as bytes");
+        for model in [ModelKind::Silueta, ModelKind::U2net, ModelKind::BiRefNetLite] {
+            let registry = prunr_models::descriptor(model.into()).map(|d| d.needs.host_cpu().host_mb).unwrap();
+            assert_eq!(engine_cost_on(model, "CPU"), registry as usize * 1024 * 1024, "{model:?}: the registry's MB, as bytes");
+        }
+        // BiRefNet's bigger activation footprint must charge more than
+        // Silueta: the whole point of model-aware admission. Measured
+        // figures order the small models differently per platform.
+        let (silueta, birefnet) = (engine_cost_on(ModelKind::Silueta, "CPU"), engine_cost_on(ModelKind::BiRefNetLite, "CPU"));
+        assert!(birefnet > silueta, "BiRefNet ({birefnet}) ≤ Silueta ({silueta})");
     }
 }
