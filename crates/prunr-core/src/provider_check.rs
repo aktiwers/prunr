@@ -5,8 +5,7 @@
 //! (`ep_compat`), under the same scope (app, runtime build, drivers).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +26,6 @@ pub struct Check {
 pub type Checker = fn(prunr_models::ModelId, &str, Weights) -> Option<Check>;
 
 static CHECKER: OnceLock<Checker> = OnceLock::new();
-static OFF: AtomicBool = AtomicBool::new(false);
 
 /// What the person using the app is told: a check starting (it takes
 /// seconds, once), and a provider passed over.
@@ -66,14 +64,10 @@ pub fn tell(notice: Notice) {
 }
 
 /// The app's checker, set once at start by every process that builds
-/// sessions.
+/// sessions for use; without one (the bench, the check's own process)
+/// nothing is checked.
 pub fn set_checker(checker: Checker) {
     let _ = CHECKER.set(checker);
-}
-
-/// No checks in this process: the check's own runs, and the bench.
-pub fn turn_off() {
-    OFF.store(true, Ordering::Relaxed);
 }
 
 /// Why a session of `model` with `weights` passes over `ep`: the check
@@ -81,19 +75,16 @@ pub fn turn_off() {
 /// verdict yet, once per process; another build of the same pair waits
 /// for it and reads its verdict.
 pub(crate) fn rejection(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<String> {
-    if OFF.load(Ordering::Relaxed) {
-        return None;
-    }
     rejection_by(*CHECKER.get()?, model, weights, ep)
 }
 
+type Pair = (EpKind, prunr_models::ModelId, Weights);
+
+/// Each pair's lock, holding whether this process asked for its check.
+static PAIRS: LazyLock<Mutex<HashMap<Pair, Arc<Mutex<bool>>>>> = LazyLock::new(Mutex::default);
+
 fn rejection_by(checker: Checker, model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<String> {
-    let pair = (ep, model, weights);
-    let lock = {
-        static PAIRS: Mutex<Option<HashMap<Pair, Arc<Mutex<bool>>>>> = Mutex::new(None);
-        let mut pairs = PAIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(pairs.get_or_insert_with(HashMap::new).entry(pair).or_default())
-    };
+    let lock = Arc::clone(PAIRS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry((ep, model, weights)).or_default());
     let mut asked = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     crate::ep_compat::refresh();
     if crate::ep_compat::has_passed(ep, model, weights) {
@@ -103,10 +94,7 @@ fn rejection_by(checker: Checker, model: prunr_models::ModelId, weights: Weights
         tracing::info!(?model, ep = %ep, ?weights, "checking the provider against the CPU, once");
         tell(Notice::Checking { model });
         if let Some(check) = checker(model, ep.as_str(), weights) {
-            record(model, &check);
-            if let Some(reason) = check.rejected {
-                tell(Notice::PassedOver { model, reason });
-            }
+            record(model, ep, weights, check);
         }
     }
     let rejected = crate::ep_compat::failure(ep, model, weights)?;
@@ -114,23 +102,27 @@ fn rejection_by(checker: Checker, model: prunr_models::ModelId, weights: Weights
     Some(rejected)
 }
 
-type Pair = (EpKind, prunr_models::ModelId, Weights);
-
-fn record(model: prunr_models::ModelId, check: &Check) {
-    let (Some(ep), Some(weights)) = (crate::engine::ep_named(&check.provider), Weights::labelled(&check.weights)) else {
-        tracing::warn!(?model, ?check, "a check named no provider this build has");
+/// `check`'s verdict for the pair asked, when its GPU side ran that pair
+/// (its ladder walks the same providers, failures and weights in the same
+/// order, so it does unless one changed meanwhile).
+fn record(model: prunr_models::ModelId, ep: EpKind, weights: Weights, check: Check) {
+    if check.provider != ep.as_str() || check.weights != weights.label() {
+        tracing::warn!(?model, ep = %ep, ?weights, ?check, "the check ran another provider; nothing recorded");
         return;
-    };
-    match &check.rejected {
+    }
+    match check.rejected {
         None => crate::ep_compat::record_pass(ep, model, weights),
-        Some(reason) => crate::ep_compat::record_failure(ep, model, weights, reason),
+        Some(reason) => {
+            crate::ep_compat::record_failure(ep, model, weights, &reason);
+            tell(Notice::PassedOver { model, reason });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_notice_names_the_model_and_the_reason() {

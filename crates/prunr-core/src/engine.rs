@@ -62,24 +62,6 @@ impl EpKind {
     }
 }
 
-/// The provider this build calls `name`.
-pub(crate) fn ep_named(name: &str) -> Option<EpKind> {
-    [
-        #[cfg(not(target_os = "macos"))]
-        EpKind::OpenVino,
-        #[cfg(not(target_os = "macos"))]
-        EpKind::Cuda,
-        #[cfg(target_os = "linux")]
-        EpKind::MiGraphX,
-        #[cfg(target_os = "macos")]
-        EpKind::CoreMl,
-        #[cfg(windows)]
-        EpKind::DirectMl,
-    ]
-    .into_iter()
-    .find(|ep| ep.as_str() == name)
-}
-
 impl std::fmt::Display for EpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -705,11 +687,6 @@ impl Weights {
             Weights::Fp16 => "FP16",
             Weights::Int8 => "INT8",
         }
-    }
-
-    /// The weights `label` names.
-    pub fn labelled(label: &str) -> Option<Self> {
-        [Weights::Fp32, Weights::Fp16, Weights::Int8].into_iter().find(|w| w.label() == label)
     }
 }
 
