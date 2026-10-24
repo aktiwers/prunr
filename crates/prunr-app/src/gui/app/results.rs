@@ -891,8 +891,7 @@ impl PrunrApp {
     /// Returns whether anything landed on an image this frame.
     pub(crate) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
         for notice in crate::gui::provider_notices::take(ctx) {
-            use crate::gui::provider_notices::{shown_for, text};
-            self.toasts.info(text(&notice)).duration(shown_for(&notice));
+            self.toasts.info(notice.text()).duration(crate::gui::provider_notices::shown_for(&notice));
         }
         let mut landed = false;
         let mut decode_arrived = false;
