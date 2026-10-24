@@ -49,6 +49,8 @@ pub enum Family {
     Eraser,
     /// The Stable Diffusion erasers.
     Diffusion,
+    /// The Magic Brush.
+    Selection,
 }
 
 impl Family {
@@ -67,6 +69,7 @@ impl Family {
             Self::Upscale | Self::Colorize => "RGB",
             Self::Depth => "the depth map",
             Self::Eraser | Self::Diffusion => "RGB inside the erased square",
+            Self::Selection => "the masks of eight clicks",
         }
     }
 
@@ -81,10 +84,13 @@ impl Family {
             Self::Depth => Tolerance { mean_abs: 3.0, over_2: 0.15 },
             Self::Eraser => Tolerance { mean_abs: 4.0, over_2: 0.25 },
             Self::Diffusion => Tolerance { mean_abs: 24.0, over_2: 0.90 },
+            // A cell is in or out: 0.5% of cells flipped across the clicks
+            // (the CPU's masks on CUDA and on a Mac's GPU flipped under 0.1%).
+            Self::Selection => Tolerance { mean_abs: 1.3, over_2: 0.005 },
         }
     }
 
-    pub const ALL: [Family; 6] = [Self::Segmentation, Self::Upscale, Self::Colorize, Self::Depth, Self::Eraser, Self::Diffusion];
+    pub const ALL: [Family; 7] = [Self::Segmentation, Self::Upscale, Self::Colorize, Self::Depth, Self::Eraser, Self::Diffusion, Self::Selection];
 }
 
 /// Where a model sits in the bench, from one match over its category.
@@ -106,7 +112,8 @@ impl Placement {
             ModelCategory::Inpaint if id.is_sd_family() => Self::Family(Family::Diffusion),
             ModelCategory::Inpaint if id == ModelId::TaesdFp16 => Self::InsideDiffusion,
             ModelCategory::Inpaint => Self::Family(Family::Eraser),
-            ModelCategory::EdgeDetection | ModelCategory::Selection | ModelCategory::Face => Self::CpuByDesign,
+            ModelCategory::Selection => Self::Family(Family::Selection),
+            ModelCategory::EdgeDetection | ModelCategory::Face => Self::CpuByDesign,
         })
     }
 }
@@ -467,7 +474,36 @@ fn open<'a>(family: Family, id: ModelId, inputs: &'a Inputs, cpu_only: bool) -> 
         Family::Segmentation | Family::Upscale | Family::Colorize | Family::Depth => {
             Box::new(EngineRun::open(family, id, inputs, cpu_only)?)
         }
+        Family::Selection => Box::new(SelectionRun::open(inputs, cpu_only)?),
     })
+}
+
+/// The Magic Brush as the app runs it: the encoder on the side's
+/// provider, the decoder on the CPU, a click at eight fixed places.
+struct SelectionRun<'a> {
+    sessions: std::sync::Arc<crate::gui::processor::SamSessions>,
+    pick: SessionPick,
+    inputs: &'a Inputs,
+}
+
+/// Where the clicks land, as fractions of the picture's width and height.
+const CLICKS: [(f32, f32); 8] = [(0.5, 0.5), (0.2, 0.3), (0.8, 0.3), (0.3, 0.8), (0.7, 0.7), (0.5, 0.15), (0.15, 0.6), (0.85, 0.85)];
+
+impl<'a> SelectionRun<'a> {
+    fn open(inputs: &'a Inputs, cpu_only: bool) -> Result<Self, String> {
+        let (sessions, provider) = crate::gui::processor::magic_brush_sessions(cpu_only)?;
+        Ok(Self { sessions, pick: SessionPick { provider, ..SessionPick::default() }, inputs })
+    }
+}
+
+impl Run for SelectionRun<'_> {
+    fn pick(&self) -> &SessionPick {
+        &self.pick
+    }
+
+    fn run(&mut self) -> Result<Vec<u8>, String> {
+        crate::gui::processor::magic_brush_masks(&self.sessions, &self.inputs.photo, &CLICKS)
+    }
 }
 
 /// Background removal, upscale, colorize, depth: one `OrtEngine`.
@@ -664,7 +700,8 @@ mod tests {
         assert_eq!(Family::of(ModelId::Migan), Some(Family::Eraser));
         assert_eq!(Family::of(ModelId::RoremFp16), Some(Family::Diffusion));
         assert_eq!(Family::of(ModelId::RealEsrganX2Plus), Some(Family::Upscale));
-        assert!(cpu_by_design(ModelId::Teed) && cpu_by_design(ModelId::FaceGfpgan) && cpu_by_design(ModelId::Sam21HieraSmall));
+        assert_eq!(Family::of(ModelId::Sam21HieraSmall), Some(Family::Selection));
+        assert!(cpu_by_design(ModelId::Teed) && cpu_by_design(ModelId::FaceGfpgan));
         assert!(!in_catalog(ModelId::TaesdFp16), "TAESD runs inside a Stable Diffusion erase");
     }
 

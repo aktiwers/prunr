@@ -306,8 +306,8 @@ impl<R> RunDone<R> {
 }
 
 /// SAM 2 encoder + decoder sessions, built on first use and reused for
-/// every click until Magic Brush is deactivated. Both run on the CPU EP;
-/// ~180 MB resident while cached.
+/// every click until Magic Brush is deactivated: the encoder on a GPU
+/// provider when there is one, the decoder on the CPU.
 pub(crate) struct SamSessions {
     encoder: Mutex<ort::session::Session>,
     decoder: Mutex<ort::session::Session>,
@@ -346,6 +346,31 @@ fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamS
 /// Whether the slot holds sessions built for `cpu_only`.
 fn sam_sessions_built(slot: &SamSessionSlot, cpu_only: bool) -> bool {
     slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|s| s.cpu_only == cpu_only)
+}
+
+/// The Magic Brush's sessions as the app builds them, and the provider
+/// the encoder landed on. For the bench.
+pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<(Arc<SamSessions>, String), String> {
+    let sessions = ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)?;
+    let provider = sessions.encoder_provider.clone();
+    Ok((sessions, provider))
+}
+
+/// `photo` encoded once, then each of `clicks` (fractions of its width
+/// and height) decoded: its best candidate's mask, 0 or 255 a cell, one
+/// after the other. For the bench.
+pub(crate) fn magic_brush_masks(sessions: &SamSessions, photo: &image::RgbaImage, clicks: &[(f32, f32)]) -> Result<Vec<u8>, String> {
+    const CELLS: usize = (prunr_core::sam::SAM_MASK_RESOLUTION * prunr_core::sam::SAM_MASK_RESOLUTION) as usize;
+    let embedding = run_sam_encoder_inline(sessions, photo)?;
+    let (w, h) = photo.dimensions();
+    let mut masks = Vec::with_capacity(clicks.len() * CELLS);
+    for &(fx, fy) in clicks {
+        let prompt = prunr_core::sam::prompt::build_click_prompt(fx * w as f32, fy * h as f32, w, h);
+        let decoded = run_sam_decoder_inline(sessions, &embedding, &prompt)?;
+        let best = (0..3).max_by(|&a, &b| decoded.iou_predictions[a].total_cmp(&decoded.iou_predictions[b])).unwrap_or(0);
+        masks.extend(decoded.masks[best * CELLS..(best + 1) * CELLS].iter().map(|&logit| if logit > 0.0 { 255 } else { 0 }));
+    }
+    Ok(masks)
 }
 
 /// One Magic Brush encode of `photo` and a click on its middle, as the
