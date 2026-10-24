@@ -12,8 +12,12 @@
 //! also names its files' checksums, so a new download of it is tried
 //! again. A failure the device had, not the model (out of memory, a
 //! device removed or hung), is never recorded.
+//!
+//! A model checked against the CPU on a provider lands here too: a pass
+//! in `passed`, so it is not checked again, and a rejection (slower than
+//! the CPU, or its output off the CPU's) as a failure with the reason.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -62,6 +66,15 @@ struct CacheFile {
     #[serde(rename = "version")]
     scope: String,
     failures: HashMap<String, String>,
+    #[serde(default)]
+    passed: BTreeSet<String>,
+}
+
+/// What the file holds for one scope.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Entries {
+    failures: HashMap<String, String>,
+    passed: BTreeSet<String>,
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -118,10 +131,10 @@ fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Opt
     }
 }
 
-/// The failures as last read or written, and the file's stamp then.
+/// The entries as last read or written, and the file's stamp then.
 #[derive(Default)]
 struct Store {
-    failures: HashMap<String, String>,
+    entries: Entries,
     stamp: Option<(SystemTime, u64)>,
 }
 
@@ -131,7 +144,7 @@ fn cache() -> &'static Mutex<Store> {
         let mut store = Store::default();
         if let Some(path) = cache_path() {
             store.stamp = stamp(&path);
-            store.failures = load_from(&path, &scope()).unwrap_or_default();
+            store.entries = load_from(&path, &scope()).unwrap_or_default();
         }
         Mutex::new(store)
     })
@@ -142,20 +155,20 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// The failures in the file at `path` recorded under `scope`; empty for
+/// The entries in the file at `path` recorded under `scope`; empty for
 /// another scope, `None` when the file cannot be read.
-fn load_from(path: &Path, scope: &str) -> Option<HashMap<String, String>> {
+fn load_from(path: &Path, scope: &str) -> Option<Entries> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.scope == scope { file.failures } else { HashMap::new() })
+    Some(if file.scope == scope { Entries { failures: file.failures, passed: file.passed } } else { Entries::default() })
 }
 
 /// Written whole and renamed into place, so another process reading it
 /// never sees half a file.
-fn save_to(path: &Path, scope: &str, failures: &HashMap<String, String>) {
+fn save_to(path: &Path, scope: &str, entries: &Entries) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile { scope: scope.to_string(), failures: failures.clone() };
+    let file = CacheFile { scope: scope.to_string(), failures: entries.failures.clone(), passed: entries.passed.clone() };
     let Ok(json) = serde_json::to_string_pretty(&file) else { return };
     let draft = path.with_extension(format!("json.{}", std::process::id()));
     if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
@@ -166,7 +179,7 @@ fn save_to(path: &Path, scope: &str, failures: &HashMap<String, String>) {
 
 fn save(store: &mut Store) {
     let Some(path) = cache_path() else { return };
-    save_to(&path, &scope(), &store.failures);
+    save_to(&path, &scope(), &store.entries);
     store.stamp = stamp(&path);
 }
 
@@ -185,8 +198,8 @@ impl Store {
         if now.is_none() || now == self.stamp {
             return;
         }
-        if let Some(failures) = load_from(path, scope) {
-            self.failures = failures;
+        if let Some(entries) = load_from(path, scope) {
+            self.entries = entries;
             self.stamp = now;
         }
     }
@@ -201,7 +214,30 @@ pub(crate) fn warm() {
 
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
     let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.failures.contains_key(&key(ep, model, weights))
+    store.entries.failures.contains_key(&key(ep, model, weights))
+}
+
+/// Why these weights of the model are on the EP's skip list.
+pub(crate) fn failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> Option<String> {
+    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.entries.failures.get(&key(ep, model, weights)).cloned()
+}
+
+/// Whether these weights of the model passed the check against the CPU
+/// on the EP.
+pub(crate) fn has_passed(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
+    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.entries.passed.contains(&key(ep, model, weights))
+}
+
+/// Idempotent, like `record_failure`.
+pub(crate) fn record_pass(ep: EpKind, model: prunr_models::ModelId, weights: Weights) {
+    let k = key(ep, model, weights);
+    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if store.entries.passed.insert(k) {
+        tracing::info!(%ep, ?model, ?weights, "recording a passed check against the CPU");
+        save(&mut store);
+    }
 }
 
 /// Idempotent. A transient failure is logged and not recorded. A failed
@@ -213,17 +249,18 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
     }
     let k = key(ep, model, weights);
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if store.failures.contains_key(&k) { return; }
+    if store.entries.failures.contains_key(&k) { return; }
     tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
-    store.failures.insert(k, error.to_string());
+    store.entries.failures.insert(k, error.to_string());
     save(&mut store);
 }
 
-/// Wipe the cache. Returns the number of entries removed.
+/// Wipe the cache, passed checks too, so each is checked again. Returns
+/// the number of failures removed.
 pub fn clear() -> usize {
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let n = store.failures.len();
-    store.failures.clear();
+    let n = store.entries.failures.len();
+    store.entries = Entries::default();
     save(&mut store);
     n
 }
@@ -340,11 +377,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
-        let failures = HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]);
-        save_to(&path, &then, &failures);
-        assert_eq!(load_from(&path, &then), Some(failures));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(HashMap::new()));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(HashMap::new()));
+        let entries = Entries {
+            failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]),
+            passed: BTreeSet::from(["DirectML::Silueta".to_string()]),
+        };
+        save_to(&path, &then, &entries);
+        assert_eq!(load_from(&path, &then), Some(entries));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Entries::default()));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Entries::default()));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
     }
 
@@ -354,15 +394,15 @@ mod tests {
     fn a_reset_by_another_process_is_seen_on_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
-        let failures = HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]);
-        save_to(&path, "scope", &failures);
-        let mut worker = Store { failures, stamp: stamp(&path) };
+        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]), passed: BTreeSet::new() };
+        save_to(&path, "scope", &entries);
+        let mut worker = Store { entries, stamp: stamp(&path) };
         worker.refresh_from(&path, "scope");
-        assert_eq!(worker.failures.len(), 1, "an unchanged file keeps the list");
+        assert_eq!(worker.entries.failures.len(), 1, "an unchanged file keeps the list");
         std::thread::sleep(std::time::Duration::from_millis(20));
-        save_to(&path, "scope", &HashMap::new());
+        save_to(&path, "scope", &Entries::default());
         worker.refresh_from(&path, "scope");
-        assert!(worker.failures.is_empty(), "the other process's reset is taken in");
+        assert!(worker.entries.failures.is_empty(), "the other process's reset is taken in");
     }
 
     #[test]
@@ -376,6 +416,14 @@ mod tests {
         assert!(!is_known_failure(ep, model, Weights::Fp16));
     }
 
+    /// A file written before checks existed reads with none passed.
+    #[test]
+    fn a_file_without_passed_checks_reads() {
+        let parsed: CacheFile = serde_json::from_str(r#"{"version":"v","failures":{"CUDA::U2net":"broke"}}"#).unwrap();
+        assert!(parsed.passed.is_empty());
+        assert_eq!(parsed.failures.len(), 1);
+    }
+
     #[test]
     fn cache_file_json_shape_is_stable() {
         // Pre-existing user cache JSON — must still parse and round-trip
@@ -386,6 +434,7 @@ mod tests {
                 "OpenVINO::Silueta".to_string(),
                 "graph cycles".to_string(),
             )]),
+            passed: BTreeSet::new(),
         };
         let json = serde_json::to_string(&stale).unwrap();
         assert!(json.contains("\"OpenVINO::Silueta\""));

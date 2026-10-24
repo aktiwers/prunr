@@ -6,6 +6,7 @@
 //! The runs go through the same core entry points as the app, so a
 //! mismatch here is a mismatch a user sees.
 
+pub mod check;
 pub mod input;
 pub mod needs;
 pub mod report;
@@ -284,7 +285,7 @@ pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Ev
     let total = models.len();
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
-        let row = bench_model(id, inputs, runs, &mut |stage| {
+        let row = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
         on(Event::Done(Box::new(row)));
@@ -295,7 +296,14 @@ fn display_name(id: ModelId) -> &'static str {
     prunr_models::descriptor(id).map_or(id.stable_name(), |d| d.display_name)
 }
 
-fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'static str)) -> Row {
+/// Timed runs on each side after the first, untimed one.
+#[derive(Debug, Clone, Copy)]
+struct Runs {
+    cpu: u32,
+    gpu: u32,
+}
+
+fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&'static str)) -> Row {
     let family = Family::of(id);
     let mut row = Row {
         model: display_name(id),
@@ -320,7 +328,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
     // A heavy model's CPU run takes minutes; one is enough for a reference.
-    let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs };
+    let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs.cpu };
     let (cpu, cpu_samples) = if cpu_reference {
         let (side, samples) = measure(family, id, inputs, true, cpu_runs, stage);
         (Some(side), samples)
@@ -331,7 +339,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
     let (gpu, gpu_samples) = match gpu_passed_over(&prunr_core::engine::gpu_ladder(id)) {
         Some(passed_over) => (passed_over, None),
         None => {
-            let (side, samples) = measure(family, id, inputs, false, runs, stage);
+            let (side, samples) = measure(family, id, inputs, false, runs.gpu, stage);
             (Gpu::Ran(side), samples)
         }
     };

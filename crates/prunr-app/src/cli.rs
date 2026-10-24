@@ -293,6 +293,11 @@ pub struct BenchArgs {
     /// own process by `--needs`.
     #[arg(long, hide = true, value_name = "MODEL:SIDE")]
     pub needs_one: Option<String>,
+
+    /// The app's once-per-machine check of a model's GPU path against the
+    /// CPU, run in its own process; prints the verdict on one line.
+    #[arg(long, hide = true, value_name = "MODEL")]
+    pub check: Option<String>,
 }
 
 /// Upscale model selection.
@@ -1411,6 +1416,9 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     if let Some(one) = &args.needs_one {
         return run_needs_one(one, args.image.as_deref());
     }
+    if let Some(name) = &args.check {
+        return run_check(name);
+    }
     let models = match bench::select(&args.models, args.heavy, prunr_models::is_available) {
         Ok(models) => models,
         Err(e) => {
@@ -1480,6 +1488,21 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
 }
 
 /// One `--needs` point, in this process, printed for the parent.
+fn run_check(name: &str) -> i32 {
+    use prunr_app::bench;
+    let Some(id) = bench::model_named(name) else {
+        eprintln!("error: unknown model {name}");
+        return 1;
+    };
+    if let Some(check) = bench::check::judge(&bench::check::bench_once(id)) {
+        match serde_json::to_string(&check) {
+            Ok(json) => println!("{}{json}", bench::check::LINE),
+            Err(e) => tracing::warn!(%e, "could not write the check's verdict"),
+        }
+    }
+    0
+}
+
 fn run_needs_one(one: &str, image: Option<&std::path::Path>) -> i32 {
     let Some((name, side)) = one.split_once(':') else {
         eprintln!("error: --needs-one takes MODEL:cpu or MODEL:gpu");
