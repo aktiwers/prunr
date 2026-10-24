@@ -88,6 +88,24 @@ pub enum Crash {
     Other(String),
 }
 
+impl Crash {
+    /// How a process that ended with `status` stopped.
+    pub(crate) fn of(status: std::process::ExitStatus) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return match signal {
+                    9 => Crash::OutOfMemory,
+                    11 => Crash::Other("crashed (segmentation fault)".into()),
+                    _ => Crash::Other(format!("killed by signal {signal}")),
+                };
+            }
+        }
+        Crash::Other(status.code().map_or_else(|| "terminated unexpectedly".into(), |code| format!("exited with code {code}")))
+    }
+}
+
 impl std::fmt::Display for Crash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -495,20 +513,7 @@ impl SubprocessManager {
 
     fn crash(&mut self) -> Crash {
         match self.child.try_wait() {
-            Ok(Some(status)) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    if let Some(signal) = status.signal() {
-                        return match signal {
-                            9 => Crash::OutOfMemory,
-                            11 => Crash::Other("crashed (segmentation fault)".into()),
-                            _ => Crash::Other(format!("killed by signal {signal}")),
-                        };
-                    }
-                }
-                Crash::Other(status.code().map_or_else(|| "terminated unexpectedly".into(), |code| format!("exited with code {code}")))
-            }
+            Ok(Some(status)) => Crash::of(status),
             _ => Crash::Unresponsive,
         }
     }
@@ -530,7 +535,7 @@ impl Drop for SubprocessManager {
 /// The binary to run a worker from: this process's own. On Linux an update
 /// can replace the file while the app runs (the path then reads
 /// "… (deleted)"); /proc/self/exe still reaches the binary running.
-fn worker_exe() -> Result<std::path::PathBuf, String> {
+pub(crate) fn worker_exe() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
         let own = std::path::PathBuf::from("/proc/self/exe");

@@ -61,9 +61,8 @@ fn main() {
     prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
     // The bench measures providers as they are; every other mode checks
     // a model on a GPU provider against the CPU before using it.
-    match cli.command {
-        Some(cli::Command::Bench(_)) => prunr_core::provider_check::turn_off(),
-        None => prunr_core::provider_check::set_checker(prunr_app::bench::check::run_in_child),
+    if cli.command.is_none() {
+        prunr_core::provider_check::set_checker(prunr_app::bench::check::run_in_child);
     }
 
     if cli.clear_ep_cache {

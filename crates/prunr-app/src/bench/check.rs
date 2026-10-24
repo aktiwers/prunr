@@ -74,7 +74,7 @@ pub fn run_in_child(model: ModelId, provider: &str, weights: Weights) -> Option<
         tracing::info!(?model, provider, "not enough memory free to check the provider; using it unchecked");
         return None;
     }
-    let exe = std::env::current_exe().ok()?;
+    let exe = crate::subprocess::manager::worker_exe().ok()?;
     let mut child = Command::new(exe)
         .args(["bench", "--check", model.stable_name()])
         .stdout(Stdio::piped())
@@ -115,15 +115,17 @@ fn ended(status: std::process::ExitStatus, out: &str, provider: &str, weights: W
     if let Some(check) = parse(out) {
         return Some(check);
     }
-    #[cfg(unix)]
-    let killed = std::os::unix::process::ExitStatusExt::signal(&status) == Some(9);
-    #[cfg(not(unix))]
-    let killed = false;
-    (!status.success() && !killed).then(|| Check {
-        provider: provider.to_string(),
-        weights: weights.label().to_string(),
-        rejected: Some(format!("its check on {provider} stopped ({status})")),
-    })
+    if status.success() {
+        return None;
+    }
+    match crate::subprocess::manager::Crash::of(status) {
+        crate::subprocess::manager::Crash::OutOfMemory => None,
+        crash => Some(Check {
+            provider: provider.to_string(),
+            weights: weights.label().to_string(),
+            rejected: Some(format!("its check on {provider} {crash}")),
+        }),
+    }
 }
 
 fn parse(out: &str) -> Option<Check> {
@@ -204,7 +206,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let status = |raw| std::process::ExitStatus::from_raw(raw);
         let crashed = ended(status(11), "", "CoreML", Weights::Fp32).and_then(|c| c.rejected).expect("rejected");
-        assert!(crashed.starts_with("its check on CoreML stopped"), "{crashed}");
+        assert_eq!(crashed, "its check on CoreML crashed (segmentation fault)");
         assert!(ended(status(256), "", "CUDA", Weights::Fp32).is_some(), "an error exit");
         assert_eq!(ended(status(9), "", "CUDA", Weights::Fp32), None, "killed for memory");
         assert_eq!(ended(status(0), "", "CUDA", Weights::Fp32), None, "nothing to judge");
