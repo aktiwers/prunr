@@ -643,8 +643,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         // CoreML rejects its convs without `pads` ("Required param 'pad' is
-        // missing", ORT 1.30 on a MacBook Air, 2026-10-23); with MatMul+Add
-        // fused it was still compiling after 23 min.
+        // missing", ORT 1.30). Given explicit zero pads it compiles and
+        // matches the CPU, at half its speed (17.6 s against 8.2 s on a
+        // MacBook Air, 2026-10-24): ORT's CoreML provider runs none of its
+        // ScatterND, Equal, Expand, ConstantOfShape, Mod or Floor nodes, so
+        // the graph runs in pieces passed between GPU and CPU.
         incompatible_eps: &["CoreML"],
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
