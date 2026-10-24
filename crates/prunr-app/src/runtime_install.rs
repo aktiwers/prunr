@@ -225,6 +225,11 @@ pub enum InstallTarget {
 }
 
 impl InstallTarget {
+    /// It downloads NVIDIA's libraries, under their license.
+    pub fn needs_nvidia_license(self) -> bool {
+        matches!(self, Self::Runtime(RuntimeId::Cuda) | Self::NvidiaLibraries)
+    }
+
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Runtime(rt) => rt.display_name(),
