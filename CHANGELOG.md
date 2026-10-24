@@ -6,6 +6,9 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- **The graphics card where it wins.** The first time a model would run on the graphics card, Prunr checks it there once against the CPU, and keeps the graphics card only where it is faster and gives the same result. A note says so while it checks (seconds, once per model); Settings › Hardware › Graphics card checks runs them again.
+- **CUDA Runtime brings its own NVIDIA libraries** (Linux). Installing it downloads NVIDIA's CUDA and cuDNN libraries with it (about 2 GB, under NVIDIA's license), so it never depends on the ones installed on the computer.
+- **Magic Brush on the Mac's graphics chip:** about four times faster on an M1 (0.5 s per photo against 2 s), with the same selections.
 - **DirectML built into Windows.** The Windows download runs background removal, upscaling, colorize and the erasers on the graphics card: any DirectX 12 card, NVIDIA, AMD or Intel. A computer without one runs everything on the processor as before, from the same download. OpenVINO stays an optional download in Settings › Hardware; with it installed, a Runtime choice (Built in or OpenVINO) says which one Prunr uses after a restart. The Windows app takes about 24 MB more disk space. `prunr --doctor` shows the choice.
 - **Model Store in the top bar:** a store icon beside Settings opens it from anywhere.
 - **See the faces Faces found.** While the Faces strip or panel is open, every face it found is ringed in the accent purple, around the exact area it redraws; a face it missed has no ring. The rings pop in with a bounce and one bright glow as soon as the search finds the faces, before any is redrawn, then rest; under Largest the faces left alone are faint. An Outline switch in the strip turns them off.
@@ -50,6 +53,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- A model that does not fit in the free memory of the graphics card (or of a Mac) runs on the CPU when it fits there, instead of not running.
 - Settings mentions the Stable Diffusion eraser (its memory check, Keep it loaded, the memory guard, the CPU-only warning) only once an SD eraser is installed.
 - **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.30.0), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.
 - On a Mac, the compiled-model cache moved from Application Support to Caches. The old folder, up to a few GB, is removed the first time this version starts.
