@@ -446,10 +446,11 @@ OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machi
 
 ### Per-(model, EP) compatibility filter
 
-Two layers skip a doomed EP before paying the failed-load cost (~5 s for OpenVINO + Silueta):
+Three layers decide whether a model runs on an EP:
 
-1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles).
-2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Keyed on the app version, so an upgrade retries everything; `prunr --clear-ep-cache` wipes it.
+1. **Static**: `ModelDescriptor.incompatible_eps` next to the registry entry, for verified-bad pairs (Silueta + OpenVINO: graph cycles), each with its measured cause.
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Scoped to the app version, runtime build and graphics drivers, so a change of any retries everything; `prunr --clear-ep-cache` and Settings wipe it.
+3. **Checked** (`provider_check`): a GPU EP is used only where it beats the CPU at the CPU's quality, which no list can know for every chip and driver. The first time a model's session would land on an EP, the ladder runs `prunr bench --check` in a child process (a hang or crash stays there; 5-minute limit) and keeps the verdict in the same file: pass when the output is within the bench's tolerance for the model's family and the GPU path takes at most 0.9x the CPU's time. Skipped without room in memory for the larger side, and for models without a bench (Stable Diffusion is wrong on the CPU by design).
 
 ### Compiled-model cache
 
