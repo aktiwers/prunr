@@ -83,9 +83,9 @@ pub fn run_in_child(model: ModelId, provider: &str, weights: Weights) -> Option<
         .inspect_err(|e| tracing::warn!(?model, %e, "could not start the provider check"))
         .ok()?;
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > LIMIT => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -99,12 +99,31 @@ pub fn run_in_child(model: ModelId, provider: &str, weights: Weights) -> Option<
                 return None;
             }
         }
-    }
+    };
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let check = parse(&out);
-    tracing::info!(?model, provider, ?check, elapsed_s = started.elapsed().as_secs(), "provider check done");
+    let check = ended(status, &out, provider, weights);
+    tracing::info!(?model, provider, ?check, %status, elapsed_s = started.elapsed().as_secs(), "provider check done");
     check
+}
+
+/// What a finished check says: its verdict line; or, stopped without one
+/// on a crash, a rejection, since the app's own session would crash the
+/// same way. A clean exit without a verdict, and a kill (the system's
+/// out-of-memory killer), say nothing about the provider.
+fn ended(status: std::process::ExitStatus, out: &str, provider: &str, weights: Weights) -> Option<Check> {
+    if let Some(check) = parse(out) {
+        return Some(check);
+    }
+    #[cfg(unix)]
+    let killed = std::os::unix::process::ExitStatusExt::signal(&status) == Some(9);
+    #[cfg(not(unix))]
+    let killed = false;
+    (!status.success() && !killed).then(|| Check {
+        provider: provider.to_string(),
+        weights: weights.label().to_string(),
+        rejected: Some(format!("its check on {provider} stopped ({status})")),
+    })
 }
 
 fn parse(out: &str) -> Option<Check> {
@@ -175,6 +194,23 @@ mod tests {
         let mut none = row(363.0, Verdict::NoGpuProvider);
         none.gpu = Gpu::NoProvider;
         assert_eq!(judge(&none), None);
+    }
+
+    /// A provider that crashes the check is passed over, so it never
+    /// crashes the app; an out-of-memory kill or a clean exit is no verdict.
+    #[cfg(unix)]
+    #[test]
+    fn a_check_that_crashes_passes_the_provider_over() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = |raw| std::process::ExitStatus::from_raw(raw);
+        let crashed = ended(status(11), "", "CoreML", Weights::Fp32).and_then(|c| c.rejected).expect("rejected");
+        assert!(crashed.starts_with("its check on CoreML stopped"), "{crashed}");
+        assert!(ended(status(256), "", "CUDA", Weights::Fp32).is_some(), "an error exit");
+        assert_eq!(ended(status(9), "", "CUDA", Weights::Fp32), None, "killed for memory");
+        assert_eq!(ended(status(0), "", "CUDA", Weights::Fp32), None, "nothing to judge");
+        let passed = Check { provider: "CUDA".into(), weights: "FP32".into(), rejected: None };
+        let line = format!("{LINE}{}", serde_json::to_string(&passed).unwrap());
+        assert_eq!(ended(status(0), &line, "CUDA", Weights::Fp32), Some(passed));
     }
 
     #[test]
