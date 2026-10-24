@@ -359,15 +359,13 @@ pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<(Arc<SamSessions>, 
 /// and height) decoded: its best candidate's mask, 0 or 255 a cell, one
 /// after the other. For the bench.
 pub(crate) fn magic_brush_masks(sessions: &SamSessions, photo: &image::RgbaImage, clicks: &[(f32, f32)]) -> Result<Vec<u8>, String> {
-    const CELLS: usize = (prunr_core::sam::SAM_MASK_RESOLUTION * prunr_core::sam::SAM_MASK_RESOLUTION) as usize;
     let embedding = run_sam_encoder_inline(sessions, photo)?;
     let (w, h) = photo.dimensions();
-    let mut masks = Vec::with_capacity(clicks.len() * CELLS);
+    let mut masks = Vec::with_capacity(clicks.len() * prunr_core::sam::SAM_MASK_CELLS);
     for &(fx, fy) in clicks {
         let prompt = prunr_core::sam::prompt::build_click_prompt(fx * w as f32, fy * h as f32, w, h);
         let decoded = run_sam_decoder_inline(sessions, &embedding, &prompt)?;
-        let best = (0..3).max_by(|&a, &b| decoded.iou_predictions[a].total_cmp(&decoded.iou_predictions[b])).unwrap_or(0);
-        masks.extend(decoded.masks[best * CELLS..(best + 1) * CELLS].iter().map(|&logit| if logit > 0.0 { 255 } else { 0 }));
+        masks.extend(decoded.mask(decoded.best()).iter().map(|&logit| if logit > 0.0 { 255 } else { 0 }));
     }
     Ok(masks)
 }
@@ -2351,19 +2349,15 @@ mod sam_dispatch_tests {
         let (on_cpu, cpu_s) = encode(&cpu);
         let _warm = encode(&gpu);
         let (on_gpu, gpu_s) = encode(&gpu);
-        let best = |o: &prunr_core::sam::SamDecoderOutput| {
-            (0..3).max_by(|&a, &b| o.iou_predictions[a].total_cmp(&o.iou_predictions[b])).unwrap_or(0)
-        };
-        const CELLS: usize = (prunr_core::sam::SAM_MASK_RESOLUTION * prunr_core::sam::SAM_MASK_RESOLUTION) as usize;
         let (mut same, mut worst_iou) = (0, 1.0f64);
         for i in 0..20u32 {
             let at = |n: u32, side: u32| side as f32 * (0.1 + 0.8 * (n % 20) as f32 / 19.0);
             let prompt = prunr_core::sam::prompt::build_click_prompt(at(i * 7, w), at(i * 13, h), w, h);
             let reference = run_sam_decoder_inline(&cpu, &on_cpu, &prompt).expect("decode");
             let candidate = run_sam_decoder_inline(&cpu, &on_gpu, &prompt).expect("decode");
-            let pick = best(&reference);
-            same += usize::from(pick == best(&candidate));
-            let mask = |o: &prunr_core::sam::SamDecoderOutput| o.masks[pick * CELLS..(pick + 1) * CELLS].iter().map(|&v| v > 0.0).collect::<Vec<_>>();
+            let pick = reference.best();
+            same += usize::from(pick == candidate.best());
+            let mask = |o: &prunr_core::sam::SamDecoderOutput| o.mask(pick).iter().map(|&v| v > 0.0).collect::<Vec<_>>();
             let (a, b) = (mask(&reference), mask(&candidate));
             let both = a.iter().zip(&b).filter(|(x, y)| **x && **y).count();
             let either = a.iter().zip(&b).filter(|(x, y)| **x || **y).count();

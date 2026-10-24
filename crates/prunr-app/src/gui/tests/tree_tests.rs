@@ -95,7 +95,6 @@ fn the_hardware_page_names_every_runtime_control() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: None,
-            nvidia_libraries: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -126,14 +125,16 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
     on_cuda.cuda = true;
     on_cuda.loaded_runtime = Some(RuntimeChoice::Store(RuntimeId::Cuda));
     let installing = Some((InstallTarget::NvidiaLibraries, "Downloading 10% (170/1700 MB)".to_string()));
+    let mut with_libraries = on_cuda;
+    with_libraries.nvidia_libraries = true;
     let shapes = [
-        ("missing a library", on_cuda, Some(&MISSING), None, false, Some("Download NVIDIA libraries")),
-        ("starts on the system's", on_cuda, None, None, false, Some("Download NVIDIA libraries")),
-        ("installing", on_cuda, Some(&MISSING), installing, false, Some("Cancel")),
-        ("installed", on_cuda, None, None, true, None),
-        ("no CUDA runtime", HardwareInstallCache::default(), None, None, false, None),
+        ("missing a library", on_cuda, Some(&MISSING), None, Some("Download NVIDIA libraries")),
+        ("starts on the system's", on_cuda, None, None, Some("Download NVIDIA libraries")),
+        ("installing", on_cuda, Some(&MISSING), installing, Some("Cancel")),
+        ("installed", with_libraries, None, None, None),
+        ("no CUDA runtime", HardwareInstallCache::default(), None, None, None),
     ];
-    for (shape, installs, failure, installing, nvidia_libraries, expected) in shapes {
+    for (shape, installs, failure, installing, expected) in shapes {
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
             installs,
@@ -142,7 +143,6 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: failure,
-            nvidia_libraries,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);

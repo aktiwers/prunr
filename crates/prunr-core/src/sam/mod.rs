@@ -14,6 +14,9 @@ pub const SAM_ENCODER_INPUT: u32 = 1024;
 /// SAM 2 emits 256×256 logits; the caller upsamples to source resolution.
 pub const SAM_MASK_RESOLUTION: u32 = 256;
 
+/// Cells in one candidate's mask.
+pub const SAM_MASK_CELLS: usize = (SAM_MASK_RESOLUTION * SAM_MASK_RESOLUTION) as usize;
+
 /// Element counts of the SAM 2 Hiera Small encoder outputs.
 const IMAGE_EMBED_LEN: usize = 256 * 64 * 64;
 const HIGH_RES_0_LEN: usize = 32 * 256 * 256;
@@ -49,6 +52,22 @@ pub struct SamDecoderOutput {
     pub masks: Vec<f32>,
     /// IoU prediction per candidate.
     pub iou_predictions: [f32; 3],
+}
+
+impl SamDecoderOutput {
+    /// The candidate the decoder rates best.
+    pub fn best(&self) -> usize {
+        self.iou_predictions
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// Candidate `index`'s mask logits.
+    pub fn mask(&self, index: usize) -> &[f32] {
+        &self.masks[index * SAM_MASK_CELLS..(index + 1) * SAM_MASK_CELLS]
+    }
 }
 
 /// The logit a pixel must reach to count as selected at `confidence`,
@@ -151,15 +170,8 @@ pub fn decode_to_mask_artifact(
     mode: BrushMode,
 ) -> crate::selection::MaskArtifact {
     let threshold = confidence_logit(reading.confidence);
-    let best_idx = output
-        .iou_predictions
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map_or(0, |(i, _)| i);
-
     const M: usize = SAM_MASK_RESOLUTION as usize;
-    let raw = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
+    let raw = output.mask(output.best());
     let cleaned;
     let mask_logits: &[f32] = if reading.remove_specks {
         cleaned = { let mut l = smooth3(raw); remove_small_regions(&mut l, threshold); l };

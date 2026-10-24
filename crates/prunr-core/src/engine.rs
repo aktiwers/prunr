@@ -681,6 +681,8 @@ pub enum Weights {
 }
 
 impl Weights {
+    pub const ALL: [Weights; 3] = [Weights::Fp32, Weights::Fp16, Weights::Int8];
+
     pub fn label(self) -> &'static str {
         match self {
             Weights::Fp32 => "FP32",
@@ -1253,7 +1255,7 @@ mod tests {
     fn a_cpu_session_builds_past_a_broken_cached_graph() {
         let id = prunr_models::ModelId::Silueta;
         assert!(crate::cache::cache_dir_for(id, CPU_NAME).is_some());
-        let broken: Vec<PathBuf> = [Weights::Fp32, Weights::Fp16, Weights::Int8]
+        let broken: Vec<PathBuf> = Weights::ALL
             .into_iter()
             .filter_map(|w| crate::cache::optimized_model_path(id, CPU_NAME, w))
             .collect();

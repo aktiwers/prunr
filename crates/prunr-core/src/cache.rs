@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn each_copy_of_the_weights_caches_its_own_graph() {
         let Some(_) = cache_root() else { return };
-        let paths = [Weights::Fp32, Weights::Fp16, Weights::Int8]
+        let paths = Weights::ALL
             .map(|w| optimized_model_path(ModelId::Silueta, "CPU", w).unwrap());
         assert_ne!(paths[0], paths[1]);
         assert_ne!(paths[0], paths[2]);
