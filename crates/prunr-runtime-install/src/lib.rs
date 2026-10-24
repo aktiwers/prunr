@@ -3,8 +3,8 @@
 //! Used by `xtask install-runtime` (build-side CLI) and the GUI Settings →
 //! Hardware → Install button.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -191,8 +191,8 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     Some(stripped.to_string())
 }
 
-pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
-    let actual = hex::encode(Sha256::digest(bytes));
+fn verify_digest(digest: &[u8], expected: &str) -> Result<(), String> {
+    let actual = hex::encode(digest);
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(format!("SHA256 mismatch — expected {expected}, got {actual}"));
     }
@@ -224,17 +224,18 @@ pub const DOWNLOAD_BACKOFF_BASE_MS: u64 = 500;
 ///
 /// SHA verification runs inside the attempt so a transient corruption
 /// (partial CDN payload, bit flip) gets retried rather than failing.
-pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
+/// The wheel downloaded to the file `path` (made or replaced), checked
+/// against its SHA-256 as it streams, never held in memory whole (cuDNN's
+/// is 766 MB); open for reading. The caller removes the file.
+pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>, path: &Path) -> Result<std::fs::File, String> {
     let cancel = Arc::clone(&hooks.cancel);
     retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |attempt| {
         if attempt > 0 {
             tracing::info!(attempt, url = %info.url, "retrying wheel download");
         }
-        let bytes = download_wheel_attempt(info, hooks)?;
-        if let Err(msg) = verify_sha256(&bytes, &info.sha256) {
-            return Err(DlError::transient(msg));
-        }
-        Ok(bytes)
+        let digest = download_wheel_attempt(info, hooks, path)?;
+        verify_digest(&digest, &info.sha256).map_err(DlError::transient)?;
+        std::fs::File::open(path).map_err(|e| DlError::fatal(format!("open {}: {e}", path.display())))
     }).map_err(|e| e.message)
 }
 
@@ -309,24 +310,14 @@ pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Clien
         .build()
 }
 
-/// The largest wheel we fetch (cuDNN) is about 770 MB; this leaves room
-/// for a newer one without trusting any size past it.
-const MAX_RESERVE_BYTES: u64 = 1536 * 1024 * 1024;
-
-/// What to reserve for a wheel PyPI says is `size_bytes`: a buffer grown
-/// by doubling holds the old and the new one at once, about 1.5 GB at the
-/// step past 512 MiB. A wrong size only costs regrowth.
-fn reserve_for(size_bytes: u64) -> usize {
-    usize::try_from(size_bytes.min(MAX_RESERVE_BYTES)).unwrap_or(0)
-}
-
-/// Streams chunks, fires progress per percentage point, polls cancel per
-/// chunk. `Content-Length` is not pre-allocated: it is untrusted, and a
-/// bogus 9999999999 would OOM; the PyPI size is, up to a cap.
+/// Streams chunks into `path`, hashing them on the way; fires progress
+/// per percentage point, polls cancel per chunk. The SHA-256 digest of
+/// what was written.
 fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
-) -> Result<bytes::Bytes, DlError> {
+    path: &Path,
+) -> Result<Vec<u8>, DlError> {
     let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .map_err(|e| DlError::fatal(format!("HTTP client: {}", with_causes(&e))))?;
     let response = client.get(&info.url).send()
@@ -339,8 +330,11 @@ fn download_wheel_attempt(
     let total = response.content_length().unwrap_or(info.size_bytes);
 
     let mut response = response;
-    let mut buf: Vec<u8> = Vec::with_capacity(reserve_for(info.size_bytes));
+    let file = std::fs::File::create(path).map_err(|e| DlError::fatal(format!("create {}: {e}", path.display())))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut hasher = Sha256::new();
     let mut chunk = [0u8; 64 * 1024];
+    let mut done: u64 = 0;
     let mut last_pct: u64 = u64::MAX;
     loop {
         if hooks.cancel.load(Ordering::Relaxed) {
@@ -352,14 +346,17 @@ fn download_wheel_attempt(
             Err(e) => return Err(DlError::transient(format!("read: {}", with_causes(&e)))),
         };
         if n == 0 { break; }
-        buf.extend_from_slice(&chunk[..n]);
-        let pct = if total > 0 { buf.len() as u64 * 100 / total } else { 0 };
+        hasher.update(&chunk[..n]);
+        out.write_all(&chunk[..n]).map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
+        done += n as u64;
+        let pct = if total > 0 { done * 100 / total } else { 0 };
         if pct != last_pct {
             last_pct = pct;
-            (hooks.progress)(buf.len() as u64, total);
+            (hooks.progress)(done, total);
         }
     }
-    Ok(bytes::Bytes::from(buf))
+    out.flush().map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
+    Ok(hasher.finalize().to_vec())
 }
 
 /// Run `attempt` up to `max_attempts` times. Returns immediately on
@@ -400,41 +397,44 @@ where
     }
 }
 
-/// Extract a wheel into `target_dir`, applying `repackage_target_filename`.
-/// Caller owns dir creation + safety guards (e.g. refusing
-/// non-`runtimes/` paths) — that's install-time policy.
+/// The files of the wheel `archive` that `rename` keeps, written flat into
+/// `target_dir` under the names it gives; how many. Caller owns dir
+/// creation + safety guards (e.g. refusing non-`runtimes/` paths), which
+/// are install-time policy.
 ///
 /// When two entries map to the same target (`libonnxruntime.so` and
 /// `libonnxruntime.so.1.24.1`), the first write wins: otherwise a 0-byte
 /// symlink-flattened entry could shadow the real dylib.
-pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathBuf, String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("zip parse: {e}"))?;
+fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(archive).map_err(|e| format!("zip parse: {e}"))?;
     let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
-        let name = entry.name().to_string();
-        let Some(target_filename) = repackage_target_filename(&name) else {
-            continue;
-        };
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let Some(target_filename) = rename(entry.name()) else { continue };
         if !written.insert(target_filename.clone()) {
             continue;
         }
         let dest = target_dir.join(&target_filename);
-        let mut out = std::fs::File::create(&dest)
-            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let file = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
         std::io::copy(&mut entry, &mut out)
+            .and_then(|_| out.flush())
             .map_err(|e| format!("extract {}: {e}", dest.display()))?;
     }
+    Ok(written.len())
+}
 
+/// Extract an `onnxruntime-*` wheel into `target_dir`, applying
+/// `repackage_target_filename`; the runtime library it holds.
+pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<PathBuf, String> {
+    extract_flat(archive, target_dir, repackage_target_filename)?;
     let dylib = target_dir.join(DYLIB_NAME);
     if !dylib.is_file() {
         return Err(format!(
             "{DYLIB_NAME} missing after extract — wheel layout may have changed",
         ));
     }
-    Ok(target_dir.to_path_buf())
+    Ok(dylib)
 }
 
 /// Filter + flatten for files extracted from an NVIDIA library wheel
@@ -455,21 +455,11 @@ pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
 
 /// Extract an NVIDIA library wheel's shared libraries into `target_dir`,
 /// flat; how many were written. Errors when the wheel holds none.
-pub fn extract_nvidia_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<usize, String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip parse: {e}"))?;
-    let mut written = 0;
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
-        let Some(file) = nvidia_target_filename(entry.name()) else { continue };
-        let dest = target_dir.join(&file);
-        let mut out = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| format!("extract {}: {e}", dest.display()))?;
-        written += 1;
+pub fn extract_nvidia_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<usize, String> {
+    match extract_flat(archive, target_dir, nvidia_target_filename)? {
+        0 => Err("no libraries in the NVIDIA wheel — its layout may have changed".to_string()),
+        written => Ok(written),
     }
-    if written == 0 {
-        return Err("no libraries in the NVIDIA wheel — its layout may have changed".to_string());
-    }
-    Ok(written)
 }
 
 pub const DYLIB_NAME: &str = if cfg!(windows) {
@@ -500,14 +490,6 @@ mod tests {
         assert_eq!(super::with_causes(&Failed("tls: certificate not trusted", Some(repeated))), "tls: certificate not trusted");
     }
 
-    /// A wheel's buffer is reserved whole from its PyPI size, so it never
-    /// regrows; a missing or absurd size reserves nothing past the cap.
-    #[test]
-    fn a_wheel_buffer_is_reserved_from_its_pypi_size_up_to_a_cap() {
-        assert_eq!(super::reserve_for(766_000_000), 766_000_000);
-        assert_eq!(super::reserve_for(0), 0);
-        assert_eq!(super::reserve_for(9_999_999_999), super::MAX_RESERVE_BYTES as usize);
-    }
 
     use super::*;
 
@@ -821,22 +803,22 @@ mod tests {
             zip.finish().unwrap().into_inner()
         };
         let dir = tempfile::tempdir().unwrap();
-        let n = extract_nvidia_wheel(&wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"]), dir.path()).unwrap();
+        let n = extract_nvidia_wheel(std::io::Cursor::new(wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"])), dir.path()).unwrap();
         assert_eq!(n, 1);
         assert_eq!(std::fs::read(dir.path().join("libcurand.so.10")).unwrap(), b"elf");
-        assert!(extract_nvidia_wheel(&wheel(&["nvidia/curand/include/curand.h"]), dir.path()).is_err());
+        assert!(extract_nvidia_wheel(std::io::Cursor::new(wheel(&["nvidia/curand/include/curand.h"])), dir.path()).is_err());
     }
 
     #[test]
-    fn verify_sha256_accepts_correct_digest() {
-        let payload = b"hello world";
-        let expected = hex::encode(Sha256::digest(payload));
-        assert!(verify_sha256(payload, &expected).is_ok());
+    fn verify_digest_accepts_correct_digest() {
+        let digest = Sha256::digest(b"hello world");
+        assert!(verify_digest(&digest, &hex::encode(digest)).is_ok());
+        assert!(verify_digest(&digest, &hex::encode(digest).to_uppercase()).is_ok());
     }
 
     #[test]
-    fn verify_sha256_rejects_wrong_digest() {
-        assert!(verify_sha256(b"hello world", &"00".repeat(32)).is_err());
+    fn verify_digest_rejects_wrong_digest() {
+        assert!(verify_digest(&Sha256::digest(b"hello world"), &"00".repeat(32)).is_err());
     }
 
     #[test]

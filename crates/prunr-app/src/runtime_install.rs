@@ -377,12 +377,15 @@ fn run_install(
         let _ = tx.send(InstallEvent::Downloading { bytes_so_far: so_far, total_bytes: total });
     };
     let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(&cancel) };
+    let target = rt.checked_install_dir()?;
+    let spool = spool_for(&target)?;
     // Already SHA-verified inside the retry loop.
-    let bytes = ri::download_wheel(&wheel, &mut hooks)?;
-
-    let _ = tx.send(InstallEvent::Extracting);
-    let install_dir = extract_into_place(&bytes, &rt.checked_install_dir()?)?;
-    drop(bytes);
+    let installed = ri::download_wheel(&wheel, &mut hooks, &spool).and_then(|file| {
+        let _ = tx.send(InstallEvent::Extracting);
+        extract_into_place(file, &target)
+    });
+    let _ = std::fs::remove_file(&spool);
+    let install_dir = installed?;
     if !nvidia.is_empty() {
         let target = rt.checked_install_dir()?.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
@@ -426,11 +429,8 @@ fn fetch_nvidia_libraries(
     cancel: &Arc<AtomicBool>,
     (done_before, total): (u64, u64),
 ) -> Result<(), String> {
-    let staging = target.with_file_name(format!(".{}.staging", prunr_core::ort_runtime::NVIDIA_LIBS_DIR));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
-    }
-    std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
+    let staging = fresh_staging(target)?;
+    let spool = spool_for(target)?;
     let fetched = (|| {
         let mut done = done_before;
         for wheel in wheels {
@@ -438,13 +438,14 @@ fn fetch_nvidia_libraries(
                 let _ = tx.send(InstallEvent::Downloading { bytes_so_far: done + so_far, total_bytes: total });
             };
             let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(cancel) };
-            let bytes = ri::download_wheel(wheel, &mut hooks)?;
+            let file = ri::download_wheel(wheel, &mut hooks, &spool)?;
             let _ = tx.send(InstallEvent::Extracting);
-            ri::extract_nvidia_wheel(&bytes, &staging)?;
+            ri::extract_nvidia_wheel(file, &staging)?;
             done += wheel.size_bytes;
         }
         Ok::<(), String>(())
     })();
+    let _ = std::fs::remove_file(&spool);
     if let Err(e) = fetched {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
@@ -453,8 +454,7 @@ fn fetch_nvidia_libraries(
 }
 
 fn query_pypi(rt: RuntimeId, cancel: &Arc<AtomicBool>) -> Result<ri::WheelInfo, String> {
-    let url = format!("https://pypi.org/pypi/{}/{}/json", rt.pypi_package(), rt.ort_version());
-    ri::pick_wheel_for_host(&pypi_files(&url, cancel)?)
+    query_pypi_package(rt.pypi_package(), rt.ort_version(), cancel)
 }
 
 /// The files PyPI lists at `url`, asked again after a dropped connection
@@ -487,20 +487,37 @@ fn query_pypi_package(package: &str, version: &str, cancel: &Arc<AtomicBool>) ->
 /// Extract into a hidden folder beside the install and move it into place
 /// once whole: an install cut short (a full disk, the app closed) leaves
 /// the runtime that was there, or none, never half of one to load.
-fn extract_into_place(bytes: &[u8], target_dir: &Path) -> Result<PathBuf, String> {
-    let name = target_dir.file_name().ok_or("install dir has no name")?.to_string_lossy().into_owned();
-    let staging = target_dir.with_file_name(format!(".{name}.staging"));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
-    }
-    std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
-    let library = ri::extract_wheel(bytes, &staging).inspect_err(|_| {
+fn extract_into_place(wheel: impl std::io::Read + std::io::Seek, target_dir: &Path) -> Result<PathBuf, String> {
+    let staging = fresh_staging(target_dir)?;
+    let library = ri::extract_wheel(wheel, &staging).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
     // The NVIDIA libraries live inside the CUDA install and come from
     // their own download; a reinstall of the runtime keeps them.
     move_into_place(&staging, target_dir, &[prunr_core::ort_runtime::NVIDIA_LIBS_DIR])?;
     Ok(target_dir.join(library.file_name().ok_or("extracted library has no name")?))
+}
+
+/// An empty hidden folder beside `target`, for an install to fill before
+/// it moves into place.
+fn fresh_staging(target: &Path) -> Result<PathBuf, String> {
+    let staging = beside(target, "staging")?;
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
+    Ok(staging)
+}
+
+/// The file a wheel for `target` downloads to, beside it.
+fn spool_for(target: &Path) -> Result<PathBuf, String> {
+    beside(target, "wheel")
+}
+
+/// `.{name}.{what}` beside `target`, named after it.
+fn beside(target: &Path, what: &str) -> Result<PathBuf, String> {
+    let name = target.file_name().ok_or("install dir has no name")?.to_string_lossy();
+    Ok(target.with_file_name(format!(".{name}.{what}")))
 }
 
 /// Replace `target` with the whole `staging` folder, carrying the `kept`
@@ -615,7 +632,7 @@ mod tests {
         let target = store.path().join("openvino-1.24.1-linux-x64");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("libonnxruntime.so"), b"the working one").unwrap();
-        assert!(extract_into_place(b"not a zip", &target).is_err());
+        assert!(extract_into_place(std::io::Cursor::new(b"not a zip"), &target).is_err());
         assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"the working one");
         let left: Vec<_> = std::fs::read_dir(store.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");

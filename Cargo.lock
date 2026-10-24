@@ -4485,7 +4485,6 @@ dependencies = [
 name = "prunr-runtime-install"
 version = "0.4.8"
 dependencies = [
- "bytes",
  "hex",
  "libc",
  "reqwest",
