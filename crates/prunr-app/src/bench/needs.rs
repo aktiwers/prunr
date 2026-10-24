@@ -29,6 +29,16 @@ pub struct Point {
     pub error: Option<String>,
 }
 
+impl Point {
+    fn new(id: ModelId, gpu_side: bool, input: (u32, u32)) -> Self {
+        Self { name: id.stable_name().into(), gpu_side, provider: String::new(), weights: None, input, host_mb: None, card_mb: None, error: None }
+    }
+
+    pub fn side_label(&self) -> &'static str {
+        if self.gpu_side { "GPU path" } else { "CPU" }
+    }
+}
+
 /// The line a child prints its point on, apart from any log output.
 const MARK: &str = "PRUNR-NEEDS ";
 
@@ -52,10 +62,7 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
         Some(Family::Upscale) => inputs.tile.dimensions(),
         _ => inputs.photo.dimensions(),
     };
-    let mut point = Point { name: id.stable_name().into(), gpu_side, provider: String::new(), weights: None, input, host_mb: None, card_mb: None, error: None };
-    if id == ModelId::Sam21HieraSmall {
-        return measure_magic_brush(point, &inputs.photo, runtime);
-    }
+    let mut point = Point::new(id, gpu_side, input);
     let Some(family) = family else {
         point.error = Some("not measured here: the bench does not run this kind of model".into());
         return point;
@@ -85,30 +92,6 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
     point
 }
 
-/// The Magic Brush: its encoder down the GPU ladder (or on the CPU), its
-/// decoder on the CPU, one photo encoded and clicked twice over.
-fn measure_magic_brush(mut point: Point, photo: &image::RgbaImage, runtime: Result<prunr_core::ort_runtime::DylibSource, String>) -> Point {
-    if let Err(e) = runtime {
-        point.error = Some(e);
-        return point;
-    }
-    let base = peak::current_mb();
-    peak::reset();
-    let card = point.gpu_side.then(card_sampler::start);
-    let run = crate::gui::processor::magic_brush_once(photo, !point.gpu_side)
-        .and_then(|_| crate::gui::processor::magic_brush_once(photo, !point.gpu_side));
-    point.host_mb = peak::peak_mb().zip(base).map(|(peak, base)| peak.saturating_sub(base));
-    point.card_mb = card.and_then(card_sampler::Sampler::stop);
-    match run {
-        Ok(provider) => {
-            point.provider = provider;
-            point.weights = Some("FP32".into());
-        }
-        Err(e) => point.error = Some(e),
-    }
-    point
-}
-
 /// Each of `models` on the CPU and on its GPU path, each in a child
 /// process; `on` hears each point as it lands.
 pub fn measure_all(models: &[ModelId], image: Option<&std::path::Path>, on: &mut dyn FnMut(&Point)) -> Vec<Point> {
@@ -121,16 +104,7 @@ pub fn measure_all(models: &[ModelId], image: Option<&std::path::Path>, on: &mut
                 Some(exe) => in_child(exe, id, gpu_side, image),
                 None => Err("cannot find this program to run a measurement".into()),
             }
-            .unwrap_or_else(|error| Point {
-                name: id.stable_name().into(),
-                gpu_side,
-                provider: String::new(),
-                weights: None,
-                input: (0, 0),
-                host_mb: None,
-                card_mb: None,
-                error: Some(error),
-            });
+            .unwrap_or_else(|error| Point { error: Some(error), ..Point::new(id, gpu_side, (0, 0)) });
             on(&point);
             points.push(point);
         }
@@ -165,7 +139,7 @@ pub fn report(points: &[Point], machine: &str) -> String {
     let mut out = format!("# Prunr memory needs\n\n{machine}\n\n| Model | Side | Provider | Weights | Input | System RAM | Card |\n|---|---|---|---|---|---:|---:|\n");
     let mb = |v: Option<u64>| v.map_or("—".to_string(), |v| format!("{v} MB"));
     for p in points {
-        let side = if p.gpu_side { "GPU path" } else { "CPU" };
+        let side = p.side_label();
         let (provider, weights) = match &p.error {
             Some(e) => (format!("failed: {e}"), String::new()),
             None => (p.provider.clone(), p.weights.clone().unwrap_or_default()),

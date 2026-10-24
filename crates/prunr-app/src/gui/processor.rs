@@ -373,18 +373,6 @@ pub(crate) fn magic_brush_masks(sessions: &SamSessions, photo: &image::RgbaImage
     Ok(masks)
 }
 
-/// One Magic Brush encode of `photo` and a click on its middle, as the
-/// app runs them; the provider the encoder landed on. For `prunr bench
-/// --needs`.
-pub(crate) fn magic_brush_once(photo: &image::RgbaImage, cpu_only: bool) -> Result<String, String> {
-    let sessions = ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)?;
-    let embedding = run_sam_encoder_inline(&sessions, photo)?;
-    let (w, h) = photo.dimensions();
-    let prompt = prunr_core::sam::prompt::build_click_prompt(w as f32 / 2.0, h as f32 / 2.0, w, h);
-    run_sam_decoder_inline(&sessions, &embedding, &prompt)?;
-    Ok(sessions.encoder_provider.clone())
-}
-
 /// Result from a background SAM decoder thread, or a human-readable error.
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
