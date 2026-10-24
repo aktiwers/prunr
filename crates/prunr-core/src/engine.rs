@@ -966,6 +966,11 @@ impl OrtEngine {
         DETECTED_PROVIDER.get().cloned()
     }
 
+    /// Whether the probe has answered.
+    pub fn probed() -> bool {
+        DETECTED_PROVIDER.get().is_some()
+    }
+
 }
 
 static DETECTED_PROVIDER: std::sync::OnceLock<String> = std::sync::OnceLock::new();

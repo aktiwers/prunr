@@ -40,7 +40,8 @@ pub fn create_engine_pool(
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
     let id: prunr_models::ModelId = model.into();
     let pool_size = engine_pool_size(model, jobs, cpu_only, &OrtEngine::detect_active_provider());
-    let pool_size = crate::memory::engines_that_fit(id, crate::memory::provider_for(id, cpu_only), pool_size);
+    let on = crate::memory::provider_for(id, cpu_only);
+    let pool_size = crate::memory::engines_that_fit(id, on, pool_size, crate::memory::card_free_mb(on));
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
