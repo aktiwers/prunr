@@ -1487,7 +1487,6 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
     0
 }
 
-/// One `--needs` point, in this process, printed for the parent.
 /// The provider check's notices, on the terminal.
 pub fn announce_provider_check(notice: prunr_core::provider_check::Notice) {
     eprintln!("{}", notice.text());
@@ -1508,6 +1507,7 @@ fn run_check(name: &str) -> i32 {
     0
 }
 
+/// One `--needs` point, in this process, printed for the parent.
 fn run_needs_one(one: &str, image: Option<&std::path::Path>) -> i32 {
     let Some((name, side)) = one.split_once(':') else {
         eprintln!("error: --needs-one takes MODEL:cpu or MODEL:gpu");

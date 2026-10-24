@@ -322,9 +322,8 @@ pub(crate) struct SamSessions {
 type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
 
 /// Cached sessions, built outside the lock so a release on the GUI
-/// thread never waits on the encoder's build.
-/// The encoder goes to the CPU when its GPU charge does not fit what is
-/// free (`admitted`).
+/// thread never waits on the encoder's build. A build puts the encoder
+/// on the CPU when its GPU charge does not fit what is free (`admitted`).
 fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamSessions>, String> {
     let fits = |s: &&Arc<SamSessions>| s.cpu_only == cpu_only;
     if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(fits) {
@@ -711,13 +710,11 @@ pub(crate) struct ColorizeOutput {
     pub shown: Arc<image::RgbaImage>,
 }
 
-/// Whether the model fits where it will run (system RAM, and the card's
-/// memory on a card), or why not; a refusal is logged. The toolbar's
-/// `can_process_intent` gate should have stopped the run already; this
-/// is the last guard at the dispatch layer.
 /// Whether a run of `descriptor`'s model goes to the CPU: its GPU when
-/// its charge there fits what is free, else the CPU when the CPU's does;
-/// refused when it fits neither.
+/// its charge there fits what is free (system RAM, and the card's memory
+/// on a card), else the CPU when the CPU's does; refused, and logged,
+/// when it fits neither. The toolbar's `can_process_intent` gate should
+/// have stopped such a run already; this is the last guard.
 fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Result<bool, String> {
     let on_cpu = crate::hardware::runs_on_cpu(descriptor.id, cpu_only).map_err(|short| {
         tracing::warn!(model = ?descriptor.id, cpu_only, ?short, "admission refused: not enough memory");
