@@ -80,8 +80,6 @@ pub(crate) struct HardwareSectionContext {
     pub sd_cpu_only: bool,
     /// Why the loaded runtime's GPU provider does not run, when it does not.
     pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
-    /// The NVIDIA libraries the CUDA runtime needs are installed.
-    pub nvidia_libraries: bool,
 }
 
 /// View-layer intent the Hardware page returns so platform side effects
@@ -216,7 +214,6 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
                 sd_cpu_only: app.settings.cpu_only(),
                 gpu_failure: prunr_core::engine::gpu_start_failure(),
-                nvidia_libraries: app.hardware_install_cache.nvidia_libraries,
             };
             render_page_hardware(ui, &hw_ctx)
         }
@@ -615,7 +612,7 @@ fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, inten
     }
     let status = match installing {
         Some((_, progress)) => progress.clone(),
-        None if ctx.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
+        None if ctx.installs.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
         None => format!("CUDA Runtime runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
     };
     rows.row("NVIDIA libraries", &status, |ui| {
@@ -623,7 +620,7 @@ fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, inten
             if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
                 *intent = Some(HardwareSectionIntent::CancelInstall);
             }
-        } else if !ctx.nvidia_libraries {
+        } else if !ctx.installs.nvidia_libraries {
             let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Download")).inner;
             if super::chip::named(resp, "Download NVIDIA libraries").clicked() {
                 *intent = Some(HardwareSectionIntent::GetNvidiaLibraries);

@@ -213,8 +213,7 @@ pub(crate) fn warm() {
 }
 
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
-    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.entries.failures.contains_key(&key(ep, model, weights))
+    failure(ep, model, weights).is_some()
 }
 
 /// Why these weights of the model are on the EP's skip list.
@@ -337,7 +336,7 @@ mod tests {
     #[test]
     fn each_copy_of_the_weights_has_its_own_key() {
         let u2net = prunr_models::ModelId::U2net;
-        let keys = [Weights::Fp32, Weights::Fp16, Weights::Int8].map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0), false));
+        let keys = Weights::ALL.map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0), false));
         assert_eq!(keys, [
             "OpenVINO::U2net@0000000000005ca0",
             "OpenVINO::U2net/fp16@0000000000005ca0",

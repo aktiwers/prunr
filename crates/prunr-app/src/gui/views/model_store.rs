@@ -353,7 +353,7 @@ pub(crate) fn render_license_dialog(
     ctx: &egui::Context,
     request: LicenseRequest,
 ) -> (bool, bool) {
-    let (name, license, links): (&str, &str, Vec<&str>) = match request {
+    let (name, license, links): (&str, &str, [&str; 2]) = match request {
         LicenseRequest::Model(id) => {
             let Some(desc) = model_descriptor(id) else { return (true, false) };
             // A bundled model was accepted at build time and never asks.
@@ -361,12 +361,12 @@ pub(crate) fn render_license_dialog(
                 return (true, false);
             }
             let license = desc.license();
-            (desc.display_name, license.license, vec![license.license_url, license.source_url])
+            (desc.display_name, license.license, [license.license_url, license.source_url])
         }
         LicenseRequest::Nvidia(_) => (
             "NVIDIA CUDA 12 and cuDNN 9 libraries",
             "NVIDIA CUDA Toolkit EULA and cuDNN Software License Agreement",
-            crate::runtime_install::NVIDIA_LICENSE_URLS.to_vec(),
+            crate::runtime_install::NVIDIA_LICENSE_URLS,
         ),
     };
 
