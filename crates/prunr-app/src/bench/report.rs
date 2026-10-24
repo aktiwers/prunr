@@ -135,6 +135,7 @@ fn gpu_path(gpu: &Gpu) -> String {
         Gpu::NoProvider => "none".into(),
         Gpu::ByDesign { .. } => "CPU by design".into(),
         Gpu::FailedBefore { providers } => format!("{} skipped", providers.join(", ")),
+        Gpu::NoRoom { .. } => "not run".into(),
         Gpu::NotInstalled => "—".into(),
     }
 }
@@ -254,6 +255,7 @@ fn details(row: &Row) -> String {
             "- GPU path: skipped. {} failed this model on an earlier run, and the app skips it until the graphics driver or the app changes, or the failures are forgotten (Settings › Hardware, `prunr --clear-ep-cache`).\n",
             providers.join(", "),
         )),
+        Gpu::NoRoom { short } => md.push_str(&format!("- GPU path: not run: it {short}.\n")),
         Gpu::NotInstalled => md.push_str("- Not installed: download it in the app's Model Store.\n"),
     }
     if let Some(note) = &row.note {

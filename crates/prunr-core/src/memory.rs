@@ -43,6 +43,15 @@ pub enum Short {
     Card { need_mb: u64, free_mb: u64 },
 }
 
+impl std::fmt::Display for Short {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Short::Ram { need_mb, free_mb } => write!(f, "needs about {need_mb} MB of free memory, {free_mb} MB is free"),
+            Short::Card { need_mb, free_mb } => write!(f, "needs about {need_mb} MB free on the graphics card, {free_mb} MB is free"),
+        }
+    }
+}
+
 /// The card's memory kept free for the desktop and the driver, as
 /// ComfyUI keeps (more on Windows, where the compositor holds more).
 pub const CARD_RESERVE_MB: u64 = if cfg!(windows) { 600 } else { 400 };
@@ -105,6 +114,13 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
 }
 
 /// `provider_for` without waiting for the GPU probe, for the UI thread:
+/// Whether `id` on `provider` fits the memory free now. No figure for
+/// it, or no reading, lets it through.
+pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
+    let Some(charge) = charge_on(id, provider) else { return Ok(()) };
+    room_now(charge, provider).map_or(Ok(()), |room| fit(charge, room))
+}
+
 /// `None` until the probe has answered.
 pub fn provider_once_probed(id: ModelId, cpu_only: bool) -> Option<&'static str> {
     crate::engine::OrtEngine::probed().then(|| provider_for(id, cpu_only))
@@ -157,6 +173,12 @@ mod tests {
         assert_eq!(falls_to_cpu(Some((cuda, card)), Some((cpu, ram(16_000)))), Ok(true), "the card is short, the RAM is not");
         assert_eq!(falls_to_cpu(Some((cpu, ram(2_000))), Some((cpu, ram(2_000)))), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }), "asked for the CPU");
         assert_eq!(falls_to_cpu(None, Some((cpu, ram(0)))), Ok(false), "no reading: trusted");
+    }
+
+    #[test]
+    fn a_shortage_names_what_is_short() {
+        assert_eq!(Short::Ram { need_mb: 9_000, free_mb: 4_000 }.to_string(), "needs about 9000 MB of free memory, 4000 MB is free");
+        assert_eq!(Short::Card { need_mb: 7_000, free_mb: 3_000 }.to_string(), "needs about 7000 MB free on the graphics card, 3000 MB is free");
     }
 
     /// Measured on a provider: its own figures. Unmeasured: the CPU's, in

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use prunr_core::engine::{Weights, CPU_NAME};
-use prunr_core::memory::{self, Charge};
+use prunr_core::memory;
 use prunr_core::provider_check::Check;
 use prunr_models::ModelId;
 
@@ -133,11 +133,9 @@ fn parse(out: &str) -> Option<Check> {
 }
 
 /// The bench runs one side, then the other: the check needs room for
-/// the larger.
+/// each.
 fn either_side_fits(model: ModelId, provider: &str) -> bool {
-    let (Some(cpu), Some(gpu)) = (memory::charge_on(model, CPU_NAME), memory::charge_on(model, provider)) else { return true };
-    let larger = Charge { ram_mb: cpu.ram_mb.max(gpu.ram_mb), card_mb: gpu.card_mb };
-    memory::room_now(larger, provider).is_none_or(|room| memory::fit(larger, room).is_ok())
+    [CPU_NAME, provider].iter().all(|side| memory::fits_now(model, side).is_ok())
 }
 
 #[cfg(test)]
@@ -196,6 +194,9 @@ mod tests {
         let mut none = row(363.0, Verdict::NoGpuProvider);
         none.gpu = Gpu::NoProvider;
         assert_eq!(judge(&none), None);
+        let mut no_room = row(363.0, Verdict::NoRoom);
+        no_room.gpu = Gpu::NoRoom { short: "needs about 9000 MB of free memory, 4000 MB is free".into() };
+        assert_eq!(judge(&no_room), None, "a shortage of memory says nothing about the provider");
     }
 
     /// A provider that crashes the check is passed over, so it never
