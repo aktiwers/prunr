@@ -197,12 +197,18 @@ pub struct FaceFinder {
 
 impl FaceFinder {
     pub fn new() -> Result<Self, CoreError> {
+        Self::on(true).map(|(finder, _)| finder)
+    }
+
+    /// The detector on the first graphics device that builds it, unless
+    /// `cpu_only`, with where it landed.
+    pub fn on(cpu_only: bool) -> Result<(Self, crate::engine::SessionPick), CoreError> {
         let bytes = prunr_models::resolve_bytes(prunr_models::ModelId::YuNet)
             .ok_or_else(|| CoreError::Inference("the face finder is missing from this build".into()))?;
-        let detector = crate::ort_runtime::session_builder()?
-            .commit_from_memory(&bytes)
-            .map_err(|e| CoreError::Inference(format!("face finder: {e}")))?;
-        Ok(Self { detector })
+        let (detector, pick) = crate::engine::session_on_ladder(prunr_models::ModelId::YuNet, cpu_only, |mut builder| {
+            builder.commit_from_memory(&bytes).map_err(|e| format!("face finder: {e}"))
+        })?;
+        Ok((Self { detector }, pick))
     }
 
     /// The faces in `image`, best first.
@@ -245,19 +251,15 @@ impl LazyFaceFinder {
 /// The restorer (~1.2 GB for GFPGAN) loads on the first face and stays
 /// until this is dropped.
 pub struct FaceRestorer {
+    id: prunr_models::ModelId,
     finder: FaceFinder,
-    restorer_path: std::path::PathBuf,
-    restorer: Option<Session>,
+    restorer: Option<Redrawer>,
 }
 
 impl FaceRestorer {
     pub fn new(id: prunr_models::ModelId) -> Result<Self, CoreError> {
-        let restorer_path = prunr_models::multi_part_paths(id)
-            .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?
-            .into_iter()
-            .find_map(|(key, path)| (key == "restorer").then_some(path))
-            .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no restorer part")))?;
-        Ok(Self { finder: FaceFinder::new()?, restorer_path, restorer: None })
+        restorer_path(id)?;
+        Ok(Self { id, finder: FaceFinder::new()?, restorer: None })
     }
 
     /// `find_and_restore` with the models this holds.
@@ -274,10 +276,10 @@ impl FaceRestorer {
             Some(r) => r,
             None => {
                 progress.step(Step::LoadingModel);
-                self.restorer.insert(load(&self.restorer_path)?)
+                self.restorer.insert(Redrawer::on(self.id, true)?.0)
             }
         };
-        restore_each(image, &places, blend, progress, |crop| restore(restorer, crop))
+        restore_each(image, &places, blend, progress, |crop| restorer.redraw(crop))
     }
 }
 
@@ -350,12 +352,34 @@ fn report_preview(image: &RgbaImage, face: &RestoredFace, blend: FaceBlend, prog
     });
 }
 
-// No optimised-graph cache: measured on GFPGAN (CPU), loading the
-// cached graph saved 0.2 s of a 4.2 s first search for 340 MB of disk.
-fn load(path: &std::path::Path) -> Result<Session, CoreError> {
-    crate::ort_runtime::session_builder()?
-        .commit_from_file(path)
-        .map_err(|e| CoreError::Inference(format!("face model {}: {e}", path.display())))
+/// A face restorer's network (GFPGAN, RestoreFormer++), loaded.
+pub struct Redrawer(Session);
+
+impl Redrawer {
+    /// `id`'s network on the first graphics device that builds it, unless
+    /// `cpu_only`, with where it landed. No optimised-graph cache:
+    /// measured on GFPGAN (CPU), loading the cached graph saved 0.2 s of a
+    /// 4.2 s first search for 340 MB of disk.
+    pub fn on(id: prunr_models::ModelId, cpu_only: bool) -> Result<(Self, crate::engine::SessionPick), CoreError> {
+        let path = restorer_path(id)?;
+        let (session, pick) = crate::engine::session_on_ladder(id, cpu_only, |mut builder| {
+            builder.commit_from_file(&path).map_err(|e| format!("face model {}: {e}", path.display()))
+        })?;
+        Ok((Self(session), pick))
+    }
+
+    /// One aligned `FACE_SIZE` crop, redrawn.
+    pub fn redraw(&mut self, crop: &RgbImage) -> Result<RgbImage, CoreError> {
+        restore(&mut self.0, crop)
+    }
+}
+
+fn restorer_path(id: prunr_models::ModelId) -> Result<std::path::PathBuf, CoreError> {
+    prunr_models::multi_part_paths(id)
+        .ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?
+        .into_iter()
+        .find_map(|(key, path)| (key == "restorer").then_some(path))
+        .ok_or_else(|| CoreError::Inference(format!("face model {id:?}: no restorer part")))
 }
 
 /// YuNet over a `w × h` photo, which `shrink(sw, sh)` gives scaled to

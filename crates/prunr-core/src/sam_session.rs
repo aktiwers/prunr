@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use ort::session::Session;
 use prunr_models::ModelId;
 
-use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights, CPU_NAME};
+use crate::engine::{EpSite, Miss, SessionPick, Weights, CPU_NAME};
 
 const ID: ModelId = ModelId::Sam21HieraSmall;
 const ENCODER: &str = "encoder";
@@ -19,7 +19,7 @@ const DECODER: &str = "decoder";
 /// passes a test run, else on the CPU; with where it landed.
 pub fn encoder(cpu_only: bool) -> Result<(Session, SessionPick), String> {
     let bytes = part_bytes(ENCODER)?;
-    let eps = gpus(crate::engine::gpu_eps_for(cpu_only), crate::engine::openvino_on_gpu());
+    let eps = crate::engine::gpu_devices(crate::engine::gpu_eps_for(cpu_only), crate::engine::openvino_on_gpu());
     let landed = crate::engine::walk_ladder("Magic Brush: ", ID, Weights::Fp32, &eps, |ep| {
         crate::cache::gc_stale_for_model(ID, ep.as_str());
         let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
@@ -53,12 +53,6 @@ pub fn decoder() -> Result<Session, String> {
     on_cpu(&part_bytes(DECODER)?, DECODER)
 }
 
-/// The GPU providers among `eps`: OpenVINO is one only on the Intel GPU,
-/// its CPU device being no faster than ORT's own.
-fn gpus(eps: &[EpKind], openvino_on_gpu: bool) -> Vec<EpKind> {
-    eps.iter().copied().filter(|ep| !crate::engine::on_host_cpu(ep.as_str(), openvino_on_gpu)).collect()
-}
-
 fn on_cpu(bytes: &[u8], part: &str) -> Result<Session, String> {
     crate::cache::gc_stale_for_model(ID, CPU_NAME);
     crate::engine::commit_past_bad_cache(|| {
@@ -84,18 +78,4 @@ fn test_run(session: &mut Session) -> Result<(), String> {
     let input = ort::value::Tensor::from_array(ndarray::Array4::<f32>::zeros((1, 3, side, side))).map_err(|e| e.to_string())?;
     let name = session.inputs()[0].name().to_string();
     session.run(ort::inputs![name.as_str() => &input]).map(drop).map_err(|e| e.to_string())
-}
-
-#[cfg(all(test, not(target_os = "macos")))]
-mod tests {
-    use super::*;
-
-    /// The encoder tries the graphics cards, and OpenVINO only when it may
-    /// use the Intel GPU: on its CPU device it is no faster than the CPU.
-    #[test]
-    fn the_encoder_tries_only_the_gpus() {
-        let eps = [EpKind::Cuda, EpKind::OpenVino];
-        assert_eq!(gpus(&eps, false), [EpKind::Cuda]);
-        assert_eq!(gpus(&eps, true), eps);
-    }
 }

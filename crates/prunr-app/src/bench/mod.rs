@@ -52,15 +52,21 @@ pub enum Family {
     Diffusion,
     /// The Magic Brush.
     Selection,
+    /// The lines (TEED). The app runs it on the CPU; the bench measures
+    /// its GPU path, as for the face models.
+    Lines,
+    /// The face finder (YuNet).
+    FaceFinder,
+    /// The face restorers' networks (GFPGAN, RestoreFormer++).
+    FaceRedraw,
 }
 
 impl Family {
-    /// `None` for a model without a GPU path (lines, Magic Brush, faces)
-    /// and for TAESD, which runs inside a Stable Diffusion erase.
+    /// `None` for TAESD, which runs inside a Stable Diffusion erase.
     pub fn of(id: ModelId) -> Option<Self> {
         match Placement::of(id)? {
             Placement::Family(family) => Some(family),
-            Placement::CpuByDesign | Placement::InsideDiffusion => None,
+            Placement::InsideDiffusion => None,
         }
     }
 
@@ -71,6 +77,9 @@ impl Family {
             Self::Depth => "the depth map",
             Self::Eraser | Self::Diffusion => "RGB inside the erased square",
             Self::Selection => "the masks of eight clicks",
+            Self::Lines => "the line drawing",
+            Self::FaceFinder => "the faces found (score, box)",
+            Self::FaceRedraw => "RGB of a redrawn 512 px crop",
         }
     }
 
@@ -88,17 +97,20 @@ impl Family {
             // A cell is in or out: 0.5% of cells flipped across the clicks
             // (the CPU's masks on CUDA and on a Mac's GPU flipped under 0.1%).
             Self::Selection => Tolerance { mean_abs: 1.3, over_2: 0.005 },
+            Self::Lines => Tolerance { mean_abs: 3.0, over_2: 0.10 },
+            Self::FaceFinder | Self::FaceRedraw => Tolerance { mean_abs: 2.0, over_2: 0.10 },
         }
     }
 
-    pub const ALL: [Family; 7] = [Self::Segmentation, Self::Upscale, Self::Colorize, Self::Depth, Self::Eraser, Self::Diffusion, Self::Selection];
+    pub const ALL: [Family; 10] = [
+        Self::Segmentation, Self::Upscale, Self::Colorize, Self::Depth, Self::Eraser, Self::Diffusion, Self::Selection,
+        Self::Lines, Self::FaceFinder, Self::FaceRedraw,
+    ];
 }
 
 /// Where a model sits in the bench, from one match over its category.
 enum Placement {
     Family(Family),
-    /// The app builds its sessions on the CPU provider alone.
-    CpuByDesign,
     /// TAESD, run only as part of a Stable Diffusion erase.
     InsideDiffusion,
 }
@@ -114,17 +126,15 @@ impl Placement {
             ModelCategory::Inpaint if id == ModelId::TaesdFp16 => Self::InsideDiffusion,
             ModelCategory::Inpaint => Self::Family(Family::Eraser),
             ModelCategory::Selection => Self::Family(Family::Selection),
-            ModelCategory::EdgeDetection | ModelCategory::Face => Self::CpuByDesign,
+            ModelCategory::EdgeDetection => Self::Family(Family::Lines),
+            ModelCategory::Face if id == ModelId::YuNet => Self::Family(Family::FaceFinder),
+            ModelCategory::Face => Self::Family(Family::FaceRedraw),
         })
     }
 }
 
-fn cpu_by_design(id: ModelId) -> bool {
-    matches!(Placement::of(id), Some(Placement::CpuByDesign))
-}
-
 fn in_catalog(id: ModelId) -> bool {
-    Family::of(id).is_some() || cpu_by_design(id)
+    Family::of(id).is_some()
 }
 
 /// The names `--models` takes: each model's stable name.
@@ -499,7 +509,96 @@ fn open<'a>(family: Family, id: ModelId, inputs: &'a Inputs, cpu_only: bool) -> 
             Box::new(EngineRun::open(family, id, inputs, cpu_only)?)
         }
         Family::Selection => Box::new(SelectionRun::open(inputs, cpu_only)?),
+        Family::Lines => Box::new(LinesRun::open(inputs, cpu_only)?),
+        Family::FaceFinder => Box::new(FaceFinderRun::open(inputs, cpu_only)?),
+        Family::FaceRedraw => Box::new(RedrawRun::open(id, inputs, cpu_only)?),
     })
+}
+
+/// The lines over the photo at the app's default look.
+struct LinesRun {
+    engine: prunr_core::EdgeEngine,
+    pick: SessionPick,
+    photo: image::DynamicImage,
+}
+
+impl LinesRun {
+    fn open(inputs: &Inputs, cpu_only: bool) -> Result<Self, String> {
+        let (engine, pick) = prunr_core::EdgeEngine::on(cpu_only).map_err(|e| e.to_string())?;
+        Ok(Self { engine, pick, photo: image::DynamicImage::ImageRgba8(inputs.photo.clone()) })
+    }
+}
+
+impl Run for LinesRun {
+    fn pick(&self) -> &SessionPick {
+        &self.pick
+    }
+
+    fn run(&mut self) -> Result<Vec<u8>, String> {
+        self.engine.detect(&self.photo, &prunr_core::EdgeSettings::default()).map(image::RgbaImage::into_raw).map_err(|e| e.to_string())
+    }
+}
+
+/// The face finder over the photo: how many faces, then each one's
+/// score and box in 0-255 of the photo.
+struct FaceFinderRun<'a> {
+    finder: prunr_core::face::FaceFinder,
+    pick: SessionPick,
+    inputs: &'a Inputs,
+}
+
+impl<'a> FaceFinderRun<'a> {
+    fn open(inputs: &'a Inputs, cpu_only: bool) -> Result<Self, String> {
+        let (finder, pick) = prunr_core::face::FaceFinder::on(cpu_only).map_err(|e| e.to_string())?;
+        Ok(Self { finder, pick, inputs })
+    }
+}
+
+impl Run for FaceFinderRun<'_> {
+    fn pick(&self) -> &SessionPick {
+        &self.pick
+    }
+
+    fn run(&mut self) -> Result<Vec<u8>, String> {
+        let photo = &self.inputs.photo;
+        let faces = self.finder.find(photo).map_err(|e| e.to_string())?;
+        let (w, h) = (photo.width() as f32, photo.height() as f32);
+        let level = |v: f32| prunr_core::math::round_u8(v * 255.0);
+        Ok(std::iter::once(faces.len().min(255) as u8)
+            .chain(faces.iter().flat_map(|f| {
+                let [x0, y0, x1, y1] = f.bbox;
+                [level(f.score), level(x0 / w), level(y0 / h), level(x1 / w), level(y1 / h)]
+            }))
+            .collect())
+    }
+}
+
+/// A face restorer's network on the photo's middle, as an aligned crop:
+/// the bench picture has no face to find, and the network's work is the
+/// same on any crop.
+struct RedrawRun {
+    redrawer: prunr_core::face::Redrawer,
+    pick: SessionPick,
+    crop: image::RgbImage,
+}
+
+impl RedrawRun {
+    fn open(id: ModelId, inputs: &Inputs, cpu_only: bool) -> Result<Self, String> {
+        let (redrawer, pick) = prunr_core::face::Redrawer::on(id, cpu_only).map_err(|e| e.to_string())?;
+        let side = prunr_core::face::FACE_SIZE;
+        let square = prunr_core::formats::resize_rgba(&inputs.photo, side, side, prunr_core::formats::ResizeFilter::Lanczos3);
+        Ok(Self { redrawer, pick, crop: image::DynamicImage::ImageRgba8(square).into_rgb8() })
+    }
+}
+
+impl Run for RedrawRun {
+    fn pick(&self) -> &SessionPick {
+        &self.pick
+    }
+
+    fn run(&mut self) -> Result<Vec<u8>, String> {
+        self.redrawer.redraw(&self.crop).map(image::RgbImage::into_raw).map_err(|e| e.to_string())
+    }
 }
 
 /// The Magic Brush as the app runs it: the encoder on the side's
@@ -712,10 +811,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_model_is_in_one_family_or_runs_on_the_cpu_by_design() {
+    fn every_model_is_in_a_family() {
         for &id in ModelId::ALL {
-            let both = Family::of(id).is_some() && cpu_by_design(id);
-            assert!(!both, "{id:?} is both");
             if id != ModelId::TaesdFp16 {
                 assert!(in_catalog(id), "{id:?} is missing from the bench");
             }
@@ -725,7 +822,10 @@ mod tests {
         assert_eq!(Family::of(ModelId::RoremFp16), Some(Family::Diffusion));
         assert_eq!(Family::of(ModelId::RealEsrganX2Plus), Some(Family::Upscale));
         assert_eq!(Family::of(ModelId::Sam21HieraSmall), Some(Family::Selection));
-        assert!(cpu_by_design(ModelId::Teed) && cpu_by_design(ModelId::FaceGfpgan));
+        assert_eq!(Family::of(ModelId::Teed), Some(Family::Lines));
+        assert_eq!(Family::of(ModelId::YuNet), Some(Family::FaceFinder));
+        assert_eq!(Family::of(ModelId::FaceGfpgan), Some(Family::FaceRedraw));
+        assert_eq!(Family::of(ModelId::FaceRestoreFormerPp), Some(Family::FaceRedraw));
         assert!(!in_catalog(ModelId::TaesdFp16), "TAESD runs inside a Stable Diffusion erase");
     }
 

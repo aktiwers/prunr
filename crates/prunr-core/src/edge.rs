@@ -62,14 +62,22 @@ const _: () = {
 
 impl EdgeEngine {
     pub fn new() -> Result<Self, CoreError> {
+        Self::on(true).map(|(engine, _)| engine)
+    }
+
+    /// The detector on the first graphics device that builds it, unless
+    /// `cpu_only`, with where it landed.
+    pub fn on(cpu_only: bool) -> Result<(Self, crate::engine::SessionPick), CoreError> {
         let edge_bytes = prunr_models::teed_bytes();
-        let session = crate::ort_runtime::session_builder()?
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-            .map_err(|e| CoreError::Inference(format!("Edge set opt level failed: {e}")))?
-            .with_intra_threads(num_cpus::get().max(1))
-            .map_err(|e| CoreError::Inference(format!("Edge set threads failed: {e}")))?
-            .commit_from_memory(&edge_bytes)
-            .map_err(|e| CoreError::Inference(format!("Edge model load failed: {e}")))?;
+        let (session, pick) = crate::engine::session_on_ladder(prunr_models::ModelId::Teed, cpu_only, |builder| {
+            builder
+                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                .map_err(|e| format!("Edge set opt level failed: {e}"))?
+                .with_intra_threads(num_cpus::get().max(1))
+                .map_err(|e| format!("Edge set threads failed: {e}"))?
+                .commit_from_memory(&edge_bytes)
+                .map_err(|e| format!("Edge model load failed: {e}"))
+        })?;
 
         // A re-export that renames the outputs would otherwise surface as
         // a wrong-scale result instead of an init error.
@@ -80,7 +88,7 @@ impl EdgeEngine {
                 "TEED export layout changed: no '{missing}' output in {names:?}",
             )));
         }
-        Ok(Self { session: Mutex::new(session) })
+        Ok((Self { session: Mutex::new(session) }, pick))
     }
 
     /// One-shot: the lines over the whole photo. Runs only the scales
