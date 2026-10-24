@@ -15,6 +15,7 @@ pub mod stats;
 use std::time::Instant;
 
 use prunr_core::engine::{SessionPick, Skip};
+use prunr_core::memory;
 use prunr_models::{ModelCategory, ModelId};
 use serde::Serialize;
 
@@ -178,6 +179,11 @@ fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
     })
 }
 
+/// The provider the ladder tries first.
+fn first_tried<'a>(ladder: &[(&'a str, Option<Skip>)]) -> Option<&'a str> {
+    ladder.iter().find(|(_, skip)| skip.is_none()).map(|&(provider, _)| provider)
+}
+
 /// One side of a model's run: where its session landed and how long it took.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Side {
@@ -203,6 +209,8 @@ pub enum Gpu {
     NoProvider,
     ByDesign { reason: String },
     FailedBefore { providers: Vec<String> },
+    /// Not run: it needs more memory than is free (`memory::Short`).
+    NoRoom { short: String },
     NotInstalled,
 }
 
@@ -221,6 +229,7 @@ pub enum Verdict {
     CpuByDesign,
     NoGpuProvider,
     FailedBefore,
+    NoRoom,
     NotInstalled,
 }
 
@@ -236,13 +245,14 @@ impl Verdict {
             Self::CpuByDesign => "CPU by design",
             Self::NoGpuProvider => "no GPU provider",
             Self::FailedBefore => "skipped: failed here before",
+            Self::NoRoom => "not enough memory",
             Self::NotInstalled => "not installed",
         }
     }
 
-    pub const ALL: [Verdict; 10] = [
+    pub const ALL: [Verdict; 11] = [
         Self::Match, Self::Mismatch, Self::NoReference, Self::FellBack, Self::GpuFailed,
-        Self::CpuFailed, Self::CpuByDesign, Self::NoGpuProvider, Self::FailedBefore, Self::NotInstalled,
+        Self::CpuFailed, Self::CpuByDesign, Self::NoGpuProvider, Self::FailedBefore, Self::NoRoom, Self::NotInstalled,
     ];
 }
 
@@ -254,6 +264,7 @@ pub fn verdict(family: Option<Family>, cpu: Option<&Side>, gpu: &Gpu, agreement:
         Gpu::NoProvider => Verdict::NoGpuProvider,
         Gpu::ByDesign { .. } => Verdict::CpuByDesign,
         Gpu::FailedBefore { .. } => Verdict::FailedBefore,
+        Gpu::NoRoom { .. } => Verdict::NoRoom,
         Gpu::Ran(side) if side.error.is_some() => Verdict::GpuFailed,
         Gpu::Ran(side) if side.on_cpu => Verdict::FellBack,
         Gpu::Ran(_) if sizes_differ => Verdict::Mismatch,
@@ -336,19 +347,32 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
     // A heavy model's CPU run takes minutes; one is enough for a reference.
     let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs.cpu };
-    let (cpu, cpu_samples) = if cpu_reference {
-        let (side, samples) = measure(family, id, inputs, true, cpu_runs, stage);
-        (Some(side), samples)
-    } else {
-        row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
-        (None, None)
-    };
-    let (gpu, gpu_samples) = match gpu_passed_over(&prunr_core::engine::gpu_ladder(id)) {
-        Some(passed_over) => (passed_over, None),
-        None => {
-            let (side, samples) = measure(family, id, inputs, false, runs.gpu, stage);
-            (Gpu::Ran(side), samples)
+    // A side that needs more memory than is free is not run: the bench
+    // must not run the machine out of memory either.
+    let (cpu, cpu_samples) = match (cpu_reference, memory::fits_now(id, CPU)) {
+        (false, _) => {
+            row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
+            (None, None)
         }
+        (true, Err(short)) => {
+            row.note = Some(format!("no CPU reference: the CPU side {short}"));
+            (None, None)
+        }
+        (true, Ok(())) => {
+            let (side, samples) = measure(family, id, inputs, true, cpu_runs, stage);
+            (Some(side), samples)
+        }
+    };
+    let ladder = prunr_core::engine::gpu_ladder(id);
+    let (gpu, gpu_samples) = match gpu_passed_over(&ladder) {
+        Some(passed_over) => (passed_over, None),
+        None => match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
+            Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
+            Ok(()) => {
+                let (side, samples) = measure(family, id, inputs, false, runs.gpu, stage);
+                (Gpu::Ran(side), samples)
+            }
+        },
     };
     let on_gpu = matches!(&gpu, Gpu::Ran(side) if !side.on_cpu);
     let mut sizes_differ = false;
@@ -755,6 +779,8 @@ mod tests {
             Some(Gpu::FailedBefore { providers: vec!["CUDA".into()] }),
             "OpenVINO is declared out; CUDA is allowed but failed before",
         );
+        let ladder = [("OpenVINO", Some(Skip::Declared)), ("DirectML", None), ("CUDA", None)];
+        assert_eq!(first_tried(&ladder), Some("DirectML"), "the GPU side's memory is checked where it lands first");
     }
 
     fn side(provider: &str) -> Side {
@@ -772,7 +798,7 @@ mod tests {
         let failed = Side { error: Some("boom".into()), ..side("DirectML") };
         let part_on_cpu = Side { on_cpu: true, ..side("unet DirectML, vae_decoder CPU") };
         type Case<'a> = (Gpu, Option<&'a Side>, Option<&'a Agreement>, bool, Verdict);
-        let cases: [Case; 12] = [
+        let cases: [Case; 13] = [
             (gpu.clone(), Some(&cpu), Some(&close), false, Verdict::Match),
             (gpu.clone(), Some(&cpu), Some(&far), false, Verdict::Mismatch),
             (gpu.clone(), Some(&cpu), None, true, Verdict::Mismatch),
@@ -784,6 +810,7 @@ mod tests {
             (Gpu::NoProvider, Some(&cpu), None, false, Verdict::NoGpuProvider),
             (Gpu::ByDesign { reason: String::new() }, Some(&cpu), None, false, Verdict::CpuByDesign),
             (Gpu::FailedBefore { providers: vec!["DirectML".into()] }, Some(&cpu), None, false, Verdict::FailedBefore),
+            (Gpu::NoRoom { short: String::new() }, Some(&cpu), None, false, Verdict::NoRoom),
             (Gpu::NotInstalled, None, None, false, Verdict::NotInstalled),
         ];
         for (gpu, cpu, agreement, sizes_differ, expected) in &cases {

@@ -716,19 +716,12 @@ pub(crate) struct ColorizeOutput {
 fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Result<bool, String> {
     let on_cpu = crate::hardware::runs_on_cpu(descriptor.id, cpu_only).map_err(|short| {
         tracing::warn!(model = ?descriptor.id, cpu_only, ?short, "admission refused: not enough memory");
-        refusal(short)
+        short.to_string()
     })?;
     if on_cpu && !cpu_only {
         tracing::info!(model = ?descriptor.id, "not enough memory for the GPU provider; running on the CPU");
     }
     Ok(on_cpu)
-}
-
-fn refusal(short: prunr_core::memory::Short) -> String {
-    match short {
-        prunr_core::memory::Short::Ram { need_mb, free_mb } => format!("needs about {need_mb} MB of free memory, {free_mb} MB is free"),
-        prunr_core::memory::Short::Card { need_mb, free_mb } => format!("needs about {need_mb} MB free on the graphics card, {free_mb} MB is free"),
-    }
 }
 
 /// The image the upscale model reads: the input, denoised first when
