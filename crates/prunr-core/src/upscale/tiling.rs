@@ -58,50 +58,42 @@ pub struct UpscaleTilePlacement {
     pub padded_h: u32,
 }
 
-/// Overlapping tiles covering the image. With `cfg.tile_multiple` each
-/// tile is padded bottom-right to that multiple, and the output trimmed
-/// back to `w × h`.
+/// Overlapping tiles covering the image, all one size: per axis the
+/// fewest tiles of at most `cfg.tile_size` that overlap their neighbours
+/// by at least `cfg.overlap`, made equal and spread evenly. No tile is an
+/// edge sliver: one would see little of the picture, and CoreML runs a
+/// new shape ~0.5 s slower and keeps only the last one warm. With
+/// `cfg.tile_multiple` each tile is padded bottom-right to that multiple,
+/// and the output trimmed back to `w × h`.
 pub fn plan_upscale_tiles(
     width: u32,
     height: u32,
     cfg: TilingConfig,
 ) -> Vec<UpscaleTilePlacement> {
     let TilingConfig { tile_size, tile_multiple, overlap } = cfg;
-    let step = tile_size.saturating_sub(overlap).max(1);
-
-    let (xs, ys) = (axis_starts(width, tile_size, step), axis_starts(height, tile_size, step));
-
-    let mut tiles = Vec::with_capacity(xs.len() * ys.len());
-    for &y in &ys {
-        for &x in &xs {
-            let w = tile_size.min(width - x);
-            let h = tile_size.min(height - y);
-            let (padded_w, padded_h) = match tile_multiple {
-                Some(m) if m > 0 => (
-                    w.div_ceil(m) * m,
-                    h.div_ceil(m) * m,
-                ),
-                _ => (w, h),
-            };
-            tiles.push(UpscaleTilePlacement { x, y, w, h, padded_w, padded_h });
-        }
-    }
-    tiles
+    let ((xs, w), (ys, h)) = (axis_tiles(width, tile_size, overlap), axis_tiles(height, tile_size, overlap));
+    let (padded_w, padded_h) = match tile_multiple {
+        Some(m) if m > 0 => (w.div_ceil(m) * m, h.div_ceil(m) * m),
+        _ => (w, h),
+    };
+    ys.iter()
+        .flat_map(|&y| xs.iter().map(move |&x| UpscaleTilePlacement { x, y, w, h, padded_w, padded_h }))
+        .collect()
 }
 
-/// Tile starts along one axis of length `len`, the last one moved in so
-/// its tile reaches the far edge.
-fn axis_starts(len: u32, tile_size: u32, step: u32) -> Vec<u32> {
-    let mut starts: Vec<u32> = (0..len).step_by(step as usize).collect();
-    if let Some(&last) = starts.last() {
-        if last + tile_size < len {
-            starts.push(len.saturating_sub(tile_size));
-        }
+/// One axis of length `len`: the tiles' starts and their common length.
+fn axis_tiles(len: u32, tile_size: u32, overlap: u32) -> (Vec<u32>, u32) {
+    if len <= tile_size {
+        return (vec![0], len);
     }
-    // The edge tile may coincide with an earlier step.
-    starts.sort_unstable();
-    starts.dedup();
-    starts
+    let step = tile_size.saturating_sub(overlap).max(1);
+    // ≥ 2: len > tile_size
+    let count = len.saturating_sub(overlap).div_ceil(step);
+    // count × size ≥ len + (count - 1) × overlap, so neighbours overlap
+    // by at least `overlap` and size ≤ tile_size.
+    let size = (len + (count - 1) * overlap).div_ceil(count);
+    let span = len - size;
+    ((0..count).map(|i| i * span / (count - 1)).collect(), size)
 }
 
 /// Upscale tile by tile, smoothstep-blending overlaps to hide seams; alpha
@@ -299,6 +291,26 @@ mod tests {
             covered.iter().all(|&c| c),
             "some pixels not covered by any tile"
         );
+    }
+
+    /// Per axis the fewest tiles that overlap by `overlap`, all one size
+    /// and spread evenly: no edge sliver, and no more pixels run than
+    /// the overlaps need.
+    #[test]
+    fn tiles_are_equal_and_few() {
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 };
+        assert_eq!(plan_upscale_tiles(256, 256, cfg).len(), 1, "a picture one tile big is one tile");
+        assert_eq!(axis_tiles(1000, 256, 16), (vec![0, 196, 393, 590, 787], 213));
+        assert_eq!(axis_tiles(4000, 512, 16), (vec![0, 442, 885, 1327, 1770, 2213, 2655, 3098, 3541], 459));
+        for len in [257, 496, 497, 700, 1000, 1024, 3000, 4000, 4032, 6000] {
+            let (starts, size) = axis_tiles(len, 256, 16);
+            assert!(size <= 256, "{len}: {size}");
+            assert_eq!((starts[0], starts.last().map(|s| s + size)), (0, Some(len)), "{len}: from edge to edge");
+            assert!(starts.windows(2).all(|p| p[1] > p[0] && p[0] + size >= p[1] + 16), "{len}: {starts:?} × {size}");
+            assert_eq!(starts.len() as u32, (len - 16).div_ceil(240), "{len}: the fewest tiles");
+        }
+        let tiles = plan_upscale_tiles(1000, 700, cfg);
+        assert!(tiles.iter().all(|t| (t.w, t.h) == (tiles[0].w, tiles[0].h)), "one shape: {tiles:?}");
     }
 
     /// Pad-to-multiple round-trip: a 250×200 tile padded to 256×208 (nearest
