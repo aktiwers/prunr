@@ -62,6 +62,24 @@ impl EpKind {
     }
 }
 
+/// The provider this build calls `name`.
+pub(crate) fn ep_named(name: &str) -> Option<EpKind> {
+    [
+        #[cfg(not(target_os = "macos"))]
+        EpKind::OpenVino,
+        #[cfg(not(target_os = "macos"))]
+        EpKind::Cuda,
+        #[cfg(target_os = "linux")]
+        EpKind::MiGraphX,
+        #[cfg(target_os = "macos")]
+        EpKind::CoreMl,
+        #[cfg(windows)]
+        EpKind::DirectMl,
+    ]
+    .into_iter()
+    .find(|ep| ep.as_str() == name)
+}
+
 impl std::fmt::Display for EpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -578,6 +596,10 @@ pub(crate) fn walk_ladder<S>(
             walk.skipped.push(skip.text(ep));
             continue;
         }
+        if let Some(rejected) = crate::provider_check::rejection(model, weights, ep) {
+            walk.skipped.push(format!("{ep}: {rejected}"));
+            continue;
+        }
         let drafted = crate::cache::drafts_attached();
         let started = std::time::SystemTime::now();
         let mut committed = commit(ep);
@@ -668,7 +690,7 @@ pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Ski
 /// The weights file a session loaded: the model's own (FP32 for
 /// segmentation and upscale; an SD bundle's own half-precision weights
 /// count as these too), or the FP16 (GPU) or INT8 (CPU) variant beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Weights {
     #[default]
     Fp32,
@@ -683,6 +705,11 @@ impl Weights {
             Weights::Fp16 => "FP16",
             Weights::Int8 => "INT8",
         }
+    }
+
+    /// The weights `label` names.
+    pub fn labelled(label: &str) -> Option<Self> {
+        [Weights::Fp32, Weights::Fp16, Weights::Int8].into_iter().find(|w| w.label() == label)
     }
 }
 
