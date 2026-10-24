@@ -264,12 +264,23 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
     }
 }
 
+/// The worker's link to the window, for the provider check's notices.
+static NOTICES: std::sync::OnceLock<Mutex<mpsc::Sender<SubprocessEvent>>> = std::sync::OnceLock::new();
+
+fn relay_notice(notice: prunr_core::provider_check::Notice) {
+    if let Some(tx) = NOTICES.get() {
+        let _ = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(SubprocessEvent::ProviderCheck { notice });
+    }
+}
+
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
 
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
+    let _ = NOTICES.set(Mutex::new(evt_tx.clone()));
+    prunr_core::provider_check::set_observer(relay_notice);
 
     // Writer thread: flush after every event. The parent blocks on each frame,
     // and a buffered writer would hold back the post-Init `Ready` indefinitely.

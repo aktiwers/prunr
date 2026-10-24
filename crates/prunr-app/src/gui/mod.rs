@@ -39,6 +39,7 @@ pub(crate) mod image_texture;
 pub(crate) mod selection_queue;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_quit;
+pub mod provider_notices;
 
 #[cfg(test)]
 mod tests;

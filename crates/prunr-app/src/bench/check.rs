@@ -37,13 +37,13 @@ pub fn judge(row: &Row) -> Option<Check> {
     let weights = gpu.weights?.to_string();
     let verdict = |rejected: Option<String>| Some(Check { provider: gpu.provider.clone(), weights: weights.clone(), rejected });
     match row.verdict {
-        Verdict::GpuFailed => verdict(Some(format!("it failed to run there: {}", gpu.error.as_deref().unwrap_or("no reason given")))),
+        Verdict::GpuFailed => verdict(Some(format!("it failed to run on {}: {}", gpu.provider, gpu.error.as_deref().unwrap_or("no reason given")))),
         Verdict::Mismatch => {
             let off = row.agreement.as_ref().map_or_else(
                 || "a different size".to_string(),
                 |a| format!("mean {:.2}/255, {:.1}% of values more than 2/255 apart", a.mean_abs, a.over_2 * 100.0),
             );
-            verdict(Some(format!("its output differs from the CPU's ({off})")))
+            verdict(Some(format!("its output on {} differs from the CPU's ({off})", gpu.provider)))
         }
         Verdict::Match => {
             let cpu_ms = row.cpu.as_ref()?.timing.as_ref()?.typical_ms();
@@ -51,7 +51,7 @@ pub fn judge(row: &Row) -> Option<Check> {
             if gpu_ms <= cpu_ms * FASTER_BY {
                 verdict(None)
             } else {
-                verdict(Some(format!("it runs slower there than on the CPU ({gpu_ms:.0} ms against {cpu_ms:.0} ms)")))
+                verdict(Some(format!("it runs slower on {} than on the CPU ({gpu_ms:.0} ms against {cpu_ms:.0} ms)", gpu.provider)))
             }
         }
         _ => None,
@@ -90,7 +90,7 @@ pub fn run_in_child(model: ModelId, provider: &str, weights: Weights) -> Option<
                 let _ = child.kill();
                 let _ = child.wait();
                 tracing::warn!(?model, provider, "the provider check ran past its limit");
-                let rejected = Some(format!("its check ran past {} minutes", LIMIT.as_secs() / 60));
+                let rejected = Some(format!("its check on {provider} ran past {} minutes", LIMIT.as_secs() / 60));
                 return Some(Check { provider: provider.to_string(), weights: weights.label().to_string(), rejected });
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(200)),
