@@ -1149,11 +1149,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        // CUDA returns a black picture from this fp16 release (RTX 3060,
+        // ORT 1.24.1, 2026-10-24: every value 0, where the CPU's matches
+        // the input to 3.3/255 shrunk back).
+        incompatible_eps: &["CUDA"],
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
+            cuda: Priced::Never,
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
@@ -2341,7 +2344,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 9), ("DirectML", 23), ("CoreML", 16), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 8), ("DirectML", 23), ("CoreML", 16), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
