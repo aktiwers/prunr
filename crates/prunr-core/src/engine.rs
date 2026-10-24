@@ -256,6 +256,39 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
     if cpu_only { &[] } else { available_gpu_eps() }
 }
 
+/// The providers among `eps` that run on a graphics device: OpenVINO only
+/// when it may use the Intel GPU, its CPU device being no faster than
+/// ORT's own.
+pub(crate) fn gpu_devices(eps: &[EpKind], openvino_on_gpu: bool) -> Vec<EpKind> {
+    eps.iter().copied().filter(|ep| !on_host_cpu(ep.as_str(), openvino_on_gpu)).collect()
+}
+
+/// A session of `id` on the first graphics device that builds it, else
+/// on the CPU, with where it landed: for a model whose caller runs the
+/// session itself (lines, faces). `commit` loads the model into the
+/// builder it is handed, provider attached.
+pub fn session_on_ladder(
+    id: prunr_models::ModelId,
+    cpu_only: bool,
+    commit: impl Fn(ort::session::builder::SessionBuilder) -> Result<Session, String>,
+) -> Result<(Session, SessionPick), CoreError> {
+    let eps = gpu_devices(gpu_eps_for(cpu_only), openvino_on_gpu());
+    let mut failed = Vec::new();
+    if !eps.is_empty() {
+        let landed = walk_ladder("", id, Weights::Fp32, &eps, |ep| {
+            let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
+            let built = ep.attach(builder, id, EpSite::Engine { threads: num_cpus::get(), part: None })?;
+            commit(built).map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}): {e}"), suspect_cache: None })
+        });
+        match landed {
+            Ok((session, ep, failed)) => return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) })),
+            Err(walk) => failed = walk.failed,
+        }
+    }
+    let session = commit(crate::ort_runtime::session_builder()?).map_err(CoreError::Inference)?;
+    Ok((session, SessionPick { failed, ..SessionPick::on(CPU_NAME) }))
+}
+
 /// The session family a provider is registered for; each keeps its own
 /// tuning of the providers.
 #[derive(Debug, Clone, Copy)]
@@ -1247,6 +1280,17 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lines, faces and the Magic Brush's encoder try the graphics
+    /// devices, and OpenVINO only when it may use the Intel GPU: on its
+    /// CPU device it is no faster than the CPU.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_session_on_the_ladder_tries_only_graphics_devices() {
+        let eps = [EpKind::Cuda, EpKind::OpenVino];
+        assert_eq!(gpu_devices(&eps, false), [EpKind::Cuda]);
+        assert_eq!(gpu_devices(&eps, true), eps);
+    }
 
     /// A cached CPU graph the session cannot load (damaged, or written on
     /// another machine) is deleted and the session built from the model:
