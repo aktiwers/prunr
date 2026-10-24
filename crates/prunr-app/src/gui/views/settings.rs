@@ -158,7 +158,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
 
 fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, ctx: &egui::Context) {
     match intent {
-        HardwareSectionIntent::StartInstall(rt) => app.start_runtime_install(rt),
+        HardwareSectionIntent::StartInstall(rt) => app.request_install(InstallTarget::Runtime(rt)),
         HardwareSectionIntent::CancelInstall => {
             if let Some(p) = app.runtime_install.as_ref() {
                 p.cancel.store(true, std::sync::atomic::Ordering::Release);
@@ -189,7 +189,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
                 app.toasts.error("Could not change the Intel graphics setting: no user data folder");
             }
         },
-        HardwareSectionIntent::GetNvidiaLibraries => app.request_nvidia_libraries(),
+        HardwareSectionIntent::GetNvidiaLibraries => app.request_install(InstallTarget::NvidiaLibraries),
         HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
         HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
     }

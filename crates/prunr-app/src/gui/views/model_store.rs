@@ -342,8 +342,8 @@ pub(crate) fn requires_license_gate(id: ModelId, settings: &super::super::settin
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LicenseRequest {
     Model(ModelId),
-    /// NVIDIA's CUDA and cuDNN libraries for the CUDA runtime.
-    NvidiaLibraries,
+    /// An install that downloads NVIDIA's CUDA and cuDNN libraries.
+    Nvidia(crate::runtime_install::InstallTarget),
 }
 
 /// License-acceptance modal. Returns `(close_requested, accepted)`:
@@ -363,7 +363,7 @@ pub(crate) fn render_license_dialog(
             let license = desc.license();
             (desc.display_name, license.license, vec![license.license_url, license.source_url])
         }
-        LicenseRequest::NvidiaLibraries => (
+        LicenseRequest::Nvidia(_) => (
             "NVIDIA CUDA 12 and cuDNN 9 libraries",
             "NVIDIA CUDA Toolkit EULA and cuDNN Software License Agreement",
             crate::runtime_install::NVIDIA_LICENSE_URLS.to_vec(),

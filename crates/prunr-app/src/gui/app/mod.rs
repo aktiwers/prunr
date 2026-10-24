@@ -876,27 +876,16 @@ impl PrunrApp {
         self.runtime_prompt = Some(rt);
     }
 
-    /// Install `runtime` in the background; Settings › Hardware and the
-    /// first-launch prompt both start it here. One install at a time. The
-    /// CUDA runtime brings NVIDIA's libraries, so it asks for their license
-    /// first.
-    pub(crate) fn start_runtime_install(&mut self, runtime: crate::runtime_install::RuntimeId) {
-        if runtime == crate::runtime_install::RuntimeId::Cuda && !self.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY) {
-            self.pending_license_request = Some(super::views::model_store::LicenseRequest::NvidiaLibraries);
+    /// Install `target` in the background; Settings › Hardware and the
+    /// first-launch prompt both start it here. One install at a time. One
+    /// that downloads NVIDIA's libraries asks for their license first, and
+    /// starts once it is accepted.
+    pub(crate) fn request_install(&mut self, target: crate::runtime_install::InstallTarget) {
+        if target.needs_nvidia_license() && !self.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY) {
+            self.pending_license_request = Some(super::views::model_store::LicenseRequest::Nvidia(target));
             return;
         }
-        self.start_install(crate::runtime_install::InstallTarget::Runtime(runtime));
-    }
-
-    /// The NVIDIA libraries the CUDA runtime needs, once their license is
-    /// accepted; asks for it first when it is not.
-    pub(crate) fn request_nvidia_libraries(&mut self) {
-        use super::views::model_store::LicenseRequest;
-        if self.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY) {
-            self.start_install(crate::runtime_install::InstallTarget::NvidiaLibraries);
-        } else {
-            self.pending_license_request = Some(LicenseRequest::NvidiaLibraries);
-        }
+        self.start_install(target);
     }
 
     fn start_install(&mut self, target: crate::runtime_install::InstallTarget) {
@@ -1408,10 +1397,9 @@ impl PrunrApp {
                         self.settings.accept_license(id);
                         self.download_manager.start_download(id);
                     }
-                    LicenseRequest::NvidiaLibraries => {
-                        use crate::runtime_install::{InstallTarget, RuntimeId};
+                    LicenseRequest::Nvidia(target) => {
                         self.settings.accept(crate::runtime_install::NVIDIA_LICENSE_KEY);
-                        self.start_install(if RuntimeId::Cuda.is_installed() { InstallTarget::NvidiaLibraries } else { InstallTarget::Runtime(RuntimeId::Cuda) });
+                        self.start_install(target);
                     }
                 }
             } else if close {
@@ -1424,7 +1412,7 @@ impl PrunrApp {
             if let Some(action) = render_runtime_prompt(ctx, rt) {
                 self.runtime_prompt = None;
                 match action {
-                    RuntimePromptAction::Install => self.start_runtime_install(rt),
+                    RuntimePromptAction::Install => self.request_install(crate::runtime_install::InstallTarget::Runtime(rt)),
                     RuntimePromptAction::NotNow => {
                         self.settings.snooze_runtime_prompt(rt, RUNTIME_PROMPT_SNOOZE_DAYS);
                     }
@@ -1536,8 +1524,9 @@ mod runtime_install_tests {
     fn the_cuda_runtime_asks_for_nvidias_license_before_installing() {
         let mut app = PrunrApp::new_for_test();
         assert!(!app.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY));
-        app.start_runtime_install(RuntimeId::Cuda);
-        assert_eq!(app.pending_license_request, Some(LicenseRequest::NvidiaLibraries));
+        let cuda = crate::runtime_install::InstallTarget::Runtime(RuntimeId::Cuda);
+        app.request_install(cuda);
+        assert_eq!(app.pending_license_request, Some(LicenseRequest::Nvidia(cuda)), "the dialog starts what was asked");
         assert!(app.runtime_install.is_none(), "nothing downloads before the license is accepted");
     }
 }
