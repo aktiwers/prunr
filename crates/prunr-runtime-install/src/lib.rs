@@ -83,7 +83,7 @@ fn manylinux_glibc(tag: &str, arch: &str) -> Option<(u32, u32)> {
 /// the wheel's minimum OS, which moves between ORT releases
 /// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
 /// only its arch is fixed. A Linux tag may need any glibc up to `glibc`,
-/// the host's (an older tag such as 2.17 fits; MIGraphX's needs 2.34).
+/// the host's (NVIDIA's wheels carry 2.12 to 2.27, MIGraphX's 2.34).
 fn tag_fits(tag: &str, rid: &str, glibc: (u32, u32)) -> bool {
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let macos = |arch: &str| tag.strip_prefix("macosx_")
@@ -309,8 +309,8 @@ pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Clien
         .build()
 }
 
-/// Runtime wheels run to a few hundred MB; this leaves room for a larger
-/// one without trusting any size past it.
+/// The largest wheel we fetch (cuDNN) is about 770 MB; this leaves room
+/// for a newer one without trusting any size past it.
 const MAX_RESERVE_BYTES: u64 = 1536 * 1024 * 1024;
 
 /// What to reserve for a wheel PyPI says is `size_bytes`: a buffer grown
@@ -435,6 +435,41 @@ pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathB
         ));
     }
     Ok(target_dir.to_path_buf())
+}
+
+/// Filter + flatten for files extracted from an NVIDIA library wheel
+/// (`nvidia/<package>/lib/libX.so.N`): its shared libraries, by file
+/// name. The same path-traversal guard as `repackage_target_filename`.
+pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
+    let rest = zip_name.strip_prefix("nvidia/")?;
+    let (_package, file) = rest.split_once("/lib/")?;
+    if file.is_empty() || file.contains('/') || file.contains('\\') || !file.contains(".so") {
+        return None;
+    }
+    // Shipped beside what ORT links but never loaded by it.
+    if file.starts_with("libnvblas") || file.starts_with("libcufftw") || file.contains(".alt.") {
+        return None;
+    }
+    Some(file.to_string())
+}
+
+/// Extract an NVIDIA library wheel's shared libraries into `target_dir`,
+/// flat; how many were written. Errors when the wheel holds none.
+pub fn extract_nvidia_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("zip parse: {e}"))?;
+    let mut written = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let Some(file) = nvidia_target_filename(entry.name()) else { continue };
+        let dest = target_dir.join(&file);
+        let mut out = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("extract {}: {e}", dest.display()))?;
+        written += 1;
+    }
+    if written == 0 {
+        return Err("no libraries in the NVIDIA wheel — its layout may have changed".to_string());
+    }
+    Ok(written)
 }
 
 pub const DYLIB_NAME: &str = if cfg!(windows) {
@@ -573,7 +608,7 @@ mod tests {
         assert!(pick_wheel(&urls, "windows-arm64").is_err());
     }
 
-    /// A wheel may carry an older manylinux tag than ORT's; any glibc up
+    /// NVIDIA's wheels carry older manylinux tags than ORT's; any glibc up
     /// to the host's fits (2.28 here), a newer one or another arch does not.
     #[test]
     fn linux_wheels_fit_up_to_the_glibc_ort_needs() {
@@ -755,6 +790,41 @@ mod tests {
         ] {
             assert!(yml.contains(&line), "release.yml no longer has `{line}`");
         }
+    }
+
+    /// An NVIDIA wheel gives up its shared libraries by file name, and
+    /// nothing else: headers, Python files and traversal names stay out.
+    #[test]
+    fn nvidia_wheels_give_up_only_their_libraries() {
+        assert_eq!(nvidia_target_filename("nvidia/cudnn/lib/libcudnn.so.9").as_deref(), Some("libcudnn.so.9"));
+        assert_eq!(nvidia_target_filename("nvidia/cublas/lib/libcublasLt.so.12").as_deref(), Some("libcublasLt.so.12"));
+        assert!(nvidia_target_filename("nvidia/cudnn/include/cudnn.h").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/__init__.py").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/../../evil.so").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/..\\evil.so").is_none());
+        assert!(nvidia_target_filename("onnxruntime/capi/libonnxruntime.so").is_none());
+        for unused in ["libnvblas.so.12", "libcufftw.so.11", "libnvrtc.alt.so.12", "libnvrtc-builtins.alt.so.12.9"] {
+            assert!(nvidia_target_filename(&format!("nvidia/x/lib/{unused}")).is_none(), "{unused}");
+        }
+    }
+
+    /// Extraction writes the libraries flat and refuses a wheel without any.
+    #[test]
+    fn an_nvidia_wheel_extracts_flat_and_one_without_libraries_fails() {
+        use std::io::Write;
+        let wheel = |files: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for f in files {
+                zip.start_file(*f, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"elf").unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let n = extract_nvidia_wheel(&wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"]), dir.path()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read(dir.path().join("libcurand.so.10")).unwrap(), b"elf");
+        assert!(extract_nvidia_wheel(&wheel(&["nvidia/curand/include/curand.h"]), dir.path()).is_err());
     }
 
     #[test]
