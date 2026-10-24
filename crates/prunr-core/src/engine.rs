@@ -1253,6 +1253,10 @@ mod tests {
     /// the CPU is the last provider, so a bad cache must not stop a model.
     #[test]
     fn a_cpu_session_builds_past_a_broken_cached_graph() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         let id = prunr_models::ModelId::Silueta;
         assert!(crate::cache::cache_dir_for(id, CPU_NAME).is_some());
         let broken: Vec<PathBuf> = Weights::ALL
