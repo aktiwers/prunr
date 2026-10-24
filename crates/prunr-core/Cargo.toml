@@ -13,10 +13,16 @@ dev-models = ["prunr-models/dev-models"]
 # CUDA execution provider (requires CUDA toolkit at link time)
 cuda = []
 
+# Constructors other crates' tests use to stand in for a model's output.
+test-utils = []
+
 [dependencies]
 prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }
 ort = { workspace = true }
+# ort's own loader version: ort cannot load a second runtime after a
+# failed load, so each candidate is checked with this first.
+libloading = "0.9"
 ndarray = { workspace = true }
 image = { workspace = true }
 resvg = { workspace = true }
@@ -33,9 +39,12 @@ rand_distr = { workspace = true }
 half = { workspace = true }
 instant-clip-tokenizer = "0.1"
 sysinfo = { workspace = true }
+dunce = { workspace = true }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
+# The integration tests in tests/ record progress with RecordingSink.
+prunr-core = { path = ".", features = ["test-utils"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 # criterion: microbench harness for the perf-sensitive kernels in this

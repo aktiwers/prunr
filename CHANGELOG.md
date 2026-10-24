@@ -6,26 +6,66 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Added
 
+- **The graphics card where it wins.** The first time a model would run on the graphics card, Prunr checks it there once against the CPU, and keeps the graphics card only where it is faster and gives the same result. A note says so while it checks (seconds, once per model); Settings › Hardware › Graphics card checks runs them again.
+- **CUDA Runtime brings its own NVIDIA libraries** (Linux). Installing it downloads NVIDIA's CUDA and cuDNN libraries with it (about 2 GB, under NVIDIA's license), so it never depends on the ones installed on the computer.
+- **Magic Brush on the Mac's graphics chip:** about four times faster on an M1 (0.5 s per photo against 2 s), with the same selections.
+- **DirectML built into Windows.** The Windows download runs background removal, upscaling, colorize and the erasers on the graphics card: any DirectX 12 card, NVIDIA, AMD or Intel. A computer without one runs everything on the processor as before, from the same download. OpenVINO stays an optional download in Settings › Hardware; with it installed, a Runtime choice (Built in or OpenVINO) says which one Prunr uses after a restart. The Windows app takes about 24 MB more disk space. `prunr --doctor` shows the choice.
+- **Model Store in the top bar:** a store icon beside Settings opens it from anywhere.
+- **See the faces Faces found.** While the Faces strip or panel is open, every face it found is ringed in the accent purple, around the exact area it redraws; a face it missed has no ring. The rings pop in with a bounce and one bright glow as soon as the search finds the faces, before any is redrawn, then rest; under Largest the faces left alone are faint. An Outline switch in the strip turns them off.
+- **Faces appear one at a time.** Restore faces shows each face redrawn in its place, at the chosen strength, the moment it is done, instead of nothing until every face is; the finished image then takes over without a jump. Under Largest only the face it redraws appears. Cancel or Esc stops after the face under way and leaves the image as it was.
+- Eraser (RORem) has an Advanced chip: Steps (2–8; fewer are faster but rougher, more than the 4 it was trained for changes little) and Pin seed.
+- **Process works on the ticked images for every model.** Upscalers and Colorize take them one at a time (the capsule counts "Image 2 of 5"); an eraser fills every ticked image that has a painted region, one after the other, and says how many had none. Tick boxes are bigger. The footer shows how large an erase filled its region ("Fill 24%"), and a pill at the bottom of the canvas says "Rendering…" or "Preparing…" when work goes on for more than a second with nothing else to show for it.
 - `--feather` and `--edge-width` on the command line, so every Mask setting has a flag.
-- **Magic Brush.** Click or drag over anything and SAM 2 (Hiera Small, bundled) finds it. On a background-removal result it restores or erases that object at once; on the eraser it adds to or takes away from the region. Shift and Alt override the mode for one click, a Confidence knob filters weak candidates. The encoder runs once per image in the background, so switching images keeps the tool ready.
-- **Restore and Erase brushes.** On a background-removal result the Paint Brush restores what the model took or erases what it left, the moment the stroke ends, with Shift and Alt overriding the mode. The knobs touched every stroke sit in a strip over the image while a brush is on; its dots open the full panel.
+- **Magic Brush.** Click or drag over anything and SAM 2.1 (Hiera Small, bundled) finds it and adds it to the selection; Alt (or Ctrl) takes it away. A Confidence knob filters weak candidates. Once you have used it in a session, the encoder runs on each image you look at in the background, so switching images keeps the tool ready; before that, looking at images costs nothing (it was 9–11 CPU seconds per image, and slowed a Process pressed meanwhile).
+- **Restore and Erase brushes.** Both brushes paint a selection: a stroke adds to it, Alt (or Ctrl) removes from it. On a background-removal result the switch Restore · Erase · Select says what the selection does, live as you paint: bring back what the model took, remove what it left, or only select. Switching re-applies the area; Restore and Delete in the toolbar keep the change and start a new area. The knobs touched every stroke sit in a strip over the image while a brush is on; its dots open the full panel.
 - **Selections as a first-class object.** Paint Brush and Magic Brush author the same selection. Delete, Copy, Cut, Invert and Clear act on it, with keyboard shortcuts; Feather softens its edge against the photo.
-- **Upscale.** Real-ESRGAN x4plus, 4x NMKD Siax-CX and Superscale, and 4xNomos8kSCHAT-L, at 2×, 3× or 4×; a 2× Real-ESRGAN upscale runs Real-ESRGAN's own 2× model when it is installed, about four times faster. Refine: Denoise before the model; Sharpen, AI blend and Color match after it, previewed live. fp16 variants download automatically on GPUs. Cancel aborts mid-tile.
-- **Eraser with Stable Diffusion.** SD 1.5 Inpaint and its LCM fast variant join LaMa, Big-LaMa and MI-GAN. Prompt and negative prompt, guidance, five schedulers (LCM, DDIM, DPM++ 2M Karras, Euler-A, UniPC), steps, denoising strength, pinned seed, and the TAESD fast decoder. Quality presets (Fast / Balanced / Quality) pick scheduler and steps. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
+- **Upscale.** Real-ESRGAN x4plus, 4x NMKD Siax-CX and Superscale, 4xNomos8kSCHAT-L, and 4xNomos2 RealPLKSR (about a third faster than Real-ESRGAN, with natural skin and hair texture), at 2×, 3× or 4×; a 2× Real-ESRGAN upscale runs Real-ESRGAN's own 2× model when it is installed, about four times faster. Refine: Denoise before the model; Sharpen, AI blend and Color match after it, previewed live. fp16 variants download automatically on GPUs. Cancel aborts mid-tile.
+- **Eraser with Stable Diffusion.** SD 1.5 Inpaint joins LaMa, Big-LaMa and MI-GAN. Quality is Fast (the LCM download, a few steps) or Quality (DPM++ 2M Karras on the full model); without the Fast download it runs Quality. A prompt (empty continues the surroundings) and a negative prompt; under Advanced, steps and guidance in each quality's range, Pin seed, which keeps the seed of the fill on screen, and the TAESD fast decoder, on by default for Fast. Switching quality keeps the prompt and seed. SD runs in its own subprocess, so an out-of-memory stop never takes the app down.
+- **Eraser (RORem)** in the Model Store: Stable Diffusion XL trained for object removal. On a large object (a person, a car, a bench across a third of the photo) it fills in the background (the road, the water, the snow) where LaMa leaves streaks and SD 1.5 draws something new in the shape of the hole. Four steps; about 75 s per erase on a 2015 4-core CPU after a one-time load, much faster on a GPU. Needs about 18 GB of free RAM on the CPU and a 5.5 GB download. Try another works on it too.
+- **Restore faces** (the Faces chip, on background removal, No model and the upscalers): redraws soft, small or compressed faces with GFPGAN or RestoreFormer++, downloaded from the Model Store. Strength updates live without running the model again: up to 50% it adds the redrawn detail over the photo's own shading and skin tone, above it the redrawn shading too. A face larger than the restorer's 512 px takes its detail only as far as that resolution reaches; All faces or the Largest; Include hair widens it to hair and ears. On an upscale the faces are found in the enlarged image and go in after Refine. Saves, copies, drags and layers carry the restored faces.
+- **Fill scale** for every eraser (Auto, Full, 1/2, 1/4; `--fill-scale` on the command line). A large object used to fill as flat grey blocks, because the model works in 512 px squares and the middle of a big hole had no photo around it. Auto keeps small areas at full size and fills large ones at a smaller scale: a bench across a 12 MP photo now fills as snow, in 22 s instead of 99 s. Each area is judged on its own, so a small mark next to a large one stays sharp. The Stable Diffusion eraser fills a large area as one crop instead of a patchwork of tiles, and a selection in many pieces (a slatted bench from Magic Brush) is filled as one area instead of hundreds of crops.
 - **Presets v2.** Per-model presets with brush settings, merge-save that keeps other models' entries, and automatic migration of v1 files.
+- **Animations switch** (Settings › Editing): off, every result appears at once and the working highlights hold still; the progress spinner keeps turning.
+- **A first look at the subject.** While BiRefNet or U2Net works on the image on screen, the fast Silueta model outlines the subject within about a second, and the precise cut-out replaces the outline when it is done. Images running in the background of a batch skip it, and so does a model that finishes an image in under 2 seconds on your machine (a fast graphics card). With Animations off, Silueta is not loaded at all.
+- **See the upscale or the erase as it happens.** Each finished tile shows its result in place: an upscale's sharpened down to fit its square, an erase's fill over the photo, also when a large area is filled at a smaller scale. The final image reveals over the finished preview. The preview is at most screen-sized, so it costs a few MB whatever the output size, and the run takes as long as before.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
-- **Help menu** with keyboard shortcuts, the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
-- **Keep the Stable Diffusion eraser loaded** (Settings › Behavior): repeated erases skip the session build, at the cost of about 16 GB of RAM while the app is open.
+- **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
+- **Keep the Stable Diffusion eraser loaded** (Settings › Performance): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
+- **Outline & Shadow** for cut-outs: a sticker outline (width, color, round corners that follow soft hair edges) and a Soft or Drop shadow (opacity, blur, distance), under the subject, in the preview, Save and drag-out. `--outline PX[:HEX]` and `--shadow soft|drop` on the command line.
+- **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
+- **Colorize** (DDColor, in the Model Store): colours a black-and-white photo. Pick "Colorize (DDColor)" and Process; Strength then sets how much of the colour shows, from grey to more saturated than predicted, without running the model again. `--colorize` with `--color-strength` on the command line.
+- **Upscale on the command line**: `--upscale realesrgan|nomos|siax|superscale|nomos2` with `--scale`, `--denoise`, `--sharpen`, `--ai-blend`, `--color-match`, and `--restore-faces gfpgan|restoreformer` with `--face-strength`. A batch loads the model once.
+- **Depth** (Depth Anything V2 Small, 95 MB in the Model Store, about half a second per photo on the CPU): the app measures how near each part of the photo is once, then every depth effect updates live without running the model again.
+  - **Lens blur background** for cut-outs: the photo behind the subject blurs more the farther it is from the subject's depth, like a wide-open lens. `--bg-effect lens[:N]` on the command line.
+  - **Depth chip** on No model: Lens blur (Point or Tilt-shift, with Amount and Set focus: click the image where it should be sharp), Fog that thickens with distance, and Aerial perspective, which turns far things cooler and paler like distant hills. Sketch lines draw over the result.
+  - **Auto focus aims at faces.** Without a focus point set, the Lens blur and the lens blur background keep the largest face in the photo sharp; with no face, the background focuses on the cut-out's subject and the Depth chip on the nearest part of the photo, as before. Saves and the command line focus the same way.
+  - **Fade with distance** in Sketch's settings: lines lighten the farther away they are. `--line-fade <0-100>` on the command line.
+  - **Select by depth** with Magic Brush: turn on By depth on its strip and a click selects everything at about that depth; Range sets how far it reaches. Shift adds and Alt subtracts as usual.
+  - **Depth map export**: Save options › Depth map also writes `<name>-depth.png` (16-bit grey, white = near) beside each saved image, layers included. `--depth-map` on the command line, `--depth-only` for the maps alone.
 - `--effect <name>` and `--bg-effect blur[:N]|bw` on the command line, matching the app's Effect list and background effects.
 - Sketch's Pre-filter gains **Smooth**, which calms skin and noise before the lines are traced; Contrast boost and Posterize pick from a few steps.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
 - Color splash shows which hues it keeps on a strip under its sliders.
-- **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and the F1 list and tooltips show your bindings.
+- **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and tooltips show your bindings. F1 opens this tab, with the mouse gestures below the keys.
+- **`prunr bench`** checks the GPU path model by model: each installed model runs on the CPU and through the accelerator the app would pick, timed (session build, first run, steady runs), and the two outputs are compared. It names the accelerator each model landed on and why one was passed over, and writes `prunr-bench.md` and `prunr-bench.json` to send back. `--models`, `--runs`, `--image`; `--heavy` adds Stable Diffusion, RORem and 4xNomos8kSCHAT-L.
 
 ### Changed
 
+- A model that does not fit in the free memory of the graphics card (or of a Mac) runs on the CPU when it fits there, instead of not running.
+- Settings mentions the Stable Diffusion eraser (its memory check, Keep it loaded, the memory guard, the CPU-only warning) only once an SD eraser is installed.
+- **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.30.0), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.
+- On a Mac, the compiled-model cache moved from Application Support to Caches. The old folder, up to a few GB, is removed the first time this version starts.
+- Copy selection and Cut put only the selected area on the clipboard, cropped to its edges; they put a full-size image with everything else clear.
+- Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.
+- Nomos8k's line in the model picker says it is the slowest upscaler, and its Model Store text says how slow.
+- Scroll bars are slim and translucent, without a rail, to sit on the dark glass panels.
+- **The face finder is built in** (YuNet, 0.2 MB), so faces are found with no download; GFPGAN and RestoreFormer++ download only their own model. Face models already installed keep working as they are.
+- A feature whose model is not downloaded says the same thing everywhere — "Get <model> · <size>" — and opens the Model Store on that model: the Faces and Depth chips show "Get" on their face, the Model picker lists every model with "Get · <size>" on the ones not yet downloaded, and the eraser's Fast quality and fast decoder name the download they need.
+- **Lines now come from TEED** instead of DexiNed: cleaner lines, faster (a Sketch on a 20 MP photo takes 1.8 s instead of 2.7 s), and the app is about 130 MB smaller. The Balanced scale is folded into Fused; saved settings, presets and `--line-scale balanced` read it as Fused.
+- An upscaled result keeps its place on screen: a fitted image stays fitted, a zoomed-in view keeps its spot.
+- **A new look.** Panels float as dark glass with round pill corners. Mask, Sketch, Effect, Outline & Shadow, Background and Refine open as a quick strip of their everyday knobs; its dots open the full panel under it. Effects and backgrounds are picture tiles, colors are swatch dots, choices are segmented pills. The model picker groups models by what they do. Settings has a sidebar of pages (Performance, Hardware, Images, Editing, Hotkeys, Credits) and the Model Store is a grid of cards that open in place. The brush panels hold only what their strip lacks, and on a cut-out Erase is drawn in warm red.
 - Refine's Brightness lift and Saturation are gone (Brightness lift clipped highlights and banded shadows; no upscaler offers either), and so is the 4× two-pass Scale.
 - The Fill style chip is called **Effect**, with None first in its list. The Channel swap effect is gone (saved presets with it load as None); Duotone looks as before, now drawn as a two-color gradient map.
 - **Backgrounds are one choice**: Transparent, Solid color, Image, Blurred photo or Black & white photo. Picking one replaces the others. The Inverted background is gone. A solid color is opaque, as it is saved. Image fit is Cover, Contain or Tile: presets with Stretch load as Cover, with Center as Contain.
@@ -38,8 +78,9 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Shift edge** (was Edge shift) reads the way other editors do: + grows the cut-out, − shrinks it, over ±20 px. `--edge-shift` on the command line follows, so a positive value now grows the subject.
 - **Contrast replaces Hard threshold** in the Mask panel: one slider that sharpens the cut-out's edge at the photo's full size, where 100% is a hard edge. Hard threshold cut at the model's lower resolution, so its edge was never really hard. Saved presets with it on load as Contrast 100%. On the command line `--contrast` replaces `--threshold`.
 - Magic Brush shows only what changes its result (mode, Confidence, Remove specks) and draws a small fixed cursor; its size, hardness and shape only ever changed the cursor.
-- How a selection looks on the image is one app setting (Settings › Behavior: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
+- How a selection looks on the image is one app setting (Settings › Editing: Selection fill and Outline the selection) instead of three sliders in each brush panel; outline width is gone, since the outline already widens as you zoom out.
 - Each model shows only the controls that act on its image: no Mask chip without a background-removal model, no selection on an upscaler, and brushes say Add / Subtract wherever they shape a selection rather than a cut-out.
+- Dragging a thumbnail out of the window (Windows, macOS) starts at once: its files are written in the background while the pointer rests on it or presses it, instead of when the drag begins.
 - **Undo rebuilt on one timeline per image**, the way Krita, GIMP and Photoshop do it. Every step stores its whole state, so undo shows the stored image instantly instead of re-running a model. Knob changes are now undoable (a slider drag is one step), Clear selection is undoable, and an erase that lands removes its brush marks, which undo brings back. A result that finishes after you undo or move on is dropped instead of landing on the wrong state, and undo stops a run in progress.
 
 - **One toolbar row.** Every pipeline stage is a group chip (Mask, Sketch, Effect, Background, Refine, Quality, Prompt, Advanced) with a header and a reset; the tool cluster is Magic, Paint, the selection actions and Compare, then Preset and Reset.
@@ -50,11 +91,27 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - The "Use last result as input" switch is gone: each step remembers what it started from, so a new tool builds on the result while changing a setting or running the same tool again redoes the step instead of stacking on it. Undo goes back to the original.
 - Eraser models are on-demand downloads; LaMa is no longer embedded in the binary.
 - Line color choices (Original, Solid color, styles) live in one list.
-- The window can be made narrower: 1020 px minimum, down from 1100.
+- **Save as PNG, JPEG or WebP.** The arrow beside Save picks the format and, for a cut-out, Separate layers (moved from Settings). JPEG flattens transparency onto white; WebP is lossless and keeps it.
+- **Processor: Auto or CPU only**, saved, for every model (was "Force CPU this session", which only reached background removal).
+- **SD memory guard: Relaxed, Balanced or Strict** replaces the GB safety-margin slider; the memory note in Settings uses the same rule as the erase.
+- The Model picker shows in the empty window, and its last row opens the Model Store (which left the Help menu).
+- Reset to defaults keeps your presets, licence acceptances, background pictures and model, and the shipped hotkeys apply at once.
+- The Live preview switch is gone: changes always preview.
+- The window can be made narrower: 900 px minimum, down from 1100; a narrow toolbar shows its chips as icons.
 - The Protect selection lock is gone: on a background-removal result a stroke applies at once, and the eraser's region waits for Process.
+- The eraser's Feather fades the fill into the photo over a ring just outside the painted region, so a wide Feather never brings back the edge of what was erased; 0 is a hard edge. Sharpen starts at 0 on the Stable Diffusion eraser, which draws its own detail.
+- The Blurred photo background and Refine's Sharpen blur on every core: a 24 MP background blurs in half a second instead of four.
+- Holding a Lens blur, Fog or Aerial slider on a large photo previews the look at 2048 px; the full-size render follows when the slider is released.
+- On the CPU, BiRefNet takes a batch one image at a time: a second parallel job gained nothing and doubled RAM. Silueta and U2Net keep the parallel jobs, which make them 27 % and 18 % faster on four cores. A machine whose models run through OpenVINO counts as a CPU here (Settings' hint and the default job count follow).
+- **Process no longer reloads the model every time.** The worker that ran the last batch stays ready for five minutes (BiRefNet for one, since it keeps 5.5 GB while ready) and takes new Mask and Sketch settings as they are; the one warmed at start-up serves the first Process, and a cut-out model you pick loads a second after you pick it. With BiRefNet on a 2015 4-core CPU that is 7–9 seconds saved on every Process, on every Sketch mode change and on the first Process after a switch.
+- Process with another background-removal model (or No model) works on the cut-out on screen instead of starting over from the photo: the new model can only take more away, your brush edits and effects carry over (effects applied once), and the cut-out stays on screen while it runs. Undo gets back to before.
+- While a cut-out or No-model run works, the canvas shows the image you are editing, the newest result, instead of the photo the run may start from.
+- A cut never shows what its image hides: a photo with its own transparency keeps it, and a cut of a cut-out can only take more away. Restore strokes still bring pixels back.
 
 ### Performance
 
+- A downloaded model no longer keeps a second copy of its file in memory once it has loaded: about 170 MB less after a U2Net cut-out or a LaMa erase, up to 270 MB for DDColor. The file is read again on the next load, a fraction of a second.
+- Eraser (RORem) peaks at 15 GB of memory instead of 20.5 GB, at the same speed: its sessions run without ONNX Runtime's memory-pattern planning.
 - Edge shift runs in constant time per pixel: a 4K mask at the knob's 50 px limit went from 2.5 s to 16 ms, and 1 px from 52 ms to 16 ms.
 - Magic Brush decode (logits to a 4K selection) went from 147 ms to 8 ms per click.
 - The selection overlay uploads only the changed region per stroke instead of a full-size texture.
@@ -64,6 +121,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - SD erases encode a prompt once per session instead of once per tile, and log the time of each stage.
 - SD erases run a region up to 768 px long as one crop instead of two blended tiles when enough RAM is free: 21 percent faster on a 328 by 607 region, and no seam.
 - The LCM eraser bundle (1.0.1) is re-exported with dynamic batch and size axes: a guided step is one UNet call instead of two, and it takes the single tall crop too. Existing installs download the new bundle, 2.1 GB.
+- Upscaling splits each photo into equal tiles instead of ending every row and column with a thin strip: the right and bottom edges no longer come from a strip that saw little of the picture, the processor does the same work or less (8 and 15 percent faster on two test photos), and on a Mac's graphics chip the upscalers run five times the processor's speed instead of two and a half.
 - Cancelling an upscale on OpenVINO takes effect about five times sooner (11 s instead of 51 s on an Intel HD 530), for about 5 percent more upscale time.
 - Magic Brush holds its image data for the shown image and the one before it, instead of 16 MB for every image visited, and paging quickly through images no longer prepares each one on the way.
 - Stroke undo keeps only the area each stroke changed: a small stroke on a 4K image costs kilobytes instead of 8 MB, so 32 undo steps no longer hold up to a quarter gigabyte per image.
@@ -71,6 +129,36 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Sliders' value boxes keep their width as the number changes, so the strip no longer jumps while you drag; the Mask panel opened from its strip no longer grows to the right each time a value widens; flyouts stay more opaque (70 %) while a slider is held.
+- A model whose half-precision copy failed on the accelerator (U2Net on OpenVINO) never tried the accelerator again, not even with its full-precision weights, and ran on the processor from then on. It now falls back to the full-precision weights on the same accelerator, and only the copy that failed is skipped next time.
+- Settings › Hardware said "none detected" for the graphics on every Windows machine. It now finds the graphics card and the built-in graphics, and tells a virtual machine's or remote desktop's stand-in from a real one.
+- When a graphics card could not be used (no driver, a remote desktop, a virtual machine), the work quietly ran on the processor while the status bar still named the card. It now falls back to the processor openly and says "CPU".
+- The app froze while a file dialog was open (Open, Save, Save selected, Save layers, and choosing a background picture): the progress stopped, finished images waited, and the desktop could call the window not responding. The app now keeps working behind the dialog, and the dialog stays attached to the window.
+- An image being upscaled, colorized or erased shows the working dot and glow in the sidebar; it showed the grey waiting dot. Images queued behind it keep the waiting dot.
+- `prunr --doctor` and `prunr --clear-ep-cache` printed nothing in a Windows terminal; they print there now.
+- A face search could not be stopped: the capsule's Cancel and Esc did nothing while Faces searched, which on a large group photo can take a minute. Both stop it now, after the face it is on, and the Faces panel says "Stopped. Turn Faces off and on to search again."
+- The Faces panel's status line ("7 faces found.", or "These apply while Faces is on.") heads the panel instead of sitting under Include hair, where it read as part of that switch.
+- Running Silueta or U2Net, which OpenVINO does not run, switched the app's accelerator to the CPU: the status bar said "Backend: CPU", Settings dropped its Processor choice, and the Parallel jobs you set went back to the default. A model the accelerator does not run now leaves all three alone.
+- Help › Keyboard shortcuts flashed Settings open and shut when Settings had been closed with its shortcut or Escape before: the click on the menu item counted as a click beside the dialog. Any dialog reopened that way stays open now.
+- Settings › Credits gave BiRefNet-lite's author as "Bundled with Prunr" under a "Project license"; it credits Peng Zheng's BiRefNet (MIT) with its source now, and every model has to name its authors and licence.
+- Process again on an upscale enlarges it again (2× then 2× gives 4×, each its own undo step), also after undoing back to an earlier upscale; it re-ran the same upscale from the original instead, into an identical step (four Nomos8k images: 146 s). A changed Scale or upscaler still redoes the shown upscale from where it started. An upscale too large for the free memory is refused with a message saying how much it needs.
+- Process under Colorize leaves an image already colorized as asked alone ("Already up to date"), and a Sharpen, AI blend, Color match or Strength change carried to the ticked images finishes their kept run again instead of running the model.
+- The Parallel jobs hint names the models that run several images at once on the CPU (Silueta and U2Net) instead of BiRefNet alone.
+- Slider handles are clean white discs on the rail again; a light ring had appeared around them, with the value box sitting a little low.
+- Colorize's Strength panel is as wide as its slider needs instead of half the window, and the sliders in it and in the eraser's Advanced panels span the panel.
+- Hint text under a knob wraps ragged-right; inside popups egui justified it and spread the words apart.
+- A failed erase says what happened in plain words; the message used to carry program text ("inpaint: Inference(…)") and an internal model name.
+- The Stable Diffusion eraser checks for the memory its load really takes (about 14 GB on the CPU, plus the spare it keeps) before it starts. It used to start with 12 GB free and be stopped partway through the load.
+- Process with the Depth look on several ticked images under No model gives each its look; the images off screen used to stay plain while a "Rendering…" pill stayed up for good.
+- The brush strip no longer draws over an open dialog (Settings, the command-line reference, the Model Store).
+- The command-line reference and the pipeline diagrams fit a short window and scroll; their bottom and close button used to fall outside it.
+- The Model picker fits its longest model name instead of a fixed width, and in a window too short for the list it runs to the bottom edge and scrolls; "Get more models" used to fall off the bottom of the window.
+- Set focus in the Depth panel closes the panel first, so a click anywhere on the image sets the focus; a click under the panel used to go to the panel and the focus never moved.
+- On the command line `-o name` without an extension saves `name.png` in every mode; upscale, colorize and erase used to stop with "The image format could not be determined".
+- A photo whose file is gone by the time a batch reaches it fails with "Failed to load" instead of staying Pending forever and holding its share of the batch's memory budget.
+- A No-model result no longer blanks the image for a frame while its texture is rebuilt: the old one stays until the new one is uploaded, as every other result does.
+- The Stable Diffusion eraser on Fast no longer finishes with nothing changed on a wide or tall area: its fast decoder only takes 512 px squares, so such an area failed and was skipped silently. It now runs at 512 px, and a part that fails stops the erase with a message.
+- Erasing a large object no longer leaves a ring of stray coloured pixels along the edge on flat backgrounds (a road at night, snow, a wall). The same fix makes Refine edges exact on large photos.
 - Upscale Sharpen starts off and sharpens detail rather than grain: it defaulted on with a one-pixel radius that boosted the model's texture on every upscale. Its radius now follows the enlargement.
 - Upscale AI blend and Color match compare with the image that was upscaled, not the original photo: an erased object no longer ghosts back, and noise Denoise removed stays gone. The result is finished in the upscale thread instead of the UI thread.
 - Scale and Refine hold still while an upscale runs; moving one used to throw the run away. Refine previews whatever the Live preview setting, and after an undo only re-finishes the shown step's own upscale.
@@ -81,6 +169,13 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Tile backgrounds tile by image pixels, so the screen matches the export at any zoom; a see-through background image keeps its color instead of darkening.
 - With an effect on Sketch Subject, the lines are traced from the plain subject, so Pixelate or Halftone no longer turns them into steps after Process.
 - The exported Lines layer of a split drag-out matches the canvas, Dual scale included.
+- Separate layers keep your brush corrections and start from the image the cut-out ran on; an image whose cut-out data is gone saves as one file, and a toast says so.
+- Model Store: Retry works after any failed download, a cancelled one returns to Download, a queued one says so, and disk usage counts the Stable Diffusion files.
+- Auto-process on import runs only for background removal and No model; it used to start a wrong run with an eraser or upscaler selected.
+- An upscale uses every core whatever Parallel jobs is set to.
+- A refused or failed erase no longer leaves the app busy; switching the SD eraser between Fast and Quality with Keep loaded on no longer runs out of memory.
+- Cmd+S works whenever the Save button shows; the sidebar's tick, delete and save are real buttons.
+- `prunr a.jpg -o b.png` writes `b.png` (it wrote into a folder `b.png/` and failed), and outside a terminal each result and error prints a line instead of going to an invisible spinner.
 - With No model, Process never runs a cut-out: an image left on Sketch Subject switches to Whole photo, and a batch takes the filter path whenever the shown image has no lines.
 - Smooth softens large photos too (it blurred at full size, which shrank to nothing at the size the line detector reads), and the line detector's dots in the photo's corners are gone.
 - Lines no longer mix modes: in Full a Pre-filter change no longer produces a subject outline, and going Full → Off → Subject traces the subject again instead of reusing lines from the whole photo.
@@ -122,6 +217,9 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Progress counters are scoped to the current dispatch; cancel routing is per kind.
 - Buttons react to hover and press; choice rows no longer wrap inside a label; a stray accent line is gone.
 - Windows CI no longer trips over `Instant` arithmetic on fresh runners.
+- Process pressed while a batch runs: when the first batch finishes, the second keeps its progress and Cancel, and the first batch's images keep their own settings record.
+- The Save preset dialog opens ready for a name: typing goes straight into it and Enter saves.
+- After a model switch the brushes still correct the cut-out on screen: an Erase or Restore made then is kept by the next run instead of dropped, and a Mask knob re-cuts it live.
 
 ## 0.4.8
 

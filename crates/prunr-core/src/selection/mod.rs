@@ -83,6 +83,44 @@ impl BrushMode {
     }
 }
 
+/// One image pixel's two neighbouring cells along an axis and the weight
+/// of the second, sampled at pixel centres with the edge cell repeated:
+/// how a linear-filtered texture of the plane is drawn.
+#[derive(Clone, Copy)]
+struct Tap {
+    near: u32,
+    far: u32,
+    far_weight: f32,
+}
+
+impl Tap {
+    /// Whether a cell of `lo..=hi` gets a weight above zero.
+    fn reaches(self, lo: u32, hi: u32) -> bool {
+        let inside = |c: u32| (lo..=hi).contains(&c);
+        inside(self.near) || (self.far_weight > 0.0 && inside(self.far))
+    }
+}
+
+/// The taps of `out` pixels over `cells` cells.
+fn taps(out: u32, cells: u32) -> Vec<Tap> {
+    let (scale, last) = (f64::from(cells) / f64::from(out), f64::from(cells.saturating_sub(1)));
+    (0..out)
+        .map(|o| {
+            let at = ((f64::from(o) + 0.5) * scale - 0.5).clamp(0.0, last);
+            let near = at.floor();
+            Tap { near: near as u32, far: (near + 1.0).min(last) as u32, far_weight: (at - near) as f32 }
+        })
+        .collect()
+}
+
+/// A plane sampled at an image's pixels: the taps per column and row, and
+/// the pixels any selected cell reaches.
+struct Sampled {
+    xs: Vec<Tap>,
+    ys: Vec<Tap>,
+    reach: CellRect,
+}
+
 /// Cells per parallel hash chunk; part of the hash format.
 const HASH_CHUNK: usize = 1 << 20;
 
@@ -106,13 +144,19 @@ fn scan_flags(cells: &[i8]) -> (bool, bool) {
 
 /// How a newer stroke cell lands on an existing one: zero leaves the
 /// existing cell, same sign keeps the stronger magnitude (painting twice
-/// does not double up), opposite sign lets the newer stroke win.
+/// does not double up), opposite sign moves it toward the newer stroke by
+/// that stroke's strength, as paint would: a full stroke flips it, a
+/// soft edge only nudges it.
 #[inline]
 fn merge_cell(existing: i8, newer: i8) -> i8 {
     match newer {
         0 => existing,
-        n if n > 0 => existing.max(n),
-        n => existing.min(n),
+        n if (n > 0) == (existing > 0) || existing == 0 => if n > 0 { existing.max(n) } else { existing.min(n) },
+        n => {
+            let weight = f32::from(n.unsigned_abs()) / f32::from(FULL as u8);
+            let moved = f32::from(existing) + (f32::from(n) - f32::from(existing)) * weight;
+            moved.round().clamp(-f32::from(FULL as u8), f32::from(FULL as u8)) as i8
+        }
     }
 }
 
@@ -244,19 +288,19 @@ impl MaskArtifact {
         self.flags().1
     }
 
-    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8) -> Result<Self, SelectionError> {
+    fn map_with(&self, other: &Self, f: impl Fn(i8, i8) -> i8 + Sync) -> Result<Self, SelectionError> {
         if self.width != other.width || self.height != other.height {
             return Err(SelectionError::DimensionMismatch {
                 lhs: (self.width, self.height),
                 rhs: (other.width, other.height),
             });
         }
-        let data = self.data.iter().zip(other.data.iter()).map(|(&a, &b)| f(a, b)).collect();
+        let data = self.data.par_iter().zip(other.data.par_iter()).map(|(&a, &b)| f(a, b)).collect();
         Ok(Self::from_cells(self.width, self.height, data))
     }
 
-    fn map(&self, f: impl Fn(i8) -> i8) -> Self {
-        let data = self.data.iter().map(|&v| f(v)).collect();
+    fn map(&self, f: impl Fn(i8) -> i8 + Sync) -> Self {
+        let data = self.data.par_iter().map(|&v| f(v)).collect();
         Self::from_cells(self.width, self.height, data)
     }
 
@@ -266,16 +310,10 @@ impl MaskArtifact {
         self.map_with(other, merge_cell)
     }
 
-    /// `stroke` combined with this selection. On a cut-out (`signed`) a
-    /// stroke's sign is its direction, restore or erase, and the newer
-    /// one wins where it lands. Elsewhere the selection is only how much
-    /// is selected: an Add stroke grows it and a Subtract stroke carves it
-    /// away. It is kept negative there, so it reads as an erase if a
-    /// background-removal model later uses it.
-    pub fn merge_stroke(&self, stroke: &Self, signed: bool) -> Result<Self, SelectionError> {
-        if signed {
-            return self.add_mask(stroke);
-        }
+    /// `stroke` combined with this selection, which is only how much is
+    /// selected: an Add stroke grows it and a Subtract stroke carves it
+    /// away. It is kept negative, so as it is it reads as an erase.
+    pub fn merge_stroke(&self, stroke: &Self) -> Result<Self, SelectionError> {
         self.map_with(stroke, |a, b| {
             let held = a.unsigned_abs();
             let mag = if b >= 0 { held.max(b as u8) } else { held.saturating_sub(b.unsigned_abs()) };
@@ -283,10 +321,14 @@ impl MaskArtifact {
         })
     }
 
-    /// Region inversion: `FULL - |v|`, signed by `mode`.
-    pub fn invert(&self, mode: BrushMode) -> Self {
-        let sign = mode.sign();
-        self.map(|v| sign * (FULL - v.unsigned_abs() as i8))
+    /// The same area as a restore: every cell's amount, made positive.
+    pub fn as_restore(&self) -> Self {
+        self.map(|v| v.unsigned_abs().min(FULL as u8) as i8)
+    }
+
+    /// Region inversion: `FULL - |v|`, kept negative like any selection.
+    pub fn invert(&self) -> Self {
+        self.map(|v| -(FULL - v.unsigned_abs() as i8))
     }
 
     /// Stable content hash: SipHash-1-3 (`DefaultHasher`) over fixed
@@ -330,17 +372,117 @@ impl MaskArtifact {
     }
 
     /// Scales alpha by `1 - coverage` — a fully selected pixel becomes
-    /// transparent, soft edges fade. RGB is preserved.
+    /// transparent, soft edges fade. RGB is preserved. An image of another
+    /// size (an upscale shown) is cut where the selection is, the plane
+    /// sampled at its pixels as the overlay draws it.
     pub fn alpha_cut(&self, rgba: &mut image::RgbaImage) {
-        self.scale_alpha(rgba, |c| 1.0 - c);
+        if rgba.dimensions() == (self.width, self.height) {
+            self.scale_alpha(rgba, |c| 1.0 - c);
+        } else if let Some(sampled) = self.sampled_at(rgba.width(), rgba.height()) {
+            self.scale_alpha_sampled(&sampled, rgba, (0, 0), |c| 1.0 - c);
+        }
     }
 
-    /// Returns a copy of `source` with alpha scaled by coverage — pixels
-    /// outside the selection become transparent. Basis of clipboard Copy/Cut.
-    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> image::RgbaImage {
-        let mut out = source.clone();
-        self.scale_alpha(&mut out, |c| c);
-        out
+    /// The selected part of `source`: cropped to the pixels the selection
+    /// reaches, alpha scaled by coverage, sampled like `alpha_cut` when
+    /// `source` is of another size. What clipboard Copy and Cut carry;
+    /// `None` when nothing is selected.
+    pub fn copy_to_rgba(&self, source: &image::RgbaImage) -> Option<image::RgbaImage> {
+        if source.dimensions() != (self.width, self.height) {
+            let sampled = self.sampled_at(source.width(), source.height())?;
+            let r = sampled.reach;
+            let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
+            self.scale_alpha_sampled(&sampled, &mut out, (r.x0, r.y0), |c| c);
+            return Some(out);
+        }
+        let r = self.bounds()?;
+        let mut out = image::imageops::crop_imm(source, r.x0, r.y0, r.width(), r.height()).to_image();
+        self.crop(r).scale_alpha(&mut out, |c| c);
+        Some(out)
+    }
+
+    /// The plane sampled at a `w × h` image's pixels; `None` when the
+    /// sampling reaches no selected cell.
+    fn sampled_at(&self, w: u32, h: u32) -> Option<Sampled> {
+        let r = self.bounds()?;
+        let (xs, ys) = (taps(w, self.width), taps(h, self.height));
+        let span = |taps: &[Tap], lo: u32, hi: u32| {
+            let first = taps.iter().position(|t| t.reaches(lo, hi))?;
+            // `first` reaches, so a last one exists
+            let last = taps.iter().rposition(|t| t.reaches(lo, hi)).unwrap_or(first);
+            Some((first as u32, last as u32))
+        };
+        let ((x0, x1), (y0, y1)) = (span(&xs, r.x0, r.x1)?, span(&ys, r.y0, r.y1)?);
+        Some(Sampled { xs, ys, reach: CellRect { x0, y0, x1, y1 } })
+    }
+
+    /// `scale_alpha` on `window`, the part of a sampled image whose top-left
+    /// pixel is `origin`. In place; beyond the image only the taps
+    /// (12 B per column and row).
+    fn scale_alpha_sampled(&self, sampled: &Sampled, window: &mut image::RgbaImage, origin: (u32, u32), factor: impl Fn(f32) -> f32 + Sync) {
+        let (w, reach) = (self.width as usize, sampled.reach);
+        let coverage = |x: u32, y: u32| Self::coverage(self.data[y as usize * w + x as usize]);
+        let row_width = window.width() as usize * 4;
+        window.par_chunks_mut(row_width.max(1)).enumerate().for_each(|(y, row)| {
+            let fy = origin.1 + y as u32;
+            if !(reach.y0..=reach.y1).contains(&fy) {
+                return;
+            }
+            let ty = sampled.ys[fy as usize];
+            for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                let fx = origin.0 + x as u32;
+                if !(reach.x0..=reach.x1).contains(&fx) {
+                    continue;
+                }
+                let tx = sampled.xs[fx as usize];
+                let along = |cy: u32| coverage(tx.near, cy) + (coverage(tx.far, cy) - coverage(tx.near, cy)) * tx.far_weight;
+                let top = along(ty.near);
+                let f = factor(top + (along(ty.far) - top) * ty.far_weight);
+                if f < 1.0 {
+                    pixel[3] = if f <= 0.0 { 0 } else { crate::math::round_u8(f32::from(pixel[3]) * f) };
+                }
+            }
+        });
+    }
+
+    /// The cells within `area` (where it is painted at all), as they are
+    /// here; the rest go. `None` when none is left, or the planes are of
+    /// other sizes.
+    pub fn within(&self, area: &MaskArtifact) -> Option<MaskArtifact> {
+        if (self.width, self.height) != (area.width, area.height) {
+            return None;
+        }
+        let cells: Vec<i8> = self.data.iter().zip(area.data.iter())
+            .map(|(&cell, &a)| if a == 0 { 0 } else { cell })
+            .collect();
+        cells.iter().any(|&c| c != 0).then(|| Self::from_cells(self.width, self.height, cells))
+    }
+
+    /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
+    pub fn bounds(&self) -> Option<CellRect> {
+        if self.is_blank() {
+            return None;
+        }
+        self.bounds_where(|v| v != 0)
+    }
+
+    /// The bounding rectangle of the cells `pred` accepts; `None` when it
+    /// accepts none.
+    pub fn bounds_where(&self, pred: impl Fn(i8) -> bool + Sync) -> Option<CellRect> {
+        let w = self.width as usize;
+        if w == 0 {
+            return None;
+        }
+        self.data
+            .par_chunks(w)
+            .enumerate()
+            .filter_map(|(y, row)| {
+                let x0 = row.iter().position(|&v| pred(v))? as u32;
+                // the row has an accepted cell, found just above
+                let x1 = row.iter().rposition(|&v| pred(v)).unwrap_or(0) as u32;
+                Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
+            })
+            .reduce_with(CellRect::union)
     }
 
     /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
@@ -410,10 +552,10 @@ impl MaskArtifact {
         self.for_each_resampled(mask_w as u32, mask_h as u32, |i, g| alpha[i] = corrected_alpha(alpha[i], g));
     }
 
-    /// The plane a first stroke makes on an empty selection: the stroke
-    /// itself on a cut-out, its Add part kept as an erase elsewhere.
-    pub fn into_selection(self, signed: bool) -> Self {
-        if signed { self } else { self.map(|b| if b > 0 { -b } else { 0 }) }
+    /// The plane a first stroke makes on an empty selection: its Add part,
+    /// kept negative.
+    pub fn into_selection(self) -> Self {
+        self.map(|b| if b > 0 { -b } else { 0 })
     }
 }
 
@@ -427,21 +569,25 @@ mod tests {
     }
 
 
-    /// On a cut-out the newer stroke's direction wins; on a selection Add
-    /// grows it, Subtract carves it away, and what stays is stored as an
-    /// erase.
     #[test]
-    fn a_stroke_merges_by_direction_on_a_cutout_and_by_amount_elsewhere() {
+    fn a_selection_as_a_restore_keeps_its_amounts_positive() {
+        let selection = mask(4, 1, vec![-127, -60, 0, 40]);
+        assert_eq!(selection.as_restore().cells(), &[127, 60, 0, 40]);
+    }
+
+    /// Add grows a selection, Subtract carves it away, and what stays is
+    /// stored as an erase.
+    #[test]
+    fn a_stroke_merges_by_amount() {
         let held = mask(4, 1, vec![-127, -127, -60, 0]);
         let add = mask(4, 1, vec![0, 100, 100, 127]);
         let sub = mask(4, 1, vec![-127, -100, 0, -127]);
-        assert_eq!(held.merge_stroke(&add, true).unwrap().cells(), &[-127, 100, 100, 127], "restore wins where it lands");
-        assert_eq!(held.merge_stroke(&add, false).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
-        assert_eq!(held.merge_stroke(&sub, false).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
-        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub, false).unwrap().has_selected_region(), "nothing to carve");
+        assert_eq!(held.merge_stroke(&add).unwrap().cells(), &[-127, -127, -100, -127], "add grows the selection");
+        assert_eq!(held.merge_stroke(&sub).unwrap().cells(), &[0, -27, -60, 0], "subtract carves it away");
+        assert!(!MaskArtifact::new_empty(4, 1).merge_stroke(&sub).unwrap().has_selected_region(), "nothing to carve");
         for stroke in [add, sub] {
-            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke, false).unwrap();
-            assert_eq!(stroke.into_selection(false), first, "a first stroke equals merging onto nothing");
+            let first = MaskArtifact::new_empty(4, 1).merge_stroke(&stroke).unwrap();
+            assert_eq!(stroke.into_selection(), first, "a first stroke equals merging onto nothing");
         }
     }
 
@@ -523,13 +669,13 @@ mod tests {
     }
 
     #[test]
-    fn add_mask_opposite_sign_lets_newer_stroke_win() {
-        // An Add stroke painted over a Subtract region restores it, and
-        // vice versa.
-        let existing = mask(2, 1, vec![-100, 80]);
-        let newer = mask(2, 1, vec![30, -10]);
+    fn add_mask_opposite_sign_moves_toward_the_newer_stroke_by_its_strength() {
+        // A full restore over an erase flips it; a faint one (a soft brush
+        // edge, a feathered rim) only nudges it, as paint would.
+        let existing = mask(4, 1, vec![-100, 80, -127, 127]);
+        let newer = mask(4, 1, vec![30, -10, 127, -127]);
         let r = existing.add_mask(&newer).unwrap();
-        assert_eq!(r.cells(), &[30, -10]);
+        assert_eq!(r.cells(), &[-69, 73, 127, -127]);
     }
 
     #[test]
@@ -541,25 +687,9 @@ mod tests {
     }
 
     #[test]
-    fn invert_flips_coverage_with_requested_sign() {
+    fn invert_flips_coverage_and_keeps_it_negative() {
         let m = mask(2, 2, vec![0, 64, FULL, -32]);
-        assert_eq!(m.invert(BrushMode::Subtract).cells(), &[-127, -63, 0, -95]);
-        assert_eq!(m.invert(BrushMode::Add).cells(), &[127, 63, 0, 95]);
-    }
-
-    #[test]
-    fn content_hash_is_deterministic() {
-        let m = mask(4, 4, vec![64; 16]);
-        assert_eq!(m.content_hash(), m.content_hash());
-    }
-
-    #[test]
-    fn content_hash_changes_when_data_changes() {
-        let mut data = vec![64i8; 16];
-        let m1 = mask(4, 4, data.clone());
-        data[7] = -64;
-        let m2 = mask(4, 4, data);
-        assert_ne!(m1.content_hash(), m2.content_hash());
+        assert_eq!(m.invert().cells(), &[-127, -63, 0, -95]);
     }
 
     #[test]
@@ -570,21 +700,14 @@ mod tests {
     }
 
     #[test]
-    fn add_mask_dimension_mismatch_returns_err() {
+    fn merging_planes_of_other_sizes_is_an_error() {
         let a = MaskArtifact::new_empty(4, 4);
-        let b = MaskArtifact::new_empty(8, 8);
         assert!(matches!(
-            a.add_mask(&b),
+            a.add_mask(&MaskArtifact::new_empty(8, 8)),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (8, 8) })
         ));
-    }
-
-    #[test]
-    fn merge_stroke_dimension_mismatch_returns_err() {
-        let a = MaskArtifact::new_empty(4, 4);
-        let b = MaskArtifact::new_empty(2, 8);
         assert!(matches!(
-            a.merge_stroke(&b, false),
+            a.merge_stroke(&MaskArtifact::new_empty(2, 8)),
             Err(SelectionError::DimensionMismatch { lhs: (4, 4), rhs: (2, 8) })
         ));
     }
@@ -613,25 +736,77 @@ mod tests {
     fn copy_to_rgba_keeps_selected_alpha_and_clears_the_rest() {
         let m = mask(2, 2, vec![FULL, 0, 0, -FULL]);
         let source = image::RgbaImage::from_pixel(2, 2, image::Rgba([10u8, 20, 30, 200]));
-        let out = m.copy_to_rgba(&source);
+        let out = m.copy_to_rgba(&source).expect("a selection");
         assert_eq!(out.get_pixel(0, 0).0[3], 200);
         assert_eq!(out.get_pixel(1, 0).0[3], 0);
         assert_eq!(out.get_pixel(0, 1).0[3], 0);
         assert_eq!(out.get_pixel(1, 1).0[3], 200);
     }
 
-    /// A soft stroke keeps hardness, strength and direction in the plane
-    /// `apply_correction` reads, cell for cell.
     #[test]
-    fn paint_stroke_keeps_sign_and_softness() {
-        let mut stroke = MaskArtifact::new_empty(32, 32);
-        let stamp = Stamp { hardness: 0.3, strength: 0.8, mode: BrushMode::Subtract };
-        paint_circle(&mut stroke, 16.0, 16.0, 10.0, stamp);
-        assert!(stroke.cells().iter().any(|&v| v < 0), "subtract stroke must be negative");
-        assert!(
-            stroke.cells().iter().any(|&v| v < 0 && v > -FULL),
-            "soft falloff must survive as intermediate magnitudes"
-        );
+    fn copy_to_rgba_carries_only_the_selections_bounds() {
+        let mut cells = vec![0; 5 * 4];
+        cells[5 + 1] = FULL;
+        cells[2 * 5 + 3] = FULL / 2;
+        let source = image::RgbaImage::from_fn(5, 4, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let out = mask(5, 4, cells).copy_to_rgba(&source).expect("a selection");
+        assert_eq!(out.dimensions(), (3, 2), "columns 1-3, rows 1-2");
+        assert_eq!(out.get_pixel(0, 0).0, [1, 1, 0, 255], "the selected pixel, where it was in the bounds");
+        assert_eq!(out.get_pixel(2, 1).0[..2], [3, 2], "the half-selected one");
+        assert!(out.get_pixel(2, 1).0[3] > 100 && out.get_pixel(2, 1).0[3] < 155);
+        assert_eq!(out.get_pixel(1, 0).0[3], 0, "an unselected pixel inside the bounds is clear");
+        assert!(MaskArtifact::new_empty(5, 4).copy_to_rgba(&source).is_none(), "nothing selected, nothing to copy");
+    }
+
+    /// A selection within an area: its cells where the area is painted,
+    /// as they are; the rest go. Nothing left, or a plane of another size,
+    /// is `None`.
+    #[test]
+    fn a_selection_within_an_area_keeps_its_cells_there() {
+        let selection = mask(4, 1, vec![FULL, -FULL, 30, 50]);
+        let area = mask(4, 1, vec![FULL, 0, 5, 0]);
+        assert_eq!(selection.within(&area).expect("cells in the area").cells(), &[FULL, 0, 30, 0]);
+        assert!(selection.within(&mask(4, 1, vec![0; 4])).is_none(), "an empty area");
+        assert!(selection.within(&mask(2, 2, vec![FULL; 4])).is_none(), "planes of other sizes");
+    }
+
+    /// On an image of another size (an upscale shown) the cut lands where
+    /// the selection is, sampled as the overlay draws it: between cells
+    /// the coverage blends linearly.
+    #[test]
+    fn a_cut_on_a_larger_image_lands_where_the_selection_is() {
+        let m = mask(4, 4, (0..16).map(|i| if i % 4 < 2 { FULL } else { 0 }).collect());
+        let mut rgba = image::RgbaImage::from_pixel(8, 8, image::Rgba([9u8, 8, 7, 255]));
+        m.alpha_cut(&mut rgba);
+        for y in 0..8 {
+            let row: Vec<u8> = (0..8).map(|x| rgba.get_pixel(x, y).0[3]).collect();
+            assert_eq!(row, [0, 0, 0, 64, 191, 255, 255, 255], "row {y}");
+        }
+        assert_eq!(rgba.get_pixel(0, 0).0[..3], [9, 8, 7], "colour kept");
+    }
+
+    #[test]
+    fn a_copy_from_a_larger_image_carries_the_selected_part() {
+        let mut cells = vec![0; 16];
+        for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+            cells[y * 4 + x] = FULL;
+        }
+        let source = image::RgbaImage::from_fn(8, 8, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
+        let out = mask(4, 4, cells).copy_to_rgba(&source).expect("a selection");
+        assert_eq!(out.dimensions(), (6, 6), "columns and rows 1-6: every pixel the selection reaches");
+        assert_eq!(out.get_pixel(2, 2).0, [3, 3, 0, 255], "inside: the pixel of the larger image, whole");
+        assert_eq!(out.get_pixel(0, 0).0, [1, 1, 0, 16], "the corner: a sixteenth covered");
+    }
+
+    #[test]
+    fn a_cut_on_a_smaller_image_lands_where_the_selection_is() {
+        let m = mask(8, 8, (0..64).map(|i| if i % 8 < 4 { FULL } else { 0 }).collect());
+        let mut rgba = image::RgbaImage::from_pixel(4, 4, image::Rgba([0u8, 0, 0, 255]));
+        m.alpha_cut(&mut rgba);
+        for y in 0..4 {
+            let row: Vec<u8> = (0..4).map(|x| rgba.get_pixel(x, y).0[3]).collect();
+            assert_eq!(row, [0, 0, 255, 255], "row {y}");
+        }
     }
 
     /// Painting into a plane an undo snapshot still shares must not
@@ -662,6 +837,7 @@ mod tests {
             }
         }
         assert!(faint_touched > 0, "a soft stroke must have cells below the threshold");
+        assert!(selection.cells().iter().all(|&v| v <= 0), "a Subtract stroke stays negative");
     }
 
     #[test]

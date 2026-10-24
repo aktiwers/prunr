@@ -1,19 +1,12 @@
-//! Canvas-side brush input + cursor render.
-//!
-//! Called from `canvas::render_done` when `brush_state.is_enabled()` and
-//! the result/source texture is showing. Owns:
-//! - the soft circle cursor
-//! - left-press/drag/release pointer wiring → BrushState
-//! - on commit: write the new correction onto the active BatchItem.
-//!
-//! Does NOT own coordinate math beyond the screen→model transform
-//! (canvas owns `compute_img_rect` and zoom/pan).
+//! Canvas-side brush input + cursor render. A finished stroke goes back to
+//! the canvas as `BrushAction::Committed`.
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui};
 
 use crate::gui::brush_state::{BrushSettings, BrushState};
 use prunr_core::brush::Stamp;
 use crate::gui::item::BatchItem;
+use crate::gui::settings::Settings;
 use crate::gui::theme;
 
 /// Minimum brush radius in screen pixels — clamps against zoom-out
@@ -31,19 +24,19 @@ pub(crate) enum BrushAction {
     None,
 }
 
-/// Handle pointer input + paint cursor for one frame. The canvas calls
-/// this after rendering the image. `img_rect` is the on-screen rect of
-/// the displayed texture (post-zoom, post-pan); the brush works in that
-/// rect's normalized coordinate space, so the underlying texture size
-/// is irrelevant here.
+/// Handle pointer input + paint cursor for one frame. The brush works in
+/// the normalized space of `img_rect` (the on-screen rect after zoom and
+/// pan), so the texture size is irrelevant here.
 pub(crate) fn handle_input(
     ui: &mut Ui,
     brush_state: &mut BrushState,
-    settings: &BrushSettings,
+    app_settings: &Settings,
     stamp: Stamp,
     item: &BatchItem,
     img_rect: Rect,
 ) -> BrushAction {
+    let settings = &app_settings.brush;
+    let look = CursorLook::of(settings, app_settings.brush_erases());
     // Strokes are authored at SOURCE resolution because the selection lives
     // there; painting at tensor resolution misaligned strokes once they were
     // resampled back.
@@ -52,15 +45,13 @@ pub(crate) fn handle_input(
         // Render a muted cursor so the user gets feedback that brush is
         // ON, but skip wiring.
         tracing::debug!(item_id = item.id, "brush active but item has no dimensions — cursor only");
-        draw_cursor(ui, img_rect, CursorLook::of(settings), /*armed=*/ false);
+        draw_cursor(ui, img_rect, look, /*armed=*/ false);
         return BrushAction::None;
     }
 
-    // No `ui.interact` here: it would set `egui_wants_pointer_input`,
-    // which the canvas pan handler reads to decide whether to ignore
-    // events. With pan on secondary in brush mode, primary belongs to
-    // the brush and secondary to pan — they don't conflict, so neither
-    // needs widget-level claim. Reading raw input below is enough.
+    // No `ui.interact` here: it would set `egui_wants_pointer_input`, which
+    // the canvas pan handler reads. In brush mode primary is the brush's and
+    // secondary pans, so raw input is enough.
     let (hover, primary_pressed, primary_down, primary_released) = ui.input(|i| {
         (
             i.pointer.hover_pos(),
@@ -69,13 +60,15 @@ pub(crate) fn handle_input(
             i.pointer.primary_released(),
         )
     });
-    let pointer_on_img = hover.filter(|p| img_rect.contains(*p));
+    // On the image, and not on a control drawn over it (the strip).
+    let layer = ui.layer_id();
+    let pointer_on_img = hover.filter(|p| img_rect.contains(*p) && ui.ctx().layer_id_at(*p).is_none_or(|l| l == layer));
 
     // In-progress stroke trail (drawn first so the cursor renders on top).
-    draw_trail(ui, brush_state, settings);
+    draw_trail(ui, brush_state, look);
 
     // Cursor circle — armed only when the pointer is over the image.
-    draw_cursor(ui, img_rect, CursorLook::of(settings), pointer_on_img.is_some());
+    draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
     // Brush radius in model-pixel space — derived from the on-screen
     // img_rect width vs model width. One isotropic factor is enough:
@@ -113,7 +106,6 @@ pub(crate) fn handle_input(
     BrushAction::None
 }
 
-/// Convert a screen-space pointer to model-grid coordinates.
 pub(super) fn screen_to_model(p: Pos2, img_rect: Rect, model_w: u32, model_h: u32) -> Pos2 {
     let in_img_x = (p.x - img_rect.min.x) / img_rect.width().max(1.0);
     let in_img_y = (p.y - img_rect.min.y) / img_rect.height().max(1.0);
@@ -127,11 +119,13 @@ pub(crate) struct CursorLook {
     pub(crate) hardness: f32,
     pub(crate) strength: f32,
     pub(crate) shape: prunr_core::brush::BrushShape,
+    /// Drawn in Erase's warm red.
+    pub(crate) erase: bool,
 }
 
 impl CursorLook {
-    pub(crate) fn of(s: &BrushSettings) -> Self {
-        Self { radius: s.radius, hardness: s.hardness, strength: s.strength, shape: s.shape }
+    pub(crate) fn of(s: &BrushSettings, erase: bool) -> Self {
+        Self { radius: s.radius, hardness: s.hardness, strength: s.strength, shape: s.shape, erase }
     }
 }
 
@@ -142,22 +136,19 @@ pub(crate) const MAGIC_CURSOR: CursorLook = CursorLook {
     hardness: 1.0,
     strength: 1.0,
     shape: prunr_core::brush::BrushShape::Circle,
+    erase: false,
 };
 
-/// Translucent ACCENT-purple stamps along the in-progress stroke's
-/// trail. Drawn on a foreground layer so the image rendered earlier
-/// in the same frame can't accidentally cover them, and tinted
-/// brighter than the theme ACCENT so the trail is legible on dark
-/// images too.
-fn draw_trail(ui: &Ui, brush_state: &BrushState, s: &BrushSettings) {
+/// Translucent stamps in the mark colour along the in-progress stroke's
+/// trail, on a foreground layer so the image rendered earlier in the
+/// same frame can't cover them.
+fn draw_trail(ui: &Ui, brush_state: &BrushState, look: CursorLook) {
     let Some(shape) = brush_state.active_shape() else { return };
-    draw_trail_for(ui, CursorLook::of(s), shape, brush_state.trail_stamps());
+    draw_trail_for(ui, look, shape, brush_state.trail_stamps());
 }
 
-/// Paint the in-progress trail from an arbitrary stamp iterator. Shared
-/// by Paint Brush (reads `BrushState.trail_stamps`) and Magic Brush
-/// (reads `MagicBrushState.active_trail`). Same visual contract — the
-/// only difference between the two tools is what they commit on release.
+/// Paint the in-progress trail from any stamp iterator; Paint Brush and
+/// Magic Brush differ only in what they commit on release.
 pub(crate) fn draw_trail_for(
     ui: &Ui,
     s: CursorLook,
@@ -167,7 +158,7 @@ pub(crate) fn draw_trail_for(
     if s.strength <= 0.0 {
         return;
     }
-    let accent = theme::ACCENT;
+    let accent = theme::mark_color(s.erase);
     let center_alpha = (110.0 * s.strength.clamp(0.0, 1.0)) as u8;
     if center_alpha == 0 {
         return;
@@ -186,22 +177,67 @@ pub(crate) fn draw_trail_for(
             let stroke = egui::Stroke::new(first.2 * 2.0, solid);
             painter.line_segment([Pos2::new(first.0, first.1), Pos2::new(last.0, last.1)], stroke);
         }
-        prunr_core::brush::BrushShape::Circle => {
-            for (sx, sy, outer_r) in stamps {
-                super::chip::paint_falloff_circle(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 8,
-                );
-            }
-        }
-        prunr_core::brush::BrushShape::Square => {
-            for (sx, sy, outer_r) in stamps {
-                super::chip::paint_falloff_square(
-                    &painter, Pos2::new(sx, sy), outer_r, hardness, accent, center_alpha, 6,
-                );
-            }
+        prunr_core::brush::BrushShape::Circle | prunr_core::brush::BrushShape::Square => {
+            let key = TrailKey { shape, hardness, accent, alpha: center_alpha, ppp: ui.ctx().pixels_per_point() };
+            let options = ui.ctx().tessellation_options(|o| *o);
+            let mesh = trail_mesh(ui.ctx(), key, options, stamps.into_iter());
+            painter.add(egui::Shape::mesh(mesh));
         }
     }
-    let _ = solid;
+}
+
+/// What a trail's tessellated stamps were made with.
+#[derive(Clone, Copy, PartialEq)]
+struct TrailKey {
+    shape: prunr_core::brush::BrushShape,
+    hardness: f32,
+    accent: Color32,
+    alpha: u8,
+    ppp: f32,
+}
+
+/// A stroke's stamps tessellated once each and kept across frames: a long
+/// stroke with a small brush is thousands of stamps of a fill and rings
+/// each, tessellated anew every frame. New stamps are appended; another
+/// stroke, look or scale starts over.
+#[derive(Clone, Default)]
+struct TrailMesh {
+    key: Option<TrailKey>,
+    first: Option<(f32, f32, f32)>,
+    done: usize,
+    mesh: std::sync::Arc<egui::Mesh>,
+}
+
+fn trail_mesh(
+    ctx: &egui::Context,
+    key: TrailKey,
+    options: egui::epaint::TessellationOptions,
+    stamps: impl Iterator<Item = (f32, f32, f32)>,
+) -> std::sync::Arc<egui::Mesh> {
+    let id = egui::Id::new("brush_trail_mesh");
+    let stamps: Vec<(f32, f32, f32)> = stamps.collect();
+    let mut kept: TrailMesh = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    if kept.key != Some(key) || kept.first != stamps.first().copied() || stamps.len() < kept.done {
+        kept = TrailMesh { key: Some(key), first: stamps.first().copied(), ..TrailMesh::default() };
+    }
+    if stamps.len() > kept.done {
+        let mut tessellator = egui::epaint::Tessellator::new(key.ppp, options, [1, 1], Vec::new());
+        let mesh = std::sync::Arc::make_mut(&mut kept.mesh);
+        for &(sx, sy, outer_r) in &stamps[kept.done..] {
+            let center = Pos2::new(sx, sy);
+            let shapes: Vec<egui::Shape> = match key.shape {
+                prunr_core::brush::BrushShape::Square => super::chip::falloff_square_shapes(center, outer_r, key.hardness, key.accent, key.alpha, 6).collect(),
+                _ => super::chip::falloff_circle_shapes(center, outer_r, key.hardness, key.accent, key.alpha, 8).collect(),
+            };
+            for shape in shapes {
+                tessellator.tessellate_shape(shape, mesh);
+            }
+        }
+        kept.done = stamps.len();
+    }
+    let mesh = std::sync::Arc::clone(&kept.mesh);
+    ctx.data_mut(|d| d.insert_temp(id, kept));
+    mesh
 }
 
 pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
@@ -210,9 +246,14 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     if !img_rect.contains(p) {
         return;
     }
+    // Ours replaces the system's (an arrow, or a cross on GNOME), except
+    // over a control floating on the image, which keeps its own.
+    if ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    }
     let r = s.radius.max(MIN_SCREEN_RADIUS_PX);
     let color = if armed {
-        theme::ACCENT
+        theme::mark_color(s.erase)
     } else {
         Color32::from_rgba_premultiplied(160, 160, 160, 180)
     };
@@ -240,6 +281,25 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
 
 #[cfg(test)]
 mod tests {
+    /// A stroke's stamps are tessellated once: a frame with no new stamp
+    /// reuses the mesh, a new stamp only adds to it, another stroke
+    /// starts over.
+    #[test]
+    fn a_trail_tessellates_each_stamp_once() {
+        let ctx = egui::Context::default();
+        let key = super::TrailKey { shape: prunr_core::brush::BrushShape::Circle, hardness: 0.5, accent: egui::Color32::RED, alpha: 100, ppp: 1.0 };
+        let options = egui::epaint::TessellationOptions::default();
+        let one = [(10.0, 10.0, 6.0)];
+        let two = [(10.0, 10.0, 6.0), (14.0, 10.0, 6.0)];
+        let first = super::trail_mesh(&ctx, key, options, one.into_iter());
+        let again = super::trail_mesh(&ctx, key, options, one.into_iter());
+        assert!(std::sync::Arc::ptr_eq(&first, &again), "nothing new: the same mesh");
+        let grown = super::trail_mesh(&ctx, key, options, two.into_iter());
+        assert!(grown.vertices.len() > first.vertices.len() && grown.vertices.starts_with(&first.vertices), "the new stamp is appended");
+        let other = super::trail_mesh(&ctx, key, options, [(50.0, 50.0, 6.0)].into_iter());
+        assert_eq!(other.vertices.len(), first.vertices.len(), "another stroke starts over");
+    }
+
     use super::*;
 
     /// Pin the screen→model coordinate transform. A bug here flips an

@@ -1,22 +1,17 @@
-//! The Magic Brush panel: the shared cursor block and selection look,
-//! plus the Confidence threshold.
+//! The Magic Brush panel: what its strip does not show.
 
 use egui::Ui;
 
 use crate::gui::brush_state::BrushSettings;
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::theme;
-use crate::gui::views::{chip, fmt};
+use crate::gui::views::chip;
 
 use super::brush_chip::BrushChipOutcome;
-
-/// Wider than a popover so the two-column cursor block fits.
-const MAGIC_POPOVER_MIN_WIDTH: f32 = 320.0;
 
 /// `encoder_pending` shows a spinner while the encoder runs.
 pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool, model: crate::gui::settings::SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
-    ui.set_min_width(MAGIC_POPOVER_MIN_WIDTH);
     chip::popover_header(ui, "Magic Brush", None);
 
     if encoder_pending {
@@ -31,32 +26,12 @@ pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: 
         ui.add_space(6.0);
     }
 
-    outcome.committed |= chip::choice_row(ui, "Mode", super::brush_chip::mode_choices(model), &mut bs.mode);
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    if shows(model, Surface::SelectionStrokes) {
-        outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
-    }
-
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    ui.label(
-        egui::RichText::new("Magic Brush")
-            .strong()
-            .color(theme::TEXT_PRIMARY)
-            .size(theme::FONT_SIZE_BODY),
-    );
-    ui.add_space(2.0);
-
-    let ct = chip::slider_row_f32(ui, "Confidence", &mut bs.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent);
-    outcome.committed |= ct.commit;
-    super::hint(ui, "Keep only the parts the model is sure about. Lower selects more.");
     let specks = chip::toggle_row(ui, "Remove specks", &mut bs.magic_remove_specks);
     outcome.committed |= specks.commit;
     super::hint(ui, "Drop tiny islands and fill pinholes where the model is unsure.");
+    outcome.committed |= super::brush_chip::fill_scale_row(ui, bs, model);
+    if shows(model, Surface::SelectionStrokes) {
+        outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
+    }
     outcome
 }

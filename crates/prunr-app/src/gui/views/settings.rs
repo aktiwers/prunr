@@ -1,41 +1,64 @@
-//! Settings modal — four tabs:
-//! - **General**: hardware + performance knobs that change *what runs*
-//! - **Behavior**: toggles that change *how editing feels*
-//! - **Hotkeys**: the shortcut table, each chord rebindable in place
-//! - **Model credits**: installed-model attribution (CC-BY compliance)
+//! Settings modal: a sidebar of pages, each a few groups of rows.
+//! - **Performance**: what runs and how much memory it may take
+//! - **Hardware**: this computer, the accelerator runtime, the cache
+//! - **Images**: what happens when images arrive
+//! - **Editing**: how the canvas looks while editing
+//! - **Shortcuts**: the shortcut table, each chord rebindable in place
+//! - **Credits**: installed-model attribution (CC-BY compliance)
 //!
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
 
 use std::sync::Arc;
 
-use egui::RichText;
+use egui::{Color32, RichText};
+use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
+use crate::gui::hardware_cache::HardwareInstallCache;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
+use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
 
 use super::chip::{button, ButtonKind};
-use super::{hint, kv_row, section_heading};
+use super::{hint, kv_row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
-    General,
-    Behavior,
-    Hotkeys,
-    ModelCredits,
+    Performance,
+    Hardware,
+    Images,
+    Editing,
+    Shortcuts,
+    Credits,
 }
 
 impl SettingsTab {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Behavior => "Behavior",
-            Self::Hotkeys => "Hotkeys",
-            Self::ModelCredits => "Model credits",
+            Self::Performance => "Performance",
+            Self::Hardware => "Hardware",
+            Self::Images => "Images",
+            Self::Editing => "Editing",
+            Self::Shortcuts => "Shortcuts",
+            Self::Credits => "Credits",
         }
     }
-    pub(crate) const ALL: [SettingsTab; 4] = [Self::General, Self::Behavior, Self::Hotkeys, Self::ModelCredits];
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Performance => ICON_BOLT.codepoint,
+            Self::Hardware => ICON_MEMORY.codepoint,
+            Self::Images => ICON_IMAGE.codepoint,
+            Self::Editing => ICON_EDIT.codepoint,
+            Self::Shortcuts => ICON_KEYBOARD.codepoint,
+            Self::Credits => ICON_INFO.codepoint,
+        }
+    }
+
+    pub(crate) const ALL: [SettingsTab; 6] = [
+        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Shortcuts, Self::Credits,
+    ];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
     pub fn from_label(s: &str) -> Option<Self> {
@@ -43,389 +66,636 @@ impl SettingsTab {
     }
 }
 
-/// Read-only snapshot of runtime-install state passed into the General
-/// tab so its renderer doesn't need a `&mut PrunrApp`.
+/// Read-only snapshot of runtime-install state passed into the Hardware
+/// page so its renderer doesn't need a `&mut PrunrApp`.
 pub(crate) struct HardwareSectionContext {
-    pub openvino_installed: bool,
-    pub install_in_progress: bool,
-    pub install_status_text: Option<String>,
+    /// The runtimes this platform offers to download.
+    pub offered: &'static [RuntimeId],
+    pub installs: HardwareInstallCache,
+    /// What is being installed, with its progress line.
+    pub installing: Option<(InstallTarget, String)>,
     pub active_provider: String,
+    pub sd_margin_mb: u64,
+    /// Settings › Processor is CPU only: no SD part goes to a card.
+    pub sd_cpu_only: bool,
+    /// Why the loaded runtime's GPU provider does not run, when it does not.
+    pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
 }
 
-/// View-layer intent the General tab returns so platform side effects
+/// View-layer intent the Hardware page returns so platform side effects
 /// (rfd, runtime install) live on the orchestrator, not the view.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HardwareSectionIntent {
-    StartInstall(crate::runtime_install::RuntimeId),
+    StartInstall(RuntimeId),
     CancelInstall,
-    Uninstall(crate::runtime_install::RuntimeId),
+    Uninstall(RuntimeId),
+    PreferRuntime(RuntimeChoice),
+    IntelGpu(bool),
+    GetNvidiaLibraries,
     ClearCompiledCache,
+    ForgetGpuFailures,
 }
+
+const SIDEBAR_WIDTH: f32 = 220.0;
+/// A row control's width before it has been measured once.
+const CONTROL_GUESS: f32 = 160.0;
+const SIDEBAR_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 31);
+const PAGE_MARGIN: egui::Margin = egui::Margin { left: 24, right: 24, top: 18, bottom: 20 };
 
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
     let keep_sd_before = app.settings.keep_sd_loaded;
-    let closed = theme::standard_modal_window(
-        ctx,
-        "settings",
-        "Settings",
-        [theme::SETTINGS_DIALOG_WIDTH, theme::SETTINGS_DIALOG_HEIGHT],
-        |ui| {
-            theme::apply_modal_visuals(ui);
-            render_tab_strip(ui, &mut app.settings_tab);
-            ui.add_space(theme::SPACE_SM);
-
-            // Tab content scrolls inside its own region so the footer
-            // (Reset row) doesn't overlap long content.
-            let scroll_height = (ui.available_height() - theme::MODAL_FOOTER_RESERVED).max(0.0);
-            hardware_intent = egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .max_height(scroll_height)
-                .show(ui, |ui| {
-                    match app.settings_tab {
-                        SettingsTab::General => {
-                            let hw_ctx = HardwareSectionContext {
-                                openvino_installed: app.hardware_install_cache.openvino,
-                                install_in_progress: app.runtime_install.is_some(),
-                                install_status_text: app.runtime_install.as_ref()
-                                    .map(|p| p.last_event.status_text()),
-                                active_provider: app.settings.active_backend.clone(),
-                            };
-                            render_tab_general(ui, &mut app.settings, &hw_ctx)
-                        }
-                        SettingsTab::Behavior => { render_tab_behavior(ui, &mut app.settings); None }
-                        SettingsTab::Hotkeys => { render_tab_hotkeys(ui, app); None }
-                        SettingsTab::ModelCredits => { render_tab_model_credits(ui); None }
-                    }
-                })
-                .inner;
-
-            ui.separator();
-            render_modal_footer(ui, app);
-        },
-    );
+    let processor_before = app.settings.processor;
+    let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::SETTINGS_MODAL_SIZE, |ui| {
+        theme::apply_modal_visuals(ui);
+        let height = ui.available_height();
+        let mut close = false;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            render_sidebar(ui, app, height);
+            egui::Frame::NONE.inner_margin(PAGE_MARGIN).show(ui, |ui| ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+                ui.set_width(ui.available_width());
+                ui.set_height(height - (PAGE_MARGIN.top + PAGE_MARGIN.bottom) as f32);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(app.settings_tab.label()).size(theme::FONT_SIZE_MODAL_TITLE).color(theme::TEXT_PRIMARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let x = super::chip::icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
+                        close = super::chip::named(x, "Close settings").clicked();
+                    });
+                });
+                let footer = if app.pending_reset_confirm { 44.0 } else { 0.0 };
+                hardware_intent = egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height((ui.available_height() - footer).max(0.0))
+                    .show(ui, |ui| render_page(ui, app))
+                    .inner;
+                if app.pending_reset_confirm {
+                    render_reset_confirm(ui, app);
+                }
+            }));
+        });
+        close
+    });
 
     if let Some(intent) = hardware_intent {
-        dispatch_hardware_intent(app, intent);
+        dispatch_hardware_intent(app, intent, ctx);
     }
     // Turning the switch off frees the resident bundle now, not on the
     // next stroke.
     if keep_sd_before && !app.settings.keep_sd_loaded {
         app.processor.release_inpaint_subprocess();
     }
+    if app.settings.processor != processor_before {
+        app.apply_processor();
+    }
     if closed {
-        app.close_settings(ctx);
+        app.close_settings();
     }
 }
 
-/// Inline confirm-then-reset (no separate modal) so the destructive
-/// scope is spelled out before the user can act on it.
-fn render_modal_footer(ui: &mut egui::Ui, app: &mut PrunrApp) {
-    ui.horizontal(|ui| {
-        if app.pending_reset_confirm {
-            ui.label(RichText::new("Reset all settings to defaults?")
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
-                    app.pending_reset_confirm = false;
-                }
-                if button(ui, ButtonKind::Destructive, "Reset").clicked() {
-                    app.settings.reset_preserving_identity();
-                    app.pending_reset_confirm = false;
-                }
-            });
-        } else {
-            ui.label(RichText::new("Auto-saved")
-                .color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if button(ui, ButtonKind::Secondary, "Reset to defaults").clicked() {
-                    app.pending_reset_confirm = true;
-                }
-            });
-        }
-    });
-}
-
-fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent) {
-    use crate::runtime_install::{InstallEvent, start_install};
+fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, ctx: &egui::Context) {
     match intent {
-        HardwareSectionIntent::StartInstall(rt) => {
-            let h = start_install(rt);
-            app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
-                runtime: rt,
-                rx: h.events,
-                cancel: h.cancel,
-                last_event: InstallEvent::Preparing,
-            });
-        }
+        HardwareSectionIntent::StartInstall(rt) => app.request_install(InstallTarget::Runtime(rt)),
         HardwareSectionIntent::CancelInstall => {
             if let Some(p) = app.runtime_install.as_ref() {
                 p.cancel.store(true, std::sync::atomic::Ordering::Release);
             }
         }
-        HardwareSectionIntent::Uninstall(rt) => {
-            match crate::runtime_install::uninstall(rt) {
-                Ok(()) => app.toasts.success(format!("{} removed", rt.display_name())),
-                Err(e) => app.toasts.error(format!("Uninstall failed: {e}")),
-            };
-            app.hardware_install_cache =
-                crate::gui::hardware_cache::HardwareInstallCache::refresh();
+        HardwareSectionIntent::Uninstall(rt) => app.uninstall_runtime(rt, ctx),
+        HardwareSectionIntent::PreferRuntime(choice) => {
+            match crate::runtime_install::prefer(choice) {
+                Ok(()) if app.hardware_install_cache.loaded_runtime != Some(choice) => {
+                    app.toasts.info(format!("Restart Prunr to switch to {}", choice.name()));
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    app.toasts.error(format!("Could not choose {}: {e}", choice.name()));
+                }
+            }
+            app.refresh_install_cache();
         }
-        HardwareSectionIntent::ClearCompiledCache => {
-            // Off-thread: a multi-GB rmtree on a slow disk would stall
-            // the GUI frame.
-            std::thread::spawn(|| {
-                let bytes = prunr_core::cache::clear_all();
-                tracing::info!(bytes, "cleared compiled-model cache");
-            });
-            app.toasts.info("Clearing compiled-model cache…");
-        }
+        HardwareSectionIntent::IntelGpu(on) => match prunr_core::ort_runtime::intel_gpu_file() {
+            Some(file) => {
+                queue_intel_gpu(file, on);
+                // The queued write may not have landed, so a fresh read
+                // could show the old state.
+                app.hardware_install_cache.intel_gpu = on;
+                app.toasts.info("Restart Prunr to apply");
+            }
+            None => {
+                app.toasts.error("Could not change the Intel graphics setting: no user data folder");
+            }
+        },
+        HardwareSectionIntent::GetNvidiaLibraries => app.request_install(InstallTarget::NvidiaLibraries),
+        HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
+        HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
     }
 }
 
-fn render_hardware_section(
-    ui: &mut egui::Ui,
-    ctx: &HardwareSectionContext,
-) -> Option<HardwareSectionIntent> {
-    use crate::hardware;
-    use crate::runtime_install::RuntimeId;
-    let mut intent = None;
-    section_heading(ui, "Hardware");
+/// The switch is the file's presence.
+fn queue_intel_gpu(file: std::path::PathBuf, on: bool) {
+    if on {
+        crate::gui::disk_queue::write(file, Vec::new());
+    } else {
+        crate::gui::disk_queue::remove(file);
+    }
+}
 
+fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionIntent> {
+    match app.settings_tab {
+        SettingsTab::Performance => { render_page_performance(ui, &mut app.settings, app.hardware_install_cache.has_sd_eraser()); None }
+        SettingsTab::Hardware => {
+            let hw_ctx = HardwareSectionContext {
+                offered: RuntimeId::OFFERED,
+                installs: app.hardware_install_cache,
+                installing: app.runtime_install.as_ref().map(|p| (p.target, p.last_event.status_text())),
+                active_provider: app.settings.active_backend.clone(),
+                sd_margin_mb: app.settings.sd_memory.margin_mb(),
+                sd_cpu_only: app.settings.cpu_only(),
+                gpu_failure: prunr_core::engine::gpu_start_failure(),
+            };
+            render_page_hardware(ui, &hw_ctx)
+        }
+        SettingsTab::Images => { render_page_images(ui, &mut app.settings); None }
+        SettingsTab::Editing => { render_page_editing(ui, &mut app.settings); None }
+        SettingsTab::Shortcuts => { render_tab_shortcuts(ui, app); None }
+        SettingsTab::Credits => { render_tab_model_credits(ui, &app.hardware_install_cache); None }
+    }
+}
+
+/// The page list, and Reset to defaults at its foot.
+fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
+    let painter = ui.painter();
+    let left = egui::CornerRadius { nw: theme::PANEL_RADIUS, sw: theme::PANEL_RADIUS, ne: 0, se: 0 };
+    painter.rect_filled(rect, left, SIDEBAR_FILL);
+    painter.vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0, theme::FIELD_FILL));
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 18.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Settings").size(theme::FONT_SIZE_HEADING).color(theme::TEXT_PRIMARY));
+    });
+    ui.add_space(14.0);
+    for tab in SettingsTab::ALL {
+        if nav_item(&mut ui, Some(tab.icon()), tab.label(), app.settings_tab == tab).clicked() {
+            app.settings_tab = tab;
+        }
+    }
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        if nav_item(ui, None, "Reset to defaults", false).clicked() {
+            app.pending_reset_confirm = true;
+        }
+    });
+}
+
+/// One sidebar entry: a 34 px pill, purple while its page shows.
+fn nav_item(ui: &mut egui::Ui, icon: Option<&str>, label: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, theme::PILL_RADIUS, super::chip::row_wash(&resp, selected));
+        let mut x = rect.left() + 12.0;
+        if let Some(icon) = icon {
+            painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(16.0), theme::ACCENT_RING);
+            x += 26.0;
+        }
+        let color = if selected { Color32::WHITE } else if icon.is_some() { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
+        painter.text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(theme::FONT_SIZE_BODY), color);
+    }
+    resp
+}
+
+/// Inline confirm-then-reset so the destructive scope is spelled out
+/// before the user can act on it.
+fn render_reset_confirm(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Reset settings? Presets, licenses, background images and the model stay.")
+            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_SECONDARY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                app.pending_reset_confirm = false;
+            }
+            if button(ui, ButtonKind::Destructive, "Reset").clicked() {
+                app.settings.reset_preserving_identity();
+                // The shipped keys go live now, not at the next launch.
+                app.apply_hotkeys(ui.ctx(), super::shortcuts::Bindings::shipped());
+                app.pending_reset_confirm = false;
+            }
+        });
+    });
+}
+
+/// A page's small heading over a group.
+fn group_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(18.0);
+    ui.horizontal(|ui| {
+        // Lines up with the rows' text: the card's 16 px padding and 1 px edge.
+        ui.add_space(17.0);
+        ui.label(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+    });
+    ui.add_space(4.0);
+}
+
+/// A group of rows in one dim rounded box.
+fn group<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut Rows<'_>) -> R) -> R {
+    egui::Frame::NONE
+        .fill(theme::CARD_FILL)
+        .stroke(egui::Stroke::new(1.0, theme::CARD_EDGE))
+        .corner_radius(14.0)
+        .inner_margin(egui::Margin::symmetric(16, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(&mut Rows { ui, first: true })
+        })
+        .inner
+}
+
+/// The rows of a `group`, a hairline between each.
+struct Rows<'a> {
+    ui: &'a mut egui::Ui,
+    first: bool,
+}
+
+impl Rows<'_> {
+    /// A row: its title over a one-line description on the left, the
+    /// control `control` draws on the right.
+    fn row<R>(&mut self, title: &str, description: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let ui = &mut *self.ui;
+        if !std::mem::replace(&mut self.first, false) {
+            let y = ui.cursor().top();
+            ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, theme::CARD_EDGE));
+        }
+        // The control sits flush right but lays out left to right, so its
+        // width comes from the last frame: a right-to-left layout would
+        // reverse the parts of a stepper or a segmented choice.
+        let width_id = ui.id().with(("settings_row", title));
+        let control_width = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(CONTROL_GUESS);
+        let (out, drawn) = ui
+            .horizontal(|ui| {
+                ui.set_min_height(46.0);
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - control_width - theme::SPACE_MD).max(120.0));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(title).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
+                    if !description.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
+                    }
+                    ui.add_space(6.0);
+                });
+                ui.add_space((ui.available_width() - control_width).max(0.0));
+                let r = ui.horizontal(control);
+                (r.inner, r.response.rect.width())
+            })
+            .inner;
+        if (drawn - control_width).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(width_id, drawn));
+            ui.ctx().request_repaint();
+        }
+        out
+    }
+
+    fn ui(&mut self) -> &mut egui::Ui {
+        self.ui
+    }
+}
+
+/// A stepper: − value + in one dim pill.
+fn stepper(ui: &mut egui::Ui, name: &str, value: &mut usize, range: std::ops::RangeInclusive<usize>) {
+    egui::Frame::NONE.fill(theme::FIELD_FILL).corner_radius(theme::PILL_RADIUS).inner_margin(3.0).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let step = |ui: &mut egui::Ui, enabled: bool, glyph: &str, tip: &str| {
+                let b = egui::Button::new(RichText::new(glyph).size(theme::FONT_SIZE_HEADING).color(theme::TEXT_PRIMARY))
+                    .frame(false)
+                    .min_size(egui::vec2(26.0, 26.0));
+                super::chip::named(ui.add_enabled(enabled, b), tip).clicked()
+            };
+            if step(ui, *value > *range.start(), "\u{2212}", "Fewer") {
+                *value -= 1;
+            }
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::hover());
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, value.to_string(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY);
+            if step(ui, *value < *range.end(), "+", "More") {
+                *value += 1;
+            }
+        });
+    })
+    .response
+    .on_hover_text(name);
+}
+
+fn jobs_hint(on_cpu: bool, max_jobs: usize) -> String {
+    if on_cpu {
+        format!("Images at once. 1\u{2013}{max_jobs}. On the CPU only {} run several; the other models take one at a time, since one run already uses every core.", models_running_several_on_cpu())
+    } else {
+        format!("Images at once. 1\u{2013}{max_jobs}; on a graphics card 1\u{2013}2 is optimal.")
+    }
+}
+
+/// "Silueta and U2Net": the registry's models that gain from parallel
+/// jobs on the CPU, built once.
+fn models_running_several_on_cpu() -> &'static str {
+    static NAMES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let names: Vec<_> = prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu).map(|d| d.display_name).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => names.concat(),
+        }
+    })
+}
+
+fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_installed: bool) {
+    use crate::gui::settings::{ComputeMode, SdMemoryGuard};
+    use super::chip::Choice;
+    group_heading(ui, "Processing");
+    let max_jobs = settings.max_jobs();
+    let jobs_hint = jobs_hint(settings.runs_on_host_cpu(), max_jobs);
+    let gpu = settings.is_gpu();
+    group(ui, |rows| {
+        rows.row("Parallel jobs", &jobs_hint, |ui| stepper(ui, "Parallel jobs", &mut settings.parallel_jobs, 1..=max_jobs));
+        if gpu {
+            rows.row("Runs on", "Auto runs each model on the graphics card when it supports it.", |ui| {
+                super::chip::choice_buttons(ui, &[
+                    Choice { value: ComputeMode::Auto, name: "Auto", description: "Each model on the graphics card when it supports it, else the CPU", enabled: true },
+                    Choice {
+                        value: ComputeMode::CpuOnly,
+                        name: "CPU only",
+                        description: if sd_installed { "Every model on the CPU. The Stable Diffusion eraser needs the graphics card" } else { "Every model on the CPU" },
+                        enabled: true,
+                    },
+                ], &mut settings.processor);
+            });
+        }
+    });
+    if !sd_installed {
+        return;
+    }
+    group_heading(ui, "Stable Diffusion eraser");
+    group(ui, |rows| {
+        rows.row("Keep it loaded", "Faster repeated erases. Holds about 16 GB of RAM while the app is open.", |ui| {
+            super::chip::switch(ui, "Keep the Stable Diffusion eraser loaded", &mut settings.keep_sd_loaded);
+        });
+        rows.row("Memory guard", "How much memory to leave free for other apps while it runs.", |ui| {
+            super::chip::choice_buttons(ui, &[
+                Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1 GB free for other apps. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
+                Choice { value: SdMemoryGuard::Balanced, name: "Balanced", description: "Leaves about 2 GB free for other apps", enabled: true },
+                Choice { value: SdMemoryGuard::Strict, name: "Strict", description: "Leaves about 4 GB free, for when other apps grab memory while it runs", enabled: true },
+            ], &mut settings.sd_memory);
+        });
+    });
+}
+
+pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Option<HardwareSectionIntent> {
+    use crate::hardware;
+    let mut intent = None;
     let p = hardware::profile();
     let avail_ram = hardware::available_ram_bytes_throttled();
-    egui::Grid::new("hardware_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_XS])
-        .show(ui, |ui| {
-            kv_row(ui, "CPU", &format!("{} ({})", p.cpu_vendor, p.cpu_brand), theme::TEXT_SECONDARY);
-            let gpu_label = match (p.dgpu, p.igpu) {
-                (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
-                (Some(d), None) => format!("{d}"),
-                (None, Some(i)) => format!("{i} (iGPU)"),
-                (None, None) => "none detected".to_string(),
+
+    group_heading(ui, "This computer");
+    group(ui, |rows| {
+        let ui = rows.ui();
+        ui.add_space(4.0);
+        let kv = |ui: &mut egui::Ui, key: &str, value: &str| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(26.0);
+                ui.label(RichText::new(key).size(theme::FONT_SIZE_BODY).color(theme::TEXT_SECONDARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(value).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
+                });
+            });
+        };
+        kv(ui, "CPU", &crate::hardware::cpu_label(p.cpu_vendor, &p.cpu_brand));
+        let gpu_label = match (p.dgpu, p.igpu) {
+            (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
+            (Some(d), None) => format!("{d}"),
+            (None, Some(i)) => format!("{i} (iGPU)"),
+            (None, None) => "none detected".to_string(),
+        };
+        kv(ui, "Graphics card", &gpu_label);
+        kv(ui, "Accelerator", &ctx.active_provider);
+        let total_ram = hardware::total_ram_bytes();
+        kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
+
+        // The same rule as the gate an erase passes, with the user's margin.
+        use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
+        for (name, id) in ctx.installs.sd_erasers() {
+            let Some((bundle, room)) = hardware::charge_and_room(id, ctx.sd_cpu_only) else { continue };
+            let (color, fit) = match sd_ram_fit(id, room, ctx.sd_margin_mb, bundle) {
+                SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
+                SdRamFit::TilesOnly => (
+                    theme::ADVISORY_TEXT,
+                    "runs, but tall regions are filled in tiles. Close other apps for one pass",
+                ),
+                SdRamFit::Refused => (
+                    Color32::from_rgb(0xd8, 0x6e, 0x6e),
+                    "not enough memory free. Close other apps or use Big-LaMa",
+                ),
+                SdRamFit::CardFull => (
+                    Color32::from_rgb(0xd8, 0x6e, 0x6e),
+                    "not enough free memory on the graphics card. Close apps that use it or use Big-LaMa",
+                ),
             };
-            kv_row(ui, "GPU", &gpu_label, theme::TEXT_SECONDARY);
-            kv_row(ui, "Accelerator", &ctx.active_provider, theme::TEXT_SECONDARY);
-            let total_ram = hardware::total_ram_bytes();
-            kv_row(ui, "RAM",
-                &format!("{:.1} / {:.1} GB free",
-                    avail_ram as f64 / 1e9, total_ram as f64 / 1e9),
-                theme::TEXT_SECONDARY);
-        });
-
-    // SD-specific verdict on its own line, color-coded so it pops.
-    let sd_working_set: u64 = 7 * 1024 * 1024 * 1024;
-    let verdict = hardware::ram_verdict(sd_working_set, avail_ram);
-    let (color, text) = match verdict {
-        hardware::RamVerdict::Comfortable => (
-            egui::Color32::from_rgb(0x6c, 0xd1, 0x6c),
-            "SD 1.5: comfortable headroom",
-        ),
-        hardware::RamVerdict::Tight => (
-            egui::Color32::from_rgb(0xe1, 0xb3, 0x4e),
-            "SD 1.5: tight — close other apps before running",
-        ),
-        hardware::RamVerdict::Insufficient => (
-            egui::Color32::from_rgb(0xd8, 0x6e, 0x6e),
-            "SD 1.5: insufficient — try Big-LaMa instead",
-        ),
-    };
-    ui.add_space(theme::SPACE_XS);
-    ui.label(RichText::new(text).color(color).size(theme::FONT_SIZE_MONO));
-    ui.add_space(theme::SPACE_SM);
-
-    let rt = RuntimeId::OpenVino;
-    let installed = ctx.openvino_installed;
-    let status = match (ctx.install_in_progress, ctx.install_status_text.as_deref()) {
-        (true, Some(s)) => s.to_string(),
-        _ if installed => "Installed".to_string(),
-        _ => format!("Not installed ({} MB)", rt.approx_download_mb()),
-    };
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(rt.display_name())
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.label(RichText::new(status)
-            .color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_MONO));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ctx.install_in_progress {
-                if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
-                    intent = Some(HardwareSectionIntent::CancelInstall);
-                }
-            } else if installed {
-                if button(ui, ButtonKind::Destructive, "Uninstall").clicked() {
-                    intent = Some(HardwareSectionIntent::Uninstall(rt));
-                }
-            } else if button(ui, ButtonKind::Primary, "Install").clicked() {
-                intent = Some(HardwareSectionIntent::StartInstall(rt));
-            }
-        });
+            ui.horizontal(|ui| {
+                ui.set_min_height(28.0);
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+                ui.label(RichText::new(format!("{name}: {fit}")).size(theme::FONT_SIZE_SECONDARY).color(color));
+            });
+        }
+        ui.add_space(4.0);
     });
-    if p.recommends_openvino() && !installed && !ctx.install_in_progress {
-        hint(ui, "Recommended for Intel hardware: 2 to 3 times faster, and the built-in GPU can run the SD eraser.");
-    }
 
-    ui.add_space(theme::SPACE_MD);
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Compiled-model cache")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if button(ui, ButtonKind::Secondary, "Clear").clicked() {
-                intent = Some(HardwareSectionIntent::ClearCompiledCache);
+    group_heading(ui, "Acceleration");
+    let recommended = p.recommended_runtime();
+    group(ui, |rows| {
+        if ctx.installs.built_in_gpu {
+            rows.row("DirectML runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the CPU without one.", |_| {});
+        }
+        // A runtime for hardware this computer lacks would install and
+        // never start; one installed anyway stays, to uninstall.
+        for &rt in ctx.offered.iter().filter(|&&rt| ctx.installs.has_runtime(rt) || p.runs(rt)) {
+            runtime_row(rows, ctx, rt, recommended == Some(rt), &mut intent);
+            if rt == RuntimeId::Cuda {
+                nvidia_libraries_row(rows, ctx, &mut intent);
             }
-        });
-    });
-    hint(ui, "Models are compiled for your graphics hardware the first time they run. Clear the cache if a compiled file is corrupt or to free disk space; models recompile on next use.");
-
-    ui.add_space(theme::SPACE_MD);
-    intent
-}
-
-fn render_ram_safety_margin_row(ui: &mut egui::Ui, value: &mut f32) {
-    super::chip::slider_row_f32(ui, "SD safety margin", value, 0.0..=8.0, false, |v| format!("{v:.1} GB"));
-    hint(ui, "Free memory the SD eraser keeps clear on top of what the model needs. Raise it if other apps use a lot of memory while it runs. Default 2 GB.");
-}
-
-fn render_tab_strip(ui: &mut egui::Ui, current: &mut SettingsTab) {
-    let labels = SettingsTab::ALL.map(|t| t.label());
-    let mut idx = SettingsTab::ALL.iter().position(|t| t == current).unwrap_or(0);
-    super::chip::tab_strip(ui, &labels, &mut idx);
-    *current = SettingsTab::ALL[idx];
-    ui.separator();
-}
-
-fn render_tab_general(
-    ui: &mut egui::Ui,
-    settings: &mut Settings,
-    ctx: &HardwareSectionContext,
-) -> Option<HardwareSectionIntent> {
-    let intent = render_hardware_section(ui, ctx);
-    render_ram_safety_margin_row(ui, &mut settings.ram_safety_margin_gb);
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Performance");
-    let max_jobs = settings.max_jobs();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Parallel jobs")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let stepper = |ui: &mut egui::Ui, enabled: bool, glyph: &str| {
-                super::chip::with_fill(ui, theme::BG_SECONDARY, |ui| {
-                    ui.add_enabled(
-                        enabled,
-                        egui::Button::new(RichText::new(glyph)
-                            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-                            .min_size(egui::vec2(theme::CHIP_HEIGHT, theme::CHIP_HEIGHT)),
-                    )
-                })
-                .clicked()
-            };
-            if stepper(ui, settings.parallel_jobs < max_jobs, "+") {
-                settings.parallel_jobs += 1;
-            }
-            ui.label(RichText::new(format!("{}", settings.parallel_jobs))
-                .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY).strong());
-            if stepper(ui, settings.parallel_jobs > 1, "\u{2212}") {
-                settings.parallel_jobs -= 1;
-            }
-        });
-    });
-    let jobs_hint = if settings.is_gpu() {
-        format!("Images at once. 1\u{2013}{max_jobs}; on GPU 1\u{2013}2 is optimal.")
-    } else {
-        format!("Images at once. 1\u{2013}{max_jobs}.")
-    };
-    hint(ui, &jobs_hint);
-    ui.add_space(theme::SPACE_MD);
-
-    if settings.is_gpu() {
-        ui.checkbox(&mut settings.force_cpu, RichText::new("Force CPU this session")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        hint(ui, "Resets to GPU on next launch. Useful for debugging GPU misbehaviour.");
-        ui.add_space(theme::SPACE_MD);
-    }
-
-    ui.checkbox(&mut settings.live_preview, RichText::new("Live preview")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Auto-rerun mask and edge tweaks while you drag sliders.");
-    intent
-}
-
-fn render_tab_behavior(ui: &mut egui::Ui, settings: &mut Settings) {
-    section_heading(ui, "When opening images");
-    ui.checkbox(&mut settings.auto_process_on_import, RichText::new("Auto-process on import")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Run Process automatically as each image arrives.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Editing");
-    ui.checkbox(&mut settings.dark_checker, RichText::new("Dark checkerboard")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Use dark tones for the transparency pattern (helps on light results).");
-    ui.add_space(theme::SPACE_SM);
-
-    super::chip::slider_row_f32(ui, "Selection fill", &mut settings.selection_fill, 0.0..=1.0, false, super::fmt::percent);
-    hint(ui, "How strongly a selection is tinted on the image.");
-    ui.add_space(theme::SPACE_SM);
-    ui.checkbox(&mut settings.selection_outline, RichText::new("Outline the selection")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    ui.add_space(theme::SPACE_SM);
-
-    ui.checkbox(&mut settings.auto_hide_adjustments, RichText::new("Auto-hide adjustments toolbar")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Collapse the toolbar when the cursor leaves it. Toggle with Shift+H.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Eraser");
-    ui.checkbox(&mut settings.keep_sd_loaded, RichText::new("Keep the Stable Diffusion eraser loaded")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-    hint(ui, "Faster repeated erases. Holds about 16 GB of RAM while the app is open.");
-    ui.add_space(theme::SPACE_MD);
-
-    section_heading(ui, "Defaults");
-    ui.checkbox(&mut settings.export_split_layers, RichText::new("Split exports into layers")
-        .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-        .on_hover_text(
-            "Drag-out and Save emit subject / lines / mask as separate \
-             PNGs — useful for Photoshop / Procreate. On Linux (no \
-             drag-out) this only affects Save.");
-    hint(ui, "Subject / lines / mask as separate PNGs.");
-    ui.add_space(theme::SPACE_SM);
-
-    let preset_names = super::preset_dropdown::all_preset_names(settings);
-    let current = settings.default_preset.clone();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Default preset")
-            .color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
-        let combo = egui::ComboBox::from_id_salt("default_preset")
-            .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
-            .show_ui(ui, |ui| {
-                for name in &preset_names {
-                    let selected = settings.default_preset == *name;
-                    if ui.selectable_label(selected, name).clicked() {
-                        settings.default_preset = name.clone();
-                    }
+        }
+        if RuntimeChoice::ALL.iter().filter(|&&c| ctx.installs.can_load(c)).count() > 1 {
+            rows.row("Runtime", "Which one Prunr uses. A change takes effect when you restart Prunr.", |ui| {
+                let mut chosen = ctx.installs.next_runtime;
+                let choices = RuntimeChoice::ALL.map(|choice| super::chip::Choice {
+                    value: Some(choice),
+                    name: choice.name(),
+                    description: choice.description(),
+                    enabled: ctx.installs.can_load(choice),
+                });
+                if super::chip::choice_buttons(ui, &choices, &mut chosen) {
+                    intent = chosen.map(HardwareSectionIntent::PreferRuntime);
                 }
             });
-        super::chip::named(combo.response, "Default preset");
+        }
+        if ctx.installs.openvino && p.recommends_openvino() {
+            rows.row(
+                "Use Intel graphics",
+                "Experimental. Runs cut-outs and upscaling on the Intel graphics chip as well as the CPU: faster for some models and computers, slower for others. Takes effect when you restart Prunr.",
+                |ui| {
+                    let mut on = ctx.installs.intel_gpu;
+                    if super::chip::switch(ui, "Use Intel graphics", &mut on).changed() {
+                        intent = Some(HardwareSectionIntent::IntelGpu(on));
+                    }
+                },
+            );
+        }
+        rows.row(
+            "Compiled-model cache",
+            "Models are compiled for your graphics hardware the first time they run. Clear it if a compiled file is corrupt or to free disk space.",
+            |ui| {
+                if button(ui, ButtonKind::Secondary, "Clear").clicked() {
+                    intent = Some(HardwareSectionIntent::ClearCompiledCache);
+                }
+            },
+        );
+        rows.row(
+            "Graphics card checks",
+            "Prunr checks each model on the graphics card once. One that fails there, runs slower than on the CPU or changes its result runs on the CPU until the graphics driver or Prunr changes. Forget the checks to run them again.",
+            |ui| {
+                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget graphics card checks").clicked() {
+                    intent = Some(HardwareSectionIntent::ForgetGpuFailures);
+                }
+            },
+        );
     });
-    hint(ui, "New images inherit this preset. The reset button on the toolbar restores its values.");
+    intent
+}
+
+/// One runtime: its state, and Install, Uninstall or Cancel. One install
+/// runs at a time.
+fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId, recommended: bool, intent: &mut Option<HardwareSectionIntent>) {
+    let installed = ctx.installs.has_runtime(rt);
+    let installing_this = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::Runtime(rt));
+    let failure = ctx.gpu_failure.filter(|_| ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt))).map(|f| f.text());
+    let status = match installing_this {
+        Some((_, progress)) => progress.as_str(),
+        None if installed => failure.as_deref().unwrap_or("Installed."),
+        None => rt.not_installed(recommended),
+    };
+    rows.row(rt.display_name(), status, |ui| {
+        if installing_this.is_some() {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                *intent = Some(HardwareSectionIntent::CancelInstall);
+            }
+        } else if installed {
+            if super::chip::named(button(ui, ButtonKind::Destructive, "Uninstall"), rt.uninstall_label()).clicked() {
+                *intent = Some(HardwareSectionIntent::Uninstall(rt));
+            }
+        } else {
+            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Install")).inner;
+            if super::chip::named(resp, rt.install_button_label()).clicked() {
+                *intent = Some(HardwareSectionIntent::StartInstall(rt));
+            }
+        }
+    });
+}
+
+/// NVIDIA's CUDA and cuDNN libraries, which the CUDA runtime brings;
+/// offered again when an install lacks them, so it never runs on the
+/// system's.
+fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
+    let installing = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::NvidiaLibraries);
+    if !(ctx.installs.cuda || installing.is_some()) {
+        return;
+    }
+    let status = match installing {
+        Some((_, progress)) => progress.clone(),
+        None if ctx.installs.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
+        None => format!("CUDA Runtime runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
+    };
+    rows.row("NVIDIA libraries", &status, |ui| {
+        if installing.is_some() {
+            if button(ui, ButtonKind::Secondary, "Cancel").clicked() {
+                *intent = Some(HardwareSectionIntent::CancelInstall);
+            }
+        } else if !ctx.installs.nvidia_libraries {
+            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Download")).inner;
+            if super::chip::named(resp, "Download NVIDIA libraries").clicked() {
+                *intent = Some(HardwareSectionIntent::GetNvidiaLibraries);
+            }
+        }
+    });
+}
+
+fn render_page_images(ui: &mut egui::Ui, settings: &mut Settings) {
+    group_heading(ui, "When opening images");
+    let preset_names = super::preset_dropdown::all_preset_names(settings);
+    let current = settings.default_preset.clone();
+    group(ui, |rows| {
+        rows.row("Auto-process on import", "Run Process automatically as each image arrives.", |ui| {
+            super::chip::switch(ui, "Auto-process on import", &mut settings.auto_process_on_import);
+        });
+        rows.row("Default preset", "New images inherit this preset. The toolbar's reset restores its values.", |ui| {
+            ui.spacing_mut().interact_size.y = theme::CHIP_HEIGHT;
+            let combo = egui::ComboBox::from_id_salt("default_preset")
+                .selected_text(RichText::new(&current).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY))
+                .show_ui(ui, |ui| {
+                    for name in &preset_names {
+                        let selected = settings.default_preset == *name;
+                        if ui.selectable_label(selected, name).clicked() {
+                            settings.default_preset = name.clone();
+                        }
+                    }
+                });
+            super::chip::named(combo.response, "Default preset");
+        });
+    });
+}
+
+fn render_page_editing(ui: &mut egui::Ui, settings: &mut Settings) {
+    group_heading(ui, "Canvas");
+    group(ui, |rows| {
+        rows.row("Dark checkerboard", "Dark tones for the transparency pattern, for light results.", |ui| {
+            super::chip::switch(ui, "Dark checkerboard", &mut settings.dark_checker);
+        });
+        rows.row("Selection fill", "How strongly a selection is tinted on the image.", |ui| {
+            ui.spacing_mut().slider_width = 140.0;
+            super::chip::bare_slider_f32(ui, "Selection fill", &mut settings.selection_fill, 0.0..=1.0, super::fmt::percent);
+        });
+        rows.row("Outline the selection", "", |ui| {
+            super::chip::switch(ui, "Outline the selection", &mut settings.selection_outline);
+        });
+    });
+    group_heading(ui, "Motion");
+    group(ui, |rows| {
+        rows.row("Animations", "Reveals, glows and moving highlights. Off shows each result at once.", |ui| {
+            super::chip::switch(ui, "Animations", &mut settings.animations);
+        });
+    });
+    group_heading(ui, "Toolbar");
+    group(ui, |rows| {
+        let toggle = super::shortcuts::keys(rows.ui.ctx(), super::shortcuts::Action::ToggleAdjustments);
+        rows.row("Auto-hide adjustments", &format!("Collapse the toolbar when the cursor leaves it. Toggle with {toggle}."), |ui| {
+            super::chip::switch(ui, "Auto-hide adjustments toolbar", &mut settings.auto_hide_adjustments);
+        });
+    });
 }
 
 /// One row per action: label, the key slots, Reset. Clicking a slot
 /// starts a capture that `PrunrApp::handle_hotkey_capture` completes on
 /// the next key press.
-fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
+fn render_tab_shortcuts(ui: &mut egui::Ui, app: &mut PrunrApp) {
     use super::shortcuts::{self, Bindings, SHORTCUTS, SLOTS};
 
     let current = Arc::clone(&app.bindings);
     let mut reset: Option<Bindings> = None;
 
-    section_heading(ui, "Hotkeys");
     hint(ui, "Click a key to change it, then press the new keys. Escape cancels, Backspace clears.");
     ui.add_space(theme::SPACE_SM);
+    group(ui, |rows| {
+    let ui = rows.ui();
     egui::Grid::new("hotkeys_grid")
         .num_columns(2 + SLOTS)
         .spacing([theme::SPACE_MD, theme::SPACE_XS])
@@ -443,9 +713,9 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                         texts.get(slot).map_or("\u{2014}", |t| t)
                     };
                     let color = if waiting { theme::ACCENT } else if rebindable { theme::TEXT_PRIMARY } else { theme::TEXT_HINT };
-                    let label = RichText::new(text).monospace().size(theme::FONT_SIZE_MONO).color(color);
+                    let label = RichText::new(text).monospace().size(theme::FONT_SIZE_SECONDARY).color(color);
                     if rebindable {
-                        let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, 0.0));
+                        let slot_button = egui::Button::new(label).min_size(egui::vec2(theme::HOTKEY_SLOT_WIDTH, theme::CHIP_HEIGHT));
                         if ui.add(slot_button).clicked() {
                             app.hotkey_capture = Some((action, slot));
                         }
@@ -465,18 +735,29 @@ fn render_tab_hotkeys(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 ui.end_row();
             }
         });
+    });
+    group_heading(ui, "Mouse");
+    group(ui, |rows| {
+        let ui = rows.ui();
+        egui::Grid::new("gestures_grid")
+            .num_columns(2)
+            .spacing([theme::SPACE_LG, theme::SPACE_SM])
+            .show(ui, |ui| {
+                for (gesture, what) in shortcuts::gestures() {
+                    kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
+                }
+            });
+    });
     ui.add_space(theme::SPACE_MD);
     if app.settings.hotkeys.is_empty() {
-        ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_MONO));
-    } else if button(ui, ButtonKind::Secondary, "Reset all hotkeys").clicked() {
+        ui.label(RichText::new("Copy and Escape are fixed.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+    } else if button(ui, ButtonKind::Secondary, "Reset all shortcuts").clicked() {
         reset = Some(Bindings::shipped());
     }
     if let Some(next) = reset {
         app.apply_hotkeys(ui.ctx(), next);
     }
 }
-
-// ── Model Credits tab ────────────────────────────────────────────────────────
 
 /// Sort installed model descriptors for the Model Credits tab.
 /// Primary: `attribution_required == true` first (CC-BY at top for
@@ -493,14 +774,13 @@ fn sort_for_model_credits<'a>(
     out
 }
 
-fn render_tab_model_credits(ui: &mut egui::Ui) {
-    super::section_heading(ui, "Model Credits");
+fn render_tab_model_credits(ui: &mut egui::Ui, installs: &crate::gui::hardware_cache::HardwareInstallCache) {
     super::hint(ui, "All installed models, their authors, and licenses.");
     ui.add_space(theme::SPACE_SM);
 
     let installed_raw: Vec<&prunr_models::ModelDescriptor> = prunr_models::REGISTRY
         .iter()
-        .filter(|d| prunr_models::is_available(d.id))
+        .filter(|d| installs.has_installed(d.id))
         .collect();
     let installed = sort_for_model_credits(&installed_raw);
 
@@ -511,30 +791,27 @@ fn render_tab_model_credits(ui: &mut egui::Ui) {
                 RichText::new("No models installed yet.")
                     .color(theme::TEXT_SECONDARY),
             );
-            super::hint(ui, "Visit the Model Store to download models.");
+            super::hint(ui, "Get models in the Model Store.");
         });
         return;
     }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for descriptor in installed {
-            render_model_credit_row(ui, descriptor);
-            ui.separator();
-        }
+        group(ui, |rows| {
+            let ui = rows.ui();
+            for (i, descriptor) in installed.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                render_model_credit_row(ui, descriptor);
+            }
+            ui.add_space(theme::SPACE_SM);
+        });
     });
 }
 
 fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDescriptor) {
-    let license_info = match descriptor.source {
-        prunr_models::ModelSource::OnDemand { license, .. } => Some(license),
-        prunr_models::ModelSource::MultiPartOnDemand { license, .. } => Some(license),
-        prunr_models::ModelSource::MultiPartBundled { license, .. } => Some(license),
-        prunr_models::ModelSource::Bundled => None,
-    };
-    let (author, license_name, source_url) = match license_info {
-        Some(info) => (info.author, info.license, info.source_url),
-        None => ("Bundled with Prunr", "Project license", ""),
-    };
+    let prunr_models::LicenseInfo { author, license: license_name, source_url, .. } = descriptor.license();
 
     ui.add_space(theme::SPACE_SM);
     ui.horizontal(|ui| {
@@ -547,19 +824,19 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
         if descriptor.attribution_required {
             ui.label(
                 RichText::new(" CC-BY")
-                    .size(theme::FONT_SIZE_MONO)
-                    .color(theme::ACCENT),
+                    .size(theme::FONT_SIZE_SECONDARY)
+                    .color(theme::ACCENT_RING),
             );
         }
     });
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Author:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
-        ui.label(RichText::new(author).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new("Author:").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(author).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
     });
     ui.horizontal(|ui| {
-        ui.label(RichText::new("License:").size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
-        ui.label(RichText::new(license_name).size(theme::FONT_SIZE_MONO).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new("License:").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+        ui.label(RichText::new(license_name).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
         if !source_url.is_empty() {
             ui.hyperlink_to("↗ source", source_url);
         }
@@ -581,11 +858,22 @@ mod model_credits_tests {
             display_name,
             description: "",
             category: ModelCategory::Segmentation,
-            source: ModelSource::Bundled,
+            source: ModelSource::Bundled {
+                license: prunr_models::LicenseInfo { author: "test", license: "MIT", license_url: "", source_url: "" },
+            },
             version: "1.0.0",
             gpu: GpuRequirement::None,
             incompatible_eps: &[],
-            working_set_mb: 100,
+            needs: prunr_models::Needs {
+                cpu: prunr_models::Cost::estimate(100, 0, "a test fixture"),
+                mac_cpu: prunr_models::Priced::Unmeasured,
+                cuda: prunr_models::Priced::Unmeasured,
+                directml: prunr_models::Priced::Unmeasured,
+                coreml: prunr_models::Priced::Unmeasured,
+                openvino: prunr_models::Priced::Unmeasured,
+                migraphx: prunr_models::Priced::Unmeasured,
+            },
+            parallel_jobs_pay_on_cpu: false,
             tile_size_multiple: None,
             recommended_tile: None,
             attribution_required,
@@ -625,5 +913,42 @@ mod model_credits_tests {
     fn sort_empty_input_returns_empty() {
         let sorted = sort_for_model_credits(&[]);
         assert!(sorted.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod jobs_hint_tests {
+    use super::jobs_hint;
+
+    #[test]
+    fn the_cpu_jobs_hint_names_the_models_that_run_several_at_once() {
+        let hint = jobs_hint(true, 8);
+        for d in prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu) {
+            assert!(hint.contains(d.display_name), "{hint:?} names {}", d.display_name);
+        }
+        assert!(!hint.contains("BiRefNet"), "{hint:?} reads as if only BiRefNet took one at a time");
+    }
+}
+
+#[cfg(test)]
+mod intel_gpu_tests {
+    /// The switch goes through the ordered disk queue: on makes the file
+    /// (and its folder), off removes it, and turning it off when never on
+    /// is fine.
+    #[test]
+    fn the_intel_gpu_switch_turns_on_and_off() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("store").join(prunr_core::ort_runtime::INTEL_GPU_FILE);
+        let set = |on| {
+            super::queue_intel_gpu(file.clone(), on);
+            crate::gui::disk_queue::flush();
+        };
+        set(false);
+        assert!(!file.exists(), "off when never chosen");
+        set(true);
+        assert!(file.is_file());
+        set(true);
+        set(false);
+        assert!(!file.exists());
     }
 }

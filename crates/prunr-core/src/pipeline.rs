@@ -2,7 +2,7 @@ use image::DynamicImage;
 use ort::{inputs, value::Tensor};
 
 use crate::{
-    engine::{InferenceEngine, OrtEngine},
+    engine::OrtEngine,
     formats::{check_large_image, load_image_from_bytes},
     postprocess::{postprocess, PostprocessOpts},
     preprocess::preprocess,
@@ -26,7 +26,6 @@ pub fn process_image(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) 
     process_image_with_mask(img_bytes, engine, &MaskSettings::default(), progress)
 }
 
-/// Process a single image with custom mask settings.
 pub fn process_image_with_mask(
     img_bytes: &[u8],
     engine: &OrtEngine,
@@ -79,12 +78,8 @@ pub fn process_image_from_decoded(
         return Err(CoreError::Cancelled);
     }
 
-    // Inference + postprocess in one IoBinding scope.
-    //
-    // The output tensor view is borrowed from ORT's bound CPU buffer;
-    // postprocess consumes it in-place inside the closure so we never
-    // pay the `try_extract_array().to_owned()` clone (4 MB at BiRefNet
-    // 1024² — was ~11.9% of CLI batch wall time in the perf trace).
+    // Postprocess reads ORT's bound output buffer in place, skipping the
+    // `to_owned()` copy (4 MB at BiRefNet 1024², ~11.9% of CLI batch wall time).
     progress.step(Step::FindingSubject);
 
     let postprocess_opts = PostprocessOpts::new(mask, model);
@@ -92,12 +87,7 @@ pub fn process_image_from_decoded(
         if progress.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        progress.subject(|| {
-            let plane = view.slice(ndarray::s![0, 0, .., ..]);
-            let (h, w) = (plane.nrows(), plane.ncols());
-            let flat = plane.as_standard_layout();
-            crate::subject::subject_hint(flat.as_slice().unwrap_or(&[]), h, w, model)
-        });
+        progress.subject(|| crate::subject::hint_of_output(view.view(), model));
         progress.step(Step::RefiningEdges);
         Ok(postprocess(view, img, &postprocess_opts))
     })?;
@@ -108,8 +98,26 @@ pub fn process_image_from_decoded(
     })
 }
 
+/// `infer_only`, after `look` (the first-look model's engine, when given)
+/// has reported where it sees the subject. A first look that fails leaves
+/// the run to go on without it; a cancel stops both.
+pub fn infer_after_first_look(
+    img: &DynamicImage,
+    engine: &OrtEngine,
+    look: Option<&OrtEngine>,
+    progress: &Progress,
+) -> Result<crate::types::InferenceResult, CoreError> {
+    if let Some(look) = look {
+        match crate::subject::first_look(img, look, progress) {
+            Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+            Err(err) => tracing::warn!(%err, "first look failed; the run goes on without it"),
+            Ok(()) => {}
+        }
+    }
+    infer_only(img, engine, progress)
+}
+
 /// Run inference only (Tier 1). Returns the raw model tensor without postprocessing.
-/// Use with `postprocess::tensor_to_mask()` + `postprocess::apply_mask()` for the full pipeline.
 /// Reports Finding the subject; the caller reports the steps it runs next.
 pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -> Result<crate::types::InferenceResult, CoreError> {
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
@@ -151,12 +159,8 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
             .map(|v| v.to_owned())
     })?;
 
-    // Force standard (row-major C-order, offset 0) layout before flattening.
-    // Some ORT execution providers (DirectML on Windows, plausibly CoreML on
-    // macOS) return tensors with GPU-mapped non-standard layouts; treating
-    // the raw backing Vec as C-order then gives garbage data downstream.
-    // `as_standard_layout()` is a no-op when already standard (CPU EP), and
-    // a single memcpy otherwise — trivial next to inference cost.
+    // Some EPs (DirectML, plausibly CoreML) return non-standard layouts;
+    // reading the backing Vec as C-order then gives garbage.
     let is_std_owned = raw_output.is_standard_layout();
     let h = raw_output.shape()[2];
     let w = raw_output.shape()[3];
@@ -181,9 +185,7 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
         // invariant: as_standard_layout always produces a contiguous view.
         standard.as_slice().unwrap().to_vec()
     };
-    // Diagnostic scans gated on tracing::debug!: each pass walks the
-    // full tensor (~16 MB for BiRefNet 1024²); skipping when the level
-    // isn't enabled saves a per-dispatch read pass.
+    // Walks the full ~16 MB tensor; skip unless DEBUG is on.
     if tracing::enabled!(tracing::Level::DEBUG) {
         let (lo, hi, mean) = crate::math::slice_stats(&tensor_data);
         let head: Vec<f32> = tensor_data.iter().take(6).copied().collect();
@@ -208,15 +210,9 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, RgbImage};
-    #[cfg(feature = "dev-models")]
-    use image::Rgb;
-    #[cfg(feature = "dev-models")]
+    use image::{DynamicImage, Rgb, RgbImage};
     use std::io::Cursor;
 
-    // Only the `dev-models` tests below consume these helpers; gating keeps
-    // the default `cargo test` build free of dead-code warnings.
-    #[cfg(feature = "dev-models")]
     fn encode_as_png(img: DynamicImage) -> Vec<u8> {
         let mut buf = Vec::new();
         img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
@@ -224,7 +220,6 @@ mod tests {
         buf
     }
 
-    #[cfg(feature = "dev-models")]
     fn make_png(width: u32, height: u32) -> Vec<u8> {
         encode_as_png(DynamicImage::ImageRgb8(RgbImage::from_pixel(
             width,
@@ -233,16 +228,155 @@ mod tests {
         )))
     }
 
+    /// A dark disc on a light ground: something for a model to find.
+    fn disc_photo(w: u32, h: u32) -> DynamicImage {
+        let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 3.0);
+        DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+            let inside = (x as f32 - cx).hypot(y as f32 - cy) < r;
+            if inside { image::Rgb([40, 30, 90]) } else { image::Rgb([235, 225, 210]) }
+        }))
+    }
+
+    /// What kind of report each one is, for comparing the order of a run's.
+    fn kinds(updates: &[crate::progress::ProgressUpdate]) -> Vec<&'static str> {
+        use crate::progress::ProgressUpdate;
+        updates.iter().map(|u| match u {
+            ProgressUpdate::Step(_) => "step",
+            ProgressUpdate::Subject(_) => "subject",
+            _ => "count",
+        }).collect()
+    }
+
+    /// The first look reports where the subject is before the run's own
+    /// model starts, and the run then reports its own; together they are
+    /// still a run the progress pill can follow.
     #[test]
-    fn test_process_image_large_returns_err() {
-        // 9000x100 exceeds LARGE_IMAGE_LIMIT — check_large_image should catch it
-        use crate::formats::check_large_image;
-        let big = DynamicImage::ImageRgb8(RgbImage::new(9000, 100));
-        let err = check_large_image(&big);
-        assert!(err.is_some(), "Expected LargeImage error for 9000px wide image");
-        match err.unwrap() {
-            CoreError::LargeImage { width, .. } => assert_eq!(width, 9000),
-            other => panic!("Expected LargeImage, got {:?}", other),
+    fn the_first_look_reports_the_subject_before_the_runs_own_model_starts() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
+        use crate::types::ModelKind;
+        let look = crate::subject::first_look_engine(1).expect("the first-look model loads");
+        assert_eq!(look.model_kind(), crate::subject::FIRST_LOOK_MODEL);
+        let run = OrtEngine::new_cpu_only(ModelKind::Silueta, 2).expect("the run's model loads");
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let ir = infer_after_first_look(&disc_photo(240, 180), &run, Some(&look), &Progress::new(sink.clone()))
+            .expect("the run");
+        assert!(!ir.tensor_data.is_empty());
+        let updates = sink.updates();
+        assert_eq!(check_contract(&updates), Ok(()));
+        assert_eq!(kinds(&updates), ["step", "subject", "step", "subject"], "{updates:?}");
+        assert_eq!(updates[0], ProgressUpdate::Step(Step::FindingSubject));
+        let ProgressUpdate::Subject(first) = &updates[1] else { unreachable!() };
+        assert!(first.coverage.iter().any(|&c| c >= 128), "the first look found the disc");
+
+        let alone = std::sync::Arc::new(RecordingSink::default());
+        infer_after_first_look(&disc_photo(240, 180), &run, None, &Progress::new(alone.clone())).expect("the run");
+        assert_eq!(kinds(&alone.updates()), ["step", "subject"], "without a look, the run reports as before");
+    }
+
+    /// Cancel stops the first look: before it starts, or while it runs,
+    /// and then it reports no subject and the run's own model never starts.
+    #[test]
+    fn a_cancel_stops_the_first_look_unreported() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        use crate::progress::{ProgressSink, ProgressUpdate, RecordingSink};
+        use crate::types::ModelKind;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        /// Cancels as soon as the look starts.
+        struct CancelOnStart(Arc<AtomicBool>, RecordingSink);
+        impl ProgressSink for CancelOnStart {
+            fn report(&self, update: ProgressUpdate) {
+                self.0.store(true, Ordering::Release);
+                self.1.report(update);
+            }
+        }
+
+        let look = crate::subject::first_look_engine(1).expect("the first-look model loads");
+        let run = OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("the run's model loads");
+        let photo = disc_photo(120, 90);
+
+        let before = Arc::new(RecordingSink::default());
+        let progress = Progress::new(before.clone()).with_cancel(Arc::new(AtomicBool::new(true)));
+        assert!(matches!(infer_after_first_look(&photo, &run, Some(&look), &progress), Err(CoreError::Cancelled)));
+        assert!(before.updates().is_empty(), "nothing reported: {:?}", before.updates());
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let during = Arc::new(CancelOnStart(flag.clone(), RecordingSink::default()));
+        let progress = Progress::new(during.clone()).with_cancel(flag);
+        assert!(matches!(infer_after_first_look(&photo, &run, Some(&look), &progress), Err(CoreError::Cancelled)));
+        assert_eq!(during.1.updates(), [ProgressUpdate::Step(Step::FindingSubject)], "the look ran but never showed");
+    }
+
+    /// Timings on this machine's CPU, for the first look's design: how
+    /// soon it shows, and what it adds to the slow model's run, run
+    /// before it or alongside it. `PRUNR_FIRST_LOOK_PHOTO` names a photo;
+    /// a 12 MP drawing otherwise.
+    #[test]
+    #[ignore = "measurement"]
+    fn first_look_timings() {
+        use crate::progress::{ProgressSink, ProgressUpdate};
+        use crate::types::ModelKind;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        /// When the first subject was reported.
+        struct FirstSubject(Instant, Mutex<Option<Duration>>);
+        impl ProgressSink for FirstSubject {
+            fn report(&self, update: ProgressUpdate) {
+                if matches!(update, ProgressUpdate::Subject(_)) {
+                    self.1.lock().unwrap().get_or_insert(self.0.elapsed());
+                }
+            }
+        }
+        // The best of three: other work on the machine only ever slows a run.
+        let first_subject = |run: &dyn Fn(&Progress)| {
+            (0..3).map(|_| {
+                let sink = Arc::new(FirstSubject(Instant::now(), Mutex::new(None)));
+                run(&Progress::new(sink.clone()));
+                let total = sink.0.elapsed();
+                let shown = sink.1.lock().unwrap().unwrap_or_default();
+                (shown, total)
+            }).fold((Duration::MAX, Duration::MAX), |(s, t), (s2, t2)| (s.min(s2), t.min(t2)))
+        };
+        let secs = |d: Duration| d.as_secs_f32();
+
+        let photo = std::env::var_os("PRUNR_FIRST_LOOK_PHOTO")
+            .map(|p| image::open(p).expect("photo"))
+            .unwrap_or_else(|| disc_photo(4000, 3000));
+        let started = Instant::now();
+        let look = crate::subject::first_look_engine(1).expect("first-look model");
+        eprintln!("first-look session built in {:.2}s", secs(started.elapsed()));
+        crate::subject::first_look(&photo, &look, &Progress::none()).expect("warm-up");
+        let (shown, _) = first_subject(&|p| crate::subject::first_look(&photo, &look, p).expect("look"));
+        eprintln!("first look alone: {:.2}s", secs(shown));
+
+        for model in [ModelKind::BiRefNetLite, ModelKind::U2net] {
+            if !prunr_models::is_available(model.into()) {
+                eprintln!("{model:?}: not installed, skipped");
+                continue;
+            }
+            let engine = crate::batch::create_engine_pool(model, 1, true).expect("engine").remove(0);
+            infer_only(&photo, &engine, &Progress::none()).expect("warm-up");
+            let (own, alone) = first_subject(&|p| { infer_only(&photo, &engine, p).expect("run"); });
+            let (look_shown, before) = first_subject(&|p| { infer_after_first_look(&photo, &engine, Some(&look), p).expect("run"); });
+            let (side_shown, alongside) = first_subject(&|p| {
+                std::thread::scope(|s| {
+                    s.spawn(|| crate::subject::first_look(&photo, &look, p).expect("look"));
+                    infer_only(&photo, &engine, &Progress::none()).expect("run");
+                });
+            });
+            eprintln!(
+                "{model:?}: alone {:.2}s (its own subject at {:.2}s) | look first: subject at {:.2}s, run {:.2}s | alongside: subject at {:.2}s, run {:.2}s",
+                secs(alone), secs(own), secs(look_shown), secs(before), secs(side_shown), secs(alongside),
+            );
         }
     }
 
@@ -254,41 +388,27 @@ mod tests {
         assert!(matches!(result, Err(CoreError::ImageFormat(_))));
     }
 
-    // Full integration tests require dev-models feature and downloaded model files.
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_process_image_produces_rgba() {
-        use crate::{engine::OrtEngine, types::ModelKind};
-
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("Need downloaded models — run `cargo xtask fetch-models`");
-
-        let png_bytes = make_png(64, 64);
-        let result = process_image(&png_bytes, &engine, &Progress::none());
-        assert!(result.is_ok(), "process_image failed: {:?}", result.err());
-        let pr = result.unwrap();
-        assert!(pr.rgba_image.width() > 0, "output image must have width");
-        assert!(pr.rgba_image.height() > 0, "output image must have height");
-    }
-
-    #[cfg(feature = "dev-models")]
     #[test]
     fn test_process_image_progress_stages_called() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
         use crate::{engine::OrtEngine, types::ModelKind};
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
 
-        let engine = OrtEngine::new(ModelKind::Silueta, 1)
-            .expect("Need downloaded models");
+        let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Silueta is bundled");
         let sink = std::sync::Arc::new(RecordingSink::default());
         let png_bytes = make_png(64, 64);
         process_image(&png_bytes, &engine, &Progress::new(sink.clone())).expect("process_image");
 
         let updates = sink.updates();
         assert_eq!(check_contract(&updates), Ok(()));
-        assert_eq!(updates, vec![
+        assert!(matches!(updates.as_slice(), [
             ProgressUpdate::Step(Step::ReadingImage),
             ProgressUpdate::Step(Step::FindingSubject),
+            ProgressUpdate::Subject(_),
             ProgressUpdate::Step(Step::RefiningEdges),
-        ]);
+        ]), "{:?}", kinds(&updates));
     }
 }

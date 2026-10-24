@@ -6,6 +6,8 @@
 //! reacts exactly as it does to a user; intents go through the same
 //! `PrunrApp::perform` the keyboard uses; `state` is a serde dump.
 
+pub mod checks;
+pub mod record;
 pub mod server;
 pub mod state;
 pub mod tree;
@@ -34,13 +36,29 @@ pub enum Request {
         name: String,
         #[serde(default)]
         secondary: bool,
+        /// Of several controls named exactly `name`, the last in the
+        /// tree: a surface catalog step (a quick strip and its open
+        /// panel share names; the panel's comes later).
+        #[serde(default)]
+        last: bool,
     },
     /// Press on a control and keep holding; `Move` drags, `Release` lets go.
     Hold { name: String },
     /// Press at a window position (points) and keep holding: a brush stroke.
-    HoldAt { x: f32, y: f32 },
+    /// `alt` holds Alt until the release: a stroke that takes away.
+    HoldAt {
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        alt: bool,
+    },
     Move { dx: f32, dy: f32 },
     Release,
+    /// Turn the wheel over a control, `lines` up (positive) or down: what
+    /// brings a row below a list's fold into view.
+    Scroll { name: String, lines: f32 },
+    /// Turn the wheel at a window position (points): zoom the canvas there.
+    ScrollAt { x: f32, y: f32, lines: f32 },
     /// A chord in the settings form: "Mod+Shift+Z", "Escape", "A".
     Key { chord: String },
     Type { text: String },
@@ -48,15 +66,52 @@ pub enum Request {
     Intent { action: String },
     Open { paths: Vec<PathBuf> },
     State,
-    Screenshot,
+    /// Save the window as `<name>.png` in the screenshot folder (a time
+    /// stamp without a name); the reply is the file's path.
+    Screenshot {
+        #[serde(default)]
+        name: Option<String>,
+    },
     Wait {
         #[serde(default = "one")]
         frames: u32,
+    },
+    /// Every surface, how to open it, and the models it shows for.
+    Catalog,
+    /// What is wrong with the last frame: nameless controls, `expect`
+    /// names missing, tooltip copy, clipped text, overlaps in the open
+    /// surface.
+    Check {
+        #[serde(default)]
+        expect: Vec<String>,
+    },
+    /// The tooltips the last frame's controls carry.
+    Tooltips,
+    /// The texts the last frame drew past their room.
+    Clips,
+    /// Move the pointer onto a control without pressing: its tooltip
+    /// shows after egui's delay.
+    Hover { name: String },
+    /// Scroll the list holding a control until the control shows: a row
+    /// below a list's fold is in the tree, but a click there lands
+    /// outside the list.
+    Reveal { name: String },
+    /// Resize the window to `w` × `h` points.
+    Resize { w: f32, h: f32 },
+    /// Reply once no work is owed to the screen, or after `timeout_ms`;
+    /// the reply says which.
+    WaitIdle {
+        #[serde(default = "idle_timeout_ms")]
+        timeout_ms: u64,
     },
 }
 
 fn one() -> u32 {
     1
+}
+
+fn idle_timeout_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Serialize)]
@@ -86,13 +141,36 @@ pub struct Pending {
     pub reply: mpsc::Sender<Response>,
 }
 
-/// A reply held until the frames that carry its input have run and
-/// the UI has reacted; zero frames means right away.
-struct Deferred {
-    frames_left: u32,
-    reply: mpsc::Sender<Response>,
-    response: Response,
+/// When a held reply goes out.
+#[derive(Clone, Copy)]
+enum Release {
+    /// Once this many more frames have run; zero or one is the next.
+    After(u32),
+    /// Once the app owes the screen no work, or at the deadline.
+    Idle(std::time::Instant),
 }
+
+/// A reply held until the frames that carry its input have run and
+/// the UI has reacted, or until the app is idle.
+struct Deferred {
+    release: Release,
+    reply: mpsc::Sender<Response>,
+    then: Then,
+}
+
+/// What a released `Deferred` does.
+enum Then {
+    Reply(Response),
+    /// Click a control asked to scroll into view, once it shows; `waits`
+    /// more frames before giving up.
+    Click { name: String, secondary: bool, last: bool, waits: u32 },
+}
+
+/// Frames for egui to scroll a revealed control into place and lay it out
+/// there: the scroll lands a pass after the request, the new place a pass
+/// after that.
+const REVEAL_FRAMES: u32 = 3;
+const REVEAL_WAITS: u32 = 10;
 
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 /// How often an idle window checks the inbox. The socket thread's
@@ -120,8 +198,8 @@ pub struct Automation {
     /// Input, one batch per frame, handed to `raw_input_hook`.
     frames: std::collections::VecDeque<InputFrame>,
     deferred: Vec<Deferred>,
-    /// Where a `Hold` left the pointer, until `Release`.
-    held_at: Option<egui::Pos2>,
+    /// Where the pointer is held, and the modifiers held with it.
+    held_at: Option<(egui::Pos2, Option<egui::Modifiers>)>,
 }
 
 impl Automation {
@@ -129,10 +207,23 @@ impl Automation {
     /// the port cannot be bound.
     pub fn start(ctx: &egui::Context, port: u16) -> Option<Self> {
         let inbox = server::spawn(port, ctx.clone())?;
-        let tree = tree::Mirror::default();
         ctx.enable_accesskit();
+        Some(Self::listening(ctx, inbox))
+    }
+
+    fn listening(ctx: &egui::Context, inbox: mpsc::Receiver<Pending>) -> Self {
+        let tree = tree::Mirror::default();
         ctx.add_plugin(tree.clone());
-        Some(Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None })
+        record::turn_on();
+        Self { tree, inbox, frames: Default::default(), deferred: Vec::new(), held_at: None }
+    }
+
+    /// Automation fed through the returned sender instead of a socket,
+    /// for a test harness (which reads the AccessKit tree already).
+    #[cfg(test)]
+    pub fn for_test(ctx: &egui::Context) -> (Self, mpsc::Sender<Pending>) {
+        let (tx, inbox) = mpsc::channel();
+        (Self::listening(ctx, inbox), tx)
     }
 
     pub fn take_frame(&mut self) -> Option<InputFrame> {
@@ -147,68 +238,145 @@ impl Automation {
         self.tree.snapshot().ok_or_else(|| "no frame rendered yet".to_string())
     }
 
-    /// The one control named `name`, with its centre.
-    fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
+    /// One wheel turn of `lines` at `pos`, the pointer moved there first.
+    fn wheel_at(&mut self, pos: egui::Pos2, lines: f32) {
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, lines),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![wheel].into()]);
+    }
+
+    /// The one control named `name`, with its centre; a greyed one only
+    /// when `greyed_too`.
+    fn locate(&self, name: &str, greyed_too: bool) -> Result<(ControlNode, egui::Pos2), String> {
+        self.locate_among(name, greyed_too, false)
+    }
+
+    /// `locate`, or with `last` the last control named exactly `name`.
+    fn locate_among(&self, name: &str, greyed_too: bool, last: bool) -> Result<(ControlNode, egui::Pos2), String> {
         let root = self.snapshot()?;
-        let found = find(&root, name);
+        let mut found = find(&root, name);
+        if last && found.len() > 1 && found.iter().all(|n| n.name.as_deref() == Some(name)) {
+            found.drain(..found.len() - 1);
+        }
         let [target] = found.as_slice() else {
             return Err(format!("{} controls named {name:?}", found.len()));
         };
-        if target.disabled {
+        if target.disabled && !greyed_too {
             return Err(format!("{name:?} is disabled"));
         }
         let pos = target.center().ok_or_else(|| format!("{name:?} has no rectangle"))?;
         Ok((target.clone(), pos))
     }
 
+    /// The one live control named `name`, with its centre.
+    fn target(&self, name: &str) -> Result<(ControlNode, egui::Pos2), String> {
+        self.locate(name, false)
+    }
+
+    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(Release, Then), String> {
+        match request {
+            Request::WaitIdle { timeout_ms } => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+                Ok((Release::Idle(deadline), Then::Reply(Response::ok(()))))
+            }
+            Request::Click { name, secondary, last } => self.click(ctx, name, secondary, last, None),
+            request => {
+                let (frames, response) = self.answer(app, ctx, request)?;
+                Ok((Release::After(frames), Then::Reply(response)))
+            }
+        }
+    }
+
+    /// Press and release on the part of the control that shows. A control
+    /// below its list's fold is in the tree, but a press at its place lands
+    /// on whatever covers it, so it is scrolled into view first.
+    /// `waits`: `None` before the control was asked to scroll into view,
+    /// then the frames left to wait for it to show.
+    fn click(&mut self, ctx: &egui::Context, name: String, secondary: bool, last: bool, waits: Option<u32>) -> Result<(Release, Then), String> {
+        let (target, centre) = self.locate_among(&name, false, last)?;
+        let pos = match (shown_part(ctx, target.id), waits) {
+            (Some(shown), _) if shown.is_positive() => shown.center(),
+            (Some(_), None) => {
+                self.frames.push_back(vec![scroll_into_view(target.id)].into());
+                return Ok((Release::After(REVEAL_FRAMES), Then::Click { name, secondary, last, waits: REVEAL_WAITS }));
+            }
+            (Some(_), Some(0)) => return Err(format!("{name:?} stays out of view")),
+            (Some(_), Some(waits)) => return Ok((Release::After(1), Then::Click { name, secondary, last, waits: waits - 1 })),
+            (None, _) => centre,
+        };
+        let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+        self.frames.extend([
+            vec![egui::Event::PointerMoved(pos)].into(),
+            vec![press(pos, button, true, None)].into(),
+            vec![press(pos, button, false, None)].into(),
+        ]);
+        Ok((Release::After(4), Then::Reply(Response::ok(target))))
+    }
+
     /// The reply and how many frames to wait before sending it.
-    fn run(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(u32, Response), String> {
+    fn answer(&mut self, app: &mut PrunrApp, ctx: &egui::Context, request: Request) -> Result<(u32, Response), String> {
         Ok(match request {
             Request::Ping => (0, Response::ok("pong")),
             Request::Tree { all: true } => (0, Response::ok(self.snapshot()?)),
             Request::Tree { all: false } => (0, Response::ok(controls(&self.snapshot()?))),
             Request::Find { name } => (0, Response::ok(find(&self.snapshot()?, &name))),
-            Request::Click { name, secondary } => {
-                let (target, pos) = self.target(&name)?;
-                let button = if secondary { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
-                let modifiers = egui::Modifiers::NONE;
-                self.frames.extend([
-                    vec![egui::Event::PointerMoved(pos)].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: true, modifiers }].into(),
-                    vec![egui::Event::PointerButton { pos, button, pressed: false, modifiers }].into(),
-                ]);
-                (4, Response::ok(target))
-            }
             Request::Hold { name } => {
                 let (target, pos) = self.target(&name)?;
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, egui::PointerButton::Primary, true, None)].into()]);
+                self.held_at = Some((pos, None));
                 (3, Response::ok(target))
             }
-            Request::HoldAt { x, y } => {
+            Request::HoldAt { x, y, alt } => {
                 let pos = egui::pos2(x, y);
-                self.frames.extend([vec![egui::Event::PointerMoved(pos)].into(), vec![press(pos, true)].into()]);
-                self.held_at = Some(pos);
+                let modifiers = alt.then_some(egui::Modifiers::ALT);
+                self.frames.extend([
+                    InputFrame { events: vec![egui::Event::PointerMoved(pos)], modifiers },
+                    InputFrame { events: vec![press(pos, egui::PointerButton::Primary, true, modifiers)], modifiers },
+                ]);
+                self.held_at = Some((pos, modifiers));
                 (3, Response::ok(()))
             }
             Request::Move { dx, dy } => {
-                let from = self.held_at.ok_or("nothing is held")?;
+                let (from, modifiers) = self.held_at.ok_or("nothing is held")?;
                 let to = from + egui::vec2(dx, dy);
-                self.frames.push_back(vec![egui::Event::PointerMoved(to)].into());
-                self.held_at = Some(to);
+                self.frames.push_back(InputFrame { events: vec![egui::Event::PointerMoved(to)], modifiers });
+                self.held_at = Some((to, modifiers));
                 (2, Response::ok([to.x, to.y]))
             }
+            Request::Scroll { name, lines } => {
+                let (target, pos) = self.target(&name)?;
+                self.wheel_at(pos, lines);
+                (4, Response::ok(target))
+            }
+            Request::ScrollAt { x, y, lines } => {
+                self.wheel_at(egui::pos2(x, y), lines);
+                (4, Response::ok(()))
+            }
             Request::Release => {
-                let pos = self.held_at.take().ok_or("nothing is held")?;
-                self.frames.push_back(vec![press(pos, false)].into());
+                let (pos, modifiers) = self.held_at.take().ok_or("nothing is held")?;
+                self.frames.push_back(InputFrame { events: vec![press(pos, egui::PointerButton::Primary, false, modifiers)], modifiers });
+                if modifiers.is_some() {
+                    self.frames.push_back(InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) });
+                }
                 (3, Response::ok(()))
             }
             Request::Key { chord } => {
                 let chord = Chord::parse(&chord).ok_or_else(|| format!("unknown chord {chord:?}"))?;
                 let modifiers = chord.modifiers();
                 let key = |pressed| egui::Event::Key { key: chord.key, physical_key: None, pressed, repeat: false, modifiers };
+                // As egui-winit does: these chords arrive as egui's own
+                // events, not as key presses.
+                let press = match (modifiers.command_only(), chord.key) {
+                    (true, egui::Key::C) => egui::Event::Copy,
+                    (true, egui::Key::X) => egui::Event::Cut,
+                    _ => key(true),
+                };
                 self.frames.extend([
-                    InputFrame { events: vec![key(true)], modifiers: Some(modifiers) },
+                    InputFrame { events: vec![press], modifiers: Some(modifiers) },
                     InputFrame { events: vec![key(false)], modifiers: Some(modifiers) },
                     InputFrame { events: Vec::new(), modifiers: Some(egui::Modifiers::NONE) },
                 ]);
@@ -228,43 +396,138 @@ impl Automation {
             Request::Open { paths } => {
                 let count = paths.len();
                 for path in paths {
-                    app.handle_open_path(path);
+                    app.handle_open_path(path, ctx);
                 }
                 (0, Response::ok(count))
             }
-            Request::State => (0, Response::ok(state::dump(app))),
-            Request::Screenshot => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-                (3, Response::ok(super::app::screenshot_dir()))
+            Request::State => {
+                let mut dump = state::dump(app);
+                let size = ctx.content_rect().size();
+                dump.viewport = Some([size.x, size.y]);
+                (0, Response::ok(dump))
+            }
+            Request::Screenshot { name } => {
+                let path = super::app::screenshot_dir().join(screenshot_file(name.as_deref())?);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(path.clone())));
+                (3, Response::ok(path))
             }
             Request::Wait { frames } => (frames.max(1), Response::ok(())),
+            Request::Catalog => (0, Response::ok(super::surface_catalog::catalog())),
+            Request::Check { expect } => {
+                let expect: Vec<&str> = expect.iter().map(String::as_str).collect();
+                (0, Response::ok(check(&self.snapshot()?, ctx, &expect)))
+            }
+            Request::Tooltips => (0, Response::ok(record::last(ctx).0)),
+            Request::Clips => (0, Response::ok(record::last(ctx).1)),
+            Request::Hover { name } => {
+                let (target, pos) = self.locate(&name, true)?;
+                self.frames.push_back(vec![egui::Event::PointerMoved(pos)].into());
+                (2, Response::ok(target))
+            }
+            Request::Reveal { name } => {
+                let (target, _) = self.locate(&name, true)?;
+                self.frames.push_back(vec![scroll_into_view(target.id)].into());
+                (REVEAL_FRAMES, Response::ok(target))
+            }
+            Request::Resize { w, h } => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                (6, Response::ok(()))
+            }
+            Request::WaitIdle { .. } | Request::Click { .. } => unreachable!("answered by `run`"),
         })
     }
+}
+
+fn failed(error: String) -> (Release, Then) {
+    (Release::After(0), Then::Reply(Response::err(error)))
+}
+
+fn scroll_into_view(node: u64) -> egui::Event {
+    egui::Event::AccessKitActionRequest(accesskit::ActionRequest {
+        action: accesskit::Action::ScrollIntoView,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node: accesskit::NodeId(node),
+        data: None,
+    })
+}
+
+/// The part of control `node` its scroll areas let through, in points;
+/// `None` when no widget of the last frames has that id.
+pub(crate) fn shown_part(ctx: &egui::Context, node: u64) -> Option<egui::Rect> {
+    // SAFETY: not a memory-safety contract; the value is a widget id egui
+    // handed AccessKit, high-entropy as egui requires, and never zero.
+    let id = (node != 0).then(|| unsafe { egui::Id::from_high_entropy_bits(node) })?;
+    ctx.read_response(id).map(|r| r.interact_rect)
 }
 
 /// Serves queued requests and releases replies whose frames have run.
 /// Called once per frame from `logic`, after the keyboard.
 pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
     let Some(mut auto) = app.automation.take() else { return };
-    let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut auto.deferred).into_iter().partition(|d| d.frames_left <= 1);
-    auto.deferred = waiting;
-    for d in &mut auto.deferred {
-        d.frames_left -= 1;
-    }
-    for d in ready {
-        let _ = d.reply.send(d.response);
+    // Input still queued is work the app has not seen yet.
+    let idle = auto.frames.is_empty() && !state::busy(app);
+    let now = std::time::Instant::now();
+    for Deferred { release, reply, then } in std::mem::take(&mut auto.deferred) {
+        match (release, then) {
+            (Release::After(n), then) if n > 1 => auto.deferred.push(Deferred { release: Release::After(n - 1), reply, then }),
+            (Release::Idle(deadline), then) if !idle && now < deadline => auto.deferred.push(Deferred { release, reply, then }),
+            (Release::Idle(_), _) => {
+                let _ = reply.send(Response::ok(serde_json::json!({ "idle": idle })));
+            }
+            (Release::After(_), Then::Reply(response)) => {
+                let _ = reply.send(response);
+            }
+            (Release::After(_), Then::Click { name, secondary, last, waits }) => {
+                let (release, then) = auto.click(ctx, name, secondary, last, Some(waits)).unwrap_or_else(failed);
+                auto.deferred.push(Deferred { release, reply, then });
+            }
+        }
     }
     while let Ok(Pending { request, reply }) = auto.inbox.try_recv() {
         tracing::debug!(?request, "control request");
-        let (frames_left, response) = auto.run(app, ctx, request).unwrap_or_else(|e| (0, Response::err(e)));
-        auto.deferred.push(Deferred { frames_left, reply, response });
+        let (release, then) = auto.run(app, ctx, request).unwrap_or_else(failed);
+        auto.deferred.push(Deferred { release, reply, then });
     }
     ctx.request_repaint_after(if auto.busy() { FRAME_INTERVAL } else { POLL_INTERVAL });
     app.automation = Some(auto);
 }
 
-fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
-    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+/// Everything `checks` finds in one frame: the tree, the tooltips and
+/// clips the widgets recorded, and overlaps inside the open surface.
+pub fn check(root: &ControlNode, ctx: &egui::Context, expect: &[&str]) -> Vec<checks::Violation> {
+    let (tooltips, clips) = record::last(ctx);
+    let mut found = checks::nameless(root);
+    found.extend(checks::missing(root, expect));
+    found.extend(checks::tooltip_copy(&tooltips));
+    found.extend(checks::clipped(&clips));
+    found.extend(open_surface(ctx).and_then(|r| checks::overlap_within(root, r)));
+    found
+}
+
+/// The rect of the topmost popover, flyout or dialog, if one is up.
+fn open_surface(ctx: &egui::Context) -> Option<[f32; 4]> {
+    let rect = ctx.memory(|m| {
+        let layer = m.areas().top_layer_id(egui::Order::Foreground)?;
+        m.area_rect(layer.id)
+    })?;
+    Some([rect.min.x, rect.min.y, rect.max.x, rect.max.y])
+}
+
+/// A screenshot's file name: `name` plus ".png", or a time stamp. A
+/// name that would reach outside the screenshot folder is refused.
+fn screenshot_file(name: Option<&str>) -> Result<String, String> {
+    match name {
+        Some(n) if n.is_empty() || n.starts_with('.') || n.contains(['/', '\\']) => Err(format!("screenshot name {n:?} must be a plain file name")),
+        Some(n) => Ok(format!("{n}.png")),
+        None => {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            Ok(format!("{stamp}.png"))
+        }
+    }
+}
+
+fn press(pos: egui::Pos2, button: egui::PointerButton, pressed: bool, modifiers: Option<egui::Modifiers>) -> egui::Event {
+    egui::Event::PointerButton { pos, button, pressed, modifiers: modifiers.unwrap_or_default() }
 }
 
 /// The controls in the tree, flat, without their children.
@@ -330,9 +593,30 @@ mod tests {
     #[test]
     fn requests_parse_from_tagged_json() {
         let req: Request = serde_json::from_str(r#"{"cmd":"click","name":"Settings"}"#).unwrap();
-        assert!(matches!(req, Request::Click { ref name, secondary: false } if name == "Settings"));
+        assert!(matches!(req, Request::Click { ref name, secondary: false, last: false } if name == "Settings"));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll","name":"Silueta","lines":-5}"#).unwrap();
+        assert!(matches!(req, Request::Scroll { ref name, lines } if name == "Silueta" && lines == -5.0));
+        let req: Request = serde_json::from_str(r#"{"cmd":"scroll_at","x":600,"y":400,"lines":2}"#).unwrap();
+        assert!(matches!(req, Request::ScrollAt { x, y, lines } if x == 600.0 && y == 400.0 && lines == 2.0));
         let req: Request = serde_json::from_str(r#"{"cmd":"wait"}"#).unwrap();
         assert!(matches!(req, Request::Wait { frames: 1 }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"screenshot"}"#).unwrap();
+        assert!(matches!(req, Request::Screenshot { name: None }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"wait_idle"}"#).unwrap();
+        assert!(matches!(req, Request::WaitIdle { timeout_ms: 30_000 }));
+        let req: Request = serde_json::from_str(r#"{"cmd":"check","expect":["Save"]}"#).unwrap();
+        assert!(matches!(req, Request::Check { ref expect } if expect == &["Save"]));
+        let req: Request = serde_json::from_str(r#"{"cmd":"resize","w":900,"h":540}"#).unwrap();
+        assert!(matches!(req, Request::Resize { w, h } if w == 900.0 && h == 540.0));
         assert!(serde_json::from_str::<Request>(r#"{"cmd":"explode"}"#).is_err());
+    }
+
+    #[test]
+    fn a_screenshot_name_stays_in_the_folder() {
+        assert_eq!(screenshot_file(Some("model-picker")).as_deref(), Ok("model-picker.png"));
+        for bad in ["", "../x", "a/b", "a\\b", ".hidden"] {
+            assert!(screenshot_file(Some(bad)).is_err(), "{bad:?}");
+        }
+        assert!(screenshot_file(None).unwrap().ends_with(".png"));
     }
 }

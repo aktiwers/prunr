@@ -3,85 +3,12 @@
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
-use super::fixtures::push_test_item;
+use super::harness::{
+    assert_all_controls_named, click, harness, harness_builder, loaded, loaded_with, names, new_app,
+    settle, tree,
+};
 use crate::gui::app::PrunrApp;
-use crate::gui::automation::tree::{readable_name, ControlNode};
-use crate::gui::item::BatchStatus;
 use crate::gui::views::settings::SettingsTab;
-
-pub(super) fn harness() -> Harness<'static, PrunrApp> {
-    harness_sized(egui::vec2(1400.0, 900.0))
-}
-
-pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
-    Harness::builder()
-        .with_size(size)
-        .build_eframe(|cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
-            PrunrApp::new_for_test()
-        })
-}
-
-pub(super) fn tree(harness: &Harness<'_, PrunrApp>) -> ControlNode {
-    ControlNode::from_node(&harness.kittest_state().root())
-}
-
-/// Runs a few frames so clicks, animations and repaint requests settle.
-/// `Harness::run` would stop at the first idle frame and panic on a
-/// spinner, which the batch list shows for any item still in flight.
-pub(super) fn settle(harness: &mut Harness<'_, PrunrApp>) {
-    harness.run_steps(4);
-}
-
-/// Clicks the control whose readable name is `name`, then lets it settle.
-pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
-    harness
-        .get_by(|n| n.label().as_deref().and_then(readable_name).as_deref() == Some(name))
-        .click();
-    settle(harness);
-}
-
-pub(super) fn names(harness: &Harness<'_, PrunrApp>) -> Vec<String> {
-    tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
-}
-
-/// Every control in the tree has a readable name. Fails with the list of
-/// nameless controls: an icon-only button, an unlabelled slider.
-pub(super) fn assert_all_controls_named(harness: &Harness<'_, PrunrApp>, surface: &str) {
-    let root = tree(harness);
-    let nameless: Vec<String> = root
-        .iter()
-        .filter(|n| n.is_control() && n.name.is_none())
-        .map(|n| format!("{:?} {:?} at {:?}", n.role, n.id, n.rect))
-        .collect();
-    assert!(nameless.is_empty(), "{surface}: controls without a readable name:\n{}", nameless.join("\n"));
-}
-
-#[test]
-fn empty_window_names_every_control() {
-    let mut harness = harness();
-    settle(&mut harness);
-    assert_all_controls_named(&harness, "empty window");
-    let names = names(&harness);
-    for expected in ["Open", "Settings"] {
-        assert!(names.iter().any(|n| n == expected), "{expected} missing from {names:?}");
-    }
-}
-
-#[test]
-fn loaded_item_names_every_control() {
-    let mut harness = harness();
-    {
-        let app = harness.state_mut();
-        let item = push_test_item(app, 1);
-        item.status = BatchStatus::Done;
-        app.batch.select_item(0);
-    }
-    settle(&mut harness);
-    assert_all_controls_named(&harness, "loaded item");
-    // A screen reader, and the control socket, pick an image by its name.
-    assert!(names(&harness).iter().any(|n| n == "test1.png"), "the sidebar row is named after its file");
-}
 
 /// The real toolbar, per model, shows exactly the chips the surface
 /// table says act on that model's image.
@@ -89,30 +16,29 @@ fn loaded_item_names_every_control() {
 fn each_model_toolbar_shows_only_its_chips() {
     use crate::gui::knob_catalog::{shows, Surface};
     use crate::gui::settings::SettingsModel;
-    let chips: &[(&str, Surface)] = &[
-        ("Mask", Surface::Mask),
-        ("Sketch", Surface::Lines),
-        ("Effect", Surface::Effect),
-        ("Background", Surface::Background),
-        ("Scale", Surface::Upscale),
-        ("Refine", Surface::Upscale),
-        ("Prompt", Surface::SdChips),
-        ("Paint Brush", Surface::Brushes),
-        ("Magic Brush", Surface::Brushes),
+    // A chip shows when any of its surfaces does: both generative
+    // erasers have an Advanced chip.
+    let chips: &[(&str, &[Surface])] = &[
+        ("Mask", &[Surface::Mask]),
+        ("Sketch", &[Surface::Lines]),
+        ("Effect", &[Surface::Effect]),
+        ("Faces", &[Surface::Faces]),
+        ("Depth", &[Surface::Depth]),
+        ("Background", &[Surface::Background]),
+        ("Scale", &[Surface::Upscale]),
+        ("Refine", &[Surface::Upscale]),
+        ("Strength", &[Surface::Colorize]),
+        ("Prompt", &[Surface::SdChips]),
+        ("Advanced", &[Surface::SdChips, Surface::RoremChips, Surface::FillChips]),
+        ("Paint Brush", &[Surface::Brushes]),
+        ("Magic Brush", &[Surface::Brushes]),
     ];
     for model in SettingsModel::ALL {
-        let mut harness = harness();
-        {
-            let app = harness.state_mut();
-            app.settings.model = model;
-            let item = push_test_item(app, 1);
-            item.status = BatchStatus::Done;
-            app.batch.select_item(0);
-        }
-        settle(&mut harness);
+        let harness = loaded_with(|app| app.settings.model = model);
         let names = names(&harness);
-        for &(chip, surface) in chips {
-            assert_eq!(names.iter().any(|n| n == chip), shows(model, surface), "{model:?}: {chip}");
+        for &(chip, surfaces) in chips {
+            let expected = surfaces.iter().any(|&surface| shows(model, surface));
+            assert_eq!(names.iter().any(|n| n == chip), expected, "{model:?}: {chip}");
         }
     }
 }
@@ -121,12 +47,7 @@ fn each_model_toolbar_shows_only_its_chips() {
 fn a_run_in_flight_names_its_cancel_button() {
     use crate::gui::dispatch_progress::DispatchProgress;
     use prunr_core::{ProgressUpdate, Step, TileRect};
-    let mut harness = harness();
-    {
-        let app = harness.state_mut();
-        let item = push_test_item(app, 1);
-        item.status = BatchStatus::Done;
-        app.batch.select_item(0);
+    let harness = loaded_with(|app| {
         let mut progress = DispatchProgress { inner: (1, 2), ..DispatchProgress::new(crate::gui::dispatch_progress::ProgressKind::Upscale, Step::Upscaling.label()) };
         progress.apply(&ProgressUpdate::Tiles(vec![
             TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 },
@@ -134,48 +55,141 @@ fn a_run_in_flight_names_its_cancel_button() {
         ]));
         progress.apply(&ProgressUpdate::Tile { index: 1, done: false });
         app.processor.show_progress_for_test(progress);
-    }
-    settle(&mut harness);
+    });
     assert_all_controls_named(&harness, "run in flight");
     let names = names(&harness);
     assert!(names.iter().any(|n| n == "Cancel"), "the capsule's Cancel is named: {names:?}");
 }
 
+/// Settings › Hardware as Windows shows it, which offers both runtimes:
+/// every runtime row and the runtime choice are named. The page is drawn
+/// on its own because the app reads this machine's platform and store.
 #[test]
-fn settings_tabs_name_every_control() {
-    let mut harness = harness();
-    settle(&mut harness);
-    click(&mut harness, "Settings");
-    for tab in SettingsTab::ALL {
-        harness.state_mut().settings_tab = tab;
-        settle(&mut harness);
-        assert_all_controls_named(&harness, &format!("settings › {tab:?}"));
-    }
-}
-
-#[test]
-fn settings_opens_from_its_toolbar_button() {
-    let mut harness = harness();
-    settle(&mut harness);
-    assert!(!harness.state().show_settings);
-    click(&mut harness, "Settings");
-    assert!(harness.state().show_settings);
-    assert!(names(&harness).iter().any(|n| n == "Behavior"), "{:?}", names(&harness));
-}
-
-#[test]
-fn help_modals_name_every_control() {
-    let mut harness = harness();
-    for (flag, surface) in [(0, "shortcuts"), (1, "cli help"), (2, "pipeline flow")] {
-        {
-            let app = harness.state_mut();
-            app.show_shortcuts = flag == 0;
-            app.show_cli_help = flag == 1;
-            app.show_pipeline_flow = flag == 2;
+fn the_hardware_page_names_every_runtime_control() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    use crate::runtime_install::RuntimeChoice;
+    let mut both = HardwareInstallCache::all_installed();
+    both.next_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
+    let mut built_in_only = HardwareInstallCache::default();
+    built_in_only.built_in_gpu = true;
+    let installing = Some((crate::runtime_install::InstallTarget::Runtime(RuntimeId::OpenVino), "Downloading 40% (32/80 MB)".to_string()));
+    let shapes = [
+        ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
+        ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
+        ("none installed", HardwareInstallCache::default(), None, vec!["Install OpenVINO Runtime"]),
+    ];
+    // Where no runtime is offered for download (Windows), the page has no
+    // install, uninstall or cancel; a runtime installed anyway still gives
+    // the choice. Every control is still named.
+    let offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino);
+    for (shape, installs, installing, expected) in shapes {
+        let download_controls = |name: &&str| name.ends_with("OpenVINO Runtime") || *name == "Cancel";
+        let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing,
+            active_provider: "DirectML".into(),
+            sd_margin_mb: 2048,
+            sd_cpu_only: false,
+            gpu_failure: None,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in expected {
+            assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
         }
-        settle(&mut harness);
-        assert_all_controls_named(&harness, surface);
+        let choice_shown = present.iter().any(|n| n == "Built in");
+        assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
     }
+}
+
+/// The NVIDIA libraries are offered whenever the CUDA runtime lacks its
+/// own copy, whatever the system has: Download then, Cancel while they
+/// install, neither once they are there or without a CUDA runtime.
+#[test]
+fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
+    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
+    static MISSING: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(String::new()) };
+    if !RuntimeId::OFFERED.contains(&RuntimeId::Cuda) {
+        return;
+    }
+    let mut on_cuda = HardwareInstallCache::default();
+    on_cuda.cuda = true;
+    on_cuda.loaded_runtime = Some(RuntimeChoice::Store(RuntimeId::Cuda));
+    let installing = Some((InstallTarget::NvidiaLibraries, "Downloading 10% (170/1700 MB)".to_string()));
+    let mut with_libraries = on_cuda;
+    with_libraries.nvidia_libraries = true;
+    let shapes = [
+        ("missing a library", on_cuda, Some(&MISSING), None, Some("Download NVIDIA libraries")),
+        ("starts on the system's", on_cuda, None, None, Some("Download NVIDIA libraries")),
+        ("installing", on_cuda, Some(&MISSING), installing, Some("Cancel")),
+        ("installed", with_libraries, None, None, None),
+        ("no CUDA runtime", HardwareInstallCache::default(), None, None, None),
+    ];
+    for (shape, installs, failure, installing, expected) in shapes {
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing,
+            active_provider: "CPU".into(),
+            sd_margin_mb: 2048,
+            sd_cpu_only: false,
+            gpu_failure: failure,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in ["Download NVIDIA libraries", "Cancel"] {
+            assert_eq!(present.iter().any(|n| n == name), expected == Some(name), "{shape}: {name}: {present:?}");
+        }
+    }
+}
+
+/// Settings speaks of the Stable Diffusion eraser only once one is
+/// installed: its RAM check, its keep-loaded switch and memory guard,
+/// and the CPU-only warning that it needs the accelerator. The memory
+/// line names each eraser installed.
+#[test]
+fn stable_diffusion_settings_show_only_with_an_sd_eraser_installed() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::settings::SettingsModel;
+    let mut harness = harness();
+    let line_of = |harness: &Harness<'_, PrunrApp>, name: &str| {
+        harness.query_all_by(|n| n.value().is_some_and(|v| v.starts_with(name)) || n.label().is_some_and(|l| l.starts_with(name))).next().is_some()
+    };
+    let rorem_only = HardwareInstallCache::with_models(&[SettingsModel::RoremInpaint]);
+    for (installs, shown) in [(HardwareInstallCache::default(), false), (HardwareInstallCache::all_installed(), true), (rorem_only, true)] {
+        let app = harness.state_mut();
+        app.hardware_install_cache = installs;
+        app.show_settings = true;
+        app.settings_tab = SettingsTab::Performance;
+        settle(&mut harness);
+        let switch = names(&harness).iter().any(|n| n == "Keep the Stable Diffusion eraser loaded");
+        assert_eq!(switch, shown, "Performance: the keep-loaded switch");
+        harness.state_mut().settings_tab = SettingsTab::Hardware;
+        settle(&mut harness);
+        let sd15 = installs.has_model(SettingsModel::SdInpaint) || installs.lcm_bundle;
+        assert_eq!(line_of(&harness, "Stable Diffusion 1.5"), sd15, "Hardware: the Stable Diffusion 1.5 memory line");
+        assert_eq!(line_of(&harness, "RORem"), installs.has_model(SettingsModel::RoremInpaint), "Hardware: the RORem memory line");
+    }
+}
+
+#[test]
+fn the_model_store_opens_from_its_toolbar_button() {
+    let mut harness = harness();
+    settle(&mut harness);
+    assert!(harness.state().model_store.is_none());
+    click(&mut harness, "Model Store");
+    assert_eq!(harness.state().model_store.map(|r| r.filter), Some(None), "the whole store, no category picked");
 }
 
 #[test]
@@ -183,13 +197,11 @@ fn mirror_sees_what_the_harness_sees() {
     use std::collections::BTreeSet;
     let mirror = crate::gui::automation::tree::Mirror::default();
     let plugin = mirror.clone();
-    let mut harness = Harness::builder()
-        .with_size(egui::vec2(1400.0, 900.0))
-        .build_eframe(move |cc| {
-            egui_material_icons::initialize(&cc.egui_ctx);
-            cc.egui_ctx.add_plugin(plugin);
-            PrunrApp::new_for_test()
-        });
+    let mut harness = harness_builder().build_eframe(move |cc| {
+        let app = new_app(cc);
+        cc.egui_ctx.add_plugin(plugin);
+        app
+    });
     settle(&mut harness);
     let from_harness: BTreeSet<String> = names(&harness).into_iter().collect();
     let root = mirror.snapshot().expect("a frame ran");
@@ -265,26 +277,77 @@ fn control_socket_clicks_by_name_and_reports_state() {
     assert_eq!(missing["ok"], false);
 }
 
-/// While an upscale runs, Scale and Refine can't be touched: a change
-/// would make the landing run stale and throw it away.
+/// While an upscale runs, Scale, Refine and Faces can't be touched: a
+/// change would make the landing run stale and throw it away.
 #[test]
-fn an_upscale_run_holds_its_scale_and_refine_chips() {
+fn an_upscale_run_holds_the_chips_it_reads() {
     use crate::gui::settings::SettingsModel;
     for running in [false, true] {
-        let mut harness = harness();
-        {
-            let app = harness.state_mut();
+        let harness = loaded_with(|app| {
             app.settings.model = SettingsModel::RealEsrganUpscale;
-            push_test_item(app, 1).status = BatchStatus::Done;
-            app.batch.select_item(0);
             app.processor.set_upscale_in_flight_for_test(running);
-        }
-        settle(&mut harness);
+        });
         let tree = tree(&harness);
-        for chip in ["Scale", "Refine"] {
+        for chip in ["Scale", "Refine", "Faces"] {
             let node = tree.iter().find(|n| n.name.as_deref() == Some(chip)).unwrap_or_else(|| panic!("{chip} shown"));
             assert_eq!(node.disabled, running, "{chip} while running: {running}");
         }
     }
 }
 
+
+/// While a colorize runs, Strength can't be touched, like Refine.
+#[test]
+fn a_colorize_run_holds_its_strength_chip() {
+    use crate::gui::settings::SettingsModel;
+    for running in [false, true] {
+        let harness = loaded_with(|app| {
+            app.settings.model = SettingsModel::ColorizeDdcolor;
+            app.processor.set_colorize_in_flight_for_test(running);
+        });
+        let tree = tree(&harness);
+        let node = tree.iter().find(|n| n.name.as_deref() == Some("Strength")).expect("Strength shown");
+        assert_eq!(node.disabled, running, "Strength while running: {running}");
+    }
+}
+
+/// No model's Depth chip: Point picks the lens blur, and Set focus waits
+/// for a click on the image.
+#[test]
+fn the_depth_chip_s_controls_act() {
+    let mut h = loaded_with(|app| {
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+        app.hardware_install_cache.depth = true;
+    });
+    click(&mut h, "Depth");
+    click(&mut h, "Point");
+    assert_eq!(h.state().batch.items[0].settings.depth.blur, prunr_core::depth::LensBlurMode::Point);
+    click(&mut h, "All depth settings");
+    click(&mut h, "Set focus");
+    assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
+}
+
+/// A dropdown in a flyout opens its list in place: a popup list would
+/// replace the flyout, the one popup egui keeps open.
+#[test]
+fn a_dropdown_keeps_its_flyout_open() {
+    let mut h = loaded();
+    click(&mut h, "Sketch");
+    click(&mut h, "Whole photo");
+    click(&mut h, "All line settings");
+    click(&mut h, "Style");
+    assert!(egui::Popup::is_any_open(&h.ctx), "the flyout stayed open");
+    assert!(names(&h).iter().any(|n| n.starts_with("Rainbow")), "the list opened");
+}
+
+/// A Model Store card's details open in place, the store staying up.
+#[test]
+fn a_store_card_s_details_open_in_place() {
+    let mut h = harness();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    settle(&mut h);
+    click(&mut h, "Details Silueta");
+    assert!(h.state().model_store.is_some(), "the store stays open");
+    let toggle = tree(&h).iter().find(|n| n.name.as_deref() == Some("Details Silueta")).map(|n| n.toggled);
+    assert_eq!(toggle, Some(Some(true)), "the card opened");
+}

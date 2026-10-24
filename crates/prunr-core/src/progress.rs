@@ -8,7 +8,7 @@
 //! call is a branch on `None`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,7 @@ pub enum Step {
     RefiningEdges,
     DrawingLines,
     Upscaling,
+    UpscalingInLessMemory,
     Finishing,
     Erasing,
     ReadingPrompt,
@@ -29,6 +30,10 @@ pub enum Step {
     DecodingResult,
     Blending,
     LoadingMagicBrush,
+    FindingFaces,
+    RestoringFaces,
+    Colorizing,
+    EstimatingDepth,
 }
 
 impl Step {
@@ -40,6 +45,7 @@ impl Step {
             Step::RefiningEdges => "Refining the edges",
             Step::DrawingLines => "Drawing the lines",
             Step::Upscaling => "Upscaling",
+            Step::UpscalingInLessMemory => "Upscaling in less memory",
             Step::Finishing => "Finishing",
             Step::Erasing => "Erasing",
             Step::ReadingPrompt => "Reading the prompt",
@@ -47,6 +53,10 @@ impl Step {
             Step::DecodingResult => "Decoding the result",
             Step::Blending => "Blending into the photo",
             Step::LoadingMagicBrush => "Loading Magic Brush",
+            Step::FindingFaces => "Finding faces",
+            Step::RestoringFaces => "Restoring faces",
+            Step::Colorizing => "Adding color",
+            Step::EstimatingDepth => "Measuring depth",
         }
     }
 }
@@ -58,6 +68,7 @@ pub enum Unit {
     Step,
     Crop,
     Image,
+    Face,
 }
 
 impl Unit {
@@ -68,6 +79,7 @@ impl Unit {
             Unit::Step => ("step", "steps"),
             Unit::Crop => ("crop", "crops"),
             Unit::Image => ("image", "images"),
+            Unit::Face => ("face", "faces"),
         };
         if n == 1 { one } else { many }
     }
@@ -105,11 +117,60 @@ pub enum ProgressUpdate {
     Tile { index: u32, done: bool },
     /// Where the subject is, as soon as segmentation has found it.
     Subject(crate::subject::SubjectHint),
+    /// The faces a face search found, as soon as it has, before any is
+    /// redrawn.
+    Faces(Vec<crate::face::FacePlace>),
+    /// A finished tile's result, small, for the listener to show in place.
+    TilePreview(TilePreview),
+}
+
+/// A finished tile at preview size: straight-alpha RGBA, `width × height`,
+/// placed at (`x`, `y`) in a `full_width × full_height` preview of the
+/// whole image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TilePreview {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub full_width: u32,
+    pub full_height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// Whoever listens to a pipeline's reports.
 pub trait ProgressSink: Send + Sync {
     fn report(&self, update: ProgressUpdate);
+
+    /// Whether previews sent now would still be shown; a run whose
+    /// pictures can no longer land stops making them.
+    fn wants_previews(&self) -> bool {
+        true
+    }
+}
+
+/// Where the image a pipeline works on sits in the photo the listener
+/// shows: a rectangle in the photo's pixels, and the photo's size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frame {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    photo: (u32, u32),
+}
+
+impl Frame {
+    /// `r`, given as fractions of the framed image, as fractions of the photo.
+    fn map(&self, r: TileRect) -> TileRect {
+        let (pw, ph) = (f64::from(self.photo.0.max(1)), f64::from(self.photo.1.max(1)));
+        TileRect {
+            x: ((self.x + f64::from(r.x) * self.w) / pw) as f32,
+            y: ((self.y + f64::from(r.y) * self.h) / ph) as f32,
+            w: (f64::from(r.w) * self.w / pw) as f32,
+            h: (f64::from(r.h) * self.h / ph) as f32,
+        }
+    }
 }
 
 /// The handle a pipeline reports through and checks for cancel.
@@ -117,6 +178,9 @@ pub trait ProgressSink: Send + Sync {
 pub struct Progress {
     sink: Option<Arc<dyn ProgressSink>>,
     cancel: Option<Arc<AtomicBool>>,
+    preview_edge: Option<u32>,
+    /// `None`: the pipeline works on the photo itself.
+    frame: Option<Frame>,
 }
 
 impl Progress {
@@ -126,7 +190,26 @@ impl Progress {
     }
 
     pub fn new(sink: Arc<dyn ProgressSink>) -> Self {
-        Self { sink: Some(sink), cancel: None }
+        Self { sink: Some(sink), ..Self::default() }
+    }
+
+    /// The handle for work on a copy, at any size, of `rect` (x, y, w, h)
+    /// of the `size` image this handle's pipeline works on: tiles and
+    /// previews reported through it land where `rect` sits in the photo.
+    pub fn within(&self, rect: (u32, u32, u32, u32), size: (u32, u32)) -> Self {
+        Self { frame: Some(self.place(rect, size)), ..self.clone() }
+    }
+
+    /// `rect` of the `size` image the pipeline works on, in the photo.
+    fn place(&self, (x, y, w, h): (u32, u32, u32, u32), (width, height): (u32, u32)) -> Frame {
+        let (x, y, w, h) = (f64::from(x), f64::from(y), f64::from(w), f64::from(h));
+        match self.frame {
+            None => Frame { x, y, w, h, photo: (width, height) },
+            Some(f) => {
+                let (sx, sy) = (f.w / f64::from(width.max(1)), f.h / f64::from(height.max(1)));
+                Frame { x: f.x + x * sx, y: f.y + y * sy, w: w * sx, h: h * sy, photo: f.photo }
+            }
+        }
     }
 
     pub fn with_cancel(mut self, flag: Arc<AtomicBool>) -> Self {
@@ -134,12 +217,25 @@ impl Progress {
         self
     }
 
-    pub fn cancel_flag(&self) -> Option<&Arc<AtomicBool>> {
-        self.cancel.as_ref()
+    /// Ask for each finished tile as a preview whose whole image is at most
+    /// `longest_edge` pixels on its longer side.
+    pub fn with_tile_previews(mut self, longest_edge: u32) -> Self {
+        self.preview_edge = Some(longest_edge);
+        self
+    }
+
+    /// The preview size asked for, when someone listens for previews.
+    pub fn preview_edge(&self) -> Option<u32> {
+        self.sink.as_ref().filter(|sink| sink.wants_previews()).and(self.preview_edge)
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancel.as_ref().is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    /// `Err(Cancelled)` once cancelled, for `?`.
+    pub fn check_cancelled(&self) -> Result<(), crate::CoreError> {
+        if self.is_cancelled() { Err(crate::CoreError::Cancelled) } else { Ok(()) }
     }
 
     pub fn report(&self, update: ProgressUpdate) {
@@ -160,12 +256,71 @@ impl Progress {
         self.report(ProgressUpdate::Inner { done, total, unit });
     }
 
-    /// The layout as the pipeline plans it; overlapping tiles reach the
-    /// listener as cells that meet edge to edge.
+    /// The layout as the pipeline plans it, as fractions of the image it
+    /// works on; the listener gets them as fractions of the photo, with
+    /// overlapping tiles as cells that meet edge to edge.
     pub fn tiles(&self, rects: Vec<TileRect>) {
-        if self.sink.is_some() {
-            self.report(ProgressUpdate::Tiles(split_overlaps(&rects)));
+        if self.sink.is_none() {
+            return;
         }
+        let rects = match self.frame {
+            None => rects,
+            Some(f) => rects.into_iter().map(|r| f.map(r)).collect(),
+        };
+        self.report(ProgressUpdate::Tiles(split_overlaps(&rects)));
+    }
+
+    /// Report the finished `rect` (x, y, w, h) of the `size` image the
+    /// pipeline works on, in its place on a preview of the whole photo
+    /// whose longer side is at most the asked edge. `pixels(width,
+    /// height)` gives the tile at that size as straight-alpha RGBA; it
+    /// runs only when previews were asked for.
+    pub fn tile_preview(&self, rect: (u32, u32, u32, u32), size: (u32, u32), pixels: impl FnOnce(u32, u32) -> Vec<u8>) {
+        let Some(at) = self.preview_place(rect, size) else { return };
+        let rgba = pixels(at.width, at.height);
+        self.report_preview(TilePreview { rgba, ..at });
+    }
+
+    /// `tile_preview` for the part of `rect` where it changed: `changed`
+    /// (x, y, w, h of the same image, inside `rect`) and the preview pixels
+    /// the resample reaches from it (`formats::preview_reach`). The
+    /// listener keeps what it already shows around it. `pixels(size,
+    /// part)` gives `part` (x, y, w, h) of the rect's `size` preview, as
+    /// `formats::preview_rgba` cuts it.
+    pub fn tile_preview_part(
+        &self,
+        rect: (u32, u32, u32, u32),
+        size: (u32, u32),
+        changed: (u32, u32, u32, u32),
+        pixels: impl FnOnce((u32, u32), (u32, u32, u32, u32)) -> Vec<u8>,
+    ) {
+        let Some(at) = self.preview_place(rect, size) else { return };
+        debug_assert!(changed.0 >= rect.0 && changed.1 >= rect.1 && changed.0 + changed.2 <= rect.0 + rect.2 && changed.1 + changed.3 <= rect.1 + rect.3);
+        let (px, width) = crate::formats::preview_reach(changed.0 - rect.0, changed.2, rect.2, at.width);
+        let (py, height) = crate::formats::preview_reach(changed.1 - rect.1, changed.3, rect.3, at.height);
+        let rgba = pixels((at.width, at.height), (px, py, width, height));
+        self.report_preview(TilePreview { x: at.x + px, y: at.y + py, width, height, rgba, ..at });
+    }
+
+    /// Where `rect` of the `size` image lands on a preview of the photo
+    /// whose longer side is at most the asked edge, with no pixels yet;
+    /// `None` unless previews were asked for and someone listens.
+    fn preview_place(&self, rect: (u32, u32, u32, u32), size: (u32, u32)) -> Option<TilePreview> {
+        let edge = self.preview_edge()?;
+        let f = self.place(rect, size);
+        let (photo_w, photo_h) = f.photo;
+        let s = (f64::from(edge) / f64::from(photo_w.max(photo_h).max(1))).min(1.0);
+        let at = |v: f64| (v * s).round() as u32;
+        let (full_width, full_height) = (at(f64::from(photo_w)).max(1), at(f64::from(photo_h)).max(1));
+        let (x, y) = (at(f.x).min(full_width - 1), at(f.y).min(full_height - 1));
+        let width = at(f.x + f.w).clamp(x + 1, full_width) - x;
+        let height = at(f.y + f.h).clamp(y + 1, full_height) - y;
+        Some(TilePreview { x, y, width, height, full_width, full_height, rgba: Vec::new() })
+    }
+
+    fn report_preview(&self, tile: TilePreview) {
+        debug_assert_eq!(tile.rgba.len(), (tile.width * tile.height * 4) as usize);
+        self.report(ProgressUpdate::TilePreview(tile));
     }
 
     pub fn tile(&self, index: u32, done: bool) {
@@ -206,17 +361,20 @@ fn split_overlaps(rects: &[TileRect]) -> Vec<TileRect> {
 }
 
 /// Keeps every report, for tests and for `check_contract`.
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Default)]
 pub struct RecordingSink {
-    updates: Mutex<Vec<ProgressUpdate>>,
+    updates: std::sync::Mutex<Vec<ProgressUpdate>>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl RecordingSink {
     pub fn updates(&self) -> Vec<ProgressUpdate> {
         self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl ProgressSink for RecordingSink {
     fn report(&self, update: ProgressUpdate) {
         self.updates.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(update);
@@ -229,6 +387,7 @@ impl ProgressSink for RecordingSink {
 /// stands (an outer report starts the inner count afresh), and ending
 /// complete; tile updates naming a tile of the last
 /// layout, inside the image.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
     if !updates.iter().any(|u| matches!(u, ProgressUpdate::Step(_))) {
         return Err("no step was named".into());
@@ -265,7 +424,12 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
                     return Err(format!("tile {index} of a layout of {tiles}"));
                 }
             }
-            ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) => {}
+            ProgressUpdate::TilePreview(ref t) => {
+                if t.x + t.width > t.full_width || t.y + t.height > t.full_height || t.rgba.len() != (t.width * t.height * 4) as usize {
+                    return Err(format!("preview tile {}×{} at {},{} outside its {}×{} image", t.width, t.height, t.x, t.y, t.full_width, t.full_height));
+                }
+            }
+            ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) => {}
         }
     }
     for (done, total, unit) in last.into_iter().flatten() {
@@ -292,8 +456,10 @@ mod tests {
             ProgressUpdate::Inner { done: 1, total: 2, unit: Unit::Tile },
         ]);
         assert!(!p.is_cancelled());
+        assert!(p.check_cancelled().is_ok());
         flag.store(true, Ordering::Release);
         assert!(p.is_cancelled());
+        assert!(matches!(p.check_cancelled(), Err(crate::CoreError::Cancelled)));
         assert!(!Progress::none().is_cancelled());
         Progress::none().step(Step::Erasing);
     }
@@ -337,6 +503,49 @@ mod tests {
         assert!(close(cells[3].y, 0.5) && close(cells[3].y + cells[3].h, 1.0), "{:?}", cells[3]);
         let apart = [TileRect { x: 0.0, y: 0.0, w: 0.2, h: 0.2 }, TileRect { x: 0.5, y: 0.5, w: 0.2, h: 0.2 }];
         assert_eq!(split_overlaps(&apart), apart, "tiles that do not touch stay whole");
+    }
+
+    /// Work on a quarter-size copy of a crop reports where the crop sits
+    /// in the photo: its layout as fractions of the photo, its previews
+    /// at the photo's preview scale.
+    #[test]
+    fn a_framed_handle_reports_where_its_crop_sits() {
+        let sink = Arc::new(RecordingSink::default());
+        let photo = Progress::new(sink.clone()).with_tile_previews(500);
+        let crop = photo.within((200, 100, 400, 200), (1000, 500));
+        crop.tiles(vec![TileRect::of_pixels(0, 0, 100, 50, 100, 50)]);
+        crop.within((0, 0, 50, 25), (100, 50)).tiles(vec![TileRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }]);
+        crop.tile_preview((50, 0, 50, 50), (100, 50), |w, h| vec![7; (w * h * 4) as usize]);
+        photo.tile_preview((10, 0, 20, 500), (1000, 500), |w, h| vec![7; (w * h * 4) as usize]);
+        let close = |a: &TileRect, b: TileRect| [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() < 1e-6);
+        let updates = sink.updates();
+        let ProgressUpdate::Tiles(t) = &updates[0] else { panic!("{:?}", updates[0]) };
+        assert!(close(&t[0], TileRect { x: 0.2, y: 0.2, w: 0.4, h: 0.4 }), "{t:?}");
+        let ProgressUpdate::Tiles(t) = &updates[1] else { panic!("{:?}", updates[1]) };
+        assert!(close(&t[0], TileRect { x: 0.2, y: 0.2, w: 0.2, h: 0.2 }), "a frame within a frame: {t:?}");
+        let place = |u: &ProgressUpdate| match u {
+            ProgressUpdate::TilePreview(p) => (p.x, p.y, p.width, p.height, p.full_width, p.full_height),
+            u => panic!("{u:?}"),
+        };
+        assert_eq!(place(&updates[2]), (200, 50, 100, 100, 500, 250), "the crop's right half, at half the photo's size");
+        assert_eq!(place(&updates[3]), (5, 0, 10, 250, 500, 250), "unframed: the photo's own pixels, halved");
+        assert_eq!(check_contract(&[ProgressUpdate::Step(Step::Erasing), updates[2].clone()]), Ok(()));
+
+        let ran = std::cell::Cell::new(false);
+        Progress::new(sink.clone()).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
+        Progress::none().with_tile_previews(500).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
+        Progress::new(Arc::new(Elsewhere)).with_tile_previews(500).tile_preview((0, 0, 1, 1), (1, 1), |_, _| { ran.set(true); vec![0; 4] });
+        assert!(!ran.get(), "no preview is made unless asked for and listened to");
+    }
+
+    /// A listener that no longer shows previews.
+    struct Elsewhere;
+
+    impl ProgressSink for Elsewhere {
+        fn report(&self, _: ProgressUpdate) {}
+        fn wants_previews(&self) -> bool {
+            false
+        }
     }
 
     #[test]

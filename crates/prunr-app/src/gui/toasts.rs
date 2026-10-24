@@ -1,62 +1,101 @@
-//! Newtype around `egui_notify::Toasts` that pre-wraps long captions at
-//! word boundaries.
-//!
-//! `egui-notify` 0.22 hardcodes `TextWrapping::Extend` with infinite
-//! width inside its `show()` — there's no caller-side knob to opt into
-//! actual wrapping, so the toast widens with the longest caption and
-//! drifts off-screen on error messages that interpolate paths or
-//! exception text. Wrapping the caption ourselves before handing it off
-//! sidesteps the upstream limitation without forking the crate.
+//! `egui_notify::Toasts` with captions pre-wrapped at word boundaries:
+//! egui-notify 0.22 hardcodes infinite-width `TextWrapping::Extend`, so a
+//! caption with a path or error text would drift off-screen.
 
 use egui::{Context, Vec2};
 use egui_notify::{Anchor, Toast};
 
-/// Per-line character cap. Tuned for the default egui_notify font at
-/// ~12 px — readable line length without going wider than ~360 px.
-/// Words longer than this get hard-broken inside the wrapper.
+/// Readable line length at the default ~12 px font, under ~360 px wide.
 const TOAST_LINE_CHARS: usize = 60;
 
 #[derive(Default)]
-pub(crate) struct Toasts(egui_notify::Toasts);
+pub(crate) struct Toasts(
+    egui_notify::Toasts,
+    /// The latest captions, kept while a script reads them.
+    std::collections::VecDeque<String>,
+    #[cfg(test)] Vec<(&'static str, String)>,
+);
+
+/// How many captions `Toasts` keeps for a script; more never show at once.
+const KEPT_CAPTIONS: usize = 8;
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
-        Self(egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin))
+        Self(
+            egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin),
+            std::collections::VecDeque::new(),
+            #[cfg(test)] Vec::new(),
+        )
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.success(wrap(&caption.into()))
+        let caption = caption.into();
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("success", caption.clone()));
+        self.0.success(wrap(&caption))
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.info(wrap(&caption.into()))
+        let caption = caption.into();
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("info", caption.clone()));
+        self.0.info(wrap(&caption))
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.warning(wrap(&caption.into()))
+        let caption = caption.into();
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("warning", caption.clone()));
+        self.0.warning(wrap(&caption))
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.error(wrap(&caption.into()))
+        let caption = caption.into();
+        self.keep(&caption);
+        #[cfg(test)] self.2.push(("error", caption.clone()));
+        self.0.error(wrap(&caption))
     }
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn basic(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.basic(wrap(&caption.into()))
+    /// A success toast for `Ok`, an error toast for `Err`.
+    pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
+        match outcome {
+            Ok(caption) => self.success(caption),
+            Err(caption) => self.error(caption),
+        }
     }
 
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn dismiss_all_toasts(&mut self) {
-        self.0.dismiss_all_toasts()
+    #[cfg(test)]
+    pub fn len_for_test(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The last toast shown: its level ("success", "error", …) and caption.
+    #[cfg(test)]
+    pub fn last_for_test(&self) -> Option<(&'static str, &str)> {
+        self.2.last().map(|(level, caption)| (*level, caption.as_str()))
     }
 
     pub fn show(&mut self, ctx: &Context) {
         self.0.show(ctx)
     }
+
+    fn keep(&mut self, caption: &str) {
+        if !crate::gui::automation::record::is_on() {
+            return;
+        }
+        if self.1.len() == KEPT_CAPTIONS {
+            self.1.pop_front();
+        }
+        self.1.push_back(caption.to_owned());
+    }
+
+    /// The captions on screen, oldest first: the latest as many as are
+    /// still shown (they leave in the order they came). Empty unless a
+    /// script turned recording on.
+    pub fn shown(&self) -> Vec<String> {
+        self.1.iter().rev().take(self.0.len()).rev().cloned().collect()
+    }
 }
 
 
-/// Greedy word-wrap: break on whitespace into lines of at most
-/// `TOAST_LINE_CHARS` chars (counted in unicode scalar values, which is
-/// close enough to display width for our use cases). Words longer than
-/// the limit hard-break — uncommon in practice (URLs, file paths) but
-/// we'd rather wrap mid-word than overflow the screen.
+/// Greedy word-wrap counted in chars (close enough to display width);
+/// a word over the limit hard-breaks rather than overflow the screen.
 fn wrap(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + input.len() / TOAST_LINE_CHARS);
     for (i, line) in input.split('\n').enumerate() {
@@ -75,7 +114,6 @@ fn wrap_one_line(line: &str, out: &mut String) {
         let wlen = word.chars().count();
         if wlen >= TOAST_LINE_CHARS {
             if !first { out.push('\n'); col = 0; }
-            // Hard-break very long words so the toast still fits.
             for ch in word.chars() {
                 if col >= TOAST_LINE_CHARS {
                     out.push('\n');

@@ -1,9 +1,5 @@
-//! SAM 2 inference primitives — encoder preprocessing, decoder prompt
-//! construction, and decoder output → MaskArtifact conversion.
-//!
-//! PURE module — no ORT dependency. The ort::Session.run plumbing
-//! lives in `prunr-app/src/gui/processor.rs` so this module stays
-//! unit-testable from prunr-core alone.
+//! SAM 2 tensors in and out, ORT-free so it stays unit-testable; the
+//! session run lives with the caller.
 
 use rayon::prelude::*;
 
@@ -12,62 +8,66 @@ use crate::selection::{BrushMode, FULL};
 pub mod preprocess;
 pub mod prompt;
 
-/// Encoder input edge length. SAM 2 Hiera Small is fixed at 1024×1024.
+/// SAM 2 Hiera Small is fixed at 1024×1024.
 pub const SAM_ENCODER_INPUT: u32 = 1024;
 
-/// Decoder mask output resolution. SAM 2 emits 256×256 logits;
-/// caller upsamples to source resolution.
+/// SAM 2 emits 256×256 logits; the caller upsamples to source resolution.
 pub const SAM_MASK_RESOLUTION: u32 = 256;
 
-/// Cached encoder output for one source image.
+/// Cells in one candidate's mask.
+pub const SAM_MASK_CELLS: usize = (SAM_MASK_RESOLUTION * SAM_MASK_RESOLUTION) as usize;
+
+/// Element counts of the SAM 2 Hiera Small encoder outputs.
+const IMAGE_EMBED_LEN: usize = 256 * 64 * 64;
+const HIGH_RES_0_LEN: usize = 32 * 256 * 256;
+const HIGH_RES_1_LEN: usize = 64 * 128 * 128;
+
 #[derive(Debug)]
 pub struct SamEmbedding {
-    /// f32[1, 256, 64, 64] — 1_048_576 f32 ≈ 4 MB
+    /// f32[1, 256, 64, 64] ≈ 4 MB
     pub image_embed: Vec<f32>,
-    /// f32[1, 32, 256, 256] — 2_097_152 f32 ≈ 8 MB
+    /// f32[1, 32, 256, 256] ≈ 8 MB
     pub high_res_feats_0: Vec<f32>,
-    /// f32[1, 64, 128, 128] — 1_048_576 f32 ≈ 4 MB
+    /// f32[1, 64, 128, 128] ≈ 4 MB
     pub high_res_feats_1: Vec<f32>,
 }
 
 impl SamEmbedding {
-    /// Stable byte estimate for BatchItem::cache_size.
-    pub const fn expected_bytes() -> usize {
-        (1_048_576 + 2_097_152 + 1_048_576) * 4
-    }
-
-    /// Verify the three Vec<f32> lengths match SAM 2 Hiera Small
-    /// expected output shapes.
     pub fn validate_shapes(&self) -> Result<(), String> {
-        if self.image_embed.len() != 1_048_576 {
-            return Err(format!(
-                "image_embed len {} != 1_048_576",
-                self.image_embed.len()
-            ));
-        }
-        if self.high_res_feats_0.len() != 2_097_152 {
-            return Err(format!(
-                "high_res_feats_0 len {} != 2_097_152",
-                self.high_res_feats_0.len()
-            ));
-        }
-        if self.high_res_feats_1.len() != 1_048_576 {
-            return Err(format!(
-                "high_res_feats_1 len {} != 1_048_576",
-                self.high_res_feats_1.len()
-            ));
+        for (name, len, expected) in [
+            ("image_embed", self.image_embed.len(), IMAGE_EMBED_LEN),
+            ("high_res_feats_0", self.high_res_feats_0.len(), HIGH_RES_0_LEN),
+            ("high_res_feats_1", self.high_res_feats_1.len(), HIGH_RES_1_LEN),
+        ] {
+            if len != expected {
+                return Err(format!("{name} len {len} != {expected}"));
+            }
         }
         Ok(())
     }
 }
 
-/// Decoder output as returned by the ORT session. Consumed by
-/// `decode_to_mask_artifact`.
 pub struct SamDecoderOutput {
     /// 3 candidates × SAM_MASK_RESOLUTION² logits.
     pub masks: Vec<f32>,
     /// IoU prediction per candidate.
     pub iou_predictions: [f32; 3],
+}
+
+impl SamDecoderOutput {
+    /// The candidate the decoder rates best.
+    pub fn best(&self) -> usize {
+        self.iou_predictions
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// Candidate `index`'s mask logits.
+    pub fn mask(&self, index: usize) -> &[f32] {
+        &self.masks[index * SAM_MASK_CELLS..(index + 1) * SAM_MASK_CELLS]
+    }
 }
 
 /// The logit a pixel must reach to count as selected at `confidence`,
@@ -155,11 +155,10 @@ fn remove_small_regions(logits: &mut [f32], threshold: f32) {
     }
 }
 
-/// Pick the candidate with the highest predicted IoU; bilinear-upsample
-/// its 256×256 logits to source resolution; keep the pixels whose
-/// probability reaches the reading's confidence (see `confidence_logit`),
-/// signed by `mode`. Higher confidence keeps the sure core of the object,
-/// lower grows into the uncertain rim.
+/// The highest-IoU candidate, bilinear-upsampled to source resolution:
+/// pixels whose probability reaches the reading's confidence, signed by
+/// `mode`. Higher confidence keeps the sure core of the object, lower
+/// grows into the uncertain rim.
 ///
 /// Peak working set: source_w * source_h bytes output + 256*256*4 bytes
 /// slice view (read-only). At 4K source: ~8 MB output.
@@ -171,15 +170,8 @@ pub fn decode_to_mask_artifact(
     mode: BrushMode,
 ) -> crate::selection::MaskArtifact {
     let threshold = confidence_logit(reading.confidence);
-    let best_idx = output
-        .iou_predictions
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .map_or(0, |(i, _)| i);
-
     const M: usize = SAM_MASK_RESOLUTION as usize;
-    let raw = &output.masks[best_idx * M * M..(best_idx + 1) * M * M];
+    let raw = output.mask(output.best());
     let cleaned;
     let mask_logits: &[f32] = if reading.remove_specks {
         cleaned = { let mut l = smooth3(raw); remove_small_regions(&mut l, threshold); l };
@@ -283,39 +275,16 @@ mod tests {
     }
 
     #[test]
-    fn expected_bytes_is_16_mb() {
-        assert_eq!(SamEmbedding::expected_bytes(), 16_777_216);
-    }
-
-    #[test]
-    fn validate_shapes_accepts_correct_lengths() {
-        let emb = SamEmbedding {
-            image_embed: vec![0.0; 1_048_576],
-            high_res_feats_0: vec![0.0; 2_097_152],
-            high_res_feats_1: vec![0.0; 1_048_576],
+    fn validate_shapes_names_the_wrong_length() {
+        let good = || SamEmbedding {
+            image_embed: vec![0.0; IMAGE_EMBED_LEN],
+            high_res_feats_0: vec![0.0; HIGH_RES_0_LEN],
+            high_res_feats_1: vec![0.0; HIGH_RES_1_LEN],
         };
-        assert!(emb.validate_shapes().is_ok());
-    }
-
-    #[test]
-    fn validate_shapes_rejects_wrong_image_embed_len() {
-        let emb = SamEmbedding {
-            image_embed: vec![0.0; 42],
-            high_res_feats_0: vec![0.0; 2_097_152],
-            high_res_feats_1: vec![0.0; 1_048_576],
-        };
-        let err = emb.validate_shapes().unwrap_err();
+        assert!(good().validate_shapes().is_ok());
+        let err = SamEmbedding { image_embed: vec![0.0; 42], ..good() }.validate_shapes().unwrap_err();
         assert!(err.contains("image_embed"), "error: {err}");
-    }
-
-    #[test]
-    fn validate_shapes_rejects_wrong_feats_len() {
-        let emb = SamEmbedding {
-            image_embed: vec![0.0; 1_048_576],
-            high_res_feats_0: vec![0.0; 1],
-            high_res_feats_1: vec![0.0; 1_048_576],
-        };
-        let err = emb.validate_shapes().unwrap_err();
+        let err = SamEmbedding { high_res_feats_0: vec![0.0; 1], ..good() }.validate_shapes().unwrap_err();
         assert!(err.contains("high_res_feats_0"), "error: {err}");
     }
 
@@ -404,20 +373,5 @@ mod tests {
             let expected = brute_force_decode(&output.masks[n..2 * n], w, h, -FULL);
             assert!(result.cells() == expected.as_slice(), "{w}x{h}");
         }
-    }
-
-    #[test]
-    fn decode_negative_logits_produce_zero_mask() {
-        // Candidate 0 has IoU 0.9 but all logits are -1.0 → all mask pixels 0.0
-        let mut masks = vec![0.0f32; 3 * 256 * 256];
-        for v in &mut masks[0..256 * 256] {
-            *v = -1.0;
-        }
-        let output = SamDecoderOutput {
-            masks,
-            iou_predictions: [0.9, 0.1, 0.1],
-        };
-        let result = decode_to_mask_artifact(&output, 32, 32, plain(0.5), BrushMode::Subtract);
-        assert!(result.cells().iter().all(|&v| v == 0));
     }
 }

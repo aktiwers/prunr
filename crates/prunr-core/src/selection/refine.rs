@@ -5,9 +5,8 @@
 
 use super::{CellRect, MaskArtifact, FULL};
 
-/// 8-connected boundary scan. Returns source-pixel coords of selected
-/// pixels with at least one unselected or out-of-bounds neighbour.
-/// Empty mask returns Vec::new(). Complexity is O(w*h).
+/// Source-pixel coords of selected pixels with at least one unselected
+/// or out-of-bounds neighbour (8-connected).
 pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     let (w, h) = (mask.width as usize, mask.height as usize);
     if w == 0 || h == 0 {
@@ -44,19 +43,8 @@ pub fn outline_polyline(mask: &MaskArtifact) -> Vec<(u32, u32)> {
     out
 }
 
-/// Bounding rectangle of the selected cells.
 fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
-    let w = mask.width as usize;
-    mask.cells()
-        .chunks_exact(w.max(1))
-        .enumerate()
-        .filter_map(|(y, row)| {
-            let x0 = row.iter().position(|&v| MaskArtifact::is_selected(v))? as u32;
-            // just found one, so rposition is Some
-            let x1 = row.iter().rposition(|&v| MaskArtifact::is_selected(v)).unwrap_or(0) as u32;
-            Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
-        })
-        .reduce(CellRect::union)
+    mask.bounds_where(MaskArtifact::is_selected)
 }
 
 /// Edge-aware feather. `feather_px == 0` or an empty selection returns a
@@ -67,7 +55,7 @@ fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
 ///
 /// Peak working set is proportional to the bbox, not the image:
 /// bbox_area × ~54 B (RGBA guide crop, two gray planes, and the guided
-/// filter's eight f32 planes plus integral scratch) plus one i8 copy of
+/// filter's eight f32 planes plus row-sum scratch) plus one i8 copy of
 /// the full mask. Measured on a 4K source:
 ///
 /// | bbox      | transient |

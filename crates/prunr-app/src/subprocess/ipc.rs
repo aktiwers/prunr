@@ -1,18 +1,20 @@
 //! Length-prefixed binary framing for subprocess IPC.
 //!
 //! Format: [4 bytes LE length][bincode payload]
-//! Max message size: 1 MB. Commands and events are tiny (≤ a few KB); image
-//! data travels via temp files. If a frame exceeds this limit it is a bug
-//! (e.g. an accidental inline payload), not a legitimate large message.
+//! Images travel via temp files; the one inline image is a run's preview,
+//! at most `TILE_PREVIEW_EDGE`² RGBA, so that sets the largest frame. A
+//! frame past it is a bug (an accidental inline payload) or garbage.
 
 use std::io::{self, Read, Write, BufReader, BufWriter};
 
-const MAX_MESSAGE_SIZE: u32 = 1024 * 1024; // 1 MB
+use super::protocol::TILE_PREVIEW_EDGE;
+
+const MAX_MESSAGE_SIZE: u32 = TILE_PREVIEW_EDGE * TILE_PREVIEW_EDGE * 4 + 64 * 1024;
 
 /// Write a single message: [4-byte LE length][bincode payload].
 ///
 /// Does NOT flush — callers in a write loop let the BufWriter coalesce
-/// frames. Call `flush_writer` explicitly before the stream closes or
+/// frames. Flush the writer explicitly before the stream closes or
 /// before a blocking read-response cycle where the peer must see the
 /// frame before sending a reply.
 pub fn write_message<W: Write, T: serde::Serialize>(
@@ -25,12 +27,6 @@ pub fn write_message<W: Write, T: serde::Serialize>(
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&payload)?;
     Ok(())
-}
-
-/// Flush the writer. Call after the last `write_message` in a session so
-/// any coalesced frames reach the peer before the pipe closes.
-pub fn flush_writer<W: Write>(writer: &mut BufWriter<W>) -> io::Result<()> {
-    writer.flush()
 }
 
 /// Read a single message: [4-byte LE length][bincode payload].
@@ -61,10 +57,56 @@ pub fn read_message<R: Read, T: serde::de::DeserializeOwned>(
     Ok(Some(msg))
 }
 
+/// Read a one-shot IPC temp file and delete it in the same breath; a file
+/// that cannot be read is left for the prefix-scoped cleanup.
+pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    Some(bytes)
+}
+
+/// Hand `image` to the other process as a file: its width and height
+/// (u32 LE), then its raw pixels. No encode on this side, no decode on
+/// the other. A write that fails leaves no partial file behind.
+pub fn write_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path, image: &image::ImageBuffer<P, Vec<u8>>) -> io::Result<()> {
+    let write = || -> io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&image.width().to_le_bytes())?;
+        file.write_all(&image.height().to_le_bytes())?;
+        file.write_all(image.as_raw())
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
+}
+
+/// An image `write_image` wrote, its file removed; `None` when it is
+/// missing or short.
+pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Option<image::ImageBuffer<P, Vec<u8>>> {
+    let read = || -> io::Result<Option<image::ImageBuffer<P, Vec<u8>>>> {
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header)?;
+        let [w, h] = [0, 4].map(|at| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]));
+        let mut pixels = Vec::with_capacity(w as usize * h as usize * usize::from(P::CHANNEL_COUNT));
+        file.read_to_end(&mut pixels)?;
+        Ok(image::ImageBuffer::from_raw(w, h, pixels))
+    };
+    let image = read().ok().flatten();
+    let _ = std::fs::remove_file(path);
+    image
+}
+
+/// A worker's raw RGBA result. Unlike `read_and_delete`, the file goes
+/// even when it cannot be read or does not match `w`×`h`.
+pub fn read_result_rgba(path: &std::path::Path, w: u32, h: u32) -> Option<image::RgbaImage> {
+    let image = std::fs::read(path).ok().and_then(|data| image::RgbaImage::from_raw(w, h, data));
+    let _ = std::fs::remove_file(path);
+    image
+}
+
 /// View an f32 slice as raw bytes. Zero-copy on little-endian hosts (every
-/// platform we target). The returned slice borrows from `data`; the caller
-/// feeds it straight into `fs::write` / `zstd::encode_all` / similar
-/// byte-sinks without an intermediate Vec.
+/// platform we target), so callers feed it to a byte sink without a copy.
 pub fn f32s_as_le_bytes(data: &[f32]) -> &[u8] {
     // Safety (documented via bytemuck::Pod): f32 is POD; on little-endian
     // targets (x86_64, aarch64, wasm32) the in-memory layout is already LE.
@@ -91,24 +133,71 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// The largest message the worker sends, a full-size tile preview of
+    /// an erase, crosses intact.
+    #[test]
+    fn a_full_size_tile_preview_crosses() {
+        use crate::subprocess::protocol::SubprocessEvent;
+        let edge = TILE_PREVIEW_EDGE;
+        let bytes = (edge * edge * 4) as usize;
+        let preview = prunr_core::TilePreview { x: 0, y: 0, width: edge, height: edge, full_width: edge, full_height: edge, rgba: vec![7; bytes] };
+        let mut writer = BufWriter::new(Vec::new());
+        write_message(&mut writer, &SubprocessEvent::Report { item_id: 1, update: prunr_core::ProgressUpdate::TilePreview(preview) }).unwrap();
+        let frame = writer.into_inner().unwrap();
+        let read: Option<SubprocessEvent> = read_message(&mut BufReader::new(Cursor::new(frame))).unwrap();
+        assert!(matches!(read, Some(SubprocessEvent::Report { update: prunr_core::ProgressUpdate::TilePreview(p), .. }) if p.rgba.len() == bytes));
+    }
+
+    #[test]
+    fn a_read_temp_file_is_gone_and_a_missing_one_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.raw");
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        assert_eq!(read_and_delete(&path), Some(vec![1, 2, 3]));
+        assert!(!path.exists());
+        assert_eq!(read_and_delete(&path), None);
+    }
+
+    /// An image goes over as its size and pixels and comes back the
+    /// same, colour or grey; the file is gone after, and a short one
+    /// reads as nothing.
+    #[test]
+    fn an_image_file_round_trips_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.raw");
+        let rgba = image::RgbaImage::from_fn(3, 2, |x, y| image::Rgba([x as u8, y as u8, 7, 200]));
+        write_image(&path, &rgba).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 3 * 2 * 4);
+        assert_eq!(read_image::<image::Rgba<u8>>(&path), Some(rgba));
+        assert!(!path.exists());
+        let gray = image::GrayImage::from_fn(2, 2, |x, y| image::Luma([(x + 2 * y) as u8 * 60]));
+        write_image(&path, &gray).unwrap();
+        assert_eq!(read_image::<image::Luma<u8>>(&path), Some(gray));
+        std::fs::write(&path, [4u8, 0, 0, 0, 4, 0, 0, 0, 1, 2]).unwrap();
+        assert_eq!(read_image::<image::Luma<u8>>(&path), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_result_file_is_gone_whether_or_not_it_fits_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.raw");
+        std::fs::write(&path, [1u8, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let image = read_result_rgba(&path, 2, 1).expect("2x1 RGBA");
+        assert_eq!(image.as_raw(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(!path.exists());
+
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        assert!(read_result_rgba(&path, 2, 1).is_none());
+        assert!(!path.exists(), "a short file is removed too");
+        assert!(read_result_rgba(&path, 2, 1).is_none());
+    }
+
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
     enum TestMsg {
         Hello { name: String },
         Number(u64),
         Empty,
-    }
-
-    #[test]
-    fn roundtrip_single_message() {
-        let mut buf = Vec::new();
-        let msg = TestMsg::Hello { name: "prunr".to_string() };
-        {
-            let mut writer = BufWriter::new(&mut buf);
-            write_message(&mut writer, &msg).unwrap();
-        }
-        let mut reader = BufReader::new(Cursor::new(&buf));
-        let recovered: Option<TestMsg> = read_message(&mut reader).unwrap();
-        assert_eq!(recovered, Some(msg));
     }
 
     #[test]
@@ -133,14 +222,6 @@ mod tests {
         // Next read should be EOF
         let eof: Option<TestMsg> = read_message(&mut reader).unwrap();
         assert!(eof.is_none());
-    }
-
-    #[test]
-    fn eof_returns_none() {
-        let buf: Vec<u8> = Vec::new();
-        let mut reader = BufReader::new(Cursor::new(&buf));
-        let result: Option<TestMsg> = read_message(&mut reader).unwrap();
-        assert!(result.is_none());
     }
 
     #[test]

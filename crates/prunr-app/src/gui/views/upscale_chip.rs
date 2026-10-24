@@ -1,7 +1,4 @@
 //! Output-scale chip widget for the upscale toolbar.
-//!
-//! Renders `[icon  {scale} · {w}×{h}]` as a chip button. Clicking opens
-//! a popover with the three scales (2× / 3× / 4×) and a reset button.
 
 use egui::Ui;
 use egui_material_icons::icons::ICON_OPEN_IN_FULL;
@@ -19,10 +16,7 @@ pub fn output_scale_label(s: OutputScale) -> &'static str {
 }
 
 /// Render the output-scale chip. Returns `true` if `value` changed.
-///
-/// `output_dims` is the projected output size at the current scale
-/// (caller computes `(source.0 * factor, source.1 * factor)` using
-/// `value.factor()`).
+/// `output_dims` is the projected output size at the current scale.
 pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, output_dims: (u32, u32)) -> bool {
     let label = format!(
         "{} \u{00b7} {}\u{00d7}{}",
@@ -68,12 +62,5 @@ mod tests {
         assert_eq!(output_scale_label(OutputScale::X2), "2\u{00d7}");
         assert_eq!(output_scale_label(OutputScale::X3), "3\u{00d7}");
         assert_eq!(output_scale_label(OutputScale::X4), "4\u{00d7}");
-    }
-
-    #[test]
-    fn output_scale_factor_via_method() {
-        assert_eq!(OutputScale::X2.factor(), 2);
-        assert_eq!(OutputScale::X3.factor(), 3);
-        assert_eq!(OutputScale::X4.factor(), 4);
     }
 }

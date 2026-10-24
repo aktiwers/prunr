@@ -1,6 +1,6 @@
 //! The keyboard bindings. One shipped table plus the user's overrides
 //! (`Settings.hotkeys`) resolve into one `Bindings`, which feeds the key
-//! handler, the F1 overlay, the Settings › Hotkeys tab, button tooltips,
+//! handler, the F1 overlay, the Settings › Shortcuts tab, button tooltips,
 //! the selection action-bar hints and the empty-canvas tips, so none of
 //! them can drift from the keys that actually work.
 
@@ -9,9 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use egui::{Event, InputState, Key};
 
-use super::kv_row;
 use crate::gui::knob_catalog::ModelRole;
-use crate::gui::theme;
 
 const MOD_NAME: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
 
@@ -28,23 +26,18 @@ pub(crate) fn magic_brush_tip(role: ModelRole) -> &'static str {
     match (role.edits_cutout(), mac) {
         (false, true) => "Click or stroke an object to add it to the selection; Alt takes it away.",
         (false, false) => "Click or stroke an object to add it to the selection; Alt or Ctrl takes it away.",
-        (true, true) => "Click or stroke an object to restore it; Alt erases it.",
-        (true, false) => "Click or stroke an object to restore it; Alt or Ctrl erases it.",
+        (true, true) => "Click or stroke an object to select it; Alt takes it away. Restore, Erase or Select in the strip says what the selection does.",
+        (true, false) => "Click or stroke an object to select it; Alt or Ctrl takes it away. Restore, Erase or Select in the strip says what the selection does.",
     }
 }
 
-/// The bottom-left hint while a brush is on: what Shift and Alt do for
-/// this model. A background-removal cut-out is restored or erased; any
-/// other selection is added to or subtracted from.
-pub(crate) fn modifier_hints(role: ModelRole) -> (&'static str, &'static str) {
-    let mac = cfg!(target_os = "macos");
-    match (role.edits_cutout(), mac) {
-        (false, true) => ("Shift = add", "Alt = subtract"),
-        (false, false) => ("Shift = add", "Alt/Ctrl = subtract"),
-        (true, true) => ("Shift = restore", "Alt = erase"),
-        (true, false) => ("Shift = restore", "Alt/Ctrl = erase"),
-    }
-}
+/// The bottom-left hint while a brush is on: what Shift and Alt do to
+/// the selection, on every model.
+pub(crate) const MODIFIER_HINTS: (&str, &str) = if cfg!(target_os = "macos") {
+    ("Shift = add", "Alt = remove")
+} else {
+    ("Shift = add", "Alt/Ctrl = remove")
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -157,9 +150,6 @@ fn foreign_modifier_held(m: &egui::Modifiers) -> bool {
     m.alt || (m.ctrl && !m.command)
 }
 
-impl Chord {
-}
-
 impl Mods {
     fn command(self) -> bool {
         matches!(self, Mods::Command | Mods::CommandShift)
@@ -186,8 +176,9 @@ pub enum Delivery {
     Press,
     /// Once per physical press — toggles must not flicker while held.
     FreshPress,
-    /// egui turns the chord into its own event (`Event::Copy`), which the
-    /// app intercepts in `raw_input_hook`; the row exists for display.
+    /// egui turns the chord into its own event (`Event::Copy`, `Event::Cut`),
+    /// which the app intercepts in `raw_input_hook`; the row exists for
+    /// display.
     Event,
 }
 
@@ -230,7 +221,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { action: Action::Process, chords: &[chord(Command, Key::R)], label: "Process the image", delivery: Press },
     Shortcut { action: Action::Save, chords: &[chord(Command, Key::S)], label: "Save the result", delivery: Press },
     Shortcut { action: Action::Copy, chords: &[chord(Command, Key::C)], label: "Copy the result or selection", delivery: ByEvent },
-    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", delivery: Press },
+    Shortcut { action: Action::Cut, chords: &[chord(Command, Key::X)], label: "Cut the selection", delivery: ByEvent },
     Shortcut { action: Action::Delete, chords: &[chord(NoMods, Key::Delete)], label: "Delete the selection", delivery: Press },
     Shortcut { action: Action::Invert, chords: &[chord(NoMods, Key::Enter)], label: "Invert the selection", delivery: Press },
     Shortcut { action: Action::Cancel, chords: &[chord(NoMods, Key::Escape)], label: "Cancel, clear or close", delivery: Press },
@@ -262,7 +253,7 @@ pub struct Bindings {
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     chords: Vec<Chord>,
-    /// Per chord, for the Hotkeys tab's slots.
+    /// Per chord, for the Shortcuts tab's slots.
     texts: Vec<Arc<str>>,
     /// All chords joined, for tooltips and lists.
     display: Arc<str>,
@@ -283,7 +274,7 @@ impl Row {
 /// Shown wherever an action has no key.
 pub const UNBOUND: &str = "Unbound";
 
-/// Slots an action offers in the Hotkeys tab: a key and an alternate.
+/// Slots an action offers in the Shortcuts tab: a key and an alternate.
 pub const SLOTS: usize = 2;
 
 impl Bindings {
@@ -296,7 +287,7 @@ impl Bindings {
     pub fn from_overrides(overrides: &BTreeMap<String, Vec<String>>) -> Self {
         let mut b = Self::shipped();
         for (name, list) in overrides {
-            let Some(action) = Action::from_name(name) else { continue };
+            let Some(action) = Action::from_name(name).filter(|&a| rebindable(a)) else { continue };
             let parsed: Vec<Chord> = list.iter().filter_map(|s| Chord::parse(s)).collect();
             if list.is_empty() || !parsed.is_empty() {
                 b.set(action, parsed);
@@ -409,7 +400,6 @@ impl Pressed {
     }
 }
 
-/// Collect the shortcuts pressed this frame.
 pub fn pressed(ctx: &egui::Context) -> Pressed {
     if ctx.input(|i| i.events.is_empty()) {
         return Pressed::default();
@@ -437,6 +427,12 @@ fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
 
 /// Bare keys type into a focused text field, so they are suppressed while
 /// one has focus. Modifier chords, function keys and Escape always fire.
+/// A text field has the keyboard: its own Copy, Cut and Paste are for
+/// its text. A focused button or slider does not count.
+pub fn text_field_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.focused()).is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some())
+}
+
 fn blocked_by_text_focus(c: Chord) -> bool {
     let bare = matches!(c.mods, Mods::None | Mods::Shift);
     bare && !matches!(c.key, Key::Escape | Key::F1 | Key::F2 | Key::F3 | Key::F12)
@@ -470,6 +466,8 @@ fn key_name(key: Key) -> &'static str {
         Key::Space => "Space",
         Key::Num0 => "0",
         Key::Num1 => "1",
+        Key::OpenBracket => "[",
+        Key::CloseBracket => "]",
         other => other.name(),
     }
 }
@@ -489,8 +487,8 @@ pub fn keys(ctx: &egui::Context, action: Action) -> Arc<str> {
     Arc::clone(current(ctx).display(action))
 }
 
-/// Whether the user can rebind `action`: Copy arrives as egui's own
-/// event and Escape is the universal cancel.
+/// Whether the user can rebind `action`: Copy and Cut arrive as egui's
+/// own events and Escape is the universal cancel.
 pub fn rebindable(action: Action) -> bool {
     row(action).delivery != ByEvent && action != Action::Cancel
 }
@@ -500,35 +498,9 @@ pub fn label(action: Action) -> &'static str {
     row(action).label
 }
 
-/// Returns true if the modal should close.
-pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
-        ctx, "shortcuts", "Keyboard shortcuts",
-        [theme::SHORTCUT_OVERLAY_WIDTH, theme::SHORTCUT_OVERLAY_HEIGHT],
-        |ui| {
-            ui.vertical(|ui| {
-                ui.add_space(theme::SPACE_SM);
-                render_shortcut_grid(ui);
-            });
-        },
-    )
-}
-
-/// Two-column key/action grid. Used by the F1 overlay and the Settings
-/// Hotkeys tab.
-pub fn render_shortcut_grid(ui: &mut egui::Ui) {
-    egui::Grid::new("shortcuts_grid")
-        .num_columns(2)
-        .spacing([theme::SPACE_LG, theme::SPACE_SM])
-        .show(ui, |ui| {
-            let bindings = current(ui.ctx());
-            for s in SHORTCUTS {
-                kv_row(ui, bindings.display(s.action), s.label, theme::TEXT_PRIMARY);
-            }
-            for (gesture, what) in GESTURES {
-                kv_row(ui, gesture, what, theme::TEXT_PRIMARY);
-            }
-        });
+/// The mouse gestures, for the Shortcuts tab's list below the keys.
+pub fn gestures() -> &'static [(&'static str, &'static str)] {
+    GESTURES
 }
 
 #[cfg(test)]
@@ -662,7 +634,9 @@ mod tests {
         assert_eq!(b.chords(Action::Redo).len(), 2);
         b.reset(Action::Undo);
         assert!(b.is_default(Action::Undo));
-        assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cancel));
+        assert!(rebindable(Action::Undo) && !rebindable(Action::Copy) && !rebindable(Action::Cut) && !rebindable(Action::Cancel));
+        let saved = BTreeMap::from([("Cut".to_string(), vec!["Mod+Shift+X".to_string()])]);
+        assert_eq!(Bindings::from_overrides(&saved).chords(Action::Cut), Bindings::shipped().chords(Action::Cut), "a saved chord for an action that cannot be rebound is ignored");
     }
 
     #[test]
@@ -747,10 +721,32 @@ mod tests {
     }
 
     #[test]
-    fn copy_is_delivered_by_the_copy_event_not_the_table() {
-        assert_eq!(row(Action::Copy).delivery, Delivery::Event);
-        let p = pressed_for(press(Key::C, Modifiers::COMMAND));
-        assert!(!p.is(Action::Copy));
+    fn copy_and_cut_are_delivered_by_their_events_not_the_table() {
+        for (action, key) in [(Action::Copy, Key::C), (Action::Cut, Key::X)] {
+            assert_eq!(row(action).delivery, Delivery::Event);
+            assert!(!pressed_for(press(key, Modifiers::COMMAND)).is(action));
+        }
+    }
+
+    /// Only a focused text field counts as typing; a focused button does
+    /// not.
+    #[test]
+    fn a_focused_text_field_is_typing_and_a_button_is_not() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let frame = |ctx: &egui::Context, text: &mut String, field: bool| {
+            let _ = ctx.run_ui(RawInput::default(), |ui| {
+                let r = if field { ui.text_edit_singleline(text) } else { ui.button("Paint Brush") };
+                r.request_focus();
+            });
+        };
+        frame(&ctx, &mut text, true);
+        frame(&ctx, &mut text, true);
+        assert!(text_field_focused(&ctx));
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut text, false);
+        frame(&ctx, &mut text, false);
+        assert!(ctx.memory(|m| m.focused().is_some()) && !text_field_focused(&ctx));
     }
 
     #[test]

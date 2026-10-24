@@ -39,16 +39,14 @@ repository = "https://github.com/aktiwers/prunr"
 # Inference runtime — pinned to an RC for stable feature surface
 # (CUDA, CoreML, DirectML, OpenVINO, load-dynamic). The dylib is
 # resolved at runtime via `ort::init_from(path)` from the Runtime
-# Store or the bundled fallback at `<exe>/runtime/<DYLIB>` (release
-# CI stages it via `cargo xtask install-runtime onnxruntime <ver>`).
-# macOS overrides this with a custom CoreML-enabled build via
-# ORT_LIB_LOCATION + the `@executable_path/../Frameworks` rpath set
-# in `.cargo/config.toml`. Unpin when ort 2.0 stable ships and our
-# feature set is preserved. Check
+# Store or the bundled fallback beside the executable (release CI
+# stages it via `cargo xtask install-runtime onnxruntime <ver>`; a
+# macOS `.app` keeps it in Contents/Frameworks/). Unpin when ort 2.0
+# stable ships and our feature set is preserved. Check
 # https://github.com/pykeio/ort/milestones before bumping. api-23
 # pin avoids the rc.12 vitis.rs build bug under load-dynamic at
 # api-24.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "ndarray", "load-dynamic", "api-23", "half"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["cuda", "coreml", "directml", "openvino", "migraphx", "ndarray", "load-dynamic", "api-23", "half"] }
 
 # Image + tensor core
 ndarray = "0.17"
@@ -82,7 +80,6 @@ eframe = { version = "0.34", default-features = true }
 egui_extras = { version = "0.34", features = ["image"] }
 egui-notify = "0.22"
 egui_material_icons = "0.6"
-egui_animation = "0.11"
 egui_kittest = { version = "0.34", features = ["eframe"] }
 accesskit = "0.24"
 accesskit_consumer = "0.35"
@@ -92,8 +89,11 @@ clap = { version = "4.5", features = ["derive"] }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 indicatif = "0.17"
 rfd = "0.15"
+# Waits on rfd's async file dialogs off the UI thread.
+pollster = "0.4"
 dirs = "6"
 sysinfo = "0.37"
+dunce = "1.0"
 memory-stats = "1"
 
 # Runtime install + xtask shared deps. Hoisted so version bumps live in
@@ -116,7 +116,9 @@ tempfile = "3"
 strip = true
 lto = "fat"
 opt-level = 3
-panic = "abort"
+# Unwind, not abort: a panic in a model run fails that run, and the app,
+# with every open image and its undo history, stays up.
+panic = "unwind"
 codegen-units = 1
 
 # Profiling profile: release-grade codegen with debug symbols kept so

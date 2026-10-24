@@ -1,45 +1,41 @@
 //! Shared host-detection + PyPI-wheel install logic for ORT runtimes.
 //!
 //! Used by `xtask install-runtime` (build-side CLI) and the GUI Settings →
-//! Hardware → Install button. Before this crate, both sites independently
-//! implemented `host_rid`, wheel-name token mapping, SHA256 verification,
-//! and wheel repackaging — divergence on the next OpenVINO release would
-//! have silently installed wrong files in one path.
+//! Hardware → Install button.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// Single source of truth for the ONNX Runtime version we ship + offer
-/// for runtime-store install. The pykeio/ort `api-23` feature is
-/// forward-compatible across ORT 1.17+ so this isn't load-bearing for
-/// linkage; it IS load-bearing for "the bundled CPU runtime and the
-/// runtime-store OpenVINO upgrade are at matching versions" — drift
-/// would surprise a user upgrading via Settings → Hardware.
+/// The ONNX Runtime version of the accelerator builds: the DirectML one
+/// Windows ships and the OpenVINO and CUDA ones the runtime store offers.
+/// Their wheels lag the plain one: DirectML's stop at 1.24.4, OpenVINO's
+/// at 1.24.1, and CUDA's need CUDA 13 from 1.27.
+/// The pykeio/ort `api-23` feature refuses a runtime older than 1.23 at
+/// load.
 ///
-/// **Upper bound:** pykeio/ort tracks ABI v23 across ORT 1.x. ORT 2.0+
-/// is expected to bump the ABI; bumping this past the 1.x line without
-/// switching the `ort` feature to `api-24` (or whatever the new ABI
-/// becomes) would compile but crash at session creation. Run
-/// `cargo xtask probe-load-dynamic <new-dylib>` before the bump to
-/// confirm — see CLAUDE.md `## Verify before bundling / wiring`.
+/// **Upper bound:** past the 1.x line the ABI is expected to change; a
+/// bump without switching the `ort` API feature compiles but crashes at
+/// session creation. Run `cargo xtask probe-load-dynamic <new-dylib>`
+/// before bumping either version.
 pub const PINNED_ORT_VERSION: &str = "1.24.1";
 
-/// Version of ONNX Runtime we build from source on macOS to enable the
-/// CoreML EP (no PyPI wheel ships this). Diverges from
-/// `PINNED_ORT_VERSION` on purpose: the CPU-only runtime ships at a
-/// newer release while the CoreML build is held back to the last
-/// version we have a known-good CMake recipe for. Mirrored in
-/// `.github/workflows/release.yml` as the `MACOS_ORT_VERSION` workflow
-/// env var; the `release_yml_macos_ort_matches_const` test asserts they
-/// stay in sync.
-pub const MACOS_CORE_ML_ORT_VERSION: &str = "1.20.0";
+/// The version of the plain `onnxruntime` wheel, which the Linux build
+/// ships (CPU) and the macOS one (CPU and CoreML). From 1.24 to 1.28 its
+/// constant folding corrupts weights, and with folding off CoreML loses
+/// the Magic Brush, DDColor and BiRefNet. Not 1.31: it moved CoreML onto
+/// device-based provider selection, and on a MacBook Air our CoreML
+/// options stopped applying (Silueta's output came out wrong). The macOS
+/// wheel's minimum OS is
+/// the Mac app's floor (`LSMinimumSystemVersion`, 14.0 for 1.30), so a
+/// bump checks that too.
+pub const PLAIN_ORT_VERSION: &str = "1.30.0";
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
-/// for unsupported platforms; `host_pypi_token` rejects those explicitly.
+/// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "linux-x64" }
     else if cfg!(all(target_os = "linux", target_arch = "aarch64")) { "linux-arm64" }
@@ -51,23 +47,68 @@ pub fn host_rid() -> &'static str {
     else { "unknown" }
 }
 
-/// PyPI wheel filename token for the host platform.
-pub fn host_pypi_token() -> Option<&'static str> {
-    Some(match host_rid() {
-        "linux-x64" => "manylinux_2_28_x86_64",
-        "linux-arm64" => "manylinux_2_28_aarch64",
-        "windows-x64" => "win_amd64",
-        "windows-arm64" => "win_arm64",
-        "macos-arm64" => "macosx_11_0_arm64",
-        // Intel Mac. PyPI's onnxruntime wheels use the 10.15 deployment
-        // target on x86_64 (the `macosx_10_15_x86_64` filename token);
-        // `host_rid` already returns `"macos-x64"` for this case, so the
-        // arm has to be present here for the GUI install button + xtask
-        // CLI to actually find a wheel instead of bailing with
-        // "unsupported host platform".
-        "macos-x64" => "macosx_10_15_x86_64",
-        _ => return None,
-    })
+/// This machine's glibc: the newest a Linux wheel may need to load here.
+/// (0, 0) off glibc, where no manylinux wheel fits.
+pub fn host_glibc() -> (u32, u32) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: glibc returns a static NUL-terminated version string.
+        let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+        if let Some((major, minor)) = version.to_str().ok().and_then(|v| v.split_once('.')) {
+            let minor = minor.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+            if let (Ok(major), Ok(minor)) = (major.parse(), minor.parse()) {
+                return (major, minor);
+            }
+        }
+    }
+    (0, 0)
+}
+
+/// The glibc a manylinux tag for `arch` needs: `manylinux_2_27_x86_64`,
+/// or a legacy alias (`manylinux2014_x86_64` is 2.17).
+fn manylinux_glibc(tag: &str, arch: &str) -> Option<(u32, u32)> {
+    let rest = tag.strip_prefix("manylinux")?.strip_suffix(arch)?.strip_suffix('_')?;
+    match rest {
+        "1" => Some((2, 5)),
+        "2010" => Some((2, 12)),
+        "2014" => Some((2, 17)),
+        _ => {
+            let (major, minor) = rest.strip_prefix('_')?.split_once('_')?;
+            Some((major.parse().ok()?, minor.parse().ok()?))
+        }
+    }
+}
+
+/// Whether a wheel's platform tag runs on `rid`. A macOS tag carries
+/// the wheel's minimum OS, which moves between ORT releases
+/// (`macosx_11_0_arm64` before 1.24, `macosx_14_0_arm64` from it), so
+/// only its arch is fixed. A Linux tag may need any glibc up to `glibc`,
+/// the host's (NVIDIA's wheels carry 2.12 to 2.27, MIGraphX's 2.34).
+fn tag_fits(tag: &str, rid: &str, glibc: (u32, u32)) -> bool {
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let macos = |arch: &str| tag.strip_prefix("macosx_")
+        .and_then(|t| t.strip_suffix(arch))
+        .and_then(|t| t.strip_suffix('_'))
+        .and_then(|version| version.split_once('_'))
+        .is_some_and(|(major, minor)| number(major) && number(minor));
+    match rid {
+        "linux-x64" => manylinux_glibc(tag, "x86_64").is_some_and(|v| v <= glibc),
+        "linux-arm64" => manylinux_glibc(tag, "aarch64").is_some_and(|v| v <= glibc),
+        "windows-x64" => tag == "win_amd64",
+        "windows-arm64" => tag == "win_arm64",
+        "macos-arm64" => macos("arm64"),
+        "macos-x64" => macos("x86_64"),
+        _ => false,
+    }
+}
+
+/// A wheel filename's platform tags: its last `-` field, which may
+/// join several with `.` (`manylinux_2_27_x86_64.manylinux_2_28_x86_64`).
+fn platform_tags(filename: &str) -> impl Iterator<Item = &str> {
+    filename.strip_suffix(".whl")
+        .and_then(|stem| stem.rsplit('-').next())
+        .into_iter()
+        .flat_map(|field| field.split('.'))
 }
 
 /// Install-dir name: `<short>-<version>-<rid>`. Locked — existing
@@ -77,9 +118,7 @@ pub fn install_subdir(short_name: &str, version: &str) -> String {
 }
 
 /// Reject names that would escape `<data_dir>/runtimes/` when joined
-/// as a single path segment. Defense-in-depth: callers should already
-/// be passing a value produced by `install_subdir`, but a future API
-/// taking a user-supplied `--target` flag could otherwise traverse out.
+/// as a single path segment.
 pub fn validate_subdir(name: &str) -> Result<(), String> {
     if name.is_empty()
         || name == "."
@@ -103,17 +142,16 @@ pub struct WheelInfo {
 /// Pick the right wheel for the host platform. Prefers cp313, falls
 /// back to any cp tag.
 pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, String> {
-    let host_token = host_pypi_token().ok_or_else(||
-        format!("unsupported host platform `{}`", host_rid())
-    )?;
+    pick_wheel_on(urls, host_rid(), host_glibc())
+}
+
+fn pick_wheel_on(urls: &[serde_json::Value], rid: &str, glibc: (u32, u32)) -> Result<WheelInfo, String> {
     let pick = |require_cp313: bool| urls.iter().find_map(|u| {
         let name = u["filename"].as_str()?;
-        // Reject sdists / non-wheel artifacts up front so a future PyPI
-        // release that includes a wheel-flavour token in a `.tar.gz`
-        // filename can't slip through to `extract_wheel` (which would
-        // fail at `ZipArchive::new` with a confusing error).
+        // An sdist whose name carries a wheel-flavour token would
+        // otherwise fail confusingly in `extract_wheel`.
         if !name.ends_with(".whl") { return None; }
-        if !name.contains(host_token) { return None; }
+        if !platform_tags(name).any(|tag| tag_fits(tag, rid, glibc)) { return None; }
         if require_cp313 && !name.contains("cp313") { return None; }
         Some(WheelInfo {
             url: u["url"].as_str()?.to_string(),
@@ -122,23 +160,22 @@ pub fn pick_wheel_for_host(urls: &[serde_json::Value]) -> Result<WheelInfo, Stri
         })
     });
     pick(true).or_else(|| pick(false)).ok_or_else(||
-        format!("no wheel for host platform `{}`", host_rid()),
+        format!("no wheel for host platform `{rid}`"),
     )
 }
 
 /// Filter + rename for files extracted from an `onnxruntime-*` wheel.
 ///
-/// Path-traversal guard: the result is used as a single filename joined
-/// onto `target_dir`. Reject anything containing `/` or `\\` so a
-/// maliciously-crafted wheel can't escape `target_dir` via
-/// `..\Windows\System32\evil.dll` on Windows or its forward-slash
-/// equivalent on Unix.
+/// Path-traversal guard: the result is joined onto `target_dir` as one
+/// filename, so anything containing `/` or `\\` is rejected.
 pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
     if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
         return None;
     }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
+    // The GPU wheel's TensorRT provider: no session registers it.
+    if stripped.starts_with("libonnxruntime_providers_tensorrt") { return None; }
     if stripped.ends_with(".py") { return None; }
     if stripped.starts_with("libonnxruntime.so.") {
         return Some("libonnxruntime.so".to_string());
@@ -154,8 +191,8 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     Some(stripped.to_string())
 }
 
-pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
-    let actual = hex::encode(Sha256::digest(bytes));
+fn verify_digest(digest: &[u8], expected: &str) -> Result<(), String> {
+    let actual = hex::encode(digest);
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(format!("SHA256 mismatch — expected {expected}, got {actual}"));
     }
@@ -175,56 +212,88 @@ impl<'a> DownloadHooks<'a> {
     }
 }
 
-/// Wraps `download_wheel_attempt` in up to 3 tries with exponential
-/// backoff. Transient errors (network timeout, 5xx, broken connection,
-/// SHA256 mismatch) retry; fatal errors (404, user cancel) fail fast.
-/// Mirrors the same policy as the model `download_manager` so users see
-/// consistent retry behaviour across runtime + model installs.
+/// Retry policy the app's downloads share, so runtime and model installs
+/// give up after the same number of tries.
+pub const DOWNLOAD_ATTEMPTS: u32 = 3;
+pub const DOWNLOAD_BACKOFF_BASE_MS: u64 = 500;
+
+/// Wraps `download_wheel_attempt` in `DOWNLOAD_ATTEMPTS` tries with
+/// exponential backoff. Transient errors (network timeout, 5xx, broken
+/// connection, SHA256 mismatch) retry; fatal errors (404, user cancel)
+/// fail fast.
 ///
-/// The SHA verification happens INSIDE the attempt (not after `download_wheel`
-/// returns). A transient corruption — CDN edge cache delivering a partial
-/// payload, mid-flight bit flip, MITM-injected garbage — would otherwise
-/// fail fast with one shot at the network; folding it inside lets the
-/// retry loop give it ~3 chances before escalating.
-pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>) -> Result<bytes::Bytes, String> {
+/// SHA verification runs inside the attempt so a transient corruption
+/// (partial CDN payload, bit flip) gets retried rather than failing.
+/// The wheel downloaded to the file `path` (made or replaced), checked
+/// against its SHA-256 as it streams, never held in memory whole (cuDNN's
+/// is 766 MB); open for reading. The caller removes the file.
+pub fn download_wheel(info: &WheelInfo, hooks: &mut DownloadHooks<'_>, path: &Path) -> Result<std::fs::File, String> {
     let cancel = Arc::clone(&hooks.cancel);
-    retry_with_backoff(&cancel, 3, 500, |attempt| {
+    retry_with_backoff(&cancel, DOWNLOAD_ATTEMPTS, DOWNLOAD_BACKOFF_BASE_MS, |attempt| {
         if attempt > 0 {
             tracing::info!(attempt, url = %info.url, "retrying wheel download");
         }
-        let bytes = download_wheel_attempt(info, hooks)?;
-        if let Err(msg) = verify_sha256(&bytes, &info.sha256) {
-            return Err(DlError::transient(msg));
-        }
-        Ok(bytes)
+        let digest = download_wheel_attempt(info, hooks, path)?;
+        verify_digest(&digest, &info.sha256).map_err(DlError::transient)?;
+        std::fs::File::open(path).map_err(|e| DlError::fatal(format!("open {}: {e}", path.display())))
     }).map_err(|e| e.message)
 }
 
-/// Implemented by error types whose values distinguish transient
-/// (network blip, 5xx) from fatal (4xx, sha mismatch, user cancel).
-/// `retry_with_backoff` consults `is_retryable` to decide between retry
-/// and fail-fast; on cancel during the backoff sleep it constructs a
-/// fresh value via `cancelled()` so each error type picks its own
-/// user-facing wording.
+/// An error that tells transient from fatal. `cancelled()` builds the
+/// value for a cancel during backoff, so each type picks its own wording.
 pub trait Retryable {
     fn is_retryable(&self) -> bool;
     fn cancelled() -> Self;
 }
 
+/// A failed download attempt: what to tell the user, and whether another
+/// attempt could succeed. Every downloader (runtime wheels, on-demand
+/// models, xtask's model fetch) shares it.
 #[derive(Debug)]
-struct DlError {
-    message: String,
+pub struct DlError {
+    pub message: String,
     retryable: bool,
 }
 
 impl DlError {
-    fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
-    fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+    pub fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false } }
+    pub fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true } }
+
+    /// A response that was not a success: a 5xx is the server's passing
+    /// trouble and is worth another attempt; anything else (a 4xx: bad
+    /// URL, gone file) fails at once.
+    pub fn for_status(status: reqwest::StatusCode, msg: impl Into<String>) -> Self {
+        if status.is_server_error() { Self::transient(msg) } else { Self::fatal(msg) }
+    }
+}
+
+impl std::fmt::Display for DlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Retryable for DlError {
     fn is_retryable(&self) -> bool { self.retryable }
     fn cancelled() -> Self { DlError::fatal("cancelled") }
+}
+
+/// `error` with the causes under it, "a: b: c". A failed request's own
+/// text names only the request ("error sending request for url ..."); why
+/// it failed (a refused connection, an untrusted certificate, a proxy
+/// that would not answer) is a cause beneath it.
+pub fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(e) = cause {
+        let more = e.to_string();
+        if !text.contains(&more) {
+            text.push_str(": ");
+            text.push_str(&more);
+        }
+        cause = e.source();
+    }
+    text
 }
 
 /// The HTTP client every download site shares. The blocking client
@@ -241,60 +310,61 @@ pub fn http_client(user_agent: &str) -> reqwest::Result<reqwest::blocking::Clien
         .build()
 }
 
-/// Single download attempt — used by the retry wrapper. Streams chunks,
-/// fires progress per percentage point, polls cancel per chunk.
-/// `Content-Length` not pre-allocated (untrusted; bogus 9999999999 would
-/// OOM). `Vec` grows; resize cost on 80 MB is microseconds.
+/// Streams chunks into `path`, hashing them on the way; fires progress
+/// per percentage point, polls cancel per chunk. The SHA-256 digest of
+/// what was written.
 fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
-) -> Result<bytes::Bytes, DlError> {
+    path: &Path,
+) -> Result<Vec<u8>, DlError> {
     let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
-        .map_err(|e| DlError::fatal(format!("HTTP client: {e}")))?;
+        .map_err(|e| DlError::fatal(format!("HTTP client: {}", with_causes(&e))))?;
     let response = client.get(&info.url).send()
-        .map_err(|e| DlError::transient(format!("connect: {e}")))?;
+        .map_err(|e| DlError::transient(format!("connect: {}", with_causes(&e))))?;
 
-    // 4xx is the user/server contract being wrong (bad URL, gone wheel) —
-    // retrying won't help. 5xx is server transient. Anything not 2xx is
-    // an error at this stage.
     let status = response.status();
     if !status.is_success() {
-        let msg = format!("HTTP {status}");
-        return Err(if status.is_server_error() { DlError::transient(msg) } else { DlError::fatal(msg) });
+        return Err(DlError::for_status(status, format!("HTTP {status}")));
     }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
     let mut response = response;
-    let mut buf: Vec<u8> = Vec::new();
+    let file = std::fs::File::create(path).map_err(|e| DlError::fatal(format!("create {}: {e}", path.display())))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut hasher = Sha256::new();
     let mut chunk = [0u8; 64 * 1024];
+    let mut done: u64 = 0;
     let mut last_pct: u64 = u64::MAX;
     loop {
         if hooks.cancel.load(Ordering::Relaxed) {
-            return Err(DlError::fatal("cancelled"));
+            return Err(DlError::cancelled());
         }
         let n = match response.read(&mut chunk) {
             Ok(n) => n,
             // Partial-stream errors (broken pipe, timeout) are transient.
-            Err(e) => return Err(DlError::transient(format!("read: {e}"))),
+            Err(e) => return Err(DlError::transient(format!("read: {}", with_causes(&e)))),
         };
         if n == 0 { break; }
-        buf.extend_from_slice(&chunk[..n]);
-        let pct = if total > 0 { buf.len() as u64 * 100 / total } else { 0 };
+        hasher.update(&chunk[..n]);
+        out.write_all(&chunk[..n]).map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
+        done += n as u64;
+        let pct = if total > 0 { done * 100 / total } else { 0 };
         if pct != last_pct {
             last_pct = pct;
-            (hooks.progress)(buf.len() as u64, total);
+            (hooks.progress)(done, total);
         }
     }
-    Ok(bytes::Bytes::from(buf))
+    out.flush().map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
+    Ok(hasher.finalize().to_vec())
 }
 
 /// Run `attempt` up to `max_attempts` times. Returns immediately on
 /// non-retryable errors (per `Retryable::is_retryable`). Between
 /// attempts, sleeps an exponentially-growing duration starting at
 /// `base_ms` (500 → 1000 → 2000…), polling `cancel` every 50 ms so a
-/// user-cancel during backoff fires promptly. The closure receives the
-/// current attempt index (0-based) for callers that want to log which
-/// retry round triggered.
+/// user-cancel during backoff fires promptly. The closure gets the
+/// 0-based attempt index.
 pub fn retry_with_backoff<F, T, E>(
     cancel: &Arc<AtomicBool>,
     max_attempts: u32,
@@ -327,79 +397,129 @@ where
     }
 }
 
-/// Extract a wheel into `target_dir`, applying `repackage_target_filename`.
-/// Caller owns dir creation + safety guards (e.g. refusing
-/// non-`runtimes/` paths) — that's install-time policy.
+/// The files of the wheel `archive` that `rename` keeps, written flat into
+/// `target_dir` under the names it gives; how many. Caller owns dir
+/// creation + safety guards (e.g. refusing non-`runtimes/` paths), which
+/// are install-time policy.
 ///
-/// Skip-on-collision: when two archive entries map to the same
-/// canonical target (e.g. an `onnxruntime-openvino` wheel that ships
-/// both `libonnxruntime.so` and `libonnxruntime.so.1.24.1` — the
-/// latter via the version-strip arm in `repackage_target_filename`),
-/// keep the first write and skip subsequent ones. Without this guard,
-/// a 0-byte symlink-flattened entry could shadow the real dylib if it
-/// happened to come second in archive order.
-pub fn extract_wheel(bytes: &[u8], target_dir: &std::path::Path) -> Result<PathBuf, String> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|e| format!("zip parse: {e}"))?;
+/// When two entries map to the same target (`libonnxruntime.so` and
+/// `libonnxruntime.so.1.24.1`), the first write wins: otherwise a 0-byte
+/// symlink-flattened entry could shadow the real dylib.
+fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(archive).map_err(|e| format!("zip parse: {e}"))?;
     let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
-        let name = entry.name().to_string();
-        let Some(target_filename) = repackage_target_filename(&name) else {
-            continue;
-        };
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let Some(target_filename) = rename(entry.name()) else { continue };
         if !written.insert(target_filename.clone()) {
-            // Already wrote this canonical target — keep the first one,
-            // skip the duplicate.
             continue;
         }
         let dest = target_dir.join(&target_filename);
-        let mut out = std::fs::File::create(&dest)
-            .map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let file = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
         std::io::copy(&mut entry, &mut out)
+            .and_then(|_| out.flush())
             .map_err(|e| format!("extract {}: {e}", dest.display()))?;
     }
+    Ok(written.len())
+}
 
-    let dylib = target_dir.join(dylib_name());
+/// Extract an `onnxruntime-*` wheel into `target_dir`, applying
+/// `repackage_target_filename`; the runtime library it holds.
+pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<PathBuf, String> {
+    extract_flat(archive, target_dir, repackage_target_filename)?;
+    let dylib = target_dir.join(DYLIB_NAME);
     if !dylib.is_file() {
         return Err(format!(
-            "{} missing after extract — wheel layout may have changed",
-            dylib_name(),
+            "{DYLIB_NAME} missing after extract — wheel layout may have changed",
         ));
     }
-    Ok(target_dir.to_path_buf())
+    Ok(dylib)
 }
 
-pub fn dylib_name() -> &'static str {
-    if cfg!(windows) { "onnxruntime.dll" }
-    else if cfg!(target_os = "macos") { "libonnxruntime.dylib" }
-    else { "libonnxruntime.so" }
+/// Filter + flatten for files extracted from an NVIDIA library wheel
+/// (`nvidia/<package>/lib/libX.so.N`): its shared libraries, by file
+/// name. The same path-traversal guard as `repackage_target_filename`.
+pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
+    let rest = zip_name.strip_prefix("nvidia/")?;
+    let (_package, file) = rest.split_once("/lib/")?;
+    if file.is_empty() || file.contains('/') || file.contains('\\') || !file.contains(".so") {
+        return None;
+    }
+    // Shipped beside what ORT links but never loaded by it.
+    if file.starts_with("libnvblas") || file.starts_with("libcufftw") || file.contains(".alt.") {
+        return None;
+    }
+    Some(file.to_string())
 }
+
+/// Extract an NVIDIA library wheel's shared libraries into `target_dir`,
+/// flat; how many were written. Errors when the wheel holds none.
+pub fn extract_nvidia_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<usize, String> {
+    match extract_flat(archive, target_dir, nvidia_target_filename)? {
+        0 => Err("no libraries in the NVIDIA wheel — its layout may have changed".to_string()),
+        written => Ok(written),
+    }
+}
+
+pub const DYLIB_NAME: &str = if cfg!(windows) {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
 
 #[cfg(test)]
 mod tests {
+    /// An error reads with its causes, each once: a wrapper that repeats
+    /// its cause's text does not repeat it again.
+    #[test]
+    fn an_error_reads_with_its_causes_each_once() {
+        #[derive(Debug)]
+        struct Failed(&'static str, Option<std::io::Error>);
+        impl std::fmt::Display for Failed {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+        }
+        impl std::error::Error for Failed {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { self.1.as_ref().map(|e| e as _) }
+        }
+        let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        assert_eq!(super::with_causes(&Failed("error sending request", Some(refused))), "error sending request: connection refused");
+        let repeated = std::io::Error::other("tls: certificate not trusted");
+        assert_eq!(super::with_causes(&Failed("tls: certificate not trusted", Some(repeated))), "tls: certificate not trusted");
+    }
+
+
     use super::*;
 
-    /// Both `release.yml` (Linux + Windows staging steps) and `ci.yml`
-    /// (Linux ORT runtime install for the e2e test) hard-code the same
+    /// `pick_wheel_on` for a host with glibc 2.28, the oldest that runs
+    /// ORT's own Linux wheels.
+    fn pick_wheel(urls: &[serde_json::Value], rid: &str) -> Result<WheelInfo, String> {
+        pick_wheel_on(urls, rid, (2, 28))
+    }
+
+    /// Both `release.yml` (the runtime each artifact ships) and `ci.yml`
+    /// (Linux install for the e2e test, macOS smoke test) hard-code the same
     /// version this const carries. Cargo doesn't link CI YAML, so drift
     /// would silently ship mismatched bundled-CPU vs runtime-store
     /// runtimes (release) or run e2e tests against a stale runtime
     /// (ci). This test reads both YAMLs and asserts every
-    /// `install-runtime onnxruntime <ver>` invocation matches the const.
+    /// `install-runtime onnxruntime[-directml] <ver>` invocation matches
+    /// the const.
     /// Counts each file's occurrences too — drift in just one of two
     /// release.yml call sites would be silently accepted by a plain
     /// `contains` check.
     #[test]
     fn yaml_pins_match_const() {
-        // (path, expected occurrence count)
-        let cases: &[(&str, usize)] = &[
-            ("/../../.github/workflows/release.yml", 2), // Linux + Windows staging
-            ("/../../.github/workflows/ci.yml",      1), // Linux ORT install before tests
+        // (path, package, version, expected occurrence count)
+        let cases: &[(&str, &str, &str, usize)] = &[
+            ("/../../.github/workflows/release.yml", "onnxruntime", PLAIN_ORT_VERSION, 1),           // Linux + macOS staging
+            ("/../../.github/workflows/release.yml", "onnxruntime-directml", PINNED_ORT_VERSION, 1), // Windows staging
+            ("/../../.github/workflows/ci.yml", "onnxruntime", PLAIN_ORT_VERSION, 2),                // Linux install before tests, macOS smoke test
         ];
-        let needle = format!("install-runtime onnxruntime {}", PINNED_ORT_VERSION);
-        for (rel, expected) in cases {
+        for (rel, package, version, expected) in cases {
+            let needle = format!("install-runtime {package} {version}");
             let abs = format!("{}{rel}", env!("CARGO_MANIFEST_DIR"));
             let yml = std::fs::read_to_string(&abs)
                 .unwrap_or_else(|e| panic!("read {abs}: {e}"));
@@ -411,45 +531,6 @@ mod tests {
             );
         }
     }
-    /// `release.yml` builds a custom ORT with CoreML on macOS — the
-    /// version is the workflow env var `MACOS_ORT_VERSION`, used to
-    /// drive the cache key + the `git clone --branch v<ver>` step.
-    /// Bumping `MACOS_CORE_ML_ORT_VERSION` here without bumping the
-    /// YAML (or vice versa) silently produces release artifacts at the
-    /// wrong version. This test also asserts the cache key + git clone
-    /// references go through `${{ env.MACOS_ORT_VERSION }}` rather than
-    /// hard-coded literals — without that interpolation a future
-    /// version bump would only update one of the two call sites and
-    /// the test would still pass.
-    #[test]
-    fn release_yml_macos_ort_matches_const() {
-        let abs = format!(
-            "{}/../../.github/workflows/release.yml",
-            env!("CARGO_MANIFEST_DIR"),
-        );
-        let yml = std::fs::read_to_string(&abs)
-            .unwrap_or_else(|e| panic!("read {abs}: {e}"));
-        let expected_decl = format!(
-            "MACOS_ORT_VERSION: '{}'",
-            MACOS_CORE_ML_ORT_VERSION,
-        );
-        assert!(
-            yml.contains(&expected_decl),
-            "release.yml is missing the workflow env declaration `{expected_decl}` — \
-             update the workflow to match the const, or vice versa.",
-        );
-        assert!(
-            yml.contains("ort-coreml-${{ env.MACOS_ORT_VERSION }}-macos-aarch64"),
-            "release.yml ORT cache key must use ${{{{ env.MACOS_ORT_VERSION }}}} \
-             so a version bump only needs to touch the env block + the const.",
-        );
-        assert!(
-            yml.contains("git clone --depth 1 --branch \"v${MACOS_ORT_VERSION}\""),
-            "release.yml ORT git clone must reference ${{MACOS_ORT_VERSION}} \
-             so the cloned tag matches the cache key automatically.",
-        );
-    }
-
     use serde_json::json;
 
     #[test]
@@ -461,39 +542,122 @@ mod tests {
         ), "unexpected rid: {r}");
     }
 
-    /// Contract: every rid that `host_rid` produces (other than the
-    /// catch-all `"unknown"`) must have a matching arm in
-    /// `host_pypi_token`. Otherwise users on that platform get a
-    /// confusing "unsupported host platform" from `pick_wheel_for_host`
-    /// despite `host_rid` agreeing the platform is supported.
+    /// Every 1.24.1 wheel on PyPI, as its JSON lists them.
+    const ORT_1_24_1_WHEELS: &[&str] = &[
+        "onnxruntime-1.24.1-cp311-cp311-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp311-cp311-win_amd64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp312-cp312-win_amd64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp313-cp313-win_amd64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-macosx_14_0_arm64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+        "onnxruntime-1.24.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "onnxruntime-1.24.1-cp314-cp314-win_amd64.whl",
+    ];
+
+    fn urls_for(filenames: &[&str]) -> Vec<serde_json::Value> {
+        filenames.iter().map(|f| json!({
+            "filename": f, "url": format!("https://example.com/{f}"),
+            "digests": {"sha256": "aa".repeat(32)}, "size": 0,
+        })).collect()
+    }
+
     #[test]
-    fn every_supported_rid_has_a_pypi_token() {
-        for rid in [
-            "linux-x64", "linux-arm64",
-            "windows-x64", "windows-arm64",
-            "macos-arm64", "macos-x64",
+    fn picks_each_platforms_cp313_wheel_from_the_pinned_release() {
+        let urls = urls_for(ORT_1_24_1_WHEELS);
+        for (rid, expected) in [
+            ("linux-x64", "cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"),
+            ("linux-arm64", "cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"),
+            ("windows-x64", "cp313-cp313-win_amd64.whl"),
+            ("macos-arm64", "cp313-cp313-macosx_14_0_arm64.whl"),
         ] {
-            let token = match rid {
-                "linux-x64" => "manylinux_2_28_x86_64",
-                "linux-arm64" => "manylinux_2_28_aarch64",
-                "windows-x64" => "win_amd64",
-                "windows-arm64" => "win_arm64",
-                "macos-arm64" => "macosx_11_0_arm64",
-                "macos-x64" => "macosx_10_15_x86_64",
-                _ => unreachable!(),
-            };
-            // Compile-time check the arm exists for current host.
-            if host_rid() == rid {
-                assert_eq!(host_pypi_token(), Some(token), "rid {rid}");
-            }
+            let pick = pick_wheel(&urls, rid).unwrap_or_else(|e| panic!("{rid}: {e}"));
+            assert!(pick.url.ends_with(expected), "{rid} picked {}", pick.url);
         }
-        // Final guard: host's own rid produces Some(token), which is
-        // the actual contract `pick_wheel_for_host` depends on.
-        if host_rid() != "unknown" {
-            assert!(host_pypi_token().is_some(),
-                "host_rid()={} but host_pypi_token() is None — pick_wheel_for_host will reject this host",
-                host_rid());
+        // 1.24 dropped Intel macOS and has no Windows-on-Arm wheel.
+        assert!(pick_wheel(&urls, "macos-x64").is_err());
+        assert!(pick_wheel(&urls, "windows-arm64").is_err());
+    }
+
+    /// NVIDIA's wheels carry older manylinux tags than ORT's; any glibc up
+    /// to the host's fits (2.28 here), a newer one or another arch does not.
+    #[test]
+    fn linux_wheels_fit_up_to_the_glibc_ort_needs() {
+        for filename in [
+            "nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl",
+            "nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+            "onnxruntime_gpu-1.24.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), "linux-x64").is_ok(), "rejected {filename}");
         }
+        for filename in [
+            "x-1.0-py3-none-manylinux_2_34_x86_64.whl",
+            "x-1.0-py3-none-manylinux_2_27_aarch64.whl",
+            "x-1.0-py3-none-musllinux_1_2_x86_64.whl",
+            "x-1.0-py3-none-manylinux_2_x_x86_64.whl",
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), "linux-x64").is_err(), "took {filename}");
+        }
+        let migraphx = urls_for(&["onnxruntime_migraphx-1.24.2-cp312-cp312-manylinux_2_34_x86_64.whl"]);
+        assert!(pick_wheel_on(&migraphx, "linux-x64", (2, 35)).is_ok(), "a 2.35 host runs a 2.34 wheel");
+        assert!(pick_wheel_on(&migraphx, "linux-x64", (2, 31)).is_err(), "a 2.31 host does not");
+    }
+
+    /// The host's glibc reads as a version on a glibc Linux.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn the_host_glibc_reads_back() {
+        assert!(host_glibc() >= (2, 17), "{:?}", host_glibc());
+    }
+
+    #[test]
+    fn macos_wheels_match_whatever_minimum_os_they_carry() {
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.19.2-cp312-cp312-macosx_11_0_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.31.0-cp313-cp313-macosx_15_0_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-x64", "onnxruntime-1.19.2-cp312-cp312-macosx_10_15_x86_64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_ok(), "{rid} rejected {filename}");
+        }
+        for (rid, filename) in [
+            ("macos-arm64", "onnxruntime-1.23.2-cp313-cp313-macosx_13_0_x86_64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-win_arm64.whl"),
+            ("macos-arm64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_x_arm64.whl"),
+            ("macos-x64", "onnxruntime-1.24.1-cp313-cp313-macosx_14_0_arm64.whl"),
+        ] {
+            assert!(pick_wheel(&urls_for(&[filename]), rid).is_err(), "{rid} took {filename}");
+        }
+    }
+
+    /// Every rid `host_rid` names has wheels it accepts; without one,
+    /// that platform's install fails with "unsupported host platform".
+    #[test]
+    fn every_supported_rid_accepts_its_own_wheels() {
+        for (rid, tag) in [
+            ("linux-x64", "manylinux_2_28_x86_64"),
+            ("linux-arm64", "manylinux_2_28_aarch64"),
+            ("windows-x64", "win_amd64"),
+            ("windows-arm64", "win_arm64"),
+            ("macos-arm64", "macosx_14_0_arm64"),
+            ("macos-x64", "macosx_13_0_x86_64"),
+        ] {
+            let urls = urls_for(&[&format!("onnxruntime-1.0.0-cp313-cp313-{tag}.whl")]);
+            assert!(pick_wheel(&urls, rid).is_ok(), "{rid} accepts no {tag} wheel");
+        }
+        assert!(pick_wheel(&urls_for(ORT_1_24_1_WHEELS), "unknown").is_err());
     }
 
     #[test]
@@ -521,29 +685,13 @@ mod tests {
     }
 
     #[test]
-    fn pick_wheel_prefers_cp313() {
-        let Some(token) = host_pypi_token() else { return; };
-        let urls = vec![
-            json!({"filename": format!("ort-cp310-cp310-{token}.whl"),
-                   "url": "https://example.com/cp310.whl",
-                   "digests": {"sha256": "aa".repeat(32)}, "size": 80_000_000}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
-                   "url": "https://example.com/cp313.whl",
-                   "digests": {"sha256": "bb".repeat(32)}, "size": 80_000_000}),
-        ];
-        let pick = pick_wheel_for_host(&urls).expect("pick");
-        assert_eq!(pick.url, "https://example.com/cp313.whl");
-    }
-
-    #[test]
     fn pick_wheel_falls_back_to_any_cp_tag() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![json!({
-            "filename": format!("ort-cp311-cp311-{token}.whl"),
+            "filename": "ort-cp311-cp311-win_amd64.whl",
             "url": "https://example.com/cp311.whl",
             "digests": {"sha256": "cc".repeat(32)}, "size": 0,
         })];
-        let pick = pick_wheel_for_host(&urls).expect("fallback");
+        let pick = pick_wheel(&urls, "windows-x64").expect("fallback");
         assert_eq!(pick.url, "https://example.com/cp311.whl");
     }
 
@@ -554,7 +702,7 @@ mod tests {
             "url": "https://example.com/wrong.whl",
             "digests": {"sha256": "dd".repeat(32)}, "size": 0,
         })];
-        assert!(pick_wheel_for_host(&urls).is_err());
+        assert!(pick_wheel(&urls, "windows-x64").is_err());
     }
 
     /// PyPI's URL list also includes the source distribution
@@ -564,77 +712,113 @@ mod tests {
     /// to parse a tarball as a zip and fail with a confusing error.
     #[test]
     fn pick_wheel_skips_sdist_even_with_matching_token() {
-        let Some(token) = host_pypi_token() else { return; };
         let urls = vec![
-            json!({"filename": format!("ort-{token}.tar.gz"),
+            json!({"filename": "ort-win_amd64.tar.gz",
                    "url": "https://example.com/sdist.tar.gz",
                    "digests": {"sha256": "ee".repeat(32)}, "size": 0}),
-            json!({"filename": format!("ort-cp313-cp313-{token}.whl"),
+            json!({"filename": "ort-cp313-cp313-win_amd64.whl",
                    "url": "https://example.com/cp313.whl",
                    "digests": {"sha256": "ff".repeat(32)}, "size": 0}),
         ];
-        let pick = pick_wheel_for_host(&urls).expect("wheel pick should succeed");
+        let pick = pick_wheel(&urls, "windows-x64").expect("wheel pick should succeed");
         assert_eq!(pick.url, "https://example.com/cp313.whl",
             "must skip sdist and pick the .whl");
     }
 
+    /// What a wheel's entry is kept as, if at all.
     #[test]
-    fn repackage_keeps_capi_dylib() {
-        // Versioned forms strip to the canonical name.
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so.1.24.1").as_deref(),
-            Some("libonnxruntime.so"),
-        );
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.1.24.1.dylib").as_deref(),
-            Some("libonnxruntime.dylib"),
-        );
-        // Canonical forms pass through unchanged.
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so").as_deref(),
-            Some("libonnxruntime.so"),
-        );
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.dylib").as_deref(),
-            Some("libonnxruntime.dylib"),
-        );
+    fn repackage_keeps_the_runtime_libraries_and_nothing_else() {
+        for (entry, kept) in [
+            // Versioned forms strip to the canonical name; canonical ones pass.
+            ("onnxruntime/capi/libonnxruntime.so.1.24.1", Some("libonnxruntime.so")),
+            ("onnxruntime/capi/libonnxruntime.1.24.1.dylib", Some("libonnxruntime.dylib")),
+            ("onnxruntime/capi/libonnxruntime.so", Some("libonnxruntime.so")),
+            ("onnxruntime/capi/libonnxruntime.dylib", Some("libonnxruntime.dylib")),
+            // The DirectML wheel's onnxruntime.dll delay-loads DirectML.dll
+            // from its own folder; without it there the system's older copy loads.
+            ("onnxruntime/capi/DirectML.dll", Some("DirectML.dll")),
+            ("onnxruntime/capi/onnxruntime.dll", Some("onnxruntime.dll")),
+            // The CUDA provider and the shared bridge it loads through stay;
+            // the TensorRT provider does not.
+            ("onnxruntime/capi/libonnxruntime_providers_cuda.so", Some("libonnxruntime_providers_cuda.so")),
+            ("onnxruntime/capi/libonnxruntime_providers_shared.so", Some("libonnxruntime_providers_shared.so")),
+            ("onnxruntime/capi/libonnxruntime_providers_tensorrt.so", None),
+            ("onnxruntime/capi/onnxruntime_pybind11_state.so", None),
+            ("onnxruntime/capi/__init__.py", None),
+            ("onnxruntime/__init__.py", None),
+            // A separator after `capi/` could escape the target dir: `/` on
+            // Unix, `\` on Windows.
+            ("onnxruntime/capi/../etc/passwd", None),
+            ("onnxruntime/capi/..\\Windows\\evil.dll", None),
+            ("onnxruntime/capi/sub\\file.so", None),
+        ] {
+            assert_eq!(repackage_target_filename(entry).as_deref(), kept, "{entry}");
+        }
+    }
+
+    /// The Windows release ships the DirectML runtime as its default:
+    /// both DLLs staged from the DirectML wheel, side by side in
+    /// `<exe>/runtime/` in the zip and in the installer.
+    #[test]
+    fn release_yml_ships_the_directml_runtime_on_windows() {
+        let abs = format!("{}/../../.github/workflows/release.yml", env!("CARGO_MANIFEST_DIR"));
+        let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
+        for line in [
+            format!("cargo xtask install-runtime onnxruntime-directml {PINNED_ORT_VERSION} --stage-to runtime-stage"),
+            "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/".to_string(),
+            "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/".to_string(),
+            "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+            "Source: \"runtime-stage\\DirectML.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+        ] {
+            assert!(yml.contains(&line), "release.yml no longer has `{line}`");
+        }
+    }
+
+    /// An NVIDIA wheel gives up its shared libraries by file name, and
+    /// nothing else: headers, Python files and traversal names stay out.
+    #[test]
+    fn nvidia_wheels_give_up_only_their_libraries() {
+        assert_eq!(nvidia_target_filename("nvidia/cudnn/lib/libcudnn.so.9").as_deref(), Some("libcudnn.so.9"));
+        assert_eq!(nvidia_target_filename("nvidia/cublas/lib/libcublasLt.so.12").as_deref(), Some("libcublasLt.so.12"));
+        assert!(nvidia_target_filename("nvidia/cudnn/include/cudnn.h").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/__init__.py").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/../../evil.so").is_none());
+        assert!(nvidia_target_filename("nvidia/cudnn/lib/..\\evil.so").is_none());
+        assert!(nvidia_target_filename("onnxruntime/capi/libonnxruntime.so").is_none());
+        for unused in ["libnvblas.so.12", "libcufftw.so.11", "libnvrtc.alt.so.12", "libnvrtc-builtins.alt.so.12.9"] {
+            assert!(nvidia_target_filename(&format!("nvidia/x/lib/{unused}")).is_none(), "{unused}");
+        }
+    }
+
+    /// Extraction writes the libraries flat and refuses a wheel without any.
+    #[test]
+    fn an_nvidia_wheel_extracts_flat_and_one_without_libraries_fails() {
+        use std::io::Write;
+        let wheel = |files: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for f in files {
+                zip.start_file(*f, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"elf").unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let n = extract_nvidia_wheel(std::io::Cursor::new(wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"])), dir.path()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read(dir.path().join("libcurand.so.10")).unwrap(), b"elf");
+        assert!(extract_nvidia_wheel(std::io::Cursor::new(wheel(&["nvidia/curand/include/curand.h"])), dir.path()).is_err());
     }
 
     #[test]
-    fn repackage_drops_python_files_and_pybind() {
-        assert!(repackage_target_filename("onnxruntime/capi/onnxruntime_pybind11_state.so").is_none());
-        assert!(repackage_target_filename("onnxruntime/capi/__init__.py").is_none());
-        assert!(repackage_target_filename("onnxruntime/__init__.py").is_none());
-    }
-
-    /// Path-traversal guard: any embedded `/` or `\\` after the
-    /// `onnxruntime/capi/` prefix must be rejected so a maliciously
-    /// crafted wheel can't escape `target_dir`. The forward-slash check
-    /// covers Unix; the backslash check covers Windows.
-    #[test]
-    fn repackage_rejects_path_traversal_in_entry_name() {
-        // forward slash (Unix-style traversal)
-        assert!(repackage_target_filename("onnxruntime/capi/../etc/passwd").is_none());
-        // backslash (Windows-style traversal)
-        assert!(repackage_target_filename("onnxruntime/capi/..\\Windows\\evil.dll").is_none());
-        assert!(repackage_target_filename("onnxruntime/capi/sub\\file.so").is_none());
-        // sanity: the canonical no-separator forms still pass
-        assert_eq!(
-            repackage_target_filename("onnxruntime/capi/libonnxruntime.so"),
-            Some("libonnxruntime.so".to_string()),
-        );
+    fn verify_digest_accepts_correct_digest() {
+        let digest = Sha256::digest(b"hello world");
+        assert!(verify_digest(&digest, &hex::encode(digest)).is_ok());
+        assert!(verify_digest(&digest, &hex::encode(digest).to_uppercase()).is_ok());
     }
 
     #[test]
-    fn verify_sha256_accepts_correct_digest() {
-        let payload = b"hello world";
-        let expected = hex::encode(Sha256::digest(payload));
-        assert!(verify_sha256(payload, &expected).is_ok());
-    }
-
-    #[test]
-    fn verify_sha256_rejects_wrong_digest() {
-        assert!(verify_sha256(b"hello world", &"00".repeat(32)).is_err());
+    fn verify_digest_rejects_wrong_digest() {
+        assert!(verify_digest(&Sha256::digest(b"hello world"), &"00".repeat(32)).is_err());
     }
 
     #[test]
@@ -647,6 +831,22 @@ mod tests {
         });
         assert_eq!(r.expect("eventual success"), 42);
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn only_a_server_error_status_is_worth_retrying() {
+        use reqwest::StatusCode;
+        for (status, retry) in [
+            (StatusCode::INTERNAL_SERVER_ERROR, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::FORBIDDEN, false),
+            (StatusCode::MOVED_PERMANENTLY, false),
+        ] {
+            let e = DlError::for_status(status, format!("HTTP {status}"));
+            assert_eq!(e.is_retryable(), retry, "{status}");
+            assert_eq!(e.to_string(), format!("HTTP {status}"));
+        }
     }
 
     #[test]

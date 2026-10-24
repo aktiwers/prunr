@@ -24,21 +24,43 @@ pub mod history_disk;
 pub mod memory;
 pub mod live_preview;
 pub mod knob_catalog;
+pub mod surface_catalog;
 pub mod system_bridge;
 pub mod download_manager;
 pub mod hardware_cache;
 pub mod env_overrides;
 pub mod dispatch_progress;
+pub(crate) mod first_look;
 pub mod automation;
+pub(crate) mod capability;
+pub(crate) mod disk_queue;
+pub(crate) mod reclaim;
+pub(crate) mod image_texture;
+pub(crate) mod selection_queue;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_quit;
+pub mod provider_notices;
 
 #[cfg(test)]
 mod tests;
 
 pub fn run() -> eframe::Result {
+    // The GPU provider probe (DirectML starts a device) and the hardware
+    // profile (DXGI lists the adapters on Windows) run while the window
+    // opens; `PrunrApp::new` and the first frame read what they found.
+    let probes: [(&str, fn()); 2] = [
+        ("provider-probe", || { let _ = prunr_core::OrtEngine::detect_active_provider(); }),
+        ("hardware-probe", || { let _ = crate::hardware::profile(); }),
+    ];
+    for (name, probe) in probes {
+        if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(probe) {
+            tracing::warn!(%e, name, "could not start the probe; it runs on first use");
+        }
+    }
     let icon = {
         let png_bytes = include_bytes!("../../../../assets/prunr-256.png");
         let img = image::load_from_memory(png_bytes).expect("Failed to decode app icon");
-        let rgba = img.to_rgba8();
+        let rgba = img.into_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         egui::IconData {
             rgba: rgba.into_raw(),
@@ -60,9 +82,8 @@ pub fn run() -> eframe::Result {
 
     let app_factory = || Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>));
 
-    // Try default renderer (glow/OpenGL). On Windows-on-Mac VMs and older Intel
-    // GPUs OpenGL drivers are unreliable; fall back to wgpu (DX12/Metal/Vulkan)
-    // which tends to work better in virtualized environments.
+    // OpenGL drivers are unreliable on Windows-on-Mac VMs and older Intel
+    // GPUs; wgpu does better there.
     let primary = eframe::run_native("prunr", make_options(), app_factory());
     if let Err(ref e) = primary {
         log_startup_error("glow/OpenGL renderer failed", e);
