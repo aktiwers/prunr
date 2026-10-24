@@ -1001,9 +1001,6 @@ pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     }
 }
 
-/// Whether DirectML is the active GPU provider. Parallel session builds
-/// go sequential under it: its `commit_from_memory` races in
-/// AbiCustomRegistry on concurrent calls.
 /// Engines of one model build one after another: DirectML's session
 /// creation is not thread-safe, and CoreML compiles each engine into the
 /// model's one cache folder, where two at once left a half-written cache
@@ -1012,6 +1009,9 @@ pub(crate) fn engines_build_one_at_a_time() -> bool {
     directml_active() || OrtEngine::detect_active_provider().eq_ignore_ascii_case(COREML_NAME)
 }
 
+/// Whether DirectML is the active GPU provider. Parallel session builds
+/// go sequential under it: its `commit_from_memory` races in
+/// AbiCustomRegistry on concurrent calls.
 pub(crate) fn directml_active() -> bool {
     #[cfg(windows)]
     {

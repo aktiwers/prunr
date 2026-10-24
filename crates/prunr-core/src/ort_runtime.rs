@@ -563,7 +563,7 @@ fn bundled_dylib() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Folding stays off where ORT's aliasing bug lives (1.24 to 1.27, or
+    /// Folding stays off where ORT's aliasing bug lives (1.24 to 1.28, or
     /// no readable version); on for the rest.
     #[test]
     fn constant_folding_is_off_where_it_corrupts_weights() {
