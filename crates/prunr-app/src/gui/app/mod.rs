@@ -877,8 +877,14 @@ impl PrunrApp {
     }
 
     /// Install `runtime` in the background; Settings › Hardware and the
-    /// first-launch prompt both start it here. One install at a time.
+    /// first-launch prompt both start it here. One install at a time. The
+    /// CUDA runtime brings NVIDIA's libraries, so it asks for their license
+    /// first.
     pub(crate) fn start_runtime_install(&mut self, runtime: crate::runtime_install::RuntimeId) {
+        if runtime == crate::runtime_install::RuntimeId::Cuda && !self.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY) {
+            self.pending_license_request = Some(super::views::model_store::LicenseRequest::NvidiaLibraries);
+            return;
+        }
         self.start_install(crate::runtime_install::InstallTarget::Runtime(runtime));
     }
 
@@ -1403,8 +1409,9 @@ impl PrunrApp {
                         self.download_manager.start_download(id);
                     }
                     LicenseRequest::NvidiaLibraries => {
+                        use crate::runtime_install::{InstallTarget, RuntimeId};
                         self.settings.accept(crate::runtime_install::NVIDIA_LICENSE_KEY);
-                        self.start_install(crate::runtime_install::InstallTarget::NvidiaLibraries);
+                        self.start_install(if RuntimeId::Cuda.is_installed() { InstallTarget::NvidiaLibraries } else { InstallTarget::Runtime(RuntimeId::Cuda) });
                     }
                 }
             } else if close {
@@ -1514,6 +1521,24 @@ mod toast_label_tests {
         assert_eq!(step_toast(&[StepKind::Stroke], "undone"), "Stroke undone");
         assert_eq!(step_toast(&[StepKind::Erase], "redone"), "Erase redone");
         assert_eq!(step_toast(&[StepKind::Stroke, StepKind::Process], "undone"), "2 steps undone");
+    }
+}
+
+#[cfg(test)]
+mod runtime_install_tests {
+    use super::PrunrApp;
+    use crate::gui::views::model_store::LicenseRequest;
+    use crate::runtime_install::RuntimeId;
+
+    /// The CUDA runtime brings NVIDIA's libraries, so its install waits for
+    /// their license, from Settings and from the first-launch prompt alike.
+    #[test]
+    fn the_cuda_runtime_asks_for_nvidias_license_before_installing() {
+        let mut app = PrunrApp::new_for_test();
+        assert!(!app.settings.has_accepted(crate::runtime_install::NVIDIA_LICENSE_KEY));
+        app.start_runtime_install(RuntimeId::Cuda);
+        assert_eq!(app.pending_license_request, Some(LicenseRequest::NvidiaLibraries));
+        assert!(app.runtime_install.is_none(), "nothing downloads before the license is accepted");
     }
 }
 

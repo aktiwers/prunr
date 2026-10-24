@@ -605,20 +605,18 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     });
 }
 
-/// NVIDIA's CUDA and cuDNN libraries, offered once the CUDA runtime is
-/// loaded and could not start for a missing library.
+/// NVIDIA's CUDA and cuDNN libraries, which the CUDA runtime brings;
+/// offered again when an install lacks them, so it never runs on the
+/// system's.
 fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
-    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
     let installing = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::NvidiaLibraries);
-    let missing_library = matches!(ctx.gpu_failure, Some(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(_) }))
-        && ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(RuntimeId::Cuda));
-    if !(ctx.nvidia_libraries || installing.is_some() || missing_library) {
+    if !(ctx.installs.cuda || installing.is_some()) {
         return;
     }
     let status = match installing {
         Some((_, progress)) => progress.clone(),
         None if ctx.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
-        None => format!("CUDA Runtime needs NVIDIA's CUDA 12 and cuDNN 9 libraries. Prunr can download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
+        None => format!("CUDA Runtime runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
     };
     rows.row("NVIDIA libraries", &status, |ui| {
         if installing.is_some() {
