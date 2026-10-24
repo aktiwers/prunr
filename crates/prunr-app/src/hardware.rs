@@ -166,13 +166,18 @@ pub fn cuda_card_free_mb_throttled() -> Option<u64> {
     throttled(&CACHE, || prunr_core::card_memory::cuda_card_memory().map(|c| c.free_mb))
 }
 
+/// `prunr_core::memory::card_free_mb`, read at most once a second.
+pub fn card_free_mb_throttled(provider: &str) -> Option<u64> {
+    (provider == prunr_core::engine::CUDA_NAME).then(cuda_card_free_mb_throttled).flatten()
+}
+
 /// What `id` takes where it will run, and what is free there now
 /// (readings at most a second old); until the GPU probe answers, the
 /// CPU's charge.
 pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(prunr_core::memory::Charge, prunr_core::memory::Room)> {
     let provider = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
     let charge = prunr_core::memory::charge_on(id, provider)?;
-    let card_mb = (charge.on_card() && provider == prunr_core::engine::CUDA_NAME).then(cuda_card_free_mb_throttled).flatten();
+    let card_mb = charge.on_card().then(|| card_free_mb_throttled(provider)).flatten();
     Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
 }
 
@@ -181,11 +186,8 @@ pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(pru
 /// `Err`: it fits neither.
 pub fn runs_on_cpu(id: prunr_models::ModelId, cpu_only: bool) -> Result<bool, prunr_core::memory::Short> {
     let cpu = charge_and_room(id, true);
-    if cpu_only {
-        return prunr_core::memory::falls_to_cpu(cpu, None).map(|_| true);
-    }
-    let on_gpu = prunr_core::memory::provider_once_probed(id, false).is_some_and(|p| p != prunr_core::engine::CPU_NAME);
-    prunr_core::memory::falls_to_cpu(charge_and_room(id, false), cpu.filter(|_| on_gpu))
+    let asked = if cpu_only { cpu } else { charge_and_room(id, false) };
+    prunr_core::memory::falls_to_cpu(asked, cpu).map(|fell| fell || cpu_only)
 }
 
 /// A reading and when it was taken.

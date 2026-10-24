@@ -62,11 +62,10 @@ pub fn fit(charge: Charge, room: Room) -> Result<(), Short> {
     Ok(())
 }
 
-/// Whether a run that asked for a GPU goes to the CPU: its GPU charge
+/// Whether a run goes to the CPU for its memory: the charge it asked for
 /// (`asked`, with the room for it) runs where it fits, else the CPU's
-/// (`cpu`, `None` when it asked for the CPU) when that fits. `None` for a
-/// side's charge or room: no reading, and the side is trusted. `Err`: it
-/// fits neither, short of what the CPU would need.
+/// (`cpu`) when that fits. `None` for a side: no reading, and the side is
+/// trusted. `Err`: it fits neither, short of what the CPU would need.
 pub fn falls_to_cpu(asked: Option<(Charge, Room)>, cpu: Option<(Charge, Room)>) -> Result<bool, Short> {
     let Some((charge, room)) = asked else { return Ok(false) };
     let Err(short) = fit(charge, room) else { return Ok(false) };
@@ -84,15 +83,14 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
 }
 
 /// How many of `wanted` engines of `id` fit the card `provider` runs it
-/// on, at least one: each engine holds its own pool there (BiRefNet takes
-/// 7.7 GB of an RTX 3060, so a second would run out). Off a card, or with
-/// no reading of it, `wanted`.
-pub fn engines_that_fit(id: ModelId, provider: &str, wanted: usize) -> usize {
-    let Some(charge) = charge_on(id, provider).filter(|c| c.on_card()) else { return wanted };
-    match room_now(charge, provider).and_then(|room| room.card_mb) {
-        Some(free_mb) => fitting(charge.card_mb, free_mb, wanted),
-        None => wanted,
-    }
+/// on, at least one, given `free_card_mb` there: each engine holds its own
+/// pool there (BiRefNet takes 7.7 GB of an RTX 3060, so a second would
+/// run out). Off a card, or with no reading of it, `wanted`.
+pub fn engines_that_fit(id: ModelId, provider: &str, wanted: usize, free_card_mb: Option<u64>) -> usize {
+    charge_on(id, provider)
+        .filter(|charge| charge.on_card())
+        .zip(free_card_mb)
+        .map_or(wanted, |(charge, free_mb)| fitting(charge.card_mb, free_mb, wanted))
 }
 
 fn fitting(card_mb: u64, free_mb: u64, wanted: usize) -> usize {
@@ -109,7 +107,7 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
 /// `provider_for` without waiting for the GPU probe, for the UI thread:
 /// `None` until the probe has answered.
 pub fn provider_once_probed(id: ModelId, cpu_only: bool) -> Option<&'static str> {
-    crate::engine::OrtEngine::detected_provider().map(|_| provider_for(id, cpu_only))
+    crate::engine::OrtEngine::probed().then(|| provider_for(id, cpu_only))
 }
 
 /// What is free now for a run charged `charge`: the card is read only
@@ -117,11 +115,14 @@ pub fn provider_once_probed(id: ModelId, cpu_only: bool) -> Option<&'static str>
 /// cannot be read.
 pub fn room_now(charge: Charge, provider: &str) -> Option<Room> {
     let ram_mb = crate::sysmem::available_ram_bytes()? / (1024 * 1024);
-    let card_mb = (charge.on_card() && provider == crate::engine::CUDA_NAME)
-        .then(crate::card_memory::cuda_card_memory)
-        .flatten()
-        .map(|card| card.free_mb);
+    let card_mb = charge.on_card().then(|| card_free_mb(provider)).flatten();
     Some(Room { ram_mb, card_mb })
+}
+
+/// Free memory on `provider`'s card now, in MB: CUDA's is read; `None`
+/// for another, or no reading.
+pub fn card_free_mb(provider: &str) -> Option<u64> {
+    (provider == crate::engine::CUDA_NAME).then(crate::card_memory::cuda_card_memory).flatten().map(|card| card.free_mb)
 }
 
 #[cfg(test)]
@@ -154,7 +155,7 @@ mod tests {
         assert_eq!(falls_to_cpu(Some((coreml, ram(2_000))), Some((cpu, ram(2_000)))), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }));
         let card = Room { ram_mb: 16_000, card_mb: Some(1_000) };
         assert_eq!(falls_to_cpu(Some((cuda, card)), Some((cpu, ram(16_000)))), Ok(true), "the card is short, the RAM is not");
-        assert_eq!(falls_to_cpu(Some((cpu, ram(2_000))), None), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }), "asked for the CPU");
+        assert_eq!(falls_to_cpu(Some((cpu, ram(2_000))), Some((cpu, ram(2_000)))), Err(Short::Ram { need_mb: 2_500, free_mb: 2_000 }), "asked for the CPU");
         assert_eq!(falls_to_cpu(None, Some((cpu, ram(0)))), Ok(false), "no reading: trusted");
     }
 

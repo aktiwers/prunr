@@ -148,17 +148,17 @@ pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     // Not waiting on the accelerator probe here (the UI thread): until it
     // answers the engines are counted as on the CPU, the larger figure.
-    let provider = prunr_core::OrtEngine::detected_provider().unwrap_or_else(|| prunr_core::engine::CPU_NAME.to_string());
+    let detected = prunr_core::OrtEngine::detected_provider().unwrap_or_else(|| prunr_core::engine::CPU_NAME.to_string());
     let id: prunr_models::ModelId = model.into();
-    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &provider);
-    let engines = prunr_core::memory::provider_once_probed(id, cpu_only).map_or(engines, |on| prunr_core::memory::engines_that_fit(id, on, engines));
-    per_engine_cost(model, cpu_only) * engines
+    let on = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
+    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, &detected);
+    engine_cost_on(model, on) * prunr_core::memory::engines_that_fit(id, on, engines, crate::hardware::card_free_mb_throttled(on))
 }
 
 /// Engines take at most 50% of available RAM, leaving the rest for image
 /// buffers, history and OS headroom.
 pub fn safe_max_jobs(model: ModelKind, cpu_only: bool) -> usize {
-    let available = crate::hardware::available_ram_bytes_now() as usize;
+    let available = crate::hardware::available_ram_bytes_throttled() as usize;
     let budget = available / 2; // 50% of available RAM for engines
     let cost = per_engine_cost(model, cpu_only);
     if cost == 0 { return 4; }
