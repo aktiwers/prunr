@@ -156,9 +156,16 @@ fn engine_pool(model: prunr_core::ModelKind, jobs: usize, on_cpu: bool) -> Resul
 /// Tell the parent the worker could not start, let the writer send it, and exit.
 fn init_failed(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::JoinHandle<()>, error: String) -> ! {
     let _ = evt_tx.send(SubprocessEvent::InitError { error });
+    close_events(evt_tx, writer);
+    std::process::exit(1);
+}
+
+/// Let the writer send what is queued and end: it ends once every sender
+/// is gone, the notice relay's too.
+fn close_events(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::JoinHandle<()>) {
+    drop(NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
     drop(evt_tx);
     let _ = writer.join();
-    std::process::exit(1);
 }
 
 /// The edge detector, built on first need.
@@ -265,11 +272,11 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
 }
 
 /// The worker's link to the window, for the provider check's notices.
-static NOTICES: std::sync::OnceLock<Mutex<mpsc::Sender<SubprocessEvent>>> = std::sync::OnceLock::new();
+static NOTICES: Mutex<Option<mpsc::Sender<SubprocessEvent>>> = Mutex::new(None);
 
 fn relay_notice(notice: prunr_core::provider_check::Notice) {
-    if let Some(tx) = NOTICES.get() {
-        let _ = tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(SubprocessEvent::ProviderCheck { notice });
+    if let Some(tx) = NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        let _ = tx.send(SubprocessEvent::ProviderCheck { notice });
     }
 }
 
@@ -279,7 +286,7 @@ pub fn run_worker() -> ! {
 
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
-    let _ = NOTICES.set(Mutex::new(evt_tx.clone()));
+    *NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(evt_tx.clone());
     prunr_core::provider_check::set_observer(relay_notice);
 
     // Writer thread: flush after every event. The parent blocks on each frame,
@@ -972,8 +979,7 @@ pub fn run_worker() -> ! {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 let _ = evt_tx.send(SubprocessEvent::Finished);
-                drop(evt_tx);
-                let _ = writer_handle.join();
+                close_events(evt_tx, writer_handle);
                 std::process::exit(0);
             }
 
@@ -984,8 +990,7 @@ pub fn run_worker() -> ! {
     }
 
     // stdin closed — clean exit
-    drop(evt_tx);
-    let _ = writer_handle.join();
+    close_events(evt_tx, writer_handle);
     std::process::exit(0);
 }
 
@@ -1027,6 +1032,21 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// The writer ends once every sender goes, the notice relay's too:
+    /// with the relay's left, each clean exit hung on joining the writer.
+    #[test]
+    fn closing_the_events_ends_the_writer_with_the_notice_relay_set() {
+        let (tx, rx) = mpsc::channel::<SubprocessEvent>();
+        *NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx.clone());
+        let writer = std::thread::spawn(move || while rx.recv().is_ok() {});
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            close_events(tx, writer);
+            let _ = done_tx.send(());
+        });
+        assert!(done_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "the writer never ended");
+    }
 
     /// A result that could not be written answers with an error, so the
     /// cache files written beside it are removed, not left in the IPC
