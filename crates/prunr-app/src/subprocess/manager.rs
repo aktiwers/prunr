@@ -165,7 +165,7 @@ impl SubprocessManager {
         } else {
             std::time::Duration::from_secs(300)
         };
-        let active_provider = match event_rx.recv_timeout(init_timeout) {
+        let active_provider = match past_notices(&event_rx, init_timeout) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
             }
@@ -607,6 +607,19 @@ fn current_rss_thresholds() -> (u64, u64) {
     (limit, resume)
 }
 
+/// The next event, after the provider check's notices, which go to this
+/// process's observer: a model's check runs inside the worker's build, so
+/// its notices come before `Ready`, and each restarts the wait (a check
+/// may take minutes).
+fn past_notices(event_rx: &mpsc::Receiver<ReaderEvent>, timeout: std::time::Duration) -> Result<ReaderEvent, mpsc::RecvTimeoutError> {
+    loop {
+        match event_rx.recv_timeout(timeout) {
+            Ok(ReaderEvent::Event(SubprocessEvent::ProviderCheck { notice })) => prunr_core::provider_check::tell(notice),
+            other => return other,
+        }
+    }
+}
+
 fn apply_event_state(
     in_flight: &mut HashSet<u64>,
     rss_paused: &mut bool,
@@ -637,7 +650,8 @@ fn apply_event_state(
         | SubprocessEvent::Report { .. }
         | SubprocessEvent::SpareEdgeScales { .. }
         | SubprocessEvent::Finished
-        | SubprocessEvent::InitError { .. } => {}
+        | SubprocessEvent::InitError { .. }
+        | SubprocessEvent::ProviderCheck { .. } => {}
     }
 }
 
@@ -645,6 +659,18 @@ fn apply_event_state(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A provider check's notice ahead of `Ready` is passed on, not taken
+    /// for the end of the start-up.
+    #[test]
+    fn a_notice_before_ready_does_not_end_the_start_up() {
+        let (tx, rx) = mpsc::channel();
+        let notice = prunr_core::provider_check::Notice::Checking { model: prunr_models::ModelId::BiRefNetLite };
+        tx.send(ReaderEvent::Event(SubprocessEvent::ProviderCheck { notice })).unwrap();
+        tx.send(ReaderEvent::Event(SubprocessEvent::Ready { active_provider: "CUDA".into() })).unwrap();
+        let first = past_notices(&rx, std::time::Duration::from_secs(1));
+        assert!(matches!(first, Ok(ReaderEvent::Event(SubprocessEvent::Ready { .. }))), "the start-up ended on the notice");
+    }
 
     /// A worker that stopped as soon as it began says why: one of another
     /// version (the app was updated while open) asks for a restart.

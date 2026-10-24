@@ -166,6 +166,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                         strokes.remove(&(item_id, generation));
                         let _ = res_tx.send(InpaintBridgeResult::Error { item_id, generation, error });
                     }
+                    SubprocessEvent::ProviderCheck { notice } => prunr_core::provider_check::tell(notice),
                     // An inpaint-only subprocess shouldn't emit seg events; ignore one
                     // rather than misroute it.
                     _ => {}

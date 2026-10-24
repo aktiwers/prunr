@@ -1266,6 +1266,10 @@ fn run_batch_subprocess(
                         (item_id, result)
                     }
                     SubprocessEvent::ImageError { item_id, error } => (item_id, Err(CoreError::Model(error))),
+                    SubprocessEvent::ProviderCheck { notice } => {
+                        prunr_core::provider_check::tell(notice);
+                        continue;
+                    }
                     _ => continue,
                 };
                 if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
@@ -1488,6 +1492,16 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
 }
 
 /// One `--needs` point, in this process, printed for the parent.
+/// The provider check's notices, on the terminal.
+pub fn announce_provider_check(notice: prunr_core::provider_check::Notice) {
+    use prunr_core::provider_check::Notice;
+    let name = |model: prunr_models::ModelId| prunr_models::descriptor(model).map_or("the model", |d| d.display_name);
+    match notice {
+        Notice::Checking { model } => eprintln!("Checking the graphics card with {}, once...", name(model)),
+        Notice::PassedOver { model, reason } => eprintln!("{} runs on the CPU here: {reason}.", name(model)),
+    }
+}
+
 fn run_check(name: &str) -> i32 {
     use prunr_app::bench;
     let Some(id) = bench::model_named(name) else {

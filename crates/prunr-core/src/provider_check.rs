@@ -29,6 +29,30 @@ pub type Checker = fn(prunr_models::ModelId, &str, Weights) -> Option<Check>;
 static CHECKER: OnceLock<Checker> = OnceLock::new();
 static OFF: AtomicBool = AtomicBool::new(false);
 
+/// What the person using the app is told: a check starting (it takes
+/// seconds, once), and a provider passed over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Notice {
+    Checking { model: prunr_models::ModelId },
+    PassedOver { model: prunr_models::ModelId, reason: String },
+}
+
+static OBSERVER: OnceLock<fn(Notice)> = OnceLock::new();
+
+/// Where this process sends its notices: the window, the worker's link
+/// to it, or the command line.
+pub fn set_observer(observer: fn(Notice)) {
+    let _ = OBSERVER.set(observer);
+}
+
+/// `notice` to this process's observer: its own, or one a worker it
+/// runs relayed.
+pub fn tell(notice: Notice) {
+    if let Some(observer) = OBSERVER.get() {
+        observer(notice);
+    }
+}
+
 /// The app's checker, set once at start by every process that builds
 /// sessions.
 pub fn set_checker(checker: Checker) {
@@ -65,8 +89,12 @@ fn rejection_by(checker: Checker, model: prunr_models::ModelId, weights: Weights
     }
     if !std::mem::replace(&mut *asked, true) {
         tracing::info!(?model, ep = %ep, ?weights, "checking the provider against the CPU, once");
+        tell(Notice::Checking { model });
         if let Some(check) = checker(model, ep.as_str(), weights) {
             record(model, &check);
+            if let Some(reason) = check.rejected {
+                tell(Notice::PassedOver { model, reason });
+            }
         }
     }
     let rejected = crate::ep_compat::failure(ep, model, weights)?;
@@ -98,6 +126,11 @@ mod tests {
     const EP: EpKind = EpKind::CoreMl;
 
     static CHECKS: AtomicUsize = AtomicUsize::new(0);
+    static TOLD: Mutex<Vec<Notice>> = Mutex::new(Vec::new());
+
+    fn tell(notice: Notice) {
+        TOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(notice);
+    }
 
     fn passes(_: prunr_models::ModelId, provider: &str, weights: Weights) -> Option<Check> {
         CHECKS.fetch_add(1, Ordering::Relaxed);
@@ -108,10 +141,12 @@ mod tests {
         Some(Check { provider: provider.into(), weights: weights.label().into(), rejected: Some("it runs slower there".into()) })
     }
 
-    /// The check runs once for a pair; a pass is kept and lets the
-    /// provider run, a rejection is kept and passes the provider over.
+    /// The check runs once for a pair and says so; a pass is kept and
+    /// lets the provider run, a rejection is kept, said, and passes the
+    /// provider over.
     #[test]
     fn a_provider_is_checked_once_and_its_verdict_kept() {
+        set_observer(tell);
         let model = prunr_models::ModelId::DepthAnythingV2Small;
         assert_eq!(rejection_by(passes, model, Weights::Fp16, EP), None);
         assert_eq!(rejection_by(passes, model, Weights::Fp16, EP), None);
@@ -121,5 +156,11 @@ mod tests {
         let other = prunr_models::ModelId::Migan;
         assert_eq!(rejection_by(slower, other, Weights::Fp16, EP).as_deref(), Some("it runs slower there"));
         assert!(crate::ep_compat::is_known_failure(EP, other, Weights::Fp16));
+        let told = TOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        assert_eq!(told, [
+            Notice::Checking { model },
+            Notice::Checking { model: other },
+            Notice::PassedOver { model: other, reason: "it runs slower there".into() },
+        ]);
     }
 }
