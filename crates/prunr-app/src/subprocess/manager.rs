@@ -158,14 +158,15 @@ impl SubprocessManager {
         })?;
 
         // Seg/edge workers build engine pools at Init (a CoreML first-run compile
-        // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
-        // bounds a pre-Ready hang such as a wedged OpenVINO probe.
+        // alone can take 2–5 min), so 300 s, and a model's provider check runs
+        // inside that build; inpaint-only builds lazily, so 30 s bounds a
+        // pre-Ready hang such as a wedged OpenVINO probe.
         let init_timeout = if inpaint_only {
             std::time::Duration::from_secs(30)
         } else {
-            std::time::Duration::from_secs(300)
+            std::time::Duration::from_secs(300) + crate::bench::check::LIMIT
         };
-        let active_provider = match past_notices(&event_rx, init_timeout) {
+        let active_provider = match event_rx.recv_timeout(init_timeout) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
             }
@@ -589,6 +590,7 @@ fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mps
             let mut reader = BufReader::new(child_stdout);
             // A closed stdout (clean exit or crash) or garbage ends it.
             while let Ok(Some(evt)) = read_message::<_, SubprocessEvent>(&mut reader) {
+                let Some(evt) = relayed(evt) else { continue };
                 if event_tx.send(ReaderEvent::Event(evt)).is_err() {
                     return; // parent dropped receiver
                 }
@@ -607,16 +609,16 @@ fn current_rss_thresholds() -> (u64, u64) {
     (limit, resume)
 }
 
-/// The next event, after the provider check's notices, which go to this
-/// process's observer: a model's check runs inside the worker's build, so
-/// its notices come before `Ready`, and each restarts the wait (a check
-/// may take minutes).
-fn past_notices(event_rx: &mpsc::Receiver<ReaderEvent>, timeout: std::time::Duration) -> Result<ReaderEvent, mpsc::RecvTimeoutError> {
-    loop {
-        match event_rx.recv_timeout(timeout) {
-            Ok(ReaderEvent::Event(SubprocessEvent::ProviderCheck { notice })) => prunr_core::provider_check::tell(notice),
-            other => return other,
+/// `evt` for whoever reads the worker's events; a provider check's notice
+/// goes to this process's observer here instead, whatever the worker is
+/// doing when it comes (it can come before `Ready`).
+fn relayed(evt: SubprocessEvent) -> Option<SubprocessEvent> {
+    match evt {
+        SubprocessEvent::ProviderCheck { notice } => {
+            prunr_core::provider_check::tell(notice);
+            None
         }
+        evt => Some(evt),
     }
 }
 
@@ -660,16 +662,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A provider check's notice ahead of `Ready` is passed on, not taken
-    /// for the end of the start-up.
+    /// A provider check's notice never reaches an event's reader, so it
+    /// cannot be taken for the end of the start-up.
     #[test]
-    fn a_notice_before_ready_does_not_end_the_start_up() {
-        let (tx, rx) = mpsc::channel();
+    fn a_notice_is_told_not_read() {
         let notice = prunr_core::provider_check::Notice::Checking { model: prunr_models::ModelId::BiRefNetLite };
-        tx.send(ReaderEvent::Event(SubprocessEvent::ProviderCheck { notice })).unwrap();
-        tx.send(ReaderEvent::Event(SubprocessEvent::Ready { active_provider: "CUDA".into() })).unwrap();
-        let first = past_notices(&rx, std::time::Duration::from_secs(1));
-        assert!(matches!(first, Ok(ReaderEvent::Event(SubprocessEvent::Ready { .. }))), "the start-up ended on the notice");
+        assert!(relayed(SubprocessEvent::ProviderCheck { notice }).is_none());
+        assert!(matches!(relayed(SubprocessEvent::Ready { active_provider: "CUDA".into() }), Some(SubprocessEvent::Ready { .. })));
     }
 
     /// A worker that stopped as soon as it began says why: one of another

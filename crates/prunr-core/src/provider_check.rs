@@ -37,6 +37,18 @@ pub enum Notice {
     PassedOver { model: prunr_models::ModelId, reason: String },
 }
 
+impl Notice {
+    /// What the person using the app is told.
+    pub fn text(&self) -> String {
+        match self {
+            Notice::Checking { model } => {
+                format!("Checking the graphics card with {}, once. This takes a few seconds.", prunr_models::display_name(*model))
+            }
+            Notice::PassedOver { model, reason } => format!("{} runs on the CPU here: {reason}.", prunr_models::display_name(*model)),
+        }
+    }
+}
+
 static OBSERVER: OnceLock<fn(Notice)> = OnceLock::new();
 
 /// Where this process sends its notices: the window, the worker's link
@@ -119,6 +131,14 @@ fn record(model: prunr_models::ModelId, check: &Check) {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn a_notice_names_the_model_and_the_reason() {
+        let model = prunr_models::ModelId::DdcolorTiny;
+        assert_eq!(Notice::Checking { model }.text(), "Checking the graphics card with DDColor, once. This takes a few seconds.");
+        let passed_over = Notice::PassedOver { model, reason: "it runs slower on CoreML than on the CPU (950 ms against 1000 ms)".into() };
+        assert_eq!(passed_over.text(), "DDColor runs on the CPU here: it runs slower on CoreML than on the CPU (950 ms against 1000 ms).");
+    }
 
     #[cfg(not(target_os = "macos"))]
     const EP: EpKind = EpKind::Cuda;

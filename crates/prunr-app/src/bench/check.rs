@@ -20,7 +20,7 @@ const FASTER_BY: f64 = 0.9;
 
 /// Past this the provider is passed over: a compile that never ends
 /// (CoreML's Neural Engine compiler has hung for an hour).
-const LIMIT: Duration = Duration::from_secs(300);
+pub(crate) const LIMIT: Duration = Duration::from_secs(300);
 
 /// The line the check's process prints its verdict on.
 pub const LINE: &str = "PRUNR-CHECK ";

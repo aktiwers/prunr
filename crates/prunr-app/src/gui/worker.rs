@@ -953,8 +953,8 @@ fn handle_subprocess_event(
             let _ = res_tx.send(WorkerResult::SpareEdgeScales { item_id, token, landing });
             ctx.request_repaint();
         }
-        SubprocessEvent::ProviderCheck { notice } => prunr_core::provider_check::tell(notice),
         SubprocessEvent::Ready { .. }
+        | SubprocessEvent::ProviderCheck { .. }
         | SubprocessEvent::InpaintDone { .. }
         | SubprocessEvent::InpaintError { .. }
         | SubprocessEvent::RssUpdate { .. }
