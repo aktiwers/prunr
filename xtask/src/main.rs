@@ -372,15 +372,21 @@ fn install_runtime() -> anyhow::Result<()> {
         }
     };
     let mut hooks = ri::DownloadHooks::progress_only(&mut on_progress);
+    let spool = target_dir.with_extension("wheel");
+    if let Some(parent) = spool.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     // Already SHA-verified inside the retry loop.
-    let bytes = ri::download_wheel(&wheel, &mut hooks).map_err(|e| anyhow::anyhow!(e))?;
+    let wheel_file = ri::download_wheel(&wheel, &mut hooks, &spool).map_err(|e| anyhow::anyhow!(e))?;
 
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)?;
     }
     std::fs::create_dir_all(&target_dir)?;
     println!("Extracting to {}", target_dir.display());
-    ri::extract_wheel(&bytes, &target_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let extracted = ri::extract_wheel(wheel_file, &target_dir).map_err(|e| anyhow::anyhow!(e));
+    let _ = std::fs::remove_file(&spool);
+    extracted?;
 
     println!();
     println!("=== install-runtime DONE ===");
