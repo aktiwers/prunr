@@ -575,15 +575,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // "graph is not acyclic" (graph-cycle validation is stricter
         // than ORT's CPU EP). FP16 variant additionally fails on a
         // quantized_cast type mismatch. Both verified 2026-04-26.
-        // CoreML runs it slower than the CPU on a MacBook Air (287 ms
-        // against 250 ms, ORT 1.30, 2026-10-23).
-        incompatible_eps: &["OpenVINO", "CoreML"],
+        incompatible_eps: &["OpenVINO"],
         needs: Needs {
             cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
             openvino: Priced::Never,
             migraphx: Priced::Unmeasured,
         },
@@ -1458,17 +1456,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // CoreML runs it slower than the CPU on a MacBook Air (671 ms
-        // against 431 ms, ORT 1.30, 2026-10-23).
-        incompatible_eps: &["CoreML"],
+        incompatible_eps: &[],
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
             cpu: Cost::measured(350, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(650, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
             cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Same(Cost::measured(3_450, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -2354,7 +2350,7 @@ mod tests {
                 }
             }
         }
-        const MAC_CPU_UNMEASURED_AT_MOST: usize = 16;
+        const MAC_CPU_UNMEASURED_AT_MOST: usize = 15;
         let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
         assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
         assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
@@ -2475,10 +2471,10 @@ mod tests {
     /// "OpenVINO" all match.
     #[test]
     fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
-        for ep in ["OpenVINO", "openvino", "OPENVINO", "CoreML", "coreml"] {
+        for ep in ["OpenVINO", "openvino", "OPENVINO"] {
             assert!(!is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
         }
-        for ep in ["CPU", "CUDA", "DirectML"] {
+        for ep in ["CPU", "CUDA", "DirectML", "CoreML"] {
             assert!(is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
         }
         // An empty list accepts every provider.
