@@ -710,22 +710,28 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
             app.batch.select_item(0);
             app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
         }
-        // Work landing off the UI thread (a texture, a startup probe on a
-        // slow runner) asks for one frame at once; the pace is what the
-        // frames settle to, and then holds. The settle budget is generous:
-        // a loaded machine (an Intel Mac runner, parallel builds) took
-        // over 10 s to land that work, and only a failure waits it out.
+        // Work landing off the UI thread (a texture, a startup probe) asks
+        // for one frame at once, and on a loaded machine (an Intel Mac
+        // runner, parallel tests) it lands at any time, over 10 s in. The
+        // pace is what the frames return to after such a frame and hold:
+        // one landing is made here, and only a failure waits out the budget.
         let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         let paced = |d: std::time::Duration| d >= std::time::Duration::from_millis(15);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        h.run_steps(3);
-        while !paced(delay(&h)) && std::time::Instant::now() < deadline {
+        let (mut streak, mut landed, mut unpaced) = (0, false, None);
+        while (streak < 10 || !landed) && std::time::Instant::now() < deadline {
             h.step();
+            if !paced(delay(&h)) {
+                streak = 0;
+                unpaced = Some((delay(&h), h.ctx.repaint_causes()));
+            } else if streak == 3 && !landed {
+                h.ctx.request_repaint();
+                (streak, landed) = (0, true);
+            } else {
+                streak += 1;
+            }
         }
-        for _ in 0..3 {
-            assert!(paced(delay(&h)), "{status:?}: the next frame is asked for {:?} ahead, by {:?}", delay(&h), h.ctx.repaint_causes());
-            h.step();
-        }
+        assert!(landed && streak >= 10, "{status:?}: the frames never held a pace; last asked {unpaced:?}");
     }
 }
 
