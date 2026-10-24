@@ -1472,7 +1472,7 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
     let header = report::Header::detect("", 0);
     let machine = format!("{}, {}, {} RAM, {}", header.gpus.join(" + "), header.cpu, header.ram, header.os);
     let points = needs::measure_all(models, args.image.as_deref(), &mut |p| {
-        let side = if p.gpu_side { "GPU path" } else { "CPU" };
+        let side = p.side_label();
         match &p.error {
             Some(e) => eprintln!("{} ({side}): {e}", p.name),
             None => eprintln!("{} ({side}, {}): RAM {:?} MB, card {:?} MB", p.name, p.provider, p.host_mb, p.card_mb),
