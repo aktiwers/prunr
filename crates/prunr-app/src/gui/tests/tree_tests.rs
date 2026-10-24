@@ -109,17 +109,16 @@ fn the_hardware_page_names_every_runtime_control() {
     }
 }
 
-/// The NVIDIA libraries are offered only while the loaded CUDA runtime
-/// is missing a library: Download then, Cancel while they install, and
-/// neither for a missing driver or once they are there.
+/// The NVIDIA libraries are offered whenever the CUDA runtime lacks its
+/// own copy, whatever the system has: Download then, Cancel while they
+/// install, neither once they are there or without a CUDA runtime.
 #[test]
-fn the_nvidia_libraries_are_offered_only_when_cuda_needs_them() {
+fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
     use crate::gui::hardware_cache::HardwareInstallCache;
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
     use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
     static MISSING: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::MissingLibrary(String::new()) };
-    static NO_DRIVER: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDriver };
     if !RuntimeId::OFFERED.contains(&RuntimeId::Cuda) {
         return;
     }
@@ -128,20 +127,21 @@ fn the_nvidia_libraries_are_offered_only_when_cuda_needs_them() {
     on_cuda.loaded_runtime = Some(RuntimeChoice::Store(RuntimeId::Cuda));
     let installing = Some((InstallTarget::NvidiaLibraries, "Downloading 10% (170/1700 MB)".to_string()));
     let shapes = [
-        ("missing a library", &MISSING, None, false, Some("Download NVIDIA libraries")),
-        ("installing", &MISSING, installing, false, Some("Cancel")),
-        ("no driver", &NO_DRIVER, None, false, None),
-        ("installed", &MISSING, None, true, None),
+        ("missing a library", on_cuda, Some(&MISSING), None, false, Some("Download NVIDIA libraries")),
+        ("starts on the system's", on_cuda, None, None, false, Some("Download NVIDIA libraries")),
+        ("installing", on_cuda, Some(&MISSING), installing, false, Some("Cancel")),
+        ("installed", on_cuda, None, None, true, None),
+        ("no CUDA runtime", HardwareInstallCache::default(), None, None, false, None),
     ];
-    for (shape, failure, installing, nvidia_libraries, expected) in shapes {
+    for (shape, installs, failure, installing, nvidia_libraries, expected) in shapes {
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
-            installs: on_cuda,
+            installs,
             installing,
             active_provider: "CPU".into(),
             sd_margin_mb: 2048,
             sd_cpu_only: false,
-            gpu_failure: Some(failure),
+            gpu_failure: failure,
             nvidia_libraries,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });

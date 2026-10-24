@@ -130,8 +130,8 @@ impl RuntimeId {
         match (self, recommended) {
             (Self::OpenVino, false) => "Not installed (80 MB).",
             (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
-            (Self::Cuda, false) => "Not installed (250 MB). Runs the models on an NVIDIA graphics card; needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
-            (Self::Cuda, true) => "Not installed (250 MB). Recommended for your NVIDIA graphics card: runs the models on it. Needs NVIDIA's CUDA 12 and cuDNN 9 libraries.",
+            (Self::Cuda, false) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Runs the models on an NVIDIA graphics card.",
+            (Self::Cuda, true) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: runs the models on it.",
             (Self::MiGraphX, false) => "Not installed (20 MB). Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
             (Self::MiGraphX, true) => "Not installed (20 MB). Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
         }
@@ -152,8 +152,8 @@ impl RuntimeId {
                 Installing it (~80 MB) makes the models run faster, and lets you \
                 try running them on the Intel graphics chip (Settings › Hardware).",
             Self::Cuda => "We detected an NVIDIA graphics card. Installing CUDA Runtime \
-                (~250 MB) runs the models on it instead of the processor. It needs \
-                NVIDIA's CUDA 12 and cuDNN 9 libraries on this computer.",
+                (about 2 GB, with NVIDIA's CUDA and cuDNN libraries) runs the models \
+                on it instead of the processor.",
             Self::MiGraphX => "We detected an AMD graphics card. Installing MIGraphX Runtime \
                 (~20 MB) runs the models on it instead of the processor. It needs \
                 AMD's ROCm 7 with MIGraphX on this computer.",
@@ -192,7 +192,8 @@ pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
     ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
 ];
 
-/// The NVIDIA libraries' download, for the button that offers them.
+/// The NVIDIA libraries' download, for the button that offers them
+/// again when they are missing.
 pub const NVIDIA_DOWNLOAD_LABEL: &str = "1.7 GB";
 
 /// The settings key the NVIDIA libraries' license acceptance is kept under.
@@ -354,6 +355,8 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     Ok(())
 }
 
+/// The CUDA runtime brings NVIDIA's libraries in the same install, never
+/// the system's; a reinstall keeps the ones already in place.
 fn run_install(
     rt: RuntimeId,
     tx: &mpsc::Sender<InstallEvent>,
@@ -361,22 +364,24 @@ fn run_install(
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
     let wheel = query_pypi(rt, &cancel)?;
+    let nvidia = if rt == RuntimeId::Cuda && !nvidia_libraries_installed() { nvidia_wheels(&cancel)? } else { Vec::new() };
+    let total = wheel.size_bytes + nvidia.iter().map(|w| w.size_bytes).sum::<u64>();
 
-    let _ = tx.send(InstallEvent::Downloading {
-        bytes_so_far: 0,
-        total_bytes: wheel.size_bytes,
-    });
-    let mut on_progress = |so_far: u64, total: u64| {
-        let _ = tx.send(InstallEvent::Downloading {
-            bytes_so_far: so_far, total_bytes: total,
-        });
+    let _ = tx.send(InstallEvent::Downloading { bytes_so_far: 0, total_bytes: total });
+    let mut on_progress = |so_far: u64, _: u64| {
+        let _ = tx.send(InstallEvent::Downloading { bytes_so_far: so_far, total_bytes: total });
     };
-    let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel };
+    let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(&cancel) };
     // Already SHA-verified inside the retry loop.
     let bytes = ri::download_wheel(&wheel, &mut hooks)?;
 
     let _ = tx.send(InstallEvent::Extracting);
     let install_dir = extract_into_place(&bytes, &rt.checked_install_dir()?)?;
+    drop(bytes);
+    if !nvidia.is_empty() {
+        let target = rt.checked_install_dir()?.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
+        fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
+    }
     // The runtime just installed is the one the user wants next start.
     if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
         tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
@@ -395,22 +400,39 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
     if !RuntimeId::Cuda.is_installed() {
         return Err("install CUDA Runtime first".to_string());
     }
-    let wheels = NVIDIA_WHEELS.iter()
-        .map(|(package, version)| query_pypi_package(package, version, &cancel))
-        .collect::<Result<Vec<_>, _>>()?;
-    let total: u64 = wheels.iter().map(|w| w.size_bytes).sum();
+    let wheels = nvidia_wheels(&cancel)?;
+    let total = wheels.iter().map(|w| w.size_bytes).sum();
+    fetch_nvidia_libraries(&wheels, &target, tx, &cancel, (0, total))?;
+    let _ = tx.send(InstallEvent::Done { install_dir: target });
+    Ok(())
+}
+
+fn nvidia_wheels(cancel: &Arc<AtomicBool>) -> Result<Vec<ri::WheelInfo>, String> {
+    NVIDIA_WHEELS.iter().map(|(package, version)| query_pypi_package(package, version, cancel)).collect()
+}
+
+/// `wheels`' libraries into `target`, through a staging folder moved into
+/// place once all are there; `(done, total)` places their bytes in the
+/// install's progress.
+fn fetch_nvidia_libraries(
+    wheels: &[ri::WheelInfo],
+    target: &Path,
+    tx: &mpsc::Sender<InstallEvent>,
+    cancel: &Arc<AtomicBool>,
+    (done_before, total): (u64, u64),
+) -> Result<(), String> {
     let staging = target.with_file_name(format!(".{}.staging", prunr_core::ort_runtime::NVIDIA_LIBS_DIR));
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
     }
     std::fs::create_dir_all(&staging).map_err(|e| format!("create staging dir: {e}"))?;
     let fetched = (|| {
-        let mut done = 0u64;
-        for wheel in &wheels {
+        let mut done = done_before;
+        for wheel in wheels {
             let mut on_progress = |so_far: u64, _: u64| {
                 let _ = tx.send(InstallEvent::Downloading { bytes_so_far: done + so_far, total_bytes: total });
             };
-            let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(&cancel) };
+            let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(cancel) };
             let bytes = ri::download_wheel(wheel, &mut hooks)?;
             let _ = tx.send(InstallEvent::Extracting);
             ri::extract_nvidia_wheel(&bytes, &staging)?;
@@ -422,9 +444,7 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
-    move_into_place(&staging, &target, &[])?;
-    let _ = tx.send(InstallEvent::Done { install_dir: target });
-    Ok(())
+    move_into_place(&staging, target, &[])
 }
 
 fn query_pypi(rt: RuntimeId, cancel: &Arc<AtomicBool>) -> Result<ri::WheelInfo, String> {
