@@ -10,12 +10,13 @@ use crate::{
 
 /// How many engines a batch builds for `jobs` on `provider`: at most two
 /// on a GPU (VRAM), one on the host CPU for a model whose single run
-/// already fills every core, else one per job. OpenVINO runs on the host
-/// CPU here, so the one-engine rule covers it; its pool keeps the cap of
-/// two, which is what was measured.
+/// already fills every core, else one per job. Where the model's sessions
+/// really run decides (`model_on_host_cpu`): OpenVINO's processor, or a
+/// provider the table keeps it off, is the host CPU; OpenVINO's pool keeps
+/// the cap of two, which is what was measured.
 pub fn engine_pool_size(model: ModelKind, jobs: usize, cpu_only: bool, provider: &str) -> usize {
     let jobs = jobs.max(1);
-    let on_cpu = cpu_only || crate::engine::runs_on_host_cpu(provider);
+    let on_cpu = cpu_only || crate::engine::model_on_host_cpu(model.model_id(), provider);
     if on_cpu && !model.parallel_jobs_pay_on_cpu() {
         1
     } else if !cpu_only && !provider.eq_ignore_ascii_case(crate::engine::CPU_NAME) {

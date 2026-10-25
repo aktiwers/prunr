@@ -1472,7 +1472,7 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     println!("{}.", report::summary(&report.rows));
     if let Some(label) = &args.table {
         let column = report.header.gpu_providers.first().map_or("CPU", String::as_str);
-        let section = bench::table::section(&report.rows, column, label);
+        let section = bench::table::section(&report.rows, column, label, prunr_core::engine::column_for);
         print!("{section}");
         report.places = Some(section);
         files.write(&report);

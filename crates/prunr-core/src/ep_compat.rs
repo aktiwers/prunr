@@ -7,10 +7,10 @@
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
 //! Scoped to what a failure says something about: the loaded runtime
-//! build and the graphics drivers ([`set_drivers`]). Either changing
-//! starts the list afresh; an app update alone does not, so what failed
-//! is not tried again after every update. Each entry names the model's
-//! files (a download's checksums, a built-in model's version), so a new
+//! build, the graphics drivers ([`set_drivers`]) and how sessions are set
+//! up (`SESSION_SETUP`). Any changing starts the list afresh; another app
+//! update does not, so what failed is not tried again after every update.
+//! Each entry names the model's files (`prunr_models::files_id`), so a new
 //! copy of a model is tried again. A failure the device had, not the
 //! model (out of memory, a device removed or hung), is never recorded.
 
@@ -32,13 +32,19 @@ pub fn set_drivers(identity: String) {
     let _ = DRIVERS.set(identity);
 }
 
-/// What a recorded failure holds for: this runtime build and drivers.
+/// Bumped by a release that changes how sessions are set up (provider
+/// options, cache handling), so the failures it may have fixed are tried
+/// again; an app update that leaves it alone keeps the list.
+const SESSION_SETUP: u32 = 1;
+
+/// What a recorded failure holds for: this way of setting sessions up,
+/// runtime build and drivers.
 fn scope() -> String {
     scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str))
 }
 
 fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
-    format!("ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
+    format!("setup {SESSION_SETUP} ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
 }
 
 /// Error text of a failure the device had rather than the model: memory
@@ -46,7 +52,7 @@ fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
 /// DirectML reports them), or CoreML found the compile it was saving
 /// already saved by another session building at the same time. The next
 /// session may well succeed.
-pub(crate) fn is_transient(error: &str) -> bool {
+pub fn is_transient(error: &str) -> bool {
     const MARKS: &[&str] = &[
         "out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate",
         "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
@@ -248,7 +254,7 @@ mod tests {
     fn key_format_is_stable_coreml() {
         assert_eq!(
             key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Fp32),
-            "CoreML::Silueta@v1.0.0",
+            format!("CoreML::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
         );
     }
 
@@ -270,8 +276,8 @@ mod tests {
         assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000002", false));
         assert!(key(EpKind::OpenVino, lcm, Weights::Fp32).starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
         let silueta = prunr_models::ModelId::Silueta;
-        let version = prunr_models::descriptor(silueta).unwrap().version;
-        assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32), format!("OpenVINO::Silueta@v{version}"), "a built-in model by its own version");
+        assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32), format!("OpenVINO::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
+            "a built-in model by the app it ships with");
     }
 
     /// A failure on the Intel GPU is its own key: turning the switch off
@@ -286,7 +292,8 @@ mod tests {
             key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", false),
         );
         if crate::engine::openvino_on_gpu() {
-            assert!(on_intel_gpu(EpKind::OpenVino, silueta));
+            assert!(on_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::RealEsrganX4Plus), "faster on the graphics");
+            assert!(!on_intel_gpu(EpKind::OpenVino, silueta), "kept off the graphics");
         }
         assert!(!on_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::LaMaFp32), "a fill stays on the CPU");
         assert!(!on_intel_gpu(EpKind::Cuda, silueta));
@@ -338,7 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
-        assert_eq!(then, "ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", "no app version in it: an update keeps the list");
+        assert_eq!(then, format!("setup {SESSION_SETUP} ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094"), "no app version in it: an update keeps the list");
         let failures = Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]);
         save_to(&path, &then, &failures);
         assert_eq!(load_from(&path, &then), Some(failures));
