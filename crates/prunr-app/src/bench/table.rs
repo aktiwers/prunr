@@ -4,7 +4,7 @@
 //! taking less system memory.
 
 use prunr_core::memory::Charge;
-use prunr_models::Needs;
+use prunr_models::{Column, Needs, Priced};
 
 use super::report::fmt_ms;
 use super::stats::steady_pair;
@@ -13,89 +13,98 @@ use super::{Gpu, Row, Verdict};
 /// Two speeds this close are one run's noise apart: memory decides.
 const EVEN: f64 = 1.1;
 
-/// Where a bench row places its model, as the registry writes it.
+/// The registry's `Place::There` or the `Why` of `Place::Cpu`, by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    There,
+    Fails,
+    Differs,
+    Slower,
+    NoGain,
+}
+
+/// Where a bench row places its model, and the measurement that says so.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Found {
-    There(String),
-    /// On the CPU: the `Why` variant and its text.
-    Cpu(&'static str, String),
+struct Found {
+    kind: Kind,
+    text: String,
 }
 
 impl Found {
-    fn rust(&self) -> String {
-        match self {
-            Found::There(text) => format!("Place::There({text:?})"),
-            Found::Cpu(why, text) => format!("Place::Cpu(Why::{why}({text:?}))"),
+    fn new(kind: Kind, text: impl Into<String>) -> Self {
+        Self { kind, text: text.into() }
+    }
+
+    /// As the registry writes it, measured where `label` says.
+    fn rust(&self, label: &str) -> String {
+        let text = format!("{} ({label})", self.text);
+        match self.kind {
+            Kind::There => format!("Place::There({text:?})"),
+            why => format!("Place::Cpu(Why::{why:?}({text:?}))"),
         }
     }
 }
 
-/// `row`'s place on `provider`, measured where `label` says; `None` when
-/// the row measured nothing there (not run, no room, no CPU reference).
-/// `needs` prices the memory tie-break.
-pub fn found(row: &Row, needs: &Needs, provider: &str, label: &str) -> Option<Found> {
+/// `row`'s place on `provider`; `None` when the row measured nothing
+/// there (not run, no room, no CPU reference). `needs` prices the memory
+/// tie-break.
+fn found(row: &Row, needs: &Needs, provider: &str) -> Option<Found> {
     let gpu = row.gpu.on_gpu();
     match row.verdict {
         Verdict::GpuFailed => {
             let error = gpu.and_then(|s| s.error.as_deref()).unwrap_or("no reason given");
-            Some(Found::Cpu("Fails", format!("{} ({label})", first_line(error))))
+            Some(Found::new(Kind::Fails, first_line(error)))
         }
         Verdict::FellBack => {
             let Gpu::Ran(side) = &row.gpu else { return None };
-            let failed = side.failed.first()?;
-            Some(Found::Cpu("Fails", format!("{} ({label})", first_line(failed))))
+            Some(Found::new(Kind::Fails, first_line(side.failed.first()?)))
         }
         Verdict::Mismatch => {
             let off = row.agreement.as_ref().map_or_else(
                 || "a different size".to_string(),
                 |a| format!("mean {:.2}/255, {:.1}% of values more than 2/255 apart", a.mean_abs, a.over_2 * 100.0),
             );
-            Some(Found::Cpu("Differs", format!("{off} ({label})")))
+            Some(Found::new(Kind::Differs, off))
         }
         Verdict::Match => {
             let (cpu_ms, gpu_ms) = steady_pair(row.cpu.as_ref()?.timing.as_ref()?, gpu?.timing.as_ref()?);
             let ratio = cpu_ms / gpu_ms;
             let times = format!("{ratio:.2}x: {} against the CPU's {}", fmt_ms(gpu_ms), fmt_ms(cpu_ms));
             if ratio >= EVEN {
-                return Some(Found::There(format!("{times} ({label})")));
+                return Some(Found::new(Kind::There, times));
             }
             if ratio <= 1.0 / EVEN {
-                return Some(Found::Cpu("Slower", format!("{times} ({label})")));
+                return Some(Found::new(Kind::Slower, times));
+            }
+            let within = format!("{times}, within {:.0}%", (EVEN - 1.0) * 100.0);
+            let faster = if ratio >= 1.0 { Kind::There } else { Kind::NoGain };
+            if !matches!(needs.on(provider), Priced::Same(_)) {
+                return Some(Found::new(faster, format!("{within}; its memory there not measured")));
             }
             let cpu_mb = Charge::of(needs, prunr_core::engine::CPU_NAME).ram_mb;
             let there_mb = Charge::of(needs, provider).ram_mb;
-            let memory = format!("{there_mb} MB of system memory against the CPU's {cpu_mb} MB");
-            let even = format!("{times}, within 10%; {memory} ({label})");
-            Some(if there_mb < cpu_mb || (there_mb == cpu_mb && ratio >= 1.0) { Found::There(even) } else { Found::Cpu("NoGain", even) })
+            let kind = match there_mb.cmp(&cpu_mb) {
+                std::cmp::Ordering::Less => Kind::There,
+                std::cmp::Ordering::Equal => faster,
+                std::cmp::Ordering::Greater => Kind::NoGain,
+            };
+            Some(Found::new(kind, format!("{within}, in {there_mb} MB of system memory against the CPU's {cpu_mb} MB")))
         }
         _ => None,
     }
 }
 
-/// The registry field of the column `Places::columns` names `column`.
-pub fn field(column: &str) -> Option<&'static str> {
-    Some(match column {
-        "CUDA" => "cuda",
-        "DirectML" => "directml",
-        "CoreML" => "coreml",
-        "MIGraphX" => "migraphx",
-        "OpenVINO" => "openvino",
-        "OpenVINO (Intel graphics on)" => "openvino_gpu",
-        _ => return None,
-    })
-}
-
-/// A Markdown section: each row's place on `column`, as registry lines.
+/// A Markdown section: each row's place in the column called `column`,
+/// as registry lines measured where `label` says.
 pub fn section(rows: &[Row], column: &str, label: &str) -> String {
-    let Some(field) = field(column) else {
+    let Some(column) = Column::named(column) else {
         return format!("\n## Places\n\nNo registry column for {column}.\n");
     };
-    let provider = column.split(" (").next().unwrap_or(column);
-    let mut out = format!("\n## Places on {column}\n\n```rust\n");
+    let mut out = format!("\n## Places on {}\n\n```rust\n", column.name());
     for row in rows {
         let Some(needs) = super::model_named(row.name).and_then(prunr_models::descriptor).map(|d| d.needs) else { continue };
-        match found(row, &needs, provider, label) {
-            Some(found) => out += &format!("// {}\n{field}: {},\n", row.name, found.rust()),
+        match found(row, &needs, column.provider()) {
+            Some(found) => out += &format!("// {}\n{}: {},\n", row.name, column.field(), found.rust(label)),
             None => out += &format!("// {}: not measured ({})\n", row.name, row.verdict.label()),
         }
     }
@@ -158,45 +167,34 @@ mod tests {
         }
     }
 
-    fn kind(found: Option<Found>) -> Option<&'static str> {
-        found.map(|f| match f {
-            Found::There(_) => "There",
-            Found::Cpu(why, _) => why,
-        })
-    }
 
     /// The CPU's result first, then the faster by more than 10%; within
     /// 10% the one taking less system memory, the middle run of each side
     /// weighed so one slow run does not decide.
     #[test]
     fn a_model_goes_where_it_is_right_then_faster_then_lighter() {
-        let at = |gpu_ms, verdict, there_mb| kind(found(&row(gpu_ms, verdict), &needs(there_mb), "OpenVINO", "test, 2026-10-25"));
-        assert_eq!(at(300.0, Verdict::Match, 900), Some("There"), "1.33x faster, more memory");
-        assert_eq!(at(500.0, Verdict::Match, 500), Some("Slower"), "0.8x");
-        assert_eq!(at(380.0, Verdict::Match, 600), Some("There"), "1.05x and lighter");
-        assert_eq!(at(380.0, Verdict::Match, 800), Some("NoGain"), "1.05x and heavier");
-        assert_eq!(at(420.0, Verdict::Match, 600), Some("There"), "0.95x and lighter");
-        assert_eq!(at(300.0, Verdict::Mismatch, 600), Some("Differs"), "faster but not the CPU's result");
+        let at = |gpu_ms, verdict, there_mb| found(&row(gpu_ms, verdict), &needs(there_mb), "OpenVINO").map(|f| f.kind);
+        assert_eq!(at(300.0, Verdict::Match, 900), Some(Kind::There), "1.33x faster, more memory");
+        assert_eq!(at(500.0, Verdict::Match, 500), Some(Kind::Slower), "0.8x");
+        assert_eq!(at(380.0, Verdict::Match, 600), Some(Kind::There), "1.05x and lighter");
+        assert_eq!(at(380.0, Verdict::Match, 800), Some(Kind::NoGain), "1.05x and heavier");
+        assert_eq!(at(420.0, Verdict::Match, 600), Some(Kind::There), "0.95x and lighter");
+        assert_eq!(at(300.0, Verdict::Mismatch, 600), Some(Kind::Differs), "faster but not the CPU's result");
         assert_eq!(at(300.0, Verdict::NoRoom, 600), None, "nothing measured");
+        let unpriced = found(&row(420.0, Verdict::Match), &needs(600), "CUDA").expect("placed");
+        assert_eq!((unpriced.kind, unpriced.text.ends_with("its memory there not measured")), (Kind::NoGain, true), "0.95x, its memory unknown: the faster");
 
-        let faster = found(&row(300.0, Verdict::Match), &needs(900), "OpenVINO", "test, 2026-10-25").expect("placed");
-        assert_eq!(faster, Found::There("1.33x: 300 ms against the CPU's 400 ms (test, 2026-10-25)".into()));
-        assert_eq!(faster.rust(), r#"Place::There("1.33x: 300 ms against the CPU's 400 ms (test, 2026-10-25)")"#);
+        let faster = found(&row(300.0, Verdict::Match), &needs(900), "OpenVINO").expect("placed");
+        assert_eq!(faster, Found::new(Kind::There, "1.33x: 300 ms against the CPU's 400 ms"));
+        assert_eq!(faster.rust("test, 2026-10-25"), r#"Place::There("1.33x: 300 ms against the CPU's 400 ms (test, 2026-10-25)")"#);
 
         let mut failed = row(300.0, Verdict::GpuFailed);
         if let Gpu::Ran(side) = &mut failed.gpu {
             side.error = Some("\nOutput names mismatch between OpenVINO and ONNX\nmore".into());
         }
         assert_eq!(
-            found(&failed, &needs(600), "OpenVINO", "i7-6700").map(|f| f.rust()),
+            found(&failed, &needs(600), "OpenVINO").map(|f| f.rust("i7-6700")),
             Some(r#"Place::Cpu(Why::Fails("Output names mismatch between OpenVINO and ONNX (i7-6700)"))"#.to_string()),
         );
-    }
-
-    #[test]
-    fn every_column_has_a_registry_field() {
-        for (column, _) in prunr_models::Places::UNMEASURED.columns() {
-            assert!(field(column).is_some(), "{column}");
-        }
     }
 }

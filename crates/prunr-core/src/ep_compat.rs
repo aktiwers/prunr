@@ -65,11 +65,8 @@ struct CacheFile {
     failures: HashMap<String, String>,
 }
 
-/// What the file holds for one scope.
-#[derive(Debug, Default, Clone, PartialEq)]
-struct Entries {
-    failures: HashMap<String, String>,
-}
+/// What the file holds for one scope: each failing pair's key and error.
+type Failures = HashMap<String, String>;
 
 fn cache_path() -> Option<PathBuf> {
     #[cfg(test)]
@@ -89,17 +86,7 @@ fn cache_path() -> Option<PathBuf> {
 /// "DirectML"), plus `"+gpu"` for an OpenVINO session on the Intel GPU, so
 /// a GPU failure does not bar OpenVINO on the CPU once the switch is off.
 fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
-    key_with(ep, model, weights, &files_of(model), on_intel_gpu(ep, model))
-}
-
-/// A download's checksums (`prunr_models::content_tag`: a re-export may
-/// keep its version string); a built-in model's own version, bumped with
-/// its file.
-fn files_of(model: prunr_models::ModelId) -> String {
-    match prunr_models::content_tag(model) {
-        Some(tag) => format!("{tag:016x}"),
-        None => format!("v{}", prunr_models::descriptor(model).map_or("unknown", |d| d.version)),
-    }
+    key_with(ep, model, weights, &prunr_models::files_id(model), on_intel_gpu(ep, model))
 }
 
 /// Whether `model`'s session on `ep` asks for the Intel GPU: OpenVINO
@@ -129,10 +116,10 @@ fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &
     format!("{ep}{device}::{model:?}{copy}@{files}")
 }
 
-/// The entries as last read or written, and the file's stamp then.
+/// The failures as last read or written, and the file's stamp then.
 #[derive(Default)]
 struct Store {
-    entries: Entries,
+    failures: Failures,
     stamp: Option<(SystemTime, u64)>,
 }
 
@@ -142,7 +129,7 @@ fn cache() -> &'static Mutex<Store> {
         let mut store = Store::default();
         if let Some(path) = cache_path() {
             store.stamp = stamp(&path);
-            store.entries = load_from(&path, &scope()).unwrap_or_default();
+            store.failures = load_from(&path, &scope()).unwrap_or_default();
         }
         Mutex::new(store)
     })
@@ -153,20 +140,20 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// The entries in the file at `path` recorded under `scope`; empty for
+/// The failures in the file at `path` recorded under `scope`; none for
 /// another scope, `None` when the file cannot be read.
-fn load_from(path: &Path, scope: &str) -> Option<Entries> {
+fn load_from(path: &Path, scope: &str) -> Option<Failures> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.scope == scope { Entries { failures: file.failures } } else { Entries::default() })
+    Some(if file.scope == scope { file.failures } else { Failures::default() })
 }
 
 /// Written whole and renamed into place, so another process reading it
 /// never sees half a file.
-fn save_to(path: &Path, scope: &str, entries: &Entries) {
+fn save_to(path: &Path, scope: &str, failures: &Failures) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile { scope: scope.to_string(), failures: entries.failures.clone() };
+    let file = CacheFile { scope: scope.to_string(), failures: failures.clone() };
     let Ok(json) = serde_json::to_string_pretty(&file) else { return };
     let draft = path.with_extension(format!("json.{}", std::process::id()));
     if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
@@ -177,7 +164,7 @@ fn save_to(path: &Path, scope: &str, entries: &Entries) {
 
 fn save(store: &mut Store) {
     let Some(path) = cache_path() else { return };
-    save_to(&path, &scope(), &store.entries);
+    save_to(&path, &scope(), &store.failures);
     store.stamp = stamp(&path);
 }
 
@@ -196,28 +183,23 @@ impl Store {
         if now.is_none() || now == self.stamp {
             return;
         }
-        if let Some(entries) = load_from(path, scope) {
-            self.entries = entries;
+        if let Some(failures) = load_from(path, scope) {
+            self.failures = failures;
             self.stamp = now;
         }
     }
 }
 
-/// True when these weights of the model are on the EP's persistent skip
-/// list.
 /// Read the store from disk now, if not yet read.
 pub(crate) fn warm() {
     let _ = cache();
 }
 
+/// True when these weights of the model are on the EP's persistent skip
+/// list.
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
-    failure(ep, model, weights).is_some()
-}
-
-/// Why these weights of the model are on the EP's skip list.
-pub(crate) fn failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> Option<String> {
     let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.entries.failures.get(&key(ep, model, weights)).cloned()
+    store.failures.contains_key(&key(ep, model, weights))
 }
 
 /// Idempotent. A transient failure is logged and not recorded. A failed
@@ -229,9 +211,9 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
     }
     let k = key(ep, model, weights);
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if store.entries.failures.contains_key(&k) { return; }
+    if store.failures.contains_key(&k) { return; }
     tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
-    store.entries.failures.insert(k, error.to_string());
+    store.failures.insert(k, error.to_string());
     save(&mut store);
 }
 
@@ -239,8 +221,8 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
 /// of failures removed.
 pub fn clear() -> usize {
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let n = store.entries.failures.len();
-    store.entries = Entries::default();
+    let n = store.failures.len();
+    store.failures.clear();
     save(&mut store);
     n
 }
@@ -359,11 +341,11 @@ mod tests {
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
         assert_eq!(then, "ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", "no app version in it: an update keeps the list");
-        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]) };
-        save_to(&path, &then, &entries);
-        assert_eq!(load_from(&path, &then), Some(entries));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Entries::default()));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Entries::default()));
+        let failures = Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]);
+        save_to(&path, &then, &failures);
+        assert_eq!(load_from(&path, &then), Some(failures));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Failures::default()));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Failures::default()));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
     }
 
@@ -373,15 +355,15 @@ mod tests {
     fn a_reset_by_another_process_is_seen_on_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
-        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]) };
-        save_to(&path, "scope", &entries);
-        let mut worker = Store { entries, stamp: stamp(&path) };
+        let failures = Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]);
+        save_to(&path, "scope", &failures);
+        let mut worker = Store { failures, stamp: stamp(&path) };
         worker.refresh_from(&path, "scope");
-        assert_eq!(worker.entries.failures.len(), 1, "an unchanged file keeps the list");
+        assert_eq!(worker.failures.len(), 1, "an unchanged file keeps the list");
         std::thread::sleep(std::time::Duration::from_millis(20));
-        save_to(&path, "scope", &Entries::default());
+        save_to(&path, "scope", &Failures::default());
         worker.refresh_from(&path, "scope");
-        assert!(worker.entries.failures.is_empty(), "the other process's reset is taken in");
+        assert!(worker.failures.is_empty(), "the other process's reset is taken in");
     }
 
     #[test]

@@ -74,6 +74,8 @@ pub struct Report {
     /// The step under way. The report is rewritten as the bench goes, so
     /// one a crash left behind names the step it crashed in.
     pub running: Option<String>,
+    /// `--table`'s section: where each model runs here, as registry lines.
+    pub places: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -241,6 +243,9 @@ pub fn markdown(report: &Report) -> String {
         md.push_str(&details(row));
     }
     md.push_str(&legend());
+    if let Some(places) = &report.places {
+        md.push_str(places);
+    }
     md
 }
 
@@ -450,7 +455,7 @@ mod tests {
             verdict: Verdict::GpuFailed,
             ..matched()
         };
-        let report = Report { header: header(), rows: vec![matched(), failed, skipped()], running: Some("U2Net: GPU timed runs".into()) };
+        let report = Report { header: header(), rows: vec![matched(), failed, skipped()], running: Some("U2Net: GPU timed runs".into()), places: None };
         let md = markdown(&report);
         assert!(md.contains("| GPUs | NVIDIA GeForce RTX 4090 (driver 32.0.15.6094) |"), "{md}");
         assert!(md.contains("> **Running:** U2Net: GPU timed runs."));
@@ -489,7 +494,7 @@ mod tests {
 
     #[test]
     fn the_json_report_carries_every_row_and_the_header() {
-        let report = Report { header: header(), rows: vec![matched(), skipped()], running: None };
+        let report = Report { header: header(), rows: vec![matched(), skipped()], running: None, places: None };
         let value: serde_json::Value = serde_json::from_str(&json(&report)).unwrap();
         assert_eq!(value["header"]["gpu_providers"][0], "DirectML");
         assert_eq!(value["rows"][0]["gpu"]["kind"], "ran");

@@ -220,8 +220,13 @@ fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
     let skips: Vec<(&str, Skip)> = ladder.iter().map(|&(p, skip)| skip.map(|s| (p, s))).collect::<Option<_>>()?;
     let failed: Vec<String> = skips.iter().filter(|(_, s)| *s == Skip::FailedBefore).map(|(p, _)| p.to_string()).collect();
     Some(if failed.is_empty() {
-        let names: Vec<&str> = skips.iter().map(|(p, _)| *p).collect();
-        Gpu::ByDesign { reason: format!("the registry keeps it off {}", names.join(", ")) }
+        let kept: Vec<String> = skips.iter()
+            .filter_map(|(p, s)| match s {
+                Skip::KeptOff(why) => Some(format!("kept off {p}: {}", why.text())),
+                Skip::FailedBefore => None,
+            })
+            .collect();
+        Gpu::ByDesign { reason: kept.join("; ") }
     } else {
         Gpu::FailedBefore { providers: failed }
     })
@@ -386,7 +391,7 @@ pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Ev
     let total = models.len();
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
-        let (row, pictures) = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, &mut |stage| {
+        let (row, pictures) = bench_model(id, inputs, runs, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
         on(Event::Done(Box::new(row), pictures));
@@ -397,14 +402,7 @@ fn display_name(id: ModelId) -> &'static str {
     prunr_models::descriptor(id).map_or(id.stable_name(), |d| d.display_name)
 }
 
-/// Timed runs on each side after the first, untimed one.
-#[derive(Debug, Clone, Copy)]
-struct Runs {
-    cpu: u32,
-    gpu: u32,
-}
-
-fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&'static str)) -> (Row, Option<Pictures>) {
+fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'static str)) -> (Row, Option<Pictures>) {
     let family = Family::of(id);
     let mut row = Row {
         model: display_name(id),
@@ -430,7 +428,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
     // A heavy model's CPU run takes minutes; one is enough for a reference.
-    let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs.cpu };
+    let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs };
     // A side that needs more memory than is free is not run: the bench
     // must not run the machine out of memory either.
     let (mut cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
@@ -453,7 +451,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
         None => match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
             Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
             Ok(()) => {
-                let (side, output) = measure(family, id, inputs, false, runs.gpu, stage);
+                let (side, output) = measure(family, id, inputs, false, runs, stage);
                 (Gpu::Ran(side), output)
             }
         },
@@ -973,18 +971,19 @@ mod tests {
 
     #[test]
     fn the_gpu_side_builds_when_the_ladder_would_try_any_provider() {
+        const WHY: prunr_models::Why = prunr_models::Why::Fails("graph cycles");
         assert_eq!(gpu_passed_over(&[]), Some(Gpu::NoProvider));
-        assert_eq!(gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("DirectML", None)]), None);
+        assert_eq!(gpu_passed_over(&[("OpenVINO", Some(Skip::KeptOff(WHY))), ("DirectML", None)]), None);
         assert_eq!(
-            gpu_passed_over(&[("OpenVINO", Some(Skip::Declared))]),
-            Some(Gpu::ByDesign { reason: "the registry keeps it off OpenVINO".into() }),
+            gpu_passed_over(&[("OpenVINO", Some(Skip::KeptOff(WHY)))]),
+            Some(Gpu::ByDesign { reason: "kept off OpenVINO: graph cycles".into() }),
         );
         assert_eq!(
-            gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("CUDA", Some(Skip::FailedBefore))]),
+            gpu_passed_over(&[("OpenVINO", Some(Skip::KeptOff(WHY))), ("CUDA", Some(Skip::FailedBefore))]),
             Some(Gpu::FailedBefore { providers: vec!["CUDA".into()] }),
             "OpenVINO is declared out; CUDA is allowed but failed before",
         );
-        let ladder = [("OpenVINO", Some(Skip::Declared)), ("DirectML", None), ("CUDA", None)];
+        let ladder = [("OpenVINO", Some(Skip::KeptOff(WHY))), ("DirectML", None), ("CUDA", None)];
         assert_eq!(first_tried(&ladder), Some("DirectML"), "the GPU side's memory is checked where it lands first");
     }
 
