@@ -562,7 +562,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         );
         rows.row(
             "Graphics card failures",
-            "A model that fails on the graphics card runs on the CPU until the graphics driver or Prunr changes. Forget the failures to try them again.",
+            "A model that fails on the graphics card runs on the CPU until the graphics driver or its runtime changes. Forget the failures to try them again.",
             |ui| {
                 if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget graphics card failures").clicked() {
                     intent = Some(HardwareSectionIntent::ForgetGpuFailures);

@@ -6,12 +6,13 @@
 //! (~5 s for OpenVINO+Silueta) on every cold start.
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
-//! Scoped to what a failure says something about: the app version, the
-//! loaded runtime build and the graphics drivers ([`set_drivers`]). Any
-//! of them changing starts the list afresh. A downloaded model's entry
-//! also names its files' checksums, so a new download of it is tried
-//! again. A failure the device had, not the model (out of memory, a
-//! device removed or hung), is never recorded.
+//! Scoped to what a failure says something about: the loaded runtime
+//! build and the graphics drivers ([`set_drivers`]). Either changing
+//! starts the list afresh; an app update alone does not, so what failed
+//! is not tried again after every update. Each entry names the model's
+//! files (a download's checksums, a built-in model's version), so a new
+//! copy of a model is tried again. A failure the device had, not the
+//! model (out of memory, a device removed or hung), is never recorded.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,8 +23,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{EpKind, Weights};
 
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 static DRIVERS: OnceLock<String> = OnceLock::new();
 
 /// Names the graphics drivers this process runs on, so a failure
@@ -33,14 +32,13 @@ pub fn set_drivers(identity: String) {
     let _ = DRIVERS.set(identity);
 }
 
-/// What a recorded failure holds for: this app version, runtime build
-/// and drivers.
+/// What a recorded failure holds for: this runtime build and drivers.
 fn scope() -> String {
     scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str))
 }
 
 fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
-    format!("{APP_VERSION} ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
+    format!("ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
 }
 
 /// Error text of a failure the device had rather than the model: memory
@@ -61,7 +59,7 @@ pub(crate) fn is_transient(error: &str) -> bool {
 
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
-    // The on-disk key predates the scope growing past the app version.
+    // The on-disk key is named for what the scope once was: the app version.
     #[serde(rename = "version")]
     scope: String,
     failures: HashMap<String, String>,
@@ -86,15 +84,22 @@ fn cache_path() -> Option<PathBuf> {
 
 /// `"{ep}::{model}"`, then `"/fp16"` or `"/int8"` for a lighter copy of
 /// the weights, so a failure of one copy leaves the others to try, and
-/// `"@{tag}"` for a downloaded model so a failure sticks to the files that
-/// failed (`prunr_models::content_tag`). The model's own weights keep the
-/// historic key, so entries written before weights were told apart still
-/// read, as failures of those. The EP part keeps the historic `Display`
-/// strings ("OpenVINO", "CUDA", "CoreML", "DirectML"), plus `"+gpu"` for
-/// an OpenVINO session on the Intel GPU, so a GPU failure does not bar
-/// OpenVINO on the CPU once the switch is off.
+/// `"@{files}"` so a failure sticks to the files that failed. The EP part
+/// keeps the historic `Display` strings ("OpenVINO", "CUDA", "CoreML",
+/// "DirectML"), plus `"+gpu"` for an OpenVINO session on the Intel GPU, so
+/// a GPU failure does not bar OpenVINO on the CPU once the switch is off.
 fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
-    key_with(ep, model, weights, prunr_models::content_tag(model), on_intel_gpu(ep, model))
+    key_with(ep, model, weights, &files_of(model), on_intel_gpu(ep, model))
+}
+
+/// A download's checksums (`prunr_models::content_tag`: a re-export may
+/// keep its version string); a built-in model's own version, bumped with
+/// its file.
+fn files_of(model: prunr_models::ModelId) -> String {
+    match prunr_models::content_tag(model) {
+        Some(tag) => format!("{tag:016x}"),
+        None => format!("v{}", prunr_models::descriptor(model).map_or("unknown", |d| d.version)),
+    }
 }
 
 /// Whether `model`'s session on `ep` asks for the Intel GPU: OpenVINO
@@ -114,17 +119,14 @@ fn on_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
     }
 }
 
-fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, tag: Option<u64>, intel_gpu: bool) -> String {
+fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &str, intel_gpu: bool) -> String {
     let copy = match weights {
         Weights::Fp32 => "",
         Weights::Fp16 => "/fp16",
         Weights::Int8 => "/int8",
     };
     let device = if intel_gpu { "+gpu" } else { "" };
-    match tag {
-        Some(tag) => format!("{ep}{device}::{model:?}{copy}@{tag:016x}"),
-        None => format!("{ep}{device}::{model:?}{copy}"),
-    }
+    format!("{ep}{device}::{model:?}{copy}@{files}")
 }
 
 /// The entries as last read or written, and the file's stamp then.
@@ -254,8 +256,8 @@ mod tests {
     #[test]
     fn key_format_is_stable_openvino() {
         assert_eq!(
-            key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None, false),
-            "OpenVINO::Silueta",
+            key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, "v1.0.0", false),
+            "OpenVINO::Silueta@v1.0.0",
         );
         assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
             .starts_with("CUDA::SdV15InpaintFp16@"));
@@ -266,7 +268,7 @@ mod tests {
     fn key_format_is_stable_coreml() {
         assert_eq!(
             key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Fp32),
-            "CoreML::Silueta",
+            "CoreML::Silueta@v1.0.0",
         );
     }
 
@@ -278,17 +280,18 @@ mod tests {
     }
 
     /// A failure belongs to the files that failed: a fixed or re-exported
-    /// download of the same model is a different key, so it gets tried
-    /// again instead of staying on the CPU for good.
+    /// download, or a built-in model of another version, is a different
+    /// key, so it gets tried again instead of staying on the CPU for good.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn a_new_download_of_a_model_is_a_new_key() {
+    fn a_new_copy_of_a_model_is_a_new_key() {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(1), false);
-        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, Some(2), false));
-        assert!(old.starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
-        assert_eq!(key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, None, false), "OpenVINO::Silueta",
-            "built-in models keep the historic key; the app version scopes them");
+        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000001", false);
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000002", false));
+        assert!(key(EpKind::OpenVino, lcm, Weights::Fp32).starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
+        let silueta = prunr_models::ModelId::Silueta;
+        let version = prunr_models::descriptor(silueta).unwrap().version;
+        assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32), format!("OpenVINO::Silueta@v{version}"), "a built-in model by its own version");
     }
 
     /// A failure on the Intel GPU is its own key: turning the switch off
@@ -297,10 +300,10 @@ mod tests {
     #[test]
     fn an_intel_gpu_failure_has_its_own_key() {
         let silueta = prunr_models::ModelId::Silueta;
-        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, true), "OpenVINO+gpu::Silueta");
+        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", true), "OpenVINO+gpu::Silueta@v1");
         assert_ne!(
-            key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, true),
-            key_with(EpKind::OpenVino, silueta, Weights::Fp32, None, false),
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", true),
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", false),
         );
         if crate::engine::openvino_on_gpu() {
             assert!(on_intel_gpu(EpKind::OpenVino, silueta));
@@ -309,13 +312,12 @@ mod tests {
         assert!(!on_intel_gpu(EpKind::Cuda, silueta));
     }
 
-    /// Each copy of the weights fails on its own key; the model's own
-    /// weights keep the key every earlier entry was written under.
+    /// Each copy of the weights fails on its own key.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn each_copy_of_the_weights_has_its_own_key() {
         let u2net = prunr_models::ModelId::U2net;
-        let keys = Weights::ALL.map(|w| key_with(EpKind::OpenVino, u2net, w, Some(0x5ca0), false));
+        let keys = Weights::ALL.map(|w| key_with(EpKind::OpenVino, u2net, w, "0000000000005ca0", false));
         assert_eq!(keys, [
             "OpenVINO::U2net@0000000000005ca0",
             "OpenVINO::U2net/fp16@0000000000005ca0",
@@ -348,14 +350,15 @@ mod tests {
         }
     }
 
-    /// A failure holds only for the app version, runtime build and
-    /// drivers it happened under: a driver update or another runtime
-    /// tries the provider again.
+    /// A failure holds only for the runtime build and drivers it happened
+    /// under: a driver update or another runtime tries the provider
+    /// again, an app update alone does not.
     #[test]
     fn a_failure_is_forgotten_under_other_drivers_or_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
+        assert_eq!(then, "ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", "no app version in it: an update keeps the list");
         let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]) };
         save_to(&path, &then, &entries);
         assert_eq!(load_from(&path, &then), Some(entries));
@@ -416,7 +419,6 @@ mod tests {
         assert!(json.contains("\"version\":\"0.0.0-stale\""));
         let parsed: CacheFile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.scope, "0.0.0-stale");
-        assert_ne!(parsed.scope, APP_VERSION);
         assert_eq!(
             parsed.failures.get("OpenVINO::Silueta").map(String::as_str),
             Some("graph cycles"),
