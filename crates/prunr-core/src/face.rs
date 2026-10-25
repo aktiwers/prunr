@@ -217,7 +217,7 @@ impl FaceFinder {
         Self::on(true).map(|(finder, _)| finder)
     }
 
-    /// The detector on the first graphics device that builds it, unless
+    /// The detector on the first accelerator that takes it and builds it, unless
     /// `cpu_only`, with where it landed.
     pub fn on(cpu_only: bool) -> Result<(Self, crate::engine::SessionPick), CoreError> {
         let bytes = prunr_models::resolve_bytes(prunr_models::ModelId::YuNet)
@@ -376,7 +376,7 @@ fn report_preview(image: &RgbaImage, face: &RestoredFace, blend: FaceBlend, prog
 pub struct Redrawer(Session);
 
 impl Redrawer {
-    /// `id`'s network on the first graphics device that builds it, unless
+    /// `id`'s network on the first accelerator that takes it and builds it, unless
     /// `cpu_only`, with where it landed. No optimised-graph cache:
     /// measured on GFPGAN (CPU), loading the cached graph saved 0.2 s of a
     /// 4.2 s first search for 340 MB of disk.

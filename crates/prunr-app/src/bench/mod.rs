@@ -55,8 +55,7 @@ pub enum Family {
     Diffusion,
     /// The Magic Brush.
     Selection,
-    /// The lines (TEED). The app runs it on the CPU; the bench measures
-    /// its GPU path, as for the face models.
+    /// The lines (TEED).
     Lines,
     /// The face finder (YuNet).
     FaceFinder,

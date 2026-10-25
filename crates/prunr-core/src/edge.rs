@@ -65,7 +65,7 @@ impl EdgeEngine {
         Self::on(true).map(|(engine, _)| engine)
     }
 
-    /// The detector on the first graphics device that builds it, unless
+    /// The detector on the first accelerator that takes it and builds it, unless
     /// `cpu_only`, with where it landed.
     pub fn on(cpu_only: bool) -> Result<(Self, crate::engine::SessionPick), CoreError> {
         let edge_bytes = prunr_models::teed_bytes();
