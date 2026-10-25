@@ -399,11 +399,12 @@ impl Needs {
     }
 }
 
-/// Where a model runs on each accelerator, from `prunr bench` on the
-/// hardware each entry names: where its result is the CPU's, then where
-/// it is faster, and within 10% of that where it takes less system
-/// memory. One field per accelerator and no `Default`, so a new
-/// accelerator does not build until every model says where it runs.
+/// Where a model runs on each accelerator, from `prunr bench --table` on
+/// the hardware each entry names: where its result is the CPU's, then
+/// where it is faster, and within 10% of that where it takes less system
+/// memory. A model spells out each accelerator it was measured on and
+/// fills the rest from `UNMEASURED`; `every_model_says_where_it_runs`
+/// counts what is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Places {
     pub cuda: Place,
@@ -420,8 +421,8 @@ pub struct Places {
 /// Where a model runs on one accelerator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
-    /// On it: its result is the CPU's and it runs faster. The measurement
-    /// and where it was taken.
+    /// On it: its result is the CPU's and it runs faster, or as fast in
+    /// less memory. The measurement and where it was taken.
     There(&'static str),
     /// On the CPU instead.
     Cpu(Why),
@@ -433,7 +434,8 @@ pub enum Place {
 /// measurement and where it was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Why {
-    /// It fails to build or run there, or takes too long to try.
+    /// It fails to build or run there, or is unsafe to try: it hangs or
+    /// takes the machine's memory. Never tried again, even by the bench.
     Fails(&'static str),
     /// Its result there is not the CPU's.
     Differs(&'static str),
@@ -441,6 +443,19 @@ pub enum Why {
     Slower(&'static str),
     /// Within 10% of the CPU's speed, and the CPU takes less memory.
     NoGain(&'static str),
+}
+
+impl Place {
+    /// Whether a session skips the accelerator for the CPU. While places
+    /// are measured again (`remeasuring`) only a failing one is skipped:
+    /// some fail by hanging or by taking the machine's memory.
+    pub fn kept_off(self, remeasuring: bool) -> bool {
+        match self {
+            Place::Cpu(Why::Fails(_)) => true,
+            Place::Cpu(_) => !remeasuring,
+            Place::There(_) | Place::Unmeasured => false,
+        }
+    }
 }
 
 impl Why {
@@ -463,36 +478,79 @@ impl Places {
         openvino_gpu: Place::Unmeasured,
     };
 
-    /// Where it runs on the provider ORT names `provider` ("CUDA", any
-    /// case); OpenVINO's entry by whether it may use the Intel graphics.
-    /// A provider this table does not know is unmeasured.
-    pub fn on(&self, provider: &str, openvino_on_gpu: bool) -> Place {
-        let named = |name: &str| provider.eq_ignore_ascii_case(name);
-        if named("CUDA") {
-            self.cuda
-        } else if named("DirectML") {
-            self.directml
-        } else if named("CoreML") {
-            self.coreml
-        } else if named("MIGraphX") {
-            self.migraphx
-        } else if named("OpenVINO") {
-            if openvino_on_gpu { self.openvino_gpu } else { self.openvino }
-        } else {
-            Place::Unmeasured
+    pub fn get(&self, column: Column) -> Place {
+        match column {
+            Column::Cuda => self.cuda,
+            Column::DirectMl => self.directml,
+            Column::CoreMl => self.coreml,
+            Column::MiGraphX => self.migraphx,
+            Column::OpenVino => self.openvino,
+            Column::OpenVinoGpu => self.openvino_gpu,
         }
     }
 
-    /// Every column with the name the bench gives it.
-    pub fn columns(&self) -> [(&'static str, Place); 6] {
-        [
-            ("CUDA", self.cuda),
-            ("DirectML", self.directml),
-            ("CoreML", self.coreml),
-            ("MIGraphX", self.migraphx),
-            ("OpenVINO", self.openvino),
-            ("OpenVINO (Intel graphics on)", self.openvino_gpu),
-        ]
+    /// Where it runs on `provider` (`Column::of`); unmeasured on a
+    /// provider this table does not know.
+    pub fn on(&self, provider: &str, openvino_on_gpu: bool) -> Place {
+        Column::of(provider, openvino_on_gpu).map_or(Place::Unmeasured, |column| self.get(column))
+    }
+}
+
+/// One accelerator's entry in `Places`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Cuda,
+    DirectMl,
+    CoreMl,
+    MiGraphX,
+    OpenVino,
+    OpenVinoGpu,
+}
+
+impl Column {
+    pub const ALL: [Self; 6] = [Self::Cuda, Self::DirectMl, Self::CoreMl, Self::MiGraphX, Self::OpenVino, Self::OpenVinoGpu];
+
+    /// The provider ORT names.
+    pub fn provider(self) -> &'static str {
+        match self {
+            Self::Cuda => "CUDA",
+            Self::DirectMl => "DirectML",
+            Self::CoreMl => "CoreML",
+            Self::MiGraphX => "MIGraphX",
+            Self::OpenVino | Self::OpenVinoGpu => "OpenVINO",
+        }
+    }
+
+    /// The name the provider list and the bench give it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenVinoGpu => "OpenVINO (Intel graphics on)",
+            other => other.provider(),
+        }
+    }
+
+    /// Its field in `Places`, as `prunr bench --table` writes it.
+    pub fn field(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::DirectMl => "directml",
+            Self::CoreMl => "coreml",
+            Self::MiGraphX => "migraphx",
+            Self::OpenVino => "openvino",
+            Self::OpenVinoGpu => "openvino_gpu",
+        }
+    }
+
+    /// The column a session on `provider` (ORT's name, any case) reads:
+    /// OpenVINO's by whether it may use the Intel graphics.
+    pub fn of(provider: &str, openvino_on_gpu: bool) -> Option<Self> {
+        let column = Self::ALL.into_iter().find(|c| c.provider().eq_ignore_ascii_case(provider))?;
+        Some(if column == Self::OpenVino && openvino_on_gpu { Self::OpenVinoGpu } else { column })
+    }
+
+    /// The column called `name` (`Column::name`).
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.name() == name)
     }
 }
 
@@ -1935,6 +1993,17 @@ pub fn content_tag(id: ModelId) -> Option<u64> {
     }
 }
 
+/// What names a model's files in a record that outlasts app updates (the
+/// failure list): a download's checksums (`content_tag`; a re-export may
+/// keep its version string), a built-in model's own version, bumped with
+/// its file.
+pub fn files_id(id: ModelId) -> String {
+    match content_tag(id) {
+        Some(tag) => format!("{tag:016x}"),
+        None => format!("v{}", descriptor(id).map_or("unknown", |d| d.version)),
+    }
+}
+
 /// FNV-1a over the checksums: stable across builds and platforms, so a
 /// tag written to disk by one run matches the next.
 fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
@@ -1954,10 +2023,6 @@ pub fn place(model: ModelId, provider: &str, openvino_on_gpu: bool) -> Place {
     descriptor(model).map_or(Place::Unmeasured, |d| d.places.on(provider, openvino_on_gpu))
 }
 
-/// Whether `model` runs on `provider` rather than the CPU.
-pub fn runs_there(model: ModelId, provider: &str, openvino_on_gpu: bool) -> bool {
-    !matches!(place(model, provider, openvino_on_gpu), Place::Cpu(_))
-}
 
 #[derive(Debug, PartialEq)]
 pub enum ResolveError {
@@ -2733,19 +2798,50 @@ mod tests {
     /// the Intel graphics; a model runs wherever its place is not the CPU.
     #[test]
     fn a_model_runs_where_its_place_is_not_the_cpu() {
+        let off = |model, ep, on_gpu| place(model, ep, on_gpu).kept_off(false);
         for ep in ["OpenVINO", "openvino", "OPENVINO"] {
             for on_gpu in [false, true] {
-                assert!(!runs_there(ModelId::Silueta, ep, on_gpu), "Silueta + {ep}");
+                assert!(off(ModelId::Silueta, ep, on_gpu), "Silueta + {ep}");
             }
         }
         for ep in ["CPU", "CUDA", "DirectML", "MIGraphX"] {
-            assert!(runs_there(ModelId::Silueta, ep, false), "Silueta + {ep}");
+            assert!(!off(ModelId::Silueta, ep, false), "Silueta + {ep}");
         }
-        assert!(!runs_there(ModelId::Silueta, "CoreML", false), "no gain, more memory: on the CPU");
-        assert!(!runs_there(ModelId::Nomos8kSchatL, "cuda", false), "a different result keeps it on the CPU");
+        assert!(off(ModelId::Silueta, "CoreML", false), "no gain, more memory: on the CPU");
+        assert!(off(ModelId::Nomos8kSchatL, "cuda", false), "a different result keeps it on the CPU");
         let split = Places { openvino_gpu: Place::Cpu(Why::Slower("slower")), ..Places::UNMEASURED };
         assert_eq!((split.on("OpenVINO", false), split.on("OpenVINO", true)), (Place::Unmeasured, Place::Cpu(Why::Slower("slower"))));
         assert_eq!(split.on("TensorRT", false), Place::Unmeasured, "an unknown provider is unmeasured");
+    }
+
+    /// A place on the CPU keeps the model off the accelerator; while places
+    /// are measured again only a failing one does, since it may hang or
+    /// take the machine's memory.
+    #[test]
+    fn a_cpu_place_keeps_the_model_off_unless_measured_again() {
+        for (place, kept, kept_while_measuring) in [
+            (Place::Unmeasured, false, false),
+            (Place::There("1.3x"), false, false),
+            (Place::Cpu(Why::Slower("0.8x")), true, false),
+            (Place::Cpu(Why::Differs("black")), true, false),
+            (Place::Cpu(Why::NoGain("1.05x, heavier")), true, false),
+            (Place::Cpu(Why::Fails("hangs")), true, true),
+        ] {
+            assert_eq!((place.kept_off(false), place.kept_off(true)), (kept, kept_while_measuring), "{place:?}");
+        }
+    }
+
+    /// Each column is found by its name and by the provider a session
+    /// runs on, OpenVINO's by the Intel graphics switch.
+    #[test]
+    fn a_column_is_found_by_name_and_by_provider() {
+        for column in Column::ALL {
+            assert_eq!(Column::named(column.name()), Some(column));
+        }
+        assert_eq!(Column::of("openvino", false), Some(Column::OpenVino));
+        assert_eq!(Column::of("OpenVINO", true), Some(Column::OpenVinoGpu));
+        assert_eq!(Column::of("CUDA", true), Some(Column::Cuda), "the switch is OpenVINO's only");
+        assert_eq!(Column::of("CPU", false), None);
     }
 
     /// Every place says where it was measured, and no more columns are
@@ -2764,8 +2860,8 @@ mod tests {
         for (i, &(column, at_most)) in UNMEASURED.iter().enumerate() {
             let mut unmeasured = Vec::new();
             for desc in REGISTRY {
-                let (name, place) = desc.places.columns()[i];
-                assert_eq!(name, column, "the counts follow `Places::columns`");
+                assert_eq!(Column::ALL[i].name(), column, "the counts follow `Column::ALL`");
+                let place = desc.places.get(Column::ALL[i]);
                 match place {
                     Place::Unmeasured => unmeasured.push(desc.id),
                     Place::There(text) => assert!(!text.trim().is_empty(), "{:?} on {column}: say where it was measured", desc.id),

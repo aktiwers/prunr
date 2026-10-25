@@ -1441,7 +1441,7 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     if args.table.is_some() {
         prunr_core::engine::remeasure_places();
     }
-    let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None };
+    let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None, places: None };
     print!("{}", report::header_text(&report.header));
     println!();
     let mut files = ReportFiles::new(args.out.clone());
@@ -1474,9 +1474,8 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
         let column = report.header.gpu_providers.first().map_or("CPU", String::as_str);
         let section = bench::table::section(&report.rows, column, label);
         print!("{section}");
-        if let Err(e) = std::fs::OpenOptions::new().append(true).open(&files.md).and_then(|mut f| std::io::Write::write_all(&mut f, section.as_bytes())) {
-            eprintln!("error: cannot add the places to {}: {e}", files.md.display());
-        }
+        report.places = Some(section);
+        files.write(&report);
     }
     println!("Report: {} and {}", files.md.display(), files.json().display());
     0

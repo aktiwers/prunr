@@ -266,17 +266,15 @@ pub fn remeasure_places() {
     let _ = REMEASURE.set(());
 }
 
-/// Whether the registry keeps `model` on the CPU rather than `ep`.
-fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> bool {
-    kept_off_at(prunr_models::place(model, ep.as_str(), openvino_on_gpu()), REMEASURE.get().is_some())
-}
-
-fn kept_off_at(place: prunr_models::Place, remeasuring: bool) -> bool {
-    use prunr_models::{Place, Why};
-    match place {
-        Place::Cpu(Why::Fails(_)) => true,
-        Place::Cpu(_) => !remeasuring,
-        Place::There(_) | Place::Unmeasured => false,
+/// Why `model` runs on the CPU rather than `ep`: its place there, or a
+/// provider that cannot serve its kind of session.
+fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Why> {
+    if compiles_per_shape(model, ep) {
+        return Some(COMPILES_PER_SHAPE);
+    }
+    match prunr_models::place(model, ep.as_str(), openvino_on_gpu()) {
+        place @ prunr_models::Place::Cpu(why) if place.kept_off(REMEASURE.get().is_some()) => Some(why),
+        _ => None,
     }
 }
 
@@ -535,10 +533,10 @@ pub(crate) enum Miss {
 /// Why the ladder passes a provider over without trying it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// The registry places the model on the CPU there
-    /// (`prunr_models::Places`), or the provider cannot serve the model's
-    /// kind of session by design.
-    Declared,
+    /// It runs on the CPU rather than there, and why: its place in the
+    /// registry (`prunr_models::Places`), or a provider that cannot serve
+    /// its kind of session.
+    KeptOff(prunr_models::Why),
     /// It failed these weights of the model on an earlier run, under the
     /// same drivers and runtime; skipped until they change or the list is
     /// reset (Settings › Hardware, `prunr --clear-ep-cache`).
@@ -548,7 +546,7 @@ pub enum Skip {
 impl Skip {
     fn text(self, ep: EpKind) -> String {
         match self {
-            Skip::Declared => format!("the registry keeps this model off {ep}"),
+            Skip::KeptOff(why) => format!("{ep} is kept off: {}", why.text()),
             Skip::FailedBefore => format!("{ep} failed this model before"),
         }
     }
@@ -562,8 +560,8 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if kept_off(model, ep) || compiles_per_shape(model, ep) {
-        Some(Skip::Declared)
+    if let Some(why) = kept_off(model, ep) {
+        Some(Skip::KeptOff(why))
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
     } else {
@@ -576,6 +574,9 @@ pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: Ep
 /// would recompile for seconds to minutes; a model run in parts sizes its
 /// crops to the image, so each new size would recompile every part. They
 /// stay off it. Engines see one shape per model and keep it.
+const COMPILES_PER_SHAPE: prunr_models::Why =
+    prunr_models::Why::Fails("MIGraphX compiles a graph per input shape: each crop or part would compile again");
+
 fn compiles_per_shape(model: prunr_models::ModelId, ep: EpKind) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -671,7 +672,7 @@ pub(crate) fn walk_ladder<S>(
 pub fn gpu_provider_names() -> Vec<String> {
     available_gpu_eps().iter().map(|&ep| match ep {
         #[cfg(not(target_os = "macos"))]
-        EpKind::OpenVino if intel_gpu_chosen() => format!("{OPENVINO_NAME} (Intel graphics on)"),
+        EpKind::OpenVino if intel_gpu_chosen() => prunr_models::Column::OpenVinoGpu.name().to_string(),
         _ => ep.as_str().to_string(),
     }).collect()
 }
@@ -692,6 +693,9 @@ fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool) -> Option<Weights>
 /// Why a GPU session of `model` passes `ep` over for every weights it
 /// tries (`None`: it tries `ep`).
 fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
+    if let Some(why) = kept_off(model, ep) {
+        return Some(Skip::KeptOff(why));
+    }
     let mut why = None;
     for weights in [lighter_weights(model, false), Some(Weights::Fp32)].into_iter().flatten() {
         why = Some(skip_reason(model, weights, ep)?);
@@ -1188,7 +1192,7 @@ pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
 pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
         Some(&ep) => gpu_skip(model, ep).is_none(),
-        None => prunr_models::runs_there(model, provider, openvino_on_gpu()),
+        None => !prunr_models::place(model, provider, openvino_on_gpu()).kept_off(false),
     }
 }
 
@@ -1498,7 +1502,8 @@ mod tests {
     fn erasers_and_parted_models_pass_migraphx_over_and_engines_keep_it() {
         for d in prunr_models::REGISTRY.iter() {
             let per_shape = d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts();
-            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), per_shape || !prunr_models::runs_there(d.id, "MIGraphX", false), "{:?}", d.id);
+            let kept = per_shape || prunr_models::place(d.id, "MIGraphX", false).kept_off(false);
+            assert_eq!(matches!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX), Some(Skip::KeptOff(_))), kept, "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
     }
@@ -1511,24 +1516,6 @@ mod tests {
         assert!(!on_host_cpu(OPENVINO_NAME, true));
         assert!(on_host_cpu(CPU_NAME, true), "the CPU provider is the CPU either way");
         assert!(!on_host_cpu("CUDA", false));
-    }
-
-    /// A place on the CPU keeps the model off the provider; while places
-    /// are measured again only a failing one does, since it may hang or
-    /// take the machine's memory.
-    #[test]
-    fn a_cpu_place_keeps_the_model_off_unless_measured_again() {
-        use prunr_models::{Place, Why};
-        for (place, kept, kept_while_measuring) in [
-            (Place::Unmeasured, false, false),
-            (Place::There("1.3x"), false, false),
-            (Place::Cpu(Why::Slower("0.8x")), true, false),
-            (Place::Cpu(Why::Differs("black")), true, false),
-            (Place::Cpu(Why::NoGain("1.05x, heavier")), true, false),
-            (Place::Cpu(Why::Fails("hangs")), true, true),
-        ] {
-            assert_eq!((kept_off_at(place, false), kept_off_at(place, true)), (kept, kept_while_measuring), "{place:?}");
-        }
     }
 
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
@@ -1841,14 +1828,16 @@ mod tests {
     fn a_walk_that_tries_no_provider_says_why() {
         use prunr_models::ModelId;
         let model = ModelId::Silueta;
+        let prunr_models::Place::Cpu(why) = prunr_models::place(model, "OpenVINO", false) else { panic!("Silueta stays off OpenVINO") };
+        let line = format!("no GPU provider to try: OpenVINO is kept off: {}", why.text());
         let declared = walk_ladder("", model, Weights::Fp32, &[EpKind::OpenVino], |_| -> Result<(), Miss> { panic!("tried a declared pair") });
-        assert_eq!(declared.map_err(|w| w.reason()), Err("no GPU provider to try: the registry keeps this model off OpenVINO".to_string()));
+        assert_eq!(declared.map_err(|w| w.reason()), Err(line.clone()));
         let none = walk_ladder("", model, Weights::Fp32, &[], |_| -> Result<(), Miss> { unreachable!() });
         assert_eq!(none.map_err(|w| w.reason()), Err("No GPU EPs available on this platform".to_string()));
-        assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::Declared));
+        assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::KeptOff(why)));
         assert_eq!(
             Walk::without_a_try(model, Weights::Fp32, &[EpKind::OpenVino]).map(|w| w.reason()),
-            Some("no GPU provider to try: the registry keeps this model off OpenVINO".to_string()),
+            Some(line),
             "the same line, known before any weights are read",
         );
         assert_eq!(Walk::without_a_try(ModelId::RealEsrganX4Plus, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");

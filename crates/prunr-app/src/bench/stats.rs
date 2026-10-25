@@ -65,32 +65,42 @@ impl Timing {
             self.runs_ms.iter().sum::<f64>() / self.runs_ms.len() as f64
         }
     }
-}
 
-/// `cpu`'s and `gpu`'s times to weigh: the middle timed run of each, or
-/// both first runs when a side was timed once (a heavy model's CPU
-/// reference), so both carry their warm-up.
-pub fn steady_pair(cpu: &Timing, gpu: &Timing) -> (f64, f64) {
-    if cpu.runs_ms.is_empty() || gpu.runs_ms.is_empty() {
-        return (cpu.first_ms, gpu.first_ms);
-    }
-    let median = |t: &Timing| {
-        let mut runs = t.runs_ms.clone();
+    /// The middle timed run, else the first run: one slow run does not
+    /// move it.
+    pub fn median_ms(&self) -> f64 {
+        let mut runs = self.runs_ms.clone();
         runs.sort_by(f64::total_cmp);
         let mid = runs.len() / 2;
-        if runs.len().is_multiple_of(2) { (runs[mid - 1] + runs[mid]) / 2.0 } else { runs[mid] }
-    };
-    (median(cpu), median(gpu))
+        match runs.len() {
+            0 => self.first_ms,
+            n if n.is_multiple_of(2) => (runs[mid - 1] + runs[mid]) / 2.0,
+            _ => runs[mid],
+        }
+    }
 }
 
-/// How many times faster `gpu` ran than `cpu`. A side timed once (a
-/// heavy model's CPU reference) is compared first run to first run, so
-/// both carry their warm-up.
+/// `cpu`'s and `gpu`'s times by `steady`, or both first runs when a side
+/// was timed once (a heavy model's CPU reference), so both carry their
+/// warm-up.
+fn pair(cpu: &Timing, gpu: &Timing, steady: fn(&Timing) -> f64) -> (f64, f64) {
+    if cpu.runs_ms.is_empty() || gpu.runs_ms.is_empty() {
+        (cpu.first_ms, gpu.first_ms)
+    } else {
+        (steady(cpu), steady(gpu))
+    }
+}
+
+/// The two sides' times a placement weighs: the middle timed run of each.
+pub fn steady_pair(cpu: &Timing, gpu: &Timing) -> (f64, f64) {
+    pair(cpu, gpu, Timing::median_ms)
+}
+
+/// How many times faster `gpu` ran than `cpu`, by the report's mean
+/// times.
 pub fn speedup(cpu: &Timing, gpu: &Timing) -> Option<f64> {
-    let once = cpu.runs_ms.is_empty() || gpu.runs_ms.is_empty();
-    let ms = |t: &Timing| if once { t.first_ms } else { t.typical_ms() };
-    let gpu_ms = ms(gpu);
-    (gpu_ms > 0.0).then(|| ms(cpu) / gpu_ms)
+    let (cpu_ms, gpu_ms) = pair(cpu, gpu, Timing::typical_ms);
+    (gpu_ms > 0.0).then(|| cpu_ms / gpu_ms)
 }
 
 pub fn alpha_samples(img: &RgbaImage) -> Vec<u8> {
