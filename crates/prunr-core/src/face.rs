@@ -184,13 +184,17 @@ pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, cpu_only: 
     found
 }
 
-/// Whether `find_and_restore` with `id` and `cpu_only` would reuse a
-/// restorer it holds, whose memory is then already taken.
-pub fn restorer_is_warm(id: prunr_models::ModelId, cpu_only: bool) -> bool {
+/// Where a loaded restorer of `id` that a face search with `cpu_only`
+/// would reuse runs, its memory then already taken: `Some(true)` on the
+/// CPU. A search that may use the GPU reuses the CPU's too, where it
+/// landed when the GPU lacked room.
+pub fn warm_restorer_on_cpu(id: prunr_models::ModelId, cpu_only: bool) -> Option<bool> {
     let cache = warm_restorers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(entry) = cache.get(&(id, cpu_only)) else { return false };
-    // A search holding it has its restorer loaded or loading.
-    entry.value.try_lock().map_or(true, |held| held.restorer.is_some())
+    let sides: &[bool] = if cpu_only { &[true] } else { &[false, true] };
+    sides.iter().copied().find(|&on_cpu| {
+        // A search holding it has its restorer loaded or loading.
+        cache.get(&(id, on_cpu)).is_some_and(|entry| entry.value.try_lock().map_or(true, |held| held.restorer.is_some()))
+    })
 }
 
 type WarmRestorers = std::collections::HashMap<(prunr_models::ModelId, bool), crate::inpaint_sd::CacheEntry<std::sync::Arc<std::sync::Mutex<FaceRestorer>>>>;

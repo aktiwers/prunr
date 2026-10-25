@@ -61,8 +61,8 @@ fn a_portrait_is_found_focused_on_and_restored_face_by_face() {
     let previews: Vec<usize> = updates.iter().enumerate().filter_map(|(i, u)| matches!(u, ProgressUpdate::TilePreview(_)).then_some(i)).collect();
     assert_eq!(previews.len(), restored.len(), "one preview per face");
     assert!(previews.iter().all(|&i| i > found_at), "found before any is restored");
-    assert!(prunr_core::face::restorer_is_warm(id, true), "the restorer that redrew stays loaded");
-    assert!(!prunr_core::face::restorer_is_warm(id, false), "the CPU's restorer is not the GPU's");
+    assert_eq!(prunr_core::face::warm_restorer_on_cpu(id, true), Some(true), "the restorer that redrew stays loaded");
+    assert_eq!(prunr_core::face::warm_restorer_on_cpu(id, false), Some(true), "a search that may use the GPU reuses the loaded CPU restorer");
 }
 
 /// A face model on the GPU path redraws alike in a second session, which
