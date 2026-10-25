@@ -5,7 +5,7 @@
 
 mod test_common;
 
-use test_common::skip_if_no_ort;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 #[test]
 fn free_dims_name_each_free_input_size() {
@@ -13,10 +13,10 @@ fn free_dims_name_each_free_input_size() {
         return;
     }
     for descriptor in prunr_models::REGISTRY.iter().filter(|d| !d.free_dims.is_empty()) {
-        let Some(bytes) = prunr_models::resolve_bytes(descriptor.id) else {
-            eprintln!("[model inputs] SKIP {:?}: not installed", descriptor.id);
+        if skip_if_model_missing("model inputs", descriptor.id) {
             continue;
-        };
+        }
+        let bytes = prunr_models::resolve_bytes(descriptor.id).expect("an installed model reads");
         // Only the input is read: no graph optimizations, which some
         // models need tuned (Nomos8k).
         let session = prunr_core::ort_runtime::session_builder()
