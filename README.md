@@ -162,7 +162,7 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 
 **OpenVINO is the big win for Intel users.** On a CPU-only or Intel-iGPU laptop, installing OpenVINO Runtime lets us route inference (most importantly Stable Diffusion) through Intel's accelerated kernels. The first launch on Intel hardware shows a one-shot prompt to install it; you can also accept later from Settings → Hardware. The runtime lives at `~/.local/share/prunr/runtimes/` (Linux) and uses ~150 MB of disk after extraction.
 
-**Per-model EP compatibility** is declared in the model registry (`incompatible_eps` field). Models that don't load on a specific EP — e.g. Silueta's ONNX has graph cycles that OpenVINO rejects — skip that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs. Wipe the cache with `prunr --clear-ep-cache` after installing new drivers or upgrading OpenVINO.
+**Where each model runs** is declared in the model registry (`places` field): per accelerator, on it or on the CPU and why. A model that doesn't load on a specific EP — e.g. Silueta's ONNX has graph cycles that OpenVINO rejects — skips that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs. Wipe the cache with `prunr --clear-ep-cache` after installing new drivers or upgrading OpenVINO.
 
 The active backend is shown in the status bar. For diagnostics, run `prunr --doctor` to dump the full hardware profile, runtime status, model availability, and resolution chain — pasteable directly into bug reports.
 

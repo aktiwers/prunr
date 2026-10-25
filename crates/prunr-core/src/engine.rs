@@ -524,8 +524,9 @@ pub(crate) enum Miss {
 /// Why the ladder passes a provider over without trying it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
-    /// The registry declares the model incompatible with it, or the
-    /// provider cannot serve the model's kind of session by design.
+    /// The registry places the model on the CPU there
+    /// (`prunr_models::Places`), or the provider cannot serve the model's
+    /// kind of session by design.
     Declared,
     /// It failed these weights of the model on an earlier run, under the
     /// same drivers and runtime; skipped until they change or the list is
@@ -536,7 +537,7 @@ pub enum Skip {
 impl Skip {
     fn text(self, ep: EpKind) -> String {
         match self {
-            Skip::Declared => format!("{ep} is declared incompatible"),
+            Skip::Declared => format!("the registry keeps this model off {ep}"),
             Skip::FailedBefore => format!("{ep} failed this model before"),
         }
     }
@@ -550,7 +551,7 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if !prunr_models::is_ep_compatible(model, ep.as_str()) || compiles_per_shape(model, ep) {
+    if !prunr_models::runs_there(model, ep.as_str(), openvino_on_gpu()) || compiles_per_shape(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
@@ -1180,15 +1181,15 @@ fn check_place(provider: &'static str, openvino_on_gpu: bool) -> &'static str {
     if on_host_cpu(provider, openvino_on_gpu) { provider } else { GRAPHICS_CARD }
 }
 
-/// Whether `model` runs on the accelerator `provider`: not declared
-/// incompatible in the registry, and some weights the ladder would load
+/// Whether `model` runs on the accelerator `provider`: the registry does
+/// not place it on the CPU there, and some weights the ladder would load
 /// there (FP16 first where a copy exists, then the model's own) have not
 /// failed there on an earlier run. A model it does not run falls back to
 /// the CPU by design.
 pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
         Some(&ep) => gpu_skip(model, ep).is_none(),
-        None => prunr_models::is_ep_compatible(model, provider),
+        None => prunr_models::runs_there(model, provider, openvino_on_gpu()),
     }
 }
 
@@ -1509,7 +1510,7 @@ mod tests {
     fn erasers_and_parted_models_pass_migraphx_over_and_engines_keep_it() {
         for d in prunr_models::REGISTRY.iter() {
             let per_shape = d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts();
-            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), per_shape || !prunr_models::is_ep_compatible(d.id, "MIGraphX"), "{:?}", d.id);
+            assert_eq!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX) == Some(Skip::Declared), per_shape || !prunr_models::runs_there(d.id, "MIGraphX", false), "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
     }
@@ -1833,21 +1834,22 @@ mod tests {
         assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "the machine's lack, not the model's");
     }
 
-    /// A provider is passed over when declared incompatible or failed
-    /// before, without a try; the walk says so when it tried none.
+    /// A provider is passed over without a try when the registry keeps
+    /// the model off it or it failed before; the walk says so when it
+    /// tried none.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_walk_that_tries_no_provider_says_why() {
         use prunr_models::ModelId;
         let model = ModelId::Silueta;
         let declared = walk_ladder("", model, Weights::Fp32, &[EpKind::OpenVino], |_| -> Result<(), Miss> { panic!("tried a declared pair") });
-        assert_eq!(declared.map_err(|w| w.reason()), Err("no GPU provider to try: OpenVINO is declared incompatible".to_string()));
+        assert_eq!(declared.map_err(|w| w.reason()), Err("no GPU provider to try: the registry keeps this model off OpenVINO".to_string()));
         let none = walk_ladder("", model, Weights::Fp32, &[], |_| -> Result<(), Miss> { unreachable!() });
         assert_eq!(none.map_err(|w| w.reason()), Err("No GPU EPs available on this platform".to_string()));
         assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::Declared));
         assert_eq!(
             Walk::without_a_try(model, Weights::Fp32, &[EpKind::OpenVino]).map(|w| w.reason()),
-            Some("no GPU provider to try: OpenVINO is declared incompatible".to_string()),
+            Some("no GPU provider to try: the registry keeps this model off OpenVINO".to_string()),
             "the same line, known before any weights are read",
         );
         assert_eq!(Walk::without_a_try(ModelId::U2net, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");

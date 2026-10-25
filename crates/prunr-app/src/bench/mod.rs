@@ -222,7 +222,7 @@ fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
     let failed: Vec<String> = skips.iter().filter(|(_, s)| *s == Skip::FailedBefore).map(|(p, _)| p.to_string()).collect();
     Some(if failed.is_empty() {
         let names: Vec<&str> = skips.iter().map(|(p, _)| *p).collect();
-        Gpu::ByDesign { reason: format!("{} declared incompatible", names.join(", ")) }
+        Gpu::ByDesign { reason: format!("the registry keeps it off {}", names.join(", ")) }
     } else {
         Gpu::FailedBefore { providers: failed }
     })
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("DirectML", None)]), None);
         assert_eq!(
             gpu_passed_over(&[("OpenVINO", Some(Skip::Declared))]),
-            Some(Gpu::ByDesign { reason: "OpenVINO declared incompatible".into() }),
+            Some(Gpu::ByDesign { reason: "the registry keeps it off OpenVINO".into() }),
         );
         assert_eq!(
             gpu_passed_over(&[("OpenVINO", Some(Skip::Declared)), ("CUDA", Some(Skip::FailedBefore))]),
