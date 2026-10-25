@@ -353,6 +353,34 @@ pub fn cache_dir_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<Path
     Some(dir)
 }
 
+/// Mark the part `used` of `(id, ep_name)` as used now, and remove the
+/// least recently used of its siblings named `prefix…` beyond `keep`.
+/// Best-effort: a process still using a removed one compiles it again.
+pub fn keep_newest_parts(id: ModelId, ep_name: &str, used: &str, prefix: &str, keep: usize) {
+    let Some(dir) = cache_path_for(id, ep_name) else { return };
+    if let Err(e) = std::fs::File::open(dir.join(used)).and_then(|f| f.set_modified(std::time::SystemTime::now())) {
+        tracing::debug!(?id, ep = %ep_name, used, %e, "could not mark a cached part as used");
+    }
+    for stale in least_recent_parts(&dir, prefix, keep) {
+        match std::fs::remove_dir_all(&stale) {
+            Ok(()) => tracing::info!(?id, ep = %ep_name, part = %stale.display(), "removed a cached part not used lately"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(?id, ep = %ep_name, part = %stale.display(), %e, "could not remove a cached part"),
+        }
+    }
+}
+
+/// The folders in `dir` named `prefix…` beyond the `keep` most recently
+/// modified.
+fn least_recent_parts(dir: &Path, prefix: &str, keep: usize) -> Vec<PathBuf> {
+    let mut parts: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(|name| name.starts_with(prefix)) && entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    parts.sort_by(|a, b| b.0.cmp(&a.0));
+    parts.into_iter().skip(keep).map(|(_, path)| path).collect()
+}
+
 /// Per-part path to the ORT-graph-optimized file. No filesystem side
 /// effects — same pure/creating split as `cache_path_for`.
 pub fn optimized_model_path_for_part(id: ModelId, ep_name: &str, part: &str) -> Option<PathBuf> {
@@ -505,6 +533,24 @@ fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_least_recently_used_sizes_beyond_the_kept_go() {
+        let dir = std::env::temp_dir().join(format!("prunr-least-recent-parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = std::time::SystemTime::now();
+        for (name, age_s) in [("size-a", 30), ("size-b", 10), ("size-c", 20), ("size-d", 40), ("head", 50)] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            let at = now - std::time::Duration::from_secs(age_s);
+            std::fs::File::open(dir.join(name)).unwrap().set_modified(at).unwrap();
+        }
+        std::fs::write(dir.join("size-file"), b"").unwrap();
+        let mut stale = least_recent_parts(&dir, "size-", 2);
+        stale.sort();
+        assert_eq!(stale, vec![dir.join("size-a"), dir.join("size-d")]);
+        assert!(least_recent_parts(&dir, "size-", 4).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A draft is attached only where ORT can write the graph: ORT fails
     /// the whole session otherwise, and the cache must not cost the model.

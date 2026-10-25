@@ -443,6 +443,8 @@ Each session walks a ladder of the GPU EPs the loaded runtime actually has compi
 
 CoreML compiles ML Programs (the format fp16 graphs need). A CoreML session swaps ORT's log sink for one that keeps CoreML's own `GetCapability` summary and logs it on commit as `partitions`, `nodes` and `coreml_nodes`: every partition edge is a CPU↔GPU round trip, so these counts are the data for deciding per model whether CoreML pays.
 
+**A CoreML session per input size.** A model whose input size is free (the upscalers, Depth; `free_dims` in the registry names the sizes) compiles on CoreML for each size it meets instead of for any size: a free size compiles to a slower program many times the memory (Real-ESRGAN x4 on a 256 px tile, MacBook Air: 1.27 s and 0.4 GB fixed, 1.78 s and 3.3 GB free). The engine keeps one size's session and compiles the next when another comes (about 1 s; 0.1 s when its compile is on disk). Equal tiles give one size per photo, and Depth's input has a few sizes, one per aspect ratio. Each size's compile is cached apart, the four used last kept.
+
 OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machines don't have an OpenVINO runtime loaded, so they fall through to CUDA. OpenVINO's thread pool is capped to the rayon budget to avoid oversubscription. `cpu_only` (Settings, CLI) skips the ladder.
 
 ### Per-(model, EP) compatibility filter

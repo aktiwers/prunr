@@ -442,6 +442,13 @@ pub struct ModelDescriptor {
     /// Hardware-aware downsizing may reduce this when RAM is tight.
     /// `None` = caller picks; only required for tile-based models.
     pub recommended_tile: Option<u32>,
+    /// The input's sizes the ONNX file leaves free, each by its name there
+    /// and the axis it sizes (NCHW). CoreML runs a model compiled for one
+    /// size faster and in a fraction of the memory (Real-ESRGAN x4 on a
+    /// 256 px tile, MacBook Air: 1.27 s and 0.4 GB against 1.78 s and
+    /// 3.3 GB), so an engine there compiles each size it meets. Empty for a
+    /// fixed input, or one no engine sizes this way.
+    pub free_dims: &'static [(&'static str, usize)],
     /// License mandates in-product credit (CC-BY family): a "CC-BY" badge
     /// in Settings → Model credits, sorted to the top.
     pub attribution_required: bool,
@@ -588,6 +595,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -624,6 +632,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -661,6 +670,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -692,6 +702,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -728,6 +739,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -764,6 +776,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -800,6 +813,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -871,6 +885,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -941,6 +956,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1028,6 +1044,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1078,6 +1095,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1112,13 +1130,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Same(Cost::measured(4_350, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
+        free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
         upscale: Some(UpscaleModelKnobs {
             input_name: "data",
@@ -1151,20 +1170,24 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         // CUDA returns a black picture from this fp16 release (RTX 3060,
         // ORT 1.24.1, 2026-10-24: every value 0, where the CPU's matches
-        // the input to 3.3/255 shrunk back).
-        incompatible_eps: &["CUDA"],
+        // the input to 3.3/255 shrunk back). CoreML (16 GB MacBook Air,
+        // ORT 1.30, 2026-10-25): compiled for any size it fails to plan
+        // ("error code: -14"); compiled for a 256 px tile it splits into 253
+        // parts and its first run was killed after 80 s.
+        incompatible_eps: &["CUDA", "CoreML"],
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
             cuda: Priced::Never,
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Never,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(16),
         recommended_tile: Some(256),
+        free_dims: &[],
         attribution_required: true,
         upscale: Some(UpscaleModelKnobs {
             input_name: "input",
@@ -1214,6 +1237,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(2),
         recommended_tile: Some(512),
+        free_dims: &[],
         attribution_required: false,
         upscale: Some(UpscaleModelKnobs {
             input_name: "data",
@@ -1251,16 +1275,17 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
+        free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
         upscale: Some(UpscaleModelKnobs {
             input_name: "data",
@@ -1342,6 +1367,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: true,
         upscale: Some(UpscaleModelKnobs {
             input_name: "input",
@@ -1382,16 +1408,17 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         incompatible_eps: &[],
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
+            mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
+            coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
+        free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
         upscale: Some(UpscaleModelKnobs {
             input_name: "data",
@@ -1439,6 +1466,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1470,13 +1498,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Same(Cost::measured(650, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
             cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Same(Cost::measured(3_450, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
+            coreml: Priced::Same(Cost::measured(1_050, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[("batch_size", 0), ("height", 2), ("width", 3)],
         attribution_required: false,
         upscale: None,
     },
@@ -1526,6 +1555,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1568,6 +1598,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1610,6 +1641,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -1645,6 +1677,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
+        free_dims: &[],
         attribution_required: false,
         upscale: None,
     },
@@ -2355,7 +2388,7 @@ mod tests {
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 5), ("DirectML", 23), ("CoreML", 13), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 5), ("DirectML", 23), ("CoreML", 9), ("OpenVINO", 18), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
@@ -2367,7 +2400,7 @@ mod tests {
                 }
             }
         }
-        const MAC_CPU_UNMEASURED_AT_MOST: usize = 12;
+        const MAC_CPU_UNMEASURED_AT_MOST: usize = 10;
         let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
         assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
         assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
