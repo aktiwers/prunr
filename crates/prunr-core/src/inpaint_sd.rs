@@ -2418,7 +2418,7 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, residen
     let margin_mb = tuning.margin_mb;
     let need = |tall| stroke_need(id, margin_mb, resident, tall, bundle);
     if let Err(short @ Short::Card { .. }) = crate::memory::fit(need(false), room) {
-        let on_cpu = prunr_models::descriptor(id).and_then(|d| Charge::of(&d.needs, crate::engine::CPU_NAME));
+        let on_cpu = prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, crate::engine::CPU_NAME));
         return match on_cpu {
             Some(cpu) if sd_spec(id).cpu_output_correct => fit_ram(id, tuning, room, resident, cpu),
             _ => Err(short),
@@ -3657,7 +3657,7 @@ mod tests {
 
     /// The bundle's needs on the CPU, for the rule's tests.
     fn on_cpu(id: prunr_models::ModelId) -> Charge {
-        Charge::of(&prunr_models::descriptor(id).unwrap().needs, crate::engine::CPU_NAME).unwrap()
+        Charge::of(&prunr_models::descriptor(id).unwrap().needs, crate::engine::CPU_NAME)
     }
 
     /// A bundle on a card, for the rule's own tests apart from any measured one.
@@ -3698,7 +3698,7 @@ mod tests {
     fn every_sd_eraser_on_an_nvidia_card_fits_a_12_gb_card_and_a_16_gb_machine() {
         use prunr_models::ModelId;
         for id in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16, ModelId::RoremFp16] {
-            let bundle = Charge::of(&prunr_models::descriptor(id).unwrap().needs, "CUDA").unwrap();
+            let bundle = Charge::of(&prunr_models::descriptor(id).unwrap().needs, "CUDA");
             assert!(bundle.on_card(), "{id:?} measured on CUDA");
             let mut t = plan_tuning(false, SD_DEFAULT_MARGIN_MB);
             assert_eq!(fit_ram(id, &mut t, Room { ram_mb: 11_600, card_mb: Some(11_600) }, false, bundle), Ok(()), "{id:?}");

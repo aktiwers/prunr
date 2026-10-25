@@ -14,12 +14,11 @@ pub struct Charge {
 }
 
 impl Charge {
-    /// `needs` on `provider`; `None` when the model is never run there.
-    pub fn of(needs: &Needs, provider: &str) -> Option<Self> {
+    /// `needs` on `provider`.
+    pub fn of(needs: &Needs, provider: &str) -> Self {
         match needs.on(provider) {
-            Priced::Same(cost) => Some(Self { ram_mb: cost.host_mb.into(), card_mb: cost.card_mb.into() }),
-            Priced::Unmeasured => Some(Self { ram_mb: needs.host_cpu().host_mb.into(), card_mb: 0 }),
-            Priced::Never => None,
+            Priced::Same(cost) => Self { ram_mb: cost.host_mb.into(), card_mb: cost.card_mb.into() },
+            Priced::Unmeasured => Self { ram_mb: needs.host_cpu().host_mb.into(), card_mb: 0 },
         }
     }
 
@@ -84,11 +83,9 @@ pub fn falls_to_cpu(asked: Option<(Charge, Room)>, cpu: Option<(Charge, Room)>) 
     }
 }
 
-/// What `id` takes on `provider`; the CPU's figure where it never runs
-/// there (the ladder then falls to the CPU).
+/// What `id` takes on `provider`.
 pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
-    let needs = prunr_models::descriptor(id)?.needs;
-    Charge::of(&needs, provider).or_else(|| Charge::of(&needs, crate::engine::CPU_NAME))
+    prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, provider))
 }
 
 /// How many of `wanted` engines of `id` fit the card `provider` runs it
@@ -153,7 +150,7 @@ mod tests {
             cuda,
             directml: Priced::Unmeasured,
             coreml: Priced::Same(Cost::estimate(3_000, 0, "test")),
-            openvino: Priced::Never,
+            openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         }
     }
@@ -182,16 +179,15 @@ mod tests {
     }
 
     /// Measured on a provider: its own figures. Unmeasured: the CPU's, in
-    /// system RAM. Never: no charge, the model does not run there.
+    /// system RAM.
     #[test]
     fn a_model_is_charged_what_it_needs_where_it_runs() {
         let measured = needs(Priced::Same(Cost::measured(2_000, 6_000, "test")));
-        assert_eq!(Charge::of(&measured, "CUDA"), Some(Charge { ram_mb: 2_000, card_mb: 6_000 }));
-        assert_eq!(Charge::of(&measured, "CPU"), Some(Charge { ram_mb: 9_000, card_mb: 0 }));
-        assert_eq!(Charge::of(&measured, "DirectML"), Some(Charge { ram_mb: 9_000, card_mb: 0 }), "unmeasured: the CPU's figure");
-        assert_eq!(Charge::of(&measured, "CoreML"), Some(Charge { ram_mb: 3_000, card_mb: 0 }), "unified memory");
-        assert_eq!(Charge::of(&measured, "OpenVINO"), None);
-        assert_eq!(Charge::of(&needs(Priced::Unmeasured), "CUDA"), Some(Charge { ram_mb: 9_000, card_mb: 0 }));
+        assert_eq!(Charge::of(&measured, "CUDA"), Charge { ram_mb: 2_000, card_mb: 6_000 });
+        assert_eq!(Charge::of(&measured, "CPU"), Charge { ram_mb: 9_000, card_mb: 0 });
+        assert_eq!(Charge::of(&measured, "DirectML"), Charge { ram_mb: 9_000, card_mb: 0 }, "unmeasured: the CPU's figure");
+        assert_eq!(Charge::of(&measured, "CoreML"), Charge { ram_mb: 3_000, card_mb: 0 }, "unified memory");
+        assert_eq!(Charge::of(&needs(Priced::Unmeasured), "CUDA"), Charge { ram_mb: 9_000, card_mb: 0 });
     }
 
     /// As many engines as the card holds with its reserve free, never
