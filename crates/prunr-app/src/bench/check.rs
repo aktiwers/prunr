@@ -12,7 +12,7 @@ use prunr_core::memory;
 use prunr_core::provider_check::Check;
 use prunr_models::ModelId;
 
-use super::{Family, Gpu, Inputs, Row, Verdict};
+use super::{Family, Inputs, Row, Verdict};
 
 /// The GPU path is used when it runs at least this much of the CPU's
 /// time: a margin over one timed run's noise.
@@ -30,10 +30,7 @@ pub const LINE: &str = "PRUNR-CHECK ";
 /// the row says nothing about a provider (none ran the model, or the CPU
 /// gave no reference).
 pub fn judge(row: &Row) -> Option<Check> {
-    let Gpu::Ran(gpu) = &row.gpu else { return None };
-    if gpu.on_cpu {
-        return None;
-    }
+    let gpu = row.gpu.on_gpu()?;
     let weights = gpu.weights?.to_string();
     let verdict = |rejected: Option<String>| Some(Check { provider: gpu.provider.clone(), weights: weights.clone(), rejected });
     match row.verdict {
@@ -62,7 +59,7 @@ pub fn judge(row: &Row) -> Option<Check> {
 /// run as its time (no timed runs: minutes on the CPU for little), the
 /// GPU path's one timed run after its first.
 pub fn bench_once(id: ModelId) -> Row {
-    super::bench_model(id, &Inputs::built_in(), super::Runs { cpu: 0, gpu: 1 }, None, &mut |_| {})
+    super::bench_model(id, &Inputs::built_in(), super::Runs { cpu: 0, gpu: 1 }, &mut |_| {}).0
 }
 
 /// `prunr_core::provider_check::Checker`. `None` for a model the bench
@@ -142,7 +139,7 @@ fn either_side_fits(model: ModelId, provider: &str) -> bool {
 mod tests {
     use super::*;
     use crate::bench::stats::{Agreement, Timing};
-    use crate::bench::Side;
+    use crate::bench::{Gpu, Side};
 
     fn side(provider: &str, ms: f64) -> Side {
         Side {
@@ -152,7 +149,7 @@ mod tests {
             timing: Some(Timing { session_ms: 1.0, first_ms: ms, runs_ms: vec![ms] }),
             failed: Vec::new(),
             error: None,
-            score: None,
+            score: Default::default(),
         }
     }
 
@@ -166,7 +163,6 @@ mod tests {
             agreement: Some(Agreement { max_abs: 29, mean_abs: 1.24, over_2: 0.145, samples: 10 }),
             note: None,
             verdict,
-            leaning: None,
             saved: Vec::new(),
         }
     }

@@ -1445,13 +1445,19 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     let mut files = ReportFiles::new(args.out.clone());
     files.write(&report);
     let outputs = files.outputs_dir();
-    bench::run(&models, &inputs, args.runs, Some(&outputs), &mut |event| match event {
+    bench::run(&models, &inputs, args.runs, &mut |event| match event {
         bench::Event::Stage { index, total, model, stage } => {
             eprintln!("[{index}/{total}] {model}: {stage}");
             report.running = Some(format!("{model}: {stage}"));
             files.write(&report);
         }
-        bench::Event::Done(row) => {
+        bench::Event::Done(mut row, pictures) => {
+            if let Some(pictures) = pictures {
+                match bench::triage::save(&outputs, row.name, &pictures) {
+                    Ok(saved) => row.saved = saved,
+                    Err(e) => row.add_note(format!("the outputs could not be saved: {e}")),
+                }
+            }
             eprintln!("      {}: {}", row.model, report::result(&row));
             report.rows.push(*row);
             report.running = None;
@@ -1549,8 +1555,7 @@ impl ReportFiles {
 
     /// Beside the report: `prunr-bench.md` saves into `prunr-bench-outputs/`.
     fn outputs_dir(&self) -> PathBuf {
-        let stem = self.md.file_stem().map_or_else(|| "prunr-bench".into(), |s| s.to_string_lossy());
-        self.md.with_file_name(format!("{stem}-outputs"))
+        output_path_with_suffix(&self.md, &None, false, "-outputs")
     }
 
     fn write(&mut self, report: &prunr_app::bench::report::Report) {
