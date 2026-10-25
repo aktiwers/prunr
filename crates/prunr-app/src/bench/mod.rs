@@ -11,6 +11,7 @@ pub mod input;
 pub mod needs;
 pub mod report;
 pub mod stats;
+pub mod table;
 pub mod triage;
 
 use std::borrow::Cow;

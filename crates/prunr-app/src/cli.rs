@@ -283,6 +283,13 @@ pub struct BenchArgs {
     #[arg(long, value_name = "PATH", default_value = "prunr-bench.md")]
     pub out: PathBuf,
 
+    /// Also print where each model runs on this machine's accelerator, as
+    /// the registry's `places` lines, measured where LABEL says (e.g.
+    /// "RTX 3060, 2026-10-25"). Places the registry keeps on the CPU are
+    /// measured again, except those that fail there.
+    #[arg(long, value_name = "LABEL")]
+    pub table: Option<String>,
+
     /// Measure memory instead of speed: each model's peak system RAM and
     /// graphics-card memory on the CPU and on the GPU path, each in a
     /// fresh process, with the registry lines to paste.
@@ -1439,6 +1446,9 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     if args.needs {
         return run_needs(&models, args);
     }
+    if args.table.is_some() {
+        prunr_core::engine::remeasure_places();
+    }
     let mut report = report::Report { header: report::Header::detect(&inputs.label, args.runs), rows: Vec::new(), running: None };
     print!("{}", report::header_text(&report.header));
     println!();
@@ -1468,6 +1478,14 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     print!("{}", report::terminal_table(&report.rows));
     println!();
     println!("{}.", report::summary(&report.rows));
+    if let Some(label) = &args.table {
+        let column = report.header.gpu_providers.first().map_or("CPU", String::as_str);
+        let section = bench::table::section(&report.rows, column, label);
+        print!("{section}");
+        if let Err(e) = std::fs::OpenOptions::new().append(true).open(&files.md).and_then(|mut f| std::io::Write::write_all(&mut f, section.as_bytes())) {
+            eprintln!("error: cannot add the places to {}: {e}", files.md.display());
+        }
+    }
     println!("Report: {} and {}", files.md.display(), files.json().display());
     0
 }

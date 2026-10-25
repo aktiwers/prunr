@@ -265,9 +265,33 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
 
 /// The providers among `eps` that run on a graphics device: OpenVINO only
 /// when it may use the Intel GPU, its CPU device being no faster than
-/// ORT's own.
+/// ORT's own. Every one of `eps` while places are measured again.
 pub(crate) fn gpu_devices(eps: &[EpKind], openvino_on_gpu: bool) -> Vec<EpKind> {
-    eps.iter().copied().filter(|ep| !on_host_cpu(ep.as_str(), openvino_on_gpu)).collect()
+    eps.iter().copied().filter(|ep| REMEASURE.get().is_some() || !on_host_cpu(ep.as_str(), openvino_on_gpu)).collect()
+}
+
+/// Set by `prunr bench --table`: this process tries the places the
+/// registry keeps on the CPU for a slower, different or no-gain result,
+/// so they are measured again. A place that fails stays skipped: some
+/// fail by hanging or by taking the machine's memory.
+static REMEASURE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+pub fn remeasure_places() {
+    let _ = REMEASURE.set(());
+}
+
+/// Whether the registry keeps `model` on the CPU rather than `ep`.
+fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> bool {
+    kept_off_at(prunr_models::place(model, ep.as_str(), openvino_on_gpu()), REMEASURE.get().is_some())
+}
+
+fn kept_off_at(place: prunr_models::Place, remeasuring: bool) -> bool {
+    use prunr_models::{Place, Why};
+    match place {
+        Place::Cpu(Why::Fails(_)) => true,
+        Place::Cpu(_) => !remeasuring,
+        Place::There(_) | Place::Unmeasured => false,
+    }
 }
 
 /// A session of `id` on the first graphics device that builds it, else
@@ -551,7 +575,7 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if !prunr_models::runs_there(model, ep.as_str(), openvino_on_gpu()) || compiles_per_shape(model, ep) {
+    if kept_off(model, ep) || compiles_per_shape(model, ep) {
         Some(Skip::Declared)
     } else if crate::ep_compat::is_known_failure(ep, model, weights) {
         Some(Skip::FailedBefore)
@@ -1523,6 +1547,24 @@ mod tests {
         assert!(!on_host_cpu(OPENVINO_NAME, true));
         assert!(on_host_cpu(CPU_NAME, true), "the CPU provider is the CPU either way");
         assert!(!on_host_cpu("CUDA", false));
+    }
+
+    /// A place on the CPU keeps the model off the provider; while places
+    /// are measured again only a failing one does, since it may hang or
+    /// take the machine's memory.
+    #[test]
+    fn a_cpu_place_keeps_the_model_off_unless_measured_again() {
+        use prunr_models::{Place, Why};
+        for (place, kept, kept_while_measuring) in [
+            (Place::Unmeasured, false, false),
+            (Place::There("1.3x"), false, false),
+            (Place::Cpu(Why::Slower("0.8x")), true, false),
+            (Place::Cpu(Why::Differs("black")), true, false),
+            (Place::Cpu(Why::NoGain("1.05x, heavier")), true, false),
+            (Place::Cpu(Why::Fails("hangs")), true, true),
+        ] {
+            assert_eq!((kept_off_at(place, false), kept_off_at(place, true)), (kept, kept_while_measuring), "{place:?}");
+        }
     }
 
     #[test]
