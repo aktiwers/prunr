@@ -95,9 +95,7 @@ fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
 fn on_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
-        ep == EpKind::OpenVino
-            && crate::engine::openvino_on_gpu()
-            && prunr_models::descriptor(model).is_some_and(|d| d.category != prunr_models::ModelCategory::Inpaint)
+        ep == EpKind::OpenVino && crate::engine::on_intel_gpu(model)
     }
     #[cfg(target_os = "macos")]
     {

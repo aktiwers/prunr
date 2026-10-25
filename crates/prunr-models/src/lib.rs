@@ -581,9 +581,14 @@ const DDCOLOR_ON_OPENVINO: Why = Why::Fails(
     "a run fails in one of OpenVINO's subgraphs (subgraph 155) (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
 );
 
-const NOMOS2_ON_OPENVINO: Why = Why::Slower(
+const NOMOS2_ON_OPENVINO: Why = Why::Fails(
     "compiling its 30 parts takes 73 s and 9.7 GB before a 55 s run, against the CPU's 67 s in 0.95 GB (960×635, \
      i7-6700, 2026-10)",
+);
+
+const FILL_ON_INTEL_GRAPHICS: Why = Why::Fails(
+    "fills run on OpenVINO's processor: its GPU plugin cannot build LaMa's dynamic shapes, and under AUTO it ran about \
+     10% slower (i7-6700, HD 530)",
 );
 
 /// The figure the registry carried as one number per model before card
@@ -885,7 +890,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There("10.77x: 12 ms against the CPU's 127 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Slower("0.59x: 126 ms against the CPU's 74 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
             openvino: Place::There("1.68x: 88 ms against the CPU's 148 ms (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.09x: 130 ms against the CPU's 142 ms, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino_gpu: Place::There("1.09x: 130 ms against the CPU's 142 ms, within 10%; its memory there not measured (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -928,7 +933,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There("14.75x: 150 ms against the CPU's 2.21 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Fails("CoreML cannot plan it (\"Failed to build the model execution plan\") (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
             openvino: Place::There("1.13x: 2.36 s against the CPU's 2.66 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.15x: 2.16 s against the CPU's 2.48 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -971,7 +976,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There("2.11x: 1.30 s against the CPU's 2.74 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Slower("0.72x: 3.81 s against the CPU's 2.75 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
             openvino: Place::There("1.12x: 3.57 s against the CPU's 4.00 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.10x: 3.47 s against the CPU's 3.81 s, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1401,7 +1406,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                  first run passed 80 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)",
             )),
             openvino: Place::There("2.67x: 47.11 s against the CPU's 2m 06s, first runs (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::Cpu(Why::Slower("one 256 px tile ran past 40 minutes and was stopped, against the CPU's 2m 06s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
+            openvino_gpu: Place::Cpu(Why::Fails("one 256 px tile ran past 40 minutes and was stopped, against the CPU's 2m 06s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1943,8 +1948,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         places: Places {
             cuda: Place::There("1.38x: 2.8 ms against the CPU's 3.8 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Slower("0.87x: 7.2 ms against the CPU's 6.2 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There("1.07x: 5.0 ms against the CPU's 5.3 ms, within 10%, in the same memory (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.01x: 6.9 ms against the CPU's 7.0 ms, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino: Place::There("1.07x: 5.0 ms against the CPU's 5.3 ms, within 10%; its memory there not measured (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.01x: 6.9 ms against the CPU's 7.0 ms, within 10%; its memory there not measured (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
@@ -2842,6 +2847,15 @@ mod tests {
         assert_eq!(Column::of("OpenVINO", true), Some(Column::OpenVinoGpu));
         assert_eq!(Column::of("CUDA", true), Some(Column::Cuda), "the switch is OpenVINO's only");
         assert_eq!(Column::of("CPU", false), None);
+    }
+
+    /// A fill never runs on the Intel graphics (OpenVINO keeps fills on
+    /// the processor), so its entry there never says it runs there.
+    #[test]
+    fn a_fill_never_runs_on_the_intel_graphics() {
+        for desc in REGISTRY.iter().filter(|d| d.category == ModelCategory::Inpaint) {
+            assert!(!matches!(desc.places.openvino_gpu, Place::There(_)), "{:?}", desc.id);
+        }
     }
 
     /// Every place says where it was measured, and no more columns are

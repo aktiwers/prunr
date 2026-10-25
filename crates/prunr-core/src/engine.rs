@@ -272,10 +272,48 @@ fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Wh
     if compiles_per_shape(model, ep) {
         return Some(COMPILES_PER_SHAPE);
     }
-    match prunr_models::place(model, ep.as_str(), openvino_on_gpu()) {
-        place @ prunr_models::Place::Cpu(why) if place.kept_off(REMEASURE.get().is_some()) => Some(why),
+    let place = prunr_models::descriptor(model)?.places.get(column_for(model, ep)?);
+    match place {
+        prunr_models::Place::Cpu(why) if place.kept_off(remeasuring()) => Some(why),
         _ => None,
     }
+}
+
+fn remeasuring() -> bool {
+    REMEASURE.get().is_some()
+}
+
+/// The table's column a session of `model` on `ep` reads: OpenVINO's by
+/// the device it runs the model on (`on_intel_gpu`).
+fn column_for(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Column> {
+    #[cfg(not(target_os = "macos"))]
+    if ep == EpKind::OpenVino {
+        return Some(if on_intel_gpu(model) { prunr_models::Column::OpenVinoGpu } else { prunr_models::Column::OpenVino });
+    }
+    prunr_models::Column::of(ep.as_str(), false)
+}
+
+/// Whether OpenVINO runs `model` on the Intel graphics: they are on, its
+/// kind can use them and the table keeps it there. Otherwise OpenVINO runs
+/// it on the processor where the table says so, so a model the graphics
+/// run slower still gets OpenVINO's processor where that beats ORT's CPU.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn on_intel_gpu(model: prunr_models::ModelId) -> bool {
+    let Some(descriptor) = prunr_models::descriptor(model) else { return false };
+    intel_gpu_for(descriptor.places.openvino_gpu, takes_intel_gpu(descriptor.category), intel_gpu_chosen(), remeasuring())
+}
+
+/// Fills stay on the processor: the GPU plugin cannot build LaMa (dynamic
+/// shapes), and under AUTO it ran ~10% slower than the CPU. SD parts pick
+/// their own device.
+#[cfg(not(target_os = "macos"))]
+fn takes_intel_gpu(category: prunr_models::ModelCategory) -> bool {
+    category != prunr_models::ModelCategory::Inpaint
+}
+
+#[cfg(not(target_os = "macos"))]
+fn intel_gpu_for(place: prunr_models::Place, takes_gpu: bool, switch_on: bool, remeasuring: bool) -> bool {
+    switch_on && takes_gpu && !place.kept_off(remeasuring)
 }
 
 /// A session of `id` on the first accelerator that takes it (the
@@ -349,9 +387,9 @@ fn intel_gpu_chosen() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 impl EpSite<'_> {
-    /// The OpenVINO device this site asks for; `None` is OpenVINO's CPU.
-    /// Fills stay on the CPU: the GPU plugin cannot build LaMa (dynamic
-    /// shapes), and under AUTO it ran ~10% slower than the CPU.
+    /// The OpenVINO device this site asks for, `intel_gpu` when the model
+    /// runs on the Intel graphics (`on_intel_gpu`); `None` is OpenVINO's
+    /// CPU. Fills stay there.
     fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
         match self {
             EpSite::Engine { .. } | EpSite::Selection { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
@@ -443,17 +481,15 @@ impl EpKind {
                 // CLI batch wall time).
                 EpSite::Engine { threads, .. } | EpSite::Fill { threads } => {
                     let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
-                    match site.ov_device(intel_gpu_chosen()) {
+                    match site.ov_device(on_intel_gpu(model)) {
                         Some(device) => provider.with_device_type(device),
                         None => provider,
                     }
                     .build()
                 }
-                // Only on the Intel GPU: the Magic Brush leaves OpenVINO's
-                // CPU device to ORT's own CPU provider.
                 EpSite::Selection { .. } => {
                     let provider = ort::ep::OpenVINO::default();
-                    match site.ov_device(intel_gpu_chosen()) {
+                    match site.ov_device(on_intel_gpu(model)) {
                         Some(device) => provider.with_device_type(device),
                         None => provider,
                     }
@@ -468,7 +504,7 @@ impl EpKind {
                     let provider = ort::ep::OpenVINO::default()
                         .with_num_streams(1)
                         .with_dynamic_shapes(true);
-                    match site.ov_device(intel_gpu_chosen()) {
+                    match site.ov_device(on_intel_gpu(model)) {
                         Some(device) => provider.with_device_type(device),
                         None => provider,
                     }
@@ -1516,6 +1552,25 @@ mod tests {
         assert!(!on_host_cpu(OPENVINO_NAME, true));
         assert!(on_host_cpu(CPU_NAME, true), "the CPU provider is the CPU either way");
         assert!(!on_host_cpu("CUDA", false));
+    }
+
+    /// With the Intel graphics on, OpenVINO runs a model there where the
+    /// table keeps it there; one slower there runs on OpenVINO's processor
+    /// instead (its own place decides that), and a fill never asks.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn openvino_takes_the_intel_graphics_only_where_the_table_keeps_a_model_there() {
+        use prunr_models::{Place, Why};
+        let faster = Place::There("1.5x");
+        let slower = Place::Cpu(Why::Slower("0.65x"));
+        assert!(intel_gpu_for(faster, true, true, false));
+        assert!(!intel_gpu_for(slower, true, true, false), "slower there: the processor");
+        assert!(intel_gpu_for(slower, true, true, true), "measured again by the bench");
+        assert!(!intel_gpu_for(Place::Cpu(Why::Fails("hangs")), true, true, true), "never a failing place");
+        assert!(!intel_gpu_for(faster, true, false, false), "the switch is off");
+        assert!(!intel_gpu_for(faster, false, true, false), "a fill");
+        assert!(intel_gpu_for(Place::Unmeasured, true, true, false), "unmeasured: tried");
+        assert!(!takes_intel_gpu(prunr_models::ModelCategory::Inpaint));
     }
 
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
