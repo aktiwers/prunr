@@ -406,12 +406,12 @@ impl EpKind {
             EpKind::MiGraphX => ort::ep::MIGraphX::default().with_device_id(0).build(),
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => {
-                let dir = prunr_models::coreml_reloads_compile(model).then(|| match site {
+                let dir = match site {
                     EpSite::SdPart { part, .. } | EpSite::Engine { part: Some(part), .. } | EpSite::Selection { part } => {
                         crate::cache::cache_dir_for_part(model, self.as_str(), part)
                     }
                     EpSite::Engine { part: None, .. } | EpSite::Fill { .. } => crate::cache::cache_dir_for(model, self.as_str()),
-                }).flatten();
+                };
                 coreml_provider(dir.as_deref()).build()
             }
             #[cfg(windows)]
