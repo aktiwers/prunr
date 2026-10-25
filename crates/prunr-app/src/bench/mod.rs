@@ -6,7 +6,6 @@
 //! The runs go through the same core entry points as the app, so a
 //! mismatch here is a mismatch a user sees.
 
-pub mod check;
 pub mod input;
 pub mod needs;
 pub mod report;

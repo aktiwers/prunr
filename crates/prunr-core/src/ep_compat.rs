@@ -12,12 +12,8 @@
 //! also names its files' checksums, so a new download of it is tried
 //! again. A failure the device had, not the model (out of memory, a
 //! device removed or hung), is never recorded.
-//!
-//! A model checked against the CPU on a provider lands here too: a pass
-//! in `passed`, so it is not checked again, and a rejection (slower than
-//! the CPU, or its output off the CPU's) as a failure with the reason.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -69,15 +65,12 @@ struct CacheFile {
     #[serde(rename = "version")]
     scope: String,
     failures: HashMap<String, String>,
-    #[serde(default)]
-    passed: BTreeSet<String>,
 }
 
 /// What the file holds for one scope.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct Entries {
     failures: HashMap<String, String>,
-    passed: BTreeSet<String>,
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -162,7 +155,7 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 /// another scope, `None` when the file cannot be read.
 fn load_from(path: &Path, scope: &str) -> Option<Entries> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.scope == scope { Entries { failures: file.failures, passed: file.passed } } else { Entries::default() })
+    Some(if file.scope == scope { Entries { failures: file.failures } } else { Entries::default() })
 }
 
 /// Written whole and renamed into place, so another process reading it
@@ -171,7 +164,7 @@ fn save_to(path: &Path, scope: &str, entries: &Entries) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile { scope: scope.to_string(), failures: entries.failures.clone(), passed: entries.passed.clone() };
+    let file = CacheFile { scope: scope.to_string(), failures: entries.failures.clone() };
     let Ok(json) = serde_json::to_string_pretty(&file) else { return };
     let draft = path.with_extension(format!("json.{}", std::process::id()));
     if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
@@ -225,23 +218,6 @@ pub(crate) fn failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights
     store.entries.failures.get(&key(ep, model, weights)).cloned()
 }
 
-/// Whether these weights of the model passed the check against the CPU
-/// on the EP.
-pub(crate) fn has_passed(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
-    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.entries.passed.contains(&key(ep, model, weights))
-}
-
-/// Idempotent, like `record_failure`.
-pub(crate) fn record_pass(ep: EpKind, model: prunr_models::ModelId, weights: Weights) {
-    let k = key(ep, model, weights);
-    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if store.entries.passed.insert(k) {
-        tracing::info!(%ep, ?model, ?weights, "recording a passed check against the CPU");
-        save(&mut store);
-    }
-}
-
 /// Idempotent. A transient failure is logged and not recorded. A failed
 /// write is logged, not fatal: the next session re-discovers the failure.
 pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, error: &str) {
@@ -257,8 +233,8 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
     save(&mut store);
 }
 
-/// Wipe the cache, passed checks too, so each is checked again. Returns
-/// the number of failures removed.
+/// Wipe the cache, so each failed pair is tried again. Returns the number
+/// of failures removed.
 pub fn clear() -> usize {
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = store.entries.failures.len();
@@ -380,10 +356,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
-        let entries = Entries {
-            failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]),
-            passed: BTreeSet::from(["DirectML::Silueta".to_string()]),
-        };
+        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]) };
         save_to(&path, &then, &entries);
         assert_eq!(load_from(&path, &then), Some(entries));
         assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Entries::default()));
@@ -397,7 +370,7 @@ mod tests {
     fn a_reset_by_another_process_is_seen_on_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
-        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]), passed: BTreeSet::new() };
+        let entries = Entries { failures: HashMap::from([("DirectML::U2net".to_string(), "broke".to_string())]) };
         save_to(&path, "scope", &entries);
         let mut worker = Store { entries, stamp: stamp(&path) };
         worker.refresh_from(&path, "scope");
@@ -419,11 +392,11 @@ mod tests {
         assert!(!is_known_failure(ep, model, Weights::Fp16));
     }
 
-    /// A file written before checks existed reads with none passed.
+    /// A file written while checks against the CPU were kept beside the
+    /// failures still reads, its failures kept.
     #[test]
-    fn a_file_without_passed_checks_reads() {
-        let parsed: CacheFile = serde_json::from_str(r#"{"version":"v","failures":{"CUDA::U2net":"broke"}}"#).unwrap();
-        assert!(parsed.passed.is_empty());
+    fn a_file_with_passed_checks_reads() {
+        let parsed: CacheFile = serde_json::from_str(r#"{"version":"v","failures":{"CUDA::U2net":"broke"},"passed":["CUDA::Silueta"]}"#).unwrap();
         assert_eq!(parsed.failures.len(), 1);
     }
 
@@ -437,7 +410,6 @@ mod tests {
                 "OpenVINO::Silueta".to_string(),
                 "graph cycles".to_string(),
             )]),
-            passed: BTreeSet::new(),
         };
         let json = serde_json::to_string(&stale).unwrap();
         assert!(json.contains("\"OpenVINO::Silueta\""));

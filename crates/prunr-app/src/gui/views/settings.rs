@@ -561,10 +561,10 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             },
         );
         rows.row(
-            "Graphics card checks",
-            "Prunr checks each model on the graphics card once. One that fails there, runs slower than on the CPU or changes its result runs on the CPU until the graphics driver or Prunr changes. Forget the checks to run them again.",
+            "Graphics card failures",
+            "A model that fails on the graphics card runs on the CPU until the graphics driver or Prunr changes. Forget the failures to try them again.",
             |ui| {
-                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget graphics card checks").clicked() {
+                if super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget graphics card failures").clicked() {
                     intent = Some(HardwareSectionIntent::ForgetGpuFailures);
                 }
             },
