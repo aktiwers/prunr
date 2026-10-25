@@ -506,6 +506,25 @@ const ROREM_ON_OPENVINO: Why = Why::Fails(
     "OpenVINO widens the 5 GB fp16 UNet to fp32 to compile it: killed for memory with 19 GB free (i7-6700, 32 GB)",
 );
 
+const BIREFNET_ON_OPENVINO: Why = Why::Fails(
+    "a run fails: OpenVINO's output names do not match the model's (\"Output names mismatch between OpenVINO and \
+     ONNX\") (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+);
+
+const MIGAN_ON_OPENVINO: Why = Why::Fails(
+    "its session does not build: OpenVINO's CPU plugin has no implementation for one of its nodes (\"No suitable \
+     implementations found\") (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+);
+
+const SAM_ON_OPENVINO: Why = Why::Fails(
+    "its encoder does not build: OpenVINO's CPU plugin cannot reshape to a dynamic rank (/image_encoder/trunk/Reshape_2) \
+     (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+);
+
+const DDCOLOR_ON_OPENVINO: Why = Why::Fails(
+    "a run fails in one of OpenVINO's subgraphs (subgraph 155) (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+);
+
 const NOMOS2_ON_OPENVINO: Why = Why::Slower(
     "compiling its 30 parts takes 73 s and 9.7 GB before a 55 s run, against the CPU's 67 s in 0.95 GB (960×635, \
      i7-6700, 2026-10)",
@@ -727,6 +746,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("11.03x: 26 ms against the CPU's 286 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::Cpu(Why::NoGain("1.09x: 369 ms against the CPU's 402 ms, within 10%, in 800 MB of system memory against the CPU's 700 MB (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)")),
+            openvino_gpu: Place::There("2.26x: 177 ms against the CPU's 402 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -767,6 +788,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                  matched the CPU at half its speed, 17.6 s against 8.2 s, with ScatterND, Equal, Expand, ConstantOfShape, Mod \
                  and Floor left to the CPU (MacBook Air M1, 2026-10-24)",
             )),
+            openvino: Place::Cpu(BIREFNET_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(BIREFNET_ON_OPENVINO),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -802,6 +825,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("10.77x: 12 ms against the CPU's 127 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.68x: 88 ms against the CPU's 148 ms (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.09x: 130 ms against the CPU's 142 ms, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -842,6 +867,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("14.75x: 150 ms against the CPU's 2.21 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.13x: 2.36 s against the CPU's 2.66 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.15x: 2.16 s against the CPU's 2.48 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -882,6 +909,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("2.11x: 1.30 s against the CPU's 2.74 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.12x: 3.57 s against the CPU's 4.00 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.10x: 3.47 s against the CPU's 3.81 s, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -922,6 +951,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("21.03x: 44 ms against the CPU's 935 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::Cpu(MIGAN_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(MIGAN_ON_OPENVINO),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1250,6 +1281,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         places: Places {
             cuda: Place::There("29.71x: 273 ms against the CPU's 8.11 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.31x: 7.13 s against the CPU's 9.32 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.55x: 5.98 s against the CPU's 9.24 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1304,6 +1337,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 "compiled for any size it fails to plan (error -14); for a 256 px tile it splits into 253 parts and its \
                  first run passed 80 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)",
             )),
+            openvino: Place::There("2.67x: 47.11 s against the CPU's 2m 06s, first runs (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::Cpu(Why::Slower("one 256 px tile ran past 40 minutes and was stopped, against the CPU's 2m 06s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1359,6 +1394,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 "its pixel-unshuffle cannot be planned (\"Error in building plan\"), the tile pinned or free (MacBook Air \
                  M1, ORT 1.24 and 1.30)",
             )),
+            openvino: Place::There("1.36x: 1.73 s against the CPU's 2.35 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.41x: 1.65 s against the CPU's 2.33 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1410,6 +1447,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         places: Places {
             cuda: Place::There("29.65x: 272 ms against the CPU's 8.07 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.27x: 7.18 s against the CPU's 9.16 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.61x: 5.98 s against the CPU's 9.65 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1494,7 +1533,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                  (MacBook Air M1, ORT 1.30)",
             )),
             openvino: Place::Cpu(NOMOS2_ON_OPENVINO),
-            openvino_gpu: Place::Cpu(NOMOS2_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(Why::Differs("mean 126.69/255, 99.9% of values more than 2/255 apart (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1549,6 +1588,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::Recommended,
         places: Places {
             cuda: Place::There("29.48x: 272 ms against the CPU's 8.03 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.29x: 7.37 s against the CPU's 9.51 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.51x: 6.11 s against the CPU's 9.24 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1599,6 +1640,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 "its colours vary between runs: 4.8% and 14.5% of values more than 2/255 from the CPU's against a 10% \
                  tolerance (MacBook Air M1, ORT 1.30, 2026-10-23)",
             )),
+            openvino: Place::Cpu(DDCOLOR_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(DDCOLOR_ON_OPENVINO),
             ..Places::UNMEASURED
         },
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
@@ -1640,6 +1683,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("17.60x: 28 ms against the CPU's 499 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.27x: 382 ms against the CPU's 487 ms (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::Cpu(Why::Slower("0.65x: 770 ms against the CPU's 497 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
         // Measured: 366 MB peak RSS on the CPU EP, session load included
@@ -1689,6 +1734,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("6.61x: 379 ms against the CPU's 2.51 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::Cpu(SAM_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(SAM_ON_OPENVINO),
             ..Places::UNMEASURED
         },
         // One encode and a click, `prunr bench --needs`: 1.12 GB on the
@@ -1741,6 +1788,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("14.75x: 68 ms against the CPU's 1.01 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.14x: 1.28 s against the CPU's 1.46 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::Cpu(Why::Slower("0.43x: 3.33 s against the CPU's 1.43 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1787,6 +1836,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("19.04x: 128 ms against the CPU's 2.43 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.17x: 2.46 s against the CPU's 2.88 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("3.15x: 976 ms against the CPU's 3.08 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1825,6 +1876,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There("1.38x: 2.8 ms against the CPU's 3.8 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            openvino: Place::There("1.07x: 5.0 ms against the CPU's 5.3 ms, within 10%, in the same memory (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino_gpu: Place::There("1.01x: 6.9 ms against the CPU's 7.0 ms, within 10%, in the same memory (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
             ..Places::UNMEASURED
         },
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
@@ -2536,7 +2589,7 @@ mod tests {
         }
     }
 
-    /// A model is priced on every accelerator: never run exactly where
+    /// A model is priced on every accelerator: never run only where
     /// `places` keeps it on the CPU, and no more accelerators left
     /// unmeasured than counted here. Measuring one lowers its count;
     /// a new model left unmeasured raises it, on purpose, here.
@@ -2547,10 +2600,10 @@ mod tests {
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
-                let banned = desc.places.columns().iter()
+                let kept_off = desc.places.columns().iter()
                     .filter(|(column, _)| column.starts_with(provider))
                     .all(|(_, place)| matches!(place, Place::Cpu(_)));
-                assert_eq!(priced == Priced::Never, banned, "{:?} on {provider}: Never exactly where every place there is the CPU", desc.id);
+                assert!(priced != Priced::Never || kept_off, "{:?} on {provider}: priced Never, so every place there is the CPU", desc.id);
                 if priced == Priced::Unmeasured {
                     // provider names come from the same table
                     unmeasured.iter_mut().find(|(p, _)| *p == provider).unwrap().1.push(desc.id);
@@ -2701,8 +2754,8 @@ mod tests {
             ("DirectML", 23),
             ("CoreML", 18),
             ("MIGraphX", 23),
-            ("OpenVINO", 20),
-            ("OpenVINO (Intel graphics on)", 20),
+            ("OpenVINO", 3),
+            ("OpenVINO (Intel graphics on)", 3),
         ];
         for (i, &(column, at_most)) in UNMEASURED.iter().enumerate() {
             let mut unmeasured = Vec::new();

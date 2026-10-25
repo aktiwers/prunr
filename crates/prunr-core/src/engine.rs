@@ -256,13 +256,6 @@ pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
     if cpu_only { &[] } else { available_gpu_eps() }
 }
 
-/// The providers among `eps` that run on a graphics device: OpenVINO only
-/// when it may use the Intel GPU, its CPU device being no faster than
-/// ORT's own. Every one of `eps` while places are measured again.
-pub(crate) fn gpu_devices(eps: &[EpKind], openvino_on_gpu: bool) -> Vec<EpKind> {
-    eps.iter().copied().filter(|ep| REMEASURE.get().is_some() || !on_host_cpu(ep.as_str(), openvino_on_gpu)).collect()
-}
-
 /// Set by `prunr bench --table`: this process tries the places the
 /// registry keeps on the CPU for a slower, different or no-gain result,
 /// so they are measured again. A place that fails stays skipped: some
@@ -287,19 +280,20 @@ fn kept_off_at(place: prunr_models::Place, remeasuring: bool) -> bool {
     }
 }
 
-/// A session of `id` on the first graphics device that builds it, else
-/// on the CPU, with where it landed: for a model whose caller runs the
-/// session itself (lines, faces). `commit` loads the model into the
-/// builder it is handed, provider attached.
+/// A session of `id` on the first accelerator that takes it (the
+/// registry's `places`) and builds it, else on the CPU, with where it
+/// landed: for a model whose caller runs the session itself (lines,
+/// faces). `commit` loads the model into the builder it is handed,
+/// provider attached.
 pub fn session_on_ladder(
     id: prunr_models::ModelId,
     cpu_only: bool,
     commit: impl Fn(ort::session::builder::SessionBuilder) -> Result<Session, String>,
 ) -> Result<(Session, SessionPick), CoreError> {
-    let eps = gpu_devices(gpu_eps_for(cpu_only), openvino_on_gpu());
+    let eps = gpu_eps_for(cpu_only);
     let mut failed = Vec::new();
     if !eps.is_empty() {
-        let landed = walk_ladder("", id, Weights::Fp32, &eps, |ep| {
+        let landed = walk_ladder("", id, Weights::Fp32, eps, |ep| {
             let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
             let built = ep.attach(builder, id, EpSite::Engine { threads: num_cpus::get(), part: None })?;
             commit(built).map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}): {e}"), suspect_cache: None })
@@ -1456,17 +1450,6 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 mod tests {
     use super::*;
 
-    /// Lines, faces and the Magic Brush's encoder try the graphics
-    /// devices, and OpenVINO only when it may use the Intel GPU: on its
-    /// CPU device it is no faster than the CPU.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn a_session_on_the_ladder_tries_only_graphics_devices() {
-        let eps = [EpKind::Cuda, EpKind::OpenVino];
-        assert_eq!(gpu_devices(&eps, false), [EpKind::Cuda]);
-        assert_eq!(gpu_devices(&eps, true), eps);
-    }
-
     /// A cached CPU graph the session cannot load (damaged, or written on
     /// another machine) is deleted and the session built from the model:
     /// the CPU is the last provider, so a bad cache must not stop a model.
@@ -1868,7 +1851,7 @@ mod tests {
             Some("no GPU provider to try: the registry keeps this model off OpenVINO".to_string()),
             "the same line, known before any weights are read",
         );
-        assert_eq!(Walk::without_a_try(ModelId::U2net, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");
+        assert_eq!(Walk::without_a_try(ModelId::RealEsrganX4Plus, Weights::Fp32, &[EpKind::OpenVino]), None, "OpenVINO would be tried");
     }
 
     /// Sessions of one model built at once all build: none reads the
