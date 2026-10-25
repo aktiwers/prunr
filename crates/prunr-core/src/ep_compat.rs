@@ -48,13 +48,16 @@ fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
 }
 
 /// Error text of a failure the device had rather than the model: memory
-/// ran out, or the GPU was removed, hung or reset (DXGI 887A0005-7, as
-/// DirectML reports them). The next session may well succeed.
+/// ran out, the GPU was removed, hung or reset (DXGI 887A0005-7, as
+/// DirectML reports them), or CoreML found the compile it was saving
+/// already saved by another session building at the same time. The next
+/// session may well succeed.
 pub(crate) fn is_transient(error: &str) -> bool {
     const MARKS: &[&str] = &[
         "out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate",
         "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
         "has been suspended", "will not respond to more commands",
+        "error copying compiled model to cache path",
     ];
     let error = error.to_ascii_lowercase();
     MARKS.iter().any(|m| error.contains(m))
@@ -356,6 +359,7 @@ mod tests {
             "ORT session creation failed (DirectML): HRESULT 0x8007000E",
             "Failed to allocate memory for requested buffer of size 1073741824",
             "bad allocation",
+            "ORT session creation failed (CoreML): Error copying compiled model to cache path: /x/size-1-3-256-256/1/0_dynamic_mlprogram/model/compiled_model.mlmodelc, reason: \u{201c}model_9C5D.mlmodelc\u{201d} couldn\u{2019}t be moved to \u{201c}model\u{201d} because an item with the same name already exists.",
         ] {
             assert!(is_transient(transient), "{transient}");
         }
