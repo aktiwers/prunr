@@ -671,7 +671,7 @@ mod tests {
     /// cannot be taken for the end of the start-up.
     #[test]
     fn a_notice_is_told_not_read() {
-        let notice = prunr_core::provider_check::Notice::Checking { model: prunr_models::ModelId::BiRefNetLite };
+        let notice = prunr_core::provider_check::Notice::Checking { model: prunr_models::ModelId::BiRefNetLite, on: "OpenVINO".into() };
         assert!(relayed(SubprocessEvent::ProviderCheck { notice }).is_none());
         assert!(matches!(relayed(SubprocessEvent::Ready { active_provider: "CUDA".into() }), Some(SubprocessEvent::Ready { .. })));
     }

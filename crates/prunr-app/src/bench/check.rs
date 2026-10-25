@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::engine::{Weights, CPU_NAME};
 use prunr_core::memory;
-use prunr_core::provider_check::Check;
+use prunr_core::provider_check::{Check, Rejection};
 use prunr_models::ModelId;
 
 use super::{Family, Inputs, Row, Verdict};
@@ -32,15 +32,21 @@ pub const LINE: &str = "PRUNR-CHECK ";
 pub fn judge(row: &Row) -> Option<Check> {
     let gpu = row.gpu.on_gpu()?;
     let weights = gpu.weights?.to_string();
-    let verdict = |rejected: Option<String>| Some(Check { provider: gpu.provider.clone(), weights: weights.clone(), rejected });
+    let verdict = |rejected: Option<Rejection>| Some(Check { provider: gpu.provider.clone(), weights: weights.clone(), rejected });
     match row.verdict {
-        Verdict::GpuFailed => verdict(Some(format!("it failed to run on {}: {}", gpu.provider, gpu.error.as_deref().unwrap_or("no reason given")))),
+        Verdict::GpuFailed => verdict(Some(Rejection {
+            plain: format!("it did not run on {}", gpu.provider),
+            detail: format!("it failed to run on {}: {}", gpu.provider, gpu.error.as_deref().unwrap_or("no reason given")),
+        })),
         Verdict::Mismatch => {
             let off = row.agreement.as_ref().map_or_else(
                 || "a different size".to_string(),
                 |a| format!("mean {:.2}/255, {:.1}% of values more than 2/255 apart", a.mean_abs, a.over_2 * 100.0),
             );
-            verdict(Some(format!("its output on {} differs from the CPU's ({off})", gpu.provider)))
+            verdict(Some(Rejection {
+                plain: format!("its result on {} differs from the CPU's", gpu.provider),
+                detail: format!("its output on {} differs from the CPU's ({off})", gpu.provider),
+            }))
         }
         Verdict::Match => {
             let cpu_ms = row.cpu.as_ref()?.timing.as_ref()?.typical_ms();
@@ -48,7 +54,7 @@ pub fn judge(row: &Row) -> Option<Check> {
             if gpu_ms <= cpu_ms * FASTER_BY {
                 verdict(None)
             } else {
-                verdict(Some(format!("it runs slower on {} than on the CPU ({gpu_ms:.0} ms against {cpu_ms:.0} ms)", gpu.provider)))
+                verdict(Some(Rejection::same(format!("it runs slower on {} than on the CPU ({gpu_ms:.0} ms against {cpu_ms:.0} ms)", gpu.provider))))
             }
         }
         _ => None,
@@ -87,7 +93,7 @@ pub fn run_in_child(model: ModelId, provider: &str, weights: Weights) -> Option<
                 let _ = child.kill();
                 let _ = child.wait();
                 tracing::warn!(?model, provider, "the provider check ran past its limit");
-                let rejected = Some(format!("its check on {provider} ran past {} minutes", LIMIT.as_secs() / 60));
+                let rejected = Some(Rejection::same(format!("its check on {provider} ran past {} minutes", LIMIT.as_secs() / 60)));
                 return Some(Check { provider: provider.to_string(), weights: weights.label().to_string(), rejected });
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(200)),
@@ -120,7 +126,7 @@ fn ended(status: std::process::ExitStatus, out: &str, provider: &str, weights: W
         crash => Some(Check {
             provider: provider.to_string(),
             weights: weights.label().to_string(),
-            rejected: Some(format!("its check on {provider} {crash}")),
+            rejected: Some(Rejection::same(format!("its check on {provider} {crash}"))),
         }),
     }
 }
@@ -174,14 +180,17 @@ mod tests {
         let passed = judge(&row(363.0, Verdict::Match)).expect("a verdict");
         assert_eq!((passed.provider.as_str(), passed.weights.as_str(), passed.rejected), ("CoreML", "FP32", None));
         let slower = judge(&row(950.0, Verdict::Match)).and_then(|c| c.rejected).expect("rejected");
-        assert!(slower.contains("950 ms against 1000 ms"), "{slower}");
+        assert!(slower.plain.contains("950 ms against 1000 ms"), "{slower:?}");
         let drifts = judge(&row(363.0, Verdict::Mismatch)).and_then(|c| c.rejected).expect("rejected");
-        assert!(drifts.contains("14.5%"), "{drifts}");
+        assert_eq!(drifts.plain, "its result on CoreML differs from the CPU's");
+        assert!(drifts.detail.contains("14.5%"), "{drifts:?}");
         let mut failed = row(363.0, Verdict::GpuFailed);
         if let Gpu::Ran(side) = &mut failed.gpu {
             side.error = Some("Error in building plan".into());
         }
-        assert!(judge(&failed).and_then(|c| c.rejected).is_some_and(|r| r.contains("Error in building plan")));
+        let failed = judge(&failed).and_then(|c| c.rejected).expect("rejected");
+        assert_eq!(failed.plain, "it did not run on CoreML", "the window is spared the provider's own error");
+        assert!(failed.detail.contains("Error in building plan"), "{failed:?}");
     }
 
     #[test]
@@ -206,7 +215,7 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let status = |raw| std::process::ExitStatus::from_raw(raw);
         let crashed = ended(status(11), "", "CoreML", Weights::Fp32).and_then(|c| c.rejected).expect("rejected");
-        assert_eq!(crashed, "its check on CoreML crashed (segmentation fault)");
+        assert_eq!(crashed.plain, "its check on CoreML crashed (segmentation fault)");
         assert!(ended(status(256), "", "CUDA", Weights::Fp32).is_some(), "an error exit");
         assert_eq!(ended(status(9), "", "CUDA", Weights::Fp32), None, "killed for memory");
         assert_eq!(ended(status(0), "", "CUDA", Weights::Fp32), None, "nothing to judge");

@@ -17,7 +17,23 @@ use crate::engine::{EpKind, Weights};
 pub struct Check {
     pub provider: String,
     pub weights: String,
-    pub rejected: Option<String>,
+    pub rejected: Option<Rejection>,
+}
+
+/// Why a check passes a provider over: in plain words for the window,
+/// and in full (the provider's own error, the numbers) for the log and
+/// the failure store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rejection {
+    pub plain: String,
+    pub detail: String,
+}
+
+impl Rejection {
+    /// A reason plain enough for the window as it is.
+    pub fn same(reason: String) -> Self {
+        Self { plain: reason.clone(), detail: reason }
+    }
 }
 
 /// Checks `model` on `provider` with `weights` against the CPU; `None`
@@ -31,7 +47,8 @@ static CHECKER: OnceLock<Checker> = OnceLock::new();
 /// seconds, once), and a provider passed over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Notice {
-    Checking { model: prunr_models::ModelId },
+    /// `on`: where the model is checked, as the window names it.
+    Checking { model: prunr_models::ModelId, on: String },
     PassedOver { model: prunr_models::ModelId, reason: String },
 }
 
@@ -39,8 +56,8 @@ impl Notice {
     /// What the person using the app is told.
     pub fn text(&self) -> String {
         match self {
-            Notice::Checking { model } => {
-                format!("Checking the graphics card with {}, once. This takes a few seconds.", prunr_models::display_name(*model))
+            Notice::Checking { model, on } => {
+                format!("Checking {on} with {}, once. This takes a few seconds.", prunr_models::display_name(*model))
             }
             Notice::PassedOver { model, reason } => format!("{} runs on the CPU here: {reason}.", prunr_models::display_name(*model)),
         }
@@ -92,7 +109,7 @@ fn rejection_by(checker: Checker, model: prunr_models::ModelId, weights: Weights
     }
     if !std::mem::replace(&mut *asked, true) {
         tracing::info!(?model, ep = %ep, ?weights, "checking the provider against the CPU, once");
-        tell(Notice::Checking { model });
+        tell(Notice::Checking { model, on: ep.checked_on().to_string() });
         if let Some(check) = checker(model, ep.as_str(), weights) {
             record(model, ep, weights, check);
         }
@@ -112,9 +129,9 @@ fn record(model: prunr_models::ModelId, ep: EpKind, weights: Weights, check: Che
     }
     match check.rejected {
         None => crate::ep_compat::record_pass(ep, model, weights),
-        Some(reason) => {
-            crate::ep_compat::record_failure(ep, model, weights, &reason);
-            tell(Notice::PassedOver { model, reason });
+        Some(rejection) => {
+            crate::ep_compat::record_failure(ep, model, weights, &rejection.detail);
+            tell(Notice::PassedOver { model, reason: rejection.plain });
         }
     }
 }
@@ -127,7 +144,9 @@ mod tests {
     #[test]
     fn a_notice_names_the_model_and_the_reason() {
         let model = prunr_models::ModelId::DdcolorTiny;
-        assert_eq!(Notice::Checking { model }.text(), "Checking the graphics card with DDColor, once. This takes a few seconds.");
+        let on = |on: &str| Notice::Checking { model, on: on.into() }.text();
+        assert_eq!(on(crate::engine::GRAPHICS_CARD), "Checking the graphics card with DDColor, once. This takes a few seconds.");
+        assert_eq!(on("OpenVINO"), "Checking OpenVINO with DDColor, once. This takes a few seconds.");
         let passed_over = Notice::PassedOver { model, reason: "it runs slower on CoreML than on the CPU (950 ms against 1000 ms)".into() };
         assert_eq!(passed_over.text(), "DDColor runs on the CPU here: it runs slower on CoreML than on the CPU (950 ms against 1000 ms).");
     }
@@ -150,12 +169,13 @@ mod tests {
     }
 
     fn slower(_: prunr_models::ModelId, provider: &str, weights: Weights) -> Option<Check> {
-        Some(Check { provider: provider.into(), weights: weights.label().into(), rejected: Some("it runs slower there".into()) })
+        let rejected = Rejection { plain: "it runs slower there".into(), detail: "it runs slower there (950 ms against 1000 ms)".into() };
+        Some(Check { provider: provider.into(), weights: weights.label().into(), rejected: Some(rejected) })
     }
 
     /// The check runs once for a pair and says so; a pass is kept and
-    /// lets the provider run, a rejection is kept, said, and passes the
-    /// provider over.
+    /// lets the provider run, a rejection is kept in full, said plainly,
+    /// and passes the provider over.
     #[test]
     fn a_provider_is_checked_once_and_its_verdict_kept() {
         set_observer(tell);
@@ -166,12 +186,12 @@ mod tests {
         assert!(crate::ep_compat::has_passed(EP, model, Weights::Fp16));
 
         let other = prunr_models::ModelId::Migan;
-        assert_eq!(rejection_by(slower, other, Weights::Fp16, EP).as_deref(), Some("it runs slower there"));
+        assert_eq!(rejection_by(slower, other, Weights::Fp16, EP).as_deref(), Some("it runs slower there (950 ms against 1000 ms)"));
         assert!(crate::ep_compat::is_known_failure(EP, other, Weights::Fp16));
         let told = TOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         assert_eq!(told, [
-            Notice::Checking { model },
-            Notice::Checking { model: other },
+            Notice::Checking { model, on: crate::engine::GRAPHICS_CARD.into() },
+            Notice::Checking { model: other, on: crate::engine::GRAPHICS_CARD.into() },
             Notice::PassedOver { model: other, reason: "it runs slower there".into() },
         ]);
     }

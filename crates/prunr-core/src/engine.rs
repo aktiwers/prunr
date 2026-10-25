@@ -68,6 +68,13 @@ impl std::fmt::Display for EpKind {
     }
 }
 
+impl EpKind {
+    /// Where the window says a check of this provider runs a model.
+    pub(crate) fn checked_on(self) -> &'static str {
+        check_place(self.as_str(), openvino_on_gpu())
+    }
+}
+
 /// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
 /// runtime may lack EPs (the OpenVINO wheel has CPU + OpenVINO only).
 /// Probed once per process.
@@ -1165,6 +1172,14 @@ pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
         || (provider.eq_ignore_ascii_case(OPENVINO_NAME) && !openvino_on_gpu)
 }
 
+pub(crate) const GRAPHICS_CARD: &str = "the graphics card";
+
+/// A provider on the processor (OpenVINO's CPU device) is named for
+/// itself: calling it the graphics card misleads.
+fn check_place(provider: &'static str, openvino_on_gpu: bool) -> &'static str {
+    if on_host_cpu(provider, openvino_on_gpu) { provider } else { GRAPHICS_CARD }
+}
+
 /// Whether `model` runs on the accelerator `provider`: not declared
 /// incompatible in the registry, and some weights the ladder would load
 /// there (FP16 first where a copy exists, then the model's own) have not
@@ -1507,6 +1522,13 @@ mod tests {
         assert!(!on_host_cpu(OPENVINO_NAME, true));
         assert!(on_host_cpu(CPU_NAME, true), "the CPU provider is the CPU either way");
         assert!(!on_host_cpu("CUDA", false));
+    }
+
+    #[test]
+    fn a_check_names_openvino_on_the_processor_for_itself() {
+        assert_eq!(check_place(OPENVINO_NAME, false), "OpenVINO");
+        assert_eq!(check_place(OPENVINO_NAME, true), GRAPHICS_CARD);
+        assert_eq!(check_place("CUDA", false), GRAPHICS_CARD);
     }
 
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
