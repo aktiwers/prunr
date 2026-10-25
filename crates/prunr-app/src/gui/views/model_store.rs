@@ -443,7 +443,7 @@ mod tests {
             },
             version: "1.0.0",
             gpu,
-            incompatible_eps: &[],
+            places: prunr_models::Places::UNMEASURED,
             needs: prunr_models::Needs {
                 cpu: prunr_models::Cost::estimate(100, 0, "a test fixture"),
                 mac_cpu: prunr_models::Priced::Unmeasured,

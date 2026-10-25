@@ -351,7 +351,7 @@ pub enum Priced {
     /// Not measured there yet: the CPU's figure is charged to system RAM,
     /// as every accelerator was before card memory was counted.
     Unmeasured,
-    /// The model is never run there (`incompatible_eps` names it).
+    /// The model is never run there (`places` keeps it on the CPU).
     Never,
 }
 
@@ -401,6 +401,116 @@ impl Needs {
     }
 }
 
+/// Where a model runs on each accelerator, from `prunr bench` on the
+/// hardware each entry names: where its result is the CPU's, then where
+/// it is faster, and within 10% of that where it takes less system
+/// memory. One field per accelerator and no `Default`, so a new
+/// accelerator does not build until every model says where it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Places {
+    pub cuda: Place,
+    pub directml: Place,
+    pub coreml: Place,
+    pub migraphx: Place,
+    /// OpenVINO on the processor, as it runs unless the Intel graphics
+    /// are on.
+    pub openvino: Place,
+    /// OpenVINO with the Intel graphics on.
+    pub openvino_gpu: Place,
+}
+
+/// Where a model runs on one accelerator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// On it: its result is the CPU's and it runs faster. The measurement
+    /// and where it was taken.
+    There(&'static str),
+    /// On the CPU instead.
+    Cpu(Why),
+    /// Not measured there: it runs there when its session builds.
+    Unmeasured,
+}
+
+/// Why a model runs on the CPU rather than an accelerator, with the
+/// measurement and where it was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// It fails to build or run there, or takes too long to try.
+    Fails(&'static str),
+    /// Its result there is not the CPU's.
+    Differs(&'static str),
+    /// It runs slower there.
+    Slower(&'static str),
+    /// Within 10% of the CPU's speed, and the CPU takes less memory.
+    NoGain(&'static str),
+}
+
+impl Why {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Fails(text) | Self::Differs(text) | Self::Slower(text) | Self::NoGain(text) => text,
+        }
+    }
+}
+
+impl Places {
+    /// Not measured anywhere: a test descriptor's, or a model's before its
+    /// first bench (a count in `every_model_says_where_it_runs` holds it).
+    pub const UNMEASURED: Self = Self {
+        cuda: Place::Unmeasured,
+        directml: Place::Unmeasured,
+        coreml: Place::Unmeasured,
+        migraphx: Place::Unmeasured,
+        openvino: Place::Unmeasured,
+        openvino_gpu: Place::Unmeasured,
+    };
+
+    /// Where it runs on the provider ORT names `provider` ("CUDA", any
+    /// case); OpenVINO's entry by whether it may use the Intel graphics.
+    /// A provider this table does not know is unmeasured.
+    pub fn on(&self, provider: &str, openvino_on_gpu: bool) -> Place {
+        let named = |name: &str| provider.eq_ignore_ascii_case(name);
+        if named("CUDA") {
+            self.cuda
+        } else if named("DirectML") {
+            self.directml
+        } else if named("CoreML") {
+            self.coreml
+        } else if named("MIGraphX") {
+            self.migraphx
+        } else if named("OpenVINO") {
+            if openvino_on_gpu { self.openvino_gpu } else { self.openvino }
+        } else {
+            Place::Unmeasured
+        }
+    }
+
+    /// Every column with the name the bench gives it.
+    pub fn columns(&self) -> [(&'static str, Place); 6] {
+        [
+            ("CUDA", self.cuda),
+            ("DirectML", self.directml),
+            ("CoreML", self.coreml),
+            ("MIGraphX", self.migraphx),
+            ("OpenVINO", self.openvino),
+            ("OpenVINO (Intel graphics on)", self.openvino_gpu),
+        ]
+    }
+}
+
+const SILUETA_ON_OPENVINO: Why = Why::Fails(
+    "OpenVINO 2025.4.1 rejects its graph as not acyclic; the FP16 copy fails a quantized-cast type check (2026-04-26)",
+);
+
+const ROREM_ON_OPENVINO: Why = Why::Fails(
+    "OpenVINO widens the 5 GB fp16 UNet to fp32 to compile it: killed for memory with 19 GB free (i7-6700, 32 GB)",
+);
+
+const NOMOS2_ON_OPENVINO: Why = Why::Slower(
+    "compiling its 30 parts takes 73 s and 9.7 GB before a 55 s run, against the CPU's 67 s in 0.95 GB (960×635, \
+     i7-6700, 2026-10)",
+);
+
 /// The figure the registry carried as one number per model before card
 /// memory was counted: measured or estimated per the comment beside it.
 const CARRIED: &str = "the registry's earlier single figure; not re-measured since";
@@ -414,14 +524,9 @@ pub struct ModelDescriptor {
     pub source: ModelSource,
     pub version: &'static str,
     pub gpu: GpuRequirement,
-    /// Providers the ladder skips for this model export, each for a
-    /// verified cause named beside it: it fails there, its output drifts
-    /// from the CPU's, or it builds or runs too slowly there to be worth
-    /// it. Checked before the dynamic compat cache so first-time users
-    /// skip the failed load.
-    ///
-    /// `&str`, not `EpKind`: this crate has no workspace deps.
-    pub incompatible_eps: &'static [&'static str],
+    /// Where it runs on each accelerator. Read before the failures this
+    /// machine recorded, so a first-time user skips a load known to fail.
+    pub places: Places,
     /// What the model needs on each accelerator: no default, so a new
     /// model does not build without its numbers.
     pub needs: Needs,
@@ -578,11 +683,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // OpenVINO 2025.4.1 rejects Silueta's ONNX with
-        // "graph is not acyclic" (graph-cycle validation is stricter
-        // than ORT's CPU EP). FP16 variant additionally fails on a
-        // quantized_cast type mismatch. Both verified 2026-04-26.
-        incompatible_eps: &["OpenVINO"],
+        places: Places {
+            openvino: Place::Cpu(SILUETA_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(SILUETA_ON_OPENVINO),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -619,7 +724,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Unmeasured,
@@ -651,13 +756,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // CoreML rejects its convs without `pads` ("Required param 'pad' is
-        // missing", ORT 1.30). Given explicit zero pads it compiles and
-        // matches the CPU, at half its speed (17.6 s against 8.2 s on a
-        // MacBook Air, 2026-10-24): ORT's CoreML provider runs none of its
-        // ScatterND, Equal, Expand, ConstantOfShape, Mod or Floor nodes, so
-        // the graph runs in pieces passed between GPU and CPU.
-        incompatible_eps: &["CoreML"],
+        places: Places {
+            coreml: Place::Cpu(Why::Fails(
+                "its convs without pads do not compile (\"Required param 'pad' is missing\", ORT 1.30); given zero pads it \
+                 matched the CPU at half its speed, 17.6 s against 8.2 s, with ScatterND, Equal, Expand, ConstantOfShape, Mod \
+                 and Floor left to the CPU (MacBook Air M1, 2026-10-24)",
+            )),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(12_850, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -689,7 +795,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(400, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(250, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -726,7 +832,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -763,7 +869,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -800,7 +906,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_000, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -864,7 +970,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Required,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // The peak while the bundle loads on OpenVINO's CPU device, its
         // heaviest provider: 13.6-14.1 GB measured for the Fast bundle,
         // which has this one's architecture and size. An estimate of
@@ -938,7 +1044,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // Measured peak while the bundle loads on OpenVINO's CPU device:
         // 13.6-14.1 GB.
         needs: Needs {
@@ -1023,10 +1129,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        // OpenVINO's CPU plugin widens the 5 GB fp16 UNet to fp32 and
-        // compiles it: the process was OOM-killed with 19 GB free on a
-        // 32 GB i7-6700. ORT's own CPU EP runs it correctly.
-        incompatible_eps: &["OpenVINO"],
+        places: Places {
+            openvino: Place::Cpu(ROREM_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(ROREM_ON_OPENVINO),
+            ..Places::UNMEASURED
+        },
         // Measured on ORT's CPU EP: 15.6 GiB anonymous peak (the fp16
         // weights widened for the CPU kernels, the VAE, activations);
         // the 4.8 GiB of mapped weight files on top are reclaimable.
@@ -1081,7 +1188,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
         needs: Needs {
             cpu: Cost::estimate(100, 0, CARRIED),
@@ -1124,7 +1231,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_350, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -1168,13 +1275,17 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        // CUDA returns a black picture from this fp16 release (RTX 3060,
-        // ORT 1.24.1, 2026-10-24: every value 0, where the CPU's matches
-        // the input to 3.3/255 shrunk back). CoreML (16 GB MacBook Air,
-        // ORT 1.30, 2026-10-25): compiled for any size it fails to plan
-        // ("error code: -14"); compiled for a 256 px tile it splits into 253
-        // parts and its first run was killed after 80 s.
-        incompatible_eps: &["CUDA", "CoreML"],
+        places: Places {
+            cuda: Place::Cpu(Why::Differs(
+                "a black picture from this fp16 release, every value 0, where the CPU's lands 3.3/255 off its input shrunk \
+                 back (RTX 3060, ORT 1.24.1, 2026-10-24)",
+            )),
+            coreml: Place::Cpu(Why::Fails(
+                "compiled for any size it fails to plan (error -14); for a 256 px tile it splits into 253 parts and its \
+                 first run passed 80 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)",
+            )),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -1222,9 +1333,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        // CoreML cannot plan its pixel-unshuffle ("Error in building plan"
-        // on a MacBook Air, ORT 1.24 and 1.30, the tile pinned or free).
-        incompatible_eps: &["CoreML"],
+        places: Places {
+            coreml: Place::Cpu(Why::Fails(
+                "its pixel-unshuffle cannot be planned (\"Error in building plan\"), the tile pinned or free (MacBook Air \
+                 M1, ORT 1.24 and 1.30)",
+            )),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_800, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -1272,7 +1387,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1348,13 +1463,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        // OpenVINO keeps a memory pool per compiled part: 9.7 GB and 73 s
-        // compiling the 30 parts on an i7-6700 (2026-10), where the CPU
-        // provider held 0.95 GB, compiled nothing, and ran the same
-        // 960×635 image in 67 s against OpenVINO's 55 s. CoreML rejects the
-        // tail's upsampler ("axis 4 is not in valid range", ORT 1.30, a
-        // MacBook Air) after 10 s building the other parts.
-        incompatible_eps: &["OpenVINO", "CoreML"],
+        places: Places {
+            coreml: Place::Cpu(Why::Fails(
+                "its tail's upsampler is rejected (\"axis 4 is not in valid range\") after 10 s building the other parts \
+                 (MacBook Air M1, ORT 1.30)",
+            )),
+            openvino: Place::Cpu(NOMOS2_ON_OPENVINO),
+            openvino_gpu: Place::Cpu(NOMOS2_ON_OPENVINO),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::estimate(750, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -1405,7 +1522,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1448,11 +1565,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        // CoreML's colours vary between runs: 4.8% and 14.5% of values more
-        // than 2/255 from the CPU's in two runs on a MacBook Air (ORT 1.30,
-        // 2026-10-23), against a 10% tolerance; with folding off (ORT
-        // 1.24-1.28) CoreML cannot plan it (error -6).
-        incompatible_eps: &["CoreML"],
+        places: Places {
+            coreml: Place::Cpu(Why::Differs(
+                "its colours vary between runs: 4.8% and 14.5% of values more than 2/255 from the CPU's against a 10% \
+                 tolerance (MacBook Air M1, ORT 1.30, 2026-10-23)",
+            )),
+            ..Places::UNMEASURED
+        },
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
             cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
@@ -1490,7 +1609,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
@@ -1536,7 +1655,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // One encode and a click, `prunr bench --needs`: 1.12 GB on the
         // CPU; on CUDA 1.0 GB of RAM and the card's peak 2.18 GB during an
         // encode (it hands the pool back after). On a MacBook Air's GPU
@@ -1585,7 +1704,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(1_350, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1628,7 +1747,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.1",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         needs: Needs {
             cpu: Cost::measured(1_550, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1663,7 +1782,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "2026may",
         gpu: GpuRequirement::None,
-        incompatible_eps: &[],
+        places: Places::UNMEASURED,
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
         needs: Needs {
             cpu: Cost::estimate(64, 0, CARRIED),
@@ -1723,12 +1842,15 @@ fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
     h
 }
 
-/// False when the static catalog lists `ep` (case-insensitive) as
-/// known-broken for this model.
-pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
-    descriptor(model)
-        .map(|d| !d.incompatible_eps.iter().any(|s| s.eq_ignore_ascii_case(ep)))
-        .unwrap_or(true)
+/// Where `model` runs on `provider` (`Places::on`); unmeasured for a model
+/// not in the registry.
+pub fn place(model: ModelId, provider: &str, openvino_on_gpu: bool) -> Place {
+    descriptor(model).map_or(Place::Unmeasured, |d| d.places.on(provider, openvino_on_gpu))
+}
+
+/// Whether `model` runs on `provider` rather than the CPU.
+pub fn runs_there(model: ModelId, provider: &str, openvino_on_gpu: bool) -> bool {
+    !matches!(place(model, provider, openvino_on_gpu), Place::Cpu(_))
 }
 
 #[derive(Debug, PartialEq)]
@@ -2371,7 +2493,7 @@ mod tests {
     }
 
     /// A model is priced on every accelerator: never run exactly where
-    /// `incompatible_eps` bans it, and no more accelerators left
+    /// `places` keeps it on the CPU, and no more accelerators left
     /// unmeasured than counted here. Measuring one lowers its count;
     /// a new model left unmeasured raises it, on purpose, here.
     #[test]
@@ -2381,8 +2503,10 @@ mod tests {
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
-                let banned = desc.incompatible_eps.contains(&provider);
-                assert_eq!(priced == Priced::Never, banned, "{:?} on {provider}: Never exactly where incompatible_eps bans it", desc.id);
+                let banned = desc.places.columns().iter()
+                    .filter(|(column, _)| column.starts_with(provider))
+                    .all(|(_, place)| matches!(place, Place::Cpu(_)));
+                assert_eq!(priced == Priced::Never, banned, "{:?} on {provider}: Never exactly where every place there is the CPU", desc.id);
                 if priced == Priced::Unmeasured {
                     // provider names come from the same table
                     unmeasured.iter_mut().find(|(p, _)| *p == provider).unwrap().1.push(desc.id);
@@ -2505,22 +2629,49 @@ mod tests {
         assert_ne!(tag_of_shas(["aa", "bb"]), tag_of_shas(["aa", "bc"]), "any part's checksum moves the tag");
     }
 
-    /// Pins the case-insensitive `eq_ignore_ascii_case` contract on
-    /// `incompatible_eps`: callers passing "openvino" / "OPENVINO" /
-    /// "OpenVINO" all match.
+    /// A provider is matched in any case, OpenVINO by whether it may use
+    /// the Intel graphics; a model runs wherever its place is not the CPU.
     #[test]
-    fn is_ep_compatible_silueta_openvino_blocked_case_insensitive() {
+    fn a_model_runs_where_its_place_is_not_the_cpu() {
         for ep in ["OpenVINO", "openvino", "OPENVINO"] {
-            assert!(!is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
-        }
-        for ep in ["CPU", "CUDA", "DirectML", "CoreML"] {
-            assert!(is_ep_compatible(ModelId::Silueta, ep), "Silueta + {ep}");
-        }
-        // An empty list accepts every provider.
-        for ep in ["CPU", "CUDA", "CoreML", "DirectML", "OpenVINO"] {
-            for id in [ModelId::U2net, ModelId::RealEsrganX4Plus, ModelId::SdV15InpaintFp16] {
-                assert!(is_ep_compatible(id, ep), "{id:?} + {ep}");
+            for on_gpu in [false, true] {
+                assert!(!runs_there(ModelId::Silueta, ep, on_gpu), "Silueta + {ep}");
             }
+        }
+        for ep in ["CPU", "CUDA", "DirectML", "CoreML", "MIGraphX"] {
+            assert!(runs_there(ModelId::Silueta, ep, false), "Silueta + {ep}");
+        }
+        assert!(!runs_there(ModelId::Nomos8kSchatL, "cuda", false), "a different result keeps it on the CPU");
+        let split = Places { openvino_gpu: Place::Cpu(Why::Slower("slower")), ..Places::UNMEASURED };
+        assert_eq!((split.on("OpenVINO", false), split.on("OpenVINO", true)), (Place::Unmeasured, Place::Cpu(Why::Slower("slower"))));
+        assert_eq!(split.on("TensorRT", false), Place::Unmeasured, "an unknown provider is unmeasured");
+    }
+
+    /// Every place says where it was measured, and no more columns are
+    /// left unmeasured than counted here: measuring lowers a count, a new
+    /// model left unmeasured raises it, on purpose, here.
+    #[test]
+    fn every_model_says_where_it_runs() {
+        const UNMEASURED: [(&str, usize); 6] = [
+            ("CUDA", 22),
+            ("DirectML", 23),
+            ("CoreML", 18),
+            ("MIGraphX", 23),
+            ("OpenVINO", 20),
+            ("OpenVINO (Intel graphics on)", 20),
+        ];
+        for (i, &(column, at_most)) in UNMEASURED.iter().enumerate() {
+            let mut unmeasured = Vec::new();
+            for desc in REGISTRY {
+                let (name, place) = desc.places.columns()[i];
+                assert_eq!(name, column, "the counts follow `Places::columns`");
+                match place {
+                    Place::Unmeasured => unmeasured.push(desc.id),
+                    Place::There(text) => assert!(!text.trim().is_empty(), "{:?} on {column}: say where it was measured", desc.id),
+                    Place::Cpu(why) => assert!(!why.text().trim().is_empty(), "{:?} on {column}: say why", desc.id),
+                }
+            }
+            assert_eq!(unmeasured.len(), at_most, "unmeasured on {column}: {unmeasured:?}; set the count");
         }
     }
 
