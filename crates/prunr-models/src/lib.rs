@@ -684,6 +684,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
+            cuda: Place::There("1.20x: 440 ms against the CPU's 525 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             openvino: Place::Cpu(SILUETA_ON_OPENVINO),
             openvino_gpu: Place::Cpu(SILUETA_ON_OPENVINO),
             ..Places::UNMEASURED
@@ -724,7 +725,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("11.03x: 26 ms against the CPU's 286 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Unmeasured,
@@ -757,6 +761,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
+            cuda: Place::There("22.21x: 397 ms against the CPU's 8.82 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Fails(
                 "its convs without pads do not compile (\"Required param 'pad' is missing\", ORT 1.30); given zero pads it \
                  matched the CPU at half its speed, 17.6 s against 8.2 s, with ScatterND, Equal, Expand, ConstantOfShape, Mod \
@@ -795,7 +800,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("10.77x: 12 ms against the CPU's 127 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(400, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(250, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -832,7 +840,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("14.75x: 150 ms against the CPU's 2.21 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -869,7 +880,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("2.11x: 1.30 s against the CPU's 2.74 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::estimate(700, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
@@ -906,7 +920,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("21.03x: 44 ms against the CPU's 935 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_000, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -1231,7 +1248,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("29.71x: 273 ms against the CPU's 8.11 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_350, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
@@ -1334,6 +1354,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
+            cuda: Place::There("20.62x: 76 ms against the CPU's 1.57 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Fails(
                 "its pixel-unshuffle cannot be planned (\"Error in building plan\"), the tile pinned or free (MacBook Air \
                  M1, ORT 1.24 and 1.30)",
@@ -1387,7 +1408,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("29.65x: 272 ms against the CPU's 8.07 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1464,6 +1488,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
+            cuda: Place::There("3.68x: 1.10 s against the CPU's 4.05 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Fails(
                 "its tail's upsampler is rejected (\"axis 4 is not in valid range\") after 10 s building the other parts \
                  (MacBook Air M1, ORT 1.30)",
@@ -1522,7 +1547,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("29.48x: 272 ms against the CPU's 8.03 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1566,6 +1594,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
+            cuda: Place::There("14.92x: 75 ms against the CPU's 1.12 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
             coreml: Place::Cpu(Why::Differs(
                 "its colours vary between runs: 4.8% and 14.5% of values more than 2/255 from the CPU's against a 10% \
                  tolerance (MacBook Air M1, ORT 1.30, 2026-10-23)",
@@ -1609,7 +1638,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("17.60x: 28 ms against the CPU's 499 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
@@ -1655,7 +1687,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("6.61x: 379 ms against the CPU's 2.51 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         // One encode and a click, `prunr bench --needs`: 1.12 GB on the
         // CPU; on CUDA 1.0 GB of RAM and the card's peak 2.18 GB during an
         // encode (it hands the pool back after). On a MacBook Air's GPU
@@ -1704,7 +1739,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("14.75x: 68 ms against the CPU's 1.01 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(1_350, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1747,7 +1785,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "1.0.1",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("19.04x: 128 ms against the CPU's 2.43 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         needs: Needs {
             cpu: Cost::measured(1_550, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
@@ -1782,7 +1823,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         version: "2026may",
         gpu: GpuRequirement::None,
-        places: Places::UNMEASURED,
+        places: Places {
+            cuda: Place::There("1.38x: 2.8 ms against the CPU's 3.8 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            ..Places::UNMEASURED
+        },
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
         needs: Needs {
             cpu: Cost::estimate(64, 0, CARRIED),
@@ -2653,7 +2697,7 @@ mod tests {
     #[test]
     fn every_model_says_where_it_runs() {
         const UNMEASURED: [(&str, usize); 6] = [
-            ("CUDA", 22),
+            ("CUDA", 4),
             ("DirectML", 23),
             ("CoreML", 18),
             ("MIGraphX", 23),
