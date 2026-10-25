@@ -56,7 +56,7 @@ impl PrunrApp {
             let entries = prunr_core::ep_compat::clear();
             tracing::info!(entries, "forgot recorded GPU failures");
         });
-        self.toasts.info("Every model will try the graphics card again");
+        self.toasts.info("Models that failed on the graphics card will try it again");
     }
 
     /// Run `remove` on a worker; its toast text lands through
