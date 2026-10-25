@@ -3,7 +3,8 @@
 //! result first, then the faster, and within `EVEN` of each other the one
 //! taking less system memory.
 
-use prunr_models::{Needs, Priced};
+use prunr_core::memory::Charge;
+use prunr_models::Needs;
 
 use super::report::fmt_ms;
 use super::stats::steady_pair;
@@ -61,11 +62,8 @@ pub fn found(row: &Row, needs: &Needs, provider: &str, label: &str) -> Option<Fo
             if ratio <= 1.0 / EVEN {
                 return Some(Found::Cpu("Slower", format!("{times} ({label})")));
             }
-            let cpu_mb = needs.host_cpu().host_mb;
-            let there_mb = match needs.on(provider) {
-                Priced::Same(cost) => cost.host_mb,
-                Priced::Unmeasured | Priced::Never => cpu_mb,
-            };
+            let cpu_mb = Charge::of(needs, prunr_core::engine::CPU_NAME).ram_mb;
+            let there_mb = Charge::of(needs, provider).ram_mb;
             let memory = format!("{there_mb} MB of system memory against the CPU's {cpu_mb} MB");
             let even = format!("{times}, within 10%; {memory} ({label})");
             Some(if there_mb < cpu_mb || (there_mb == cpu_mb && ratio >= 1.0) { Found::There(even) } else { Found::Cpu("NoGain", even) })

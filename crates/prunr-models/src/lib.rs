@@ -351,8 +351,6 @@ pub enum Priced {
     /// Not measured there yet: the CPU's figure is charged to system RAM,
     /// as every accelerator was before card memory was counted.
     Unmeasured,
-    /// The model is never run there (`places` keeps it on the CPU).
-    Never,
 }
 
 impl Cost {
@@ -715,7 +713,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
             coreml: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
-            openvino: Priced::Never,
+            openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: true,
@@ -799,7 +797,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Same(Cost::measured(12_850, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Unmeasured,
             openvino: Priced::Same(Cost::measured(5_150, 0, "i7-6700, 2026-10-23")),
             migraphx: Priced::Unmeasured,
         },
@@ -1199,7 +1197,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Priced::Same(Cost::measured(1_500, 8_650, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
             directml: Priced::Unmeasured,
             coreml: Priced::Unmeasured,
-            openvino: Priced::Never,
+            openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
@@ -1351,9 +1349,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         needs: Needs {
             cpu: Cost::estimate(1200, 0, CARRIED),
             mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Never,
+            cuda: Priced::Unmeasured,
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -1410,7 +1408,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Same(Cost::measured(1_800, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -1549,8 +1547,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_550, 7_400, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
-            openvino: Priced::Never,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
         parallel_jobs_pay_on_cpu: false,
@@ -1656,7 +1654,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             mac_cpu: Priced::Same(Cost::measured(2_500, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Unmeasured,
-            coreml: Priced::Never,
+            coreml: Priced::Unmeasured,
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
@@ -2579,7 +2577,7 @@ mod tests {
         for desc in REGISTRY {
             let costs = std::iter::once(desc.needs.cpu).chain([("Mac CPU", desc.needs.mac_cpu)].into_iter().chain(desc.needs.accelerators()).filter_map(|(_, p)| match p {
                 Priced::Same(cost) => Some(cost),
-                Priced::Unmeasured | Priced::Never => None,
+                Priced::Unmeasured => None,
             }));
             for cost in costs {
                 assert!(cost.host_mb + cost.card_mb >= 50, "{:?} {cost:?} too small: every real model uses ≥ 50 MB", desc.id);
@@ -2600,21 +2598,16 @@ mod tests {
         }
     }
 
-    /// A model is priced on every accelerator: never run only where
-    /// `places` keeps it on the CPU, and no more accelerators left
-    /// unmeasured than counted here. Measuring one lowers its count;
+    /// A model is priced on every accelerator, and no more accelerators
+    /// left unmeasured than counted here. Measuring one lowers its count;
     /// a new model left unmeasured raises it, on purpose, here.
     #[test]
     fn every_model_prices_every_accelerator() {
         const UNMEASURED_AT_MOST: [(&str, usize); 5] =
-            [("CUDA", 5), ("DirectML", 23), ("CoreML", 9), ("OpenVINO", 18), ("MIGraphX", 23)];
+            [("CUDA", 6), ("DirectML", 23), ("CoreML", 14), ("OpenVINO", 21), ("MIGraphX", 23)];
         let mut unmeasured: Vec<(&str, Vec<ModelId>)> = UNMEASURED_AT_MOST.iter().map(|&(p, _)| (p, Vec::new())).collect();
         for desc in REGISTRY {
             for (provider, priced) in desc.needs.accelerators() {
-                let kept_off = desc.places.columns().iter()
-                    .filter(|(column, _)| column.starts_with(provider))
-                    .all(|(_, place)| matches!(place, Place::Cpu(_)));
-                assert!(priced != Priced::Never || kept_off, "{:?} on {provider}: priced Never, so every place there is the CPU", desc.id);
                 if priced == Priced::Unmeasured {
                     // provider names come from the same table
                     unmeasured.iter_mut().find(|(p, _)| *p == provider).unwrap().1.push(desc.id);
@@ -2623,7 +2616,6 @@ mod tests {
         }
         const MAC_CPU_UNMEASURED_AT_MOST: usize = 10;
         let mac_unmeasured: Vec<ModelId> = REGISTRY.iter().filter(|d| d.needs.mac_cpu == Priced::Unmeasured).map(|d| d.id).collect();
-        assert!(REGISTRY.iter().all(|d| d.needs.mac_cpu != Priced::Never), "every model runs on the Mac's CPU");
         assert_eq!(mac_unmeasured.len(), MAC_CPU_UNMEASURED_AT_MOST, "unmeasured on the Mac's CPU: {mac_unmeasured:?}; set the count");
         for ((provider, at_most), (_, models)) in UNMEASURED_AT_MOST.iter().zip(&unmeasured) {
             assert!(models.len() <= *at_most, "{} models unmeasured on {provider}, more than {at_most}: measure them ({models:?})", models.len());
