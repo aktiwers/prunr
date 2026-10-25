@@ -1608,14 +1608,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         description: "Redraws soft, small or compressed faces. Stays closest to the person's own features. Trained on FFHQ, a non-commercial photo set.",
         category: ModelCategory::Face,
         source: ModelSource::MultiPartOnDemand {
-            subdir: "face-restoreformer-pp-1.0.0",
+            subdir: "face-restoreformer-pp-1.0.1",
             parts: &[
                 ModelPart {
                     key: "restorer",
-                    filename: "restoreformer_pp.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/restoreformer_pp.onnx",
-                    sha256: "67c7fbdf69bd7223f5f42875421fbba71a2124117a66be6a5c450969c293c4e1",
-                    size_bytes: 295_248_883,
+                    filename: "restoreformer_pp-1.0.1.onnx",
+                    url: "https://github.com/aktiwers/prunr/releases/download/models-v1/restoreformer_pp-1.0.1.onnx",
+                    sha256: "ee1fb28557e84b8afdf5a829f20efcadd15ce4dc8bb67fa0564bb85c17a5985a",
+                    size_bytes: 295_250_172,
                 },
             ],
             license: LicenseInfo {
@@ -1626,7 +1626,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             },
             license_acceptance_required: false,
         },
-        version: "1.0.0",
+        version: "1.0.1",
         gpu: GpuRequirement::None,
         incompatible_eps: &[],
         needs: Needs {
@@ -1729,17 +1729,6 @@ pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
     descriptor(model)
         .map(|d| !d.incompatible_eps.iter().any(|s| s.eq_ignore_ascii_case(ep)))
         .unwrap_or(true)
-}
-
-/// Whether CoreML may load its compile of `model` back from the cache.
-/// Not RestoreFormer++: 198 pairs of its value names differ only in `.`
-/// against `_` (`attn.1`, `attn_1`). ORT 1.30's CoreML provider writes
-/// both the same and numbers them apart, in one order as it compiles and
-/// in another as it loads a compile back, so the reloaded compile is asked
-/// for outputs it does not have ("output_features has no value for
-/// …__0"). It compiles each session instead.
-pub fn coreml_reloads_compile(model: ModelId) -> bool {
-    model != ModelId::FaceRestoreFormerPp
 }
 
 #[derive(Debug, PartialEq)]
