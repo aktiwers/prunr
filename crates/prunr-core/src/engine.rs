@@ -289,6 +289,7 @@ pub fn column_for(model: prunr_models::ModelId, provider: &str) -> Option<prunr_
 }
 
 /// Whether OpenVINO runs `model` on the Intel graphics here.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn on_intel_gpu(model: prunr_models::ModelId) -> bool {
     column_for(model, OPENVINO_NAME) == Some(prunr_models::Column::OpenVinoGpu)
 }
