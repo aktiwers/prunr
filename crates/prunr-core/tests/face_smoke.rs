@@ -63,6 +63,31 @@ fn a_portrait_is_found_focused_on_and_restored_face_by_face() {
     assert!(previews.iter().all(|&i| i > found_at), "found before any is restored");
 }
 
+/// A face model on the GPU path redraws alike in a second session, which
+/// loads what the first one compiled where the provider keeps it (CoreML).
+#[test]
+fn a_face_model_redraws_alike_in_a_second_session() {
+    use prunr_models::ModelId;
+    if skip_if_no_ort("face") {
+        return;
+    }
+    let crop = image::RgbImage::from_fn(prunr_core::face::FACE_SIZE, prunr_core::face::FACE_SIZE, |x, y| image::Rgb([(x / 2) as u8, (y / 2) as u8, 128]));
+    for id in [ModelId::FaceGfpgan, ModelId::FaceRestoreFormerPp] {
+        if skip_if_model_missing("face", id) {
+            continue;
+        }
+        let redraw = || {
+            let (mut redrawer, pick) = prunr_core::face::Redrawer::on(id, false).expect("an installed face model opens");
+            let face = redrawer.redraw(&crop).unwrap_or_else(|e| panic!("{id:?} on {}: {e}", pick.provider));
+            (face, pick.provider)
+        };
+        let (first, provider) = redraw();
+        let (second, _) = redraw();
+        let worst = first.as_raw().iter().zip(second.as_raw()).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(worst <= 2, "{id:?} on {provider}: the second session is off by {worst}");
+    }
+}
+
 /// An installed face model opens with the built-in finder, including an
 /// install whose folder still holds the copy it once downloaded.
 #[test]

@@ -1698,6 +1698,17 @@ pub fn is_ep_compatible(model: ModelId, ep: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Whether CoreML may load its compile of `model` back from the cache.
+/// Not RestoreFormer++: 198 pairs of its value names differ only in `.`
+/// against `_` (`attn.1`, `attn_1`). ORT 1.30's CoreML provider writes
+/// both the same and numbers them apart, in one order as it compiles and
+/// in another as it loads a compile back, so the reloaded compile is asked
+/// for outputs it does not have ("output_features has no value for
+/// …__0"). It compiles each session instead.
+pub fn coreml_reloads_compile(model: ModelId) -> bool {
+    model != ModelId::FaceRestoreFormerPp
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ResolveError {
     NotInRegistry,
