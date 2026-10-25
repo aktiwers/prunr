@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use super::stats::{speedup, Timing};
-use super::{Family, Gpu, Row, Side, Verdict};
+use super::{triage, Family, Gpu, Row, Side, Verdict};
 
 /// The machine and runtime a report was made on.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -125,8 +125,17 @@ pub fn cells(row: &Row) -> [String; COLUMN_COUNT] {
         a.map_or_else(dash, |a| a.max_abs.to_string()),
         a.map_or_else(dash, |a| format!("{:.2}", a.mean_abs)),
         a.map_or_else(dash, |a| format!("{:.1}%", a.over_2 * 100.0)),
-        row.verdict.label().to_string(),
+        result(row),
     ]
+}
+
+/// The verdict, and which output looks right when one is blank or they
+/// differ.
+pub fn result(row: &Row) -> String {
+    match row.leaning {
+        Some(leaning) => format!("{}: {}", row.verdict.label(), leaning.label()),
+        None => row.verdict.label().to_string(),
+    }
 }
 
 fn gpu_path(gpu: &Gpu) -> String {
@@ -245,10 +254,10 @@ fn details(row: &Row) -> String {
         ));
     }
     if let Some(cpu) = &row.cpu {
-        md.push_str(&side_lines("CPU", cpu));
+        md.push_str(&side_lines("CPU", cpu, row.family));
     }
     match &row.gpu {
-        Gpu::Ran(side) => md.push_str(&side_lines("GPU path", side)),
+        Gpu::Ran(side) => md.push_str(&side_lines("GPU path", side, row.family)),
         Gpu::NoProvider => md.push_str("- GPU path: the loaded ONNX Runtime has no GPU provider.\n"),
         Gpu::ByDesign { reason } => md.push_str(&format!("- GPU path: CPU by design ({reason}).\n")),
         Gpu::FailedBefore { providers } => md.push_str(&format!(
@@ -261,15 +270,26 @@ fn details(row: &Row) -> String {
     if let Some(note) = &row.note {
         md.push_str(&format!("- Note: {note}.\n"));
     }
+    if !row.saved.is_empty() {
+        let paths: Vec<String> = row.saved.iter().map(|path| format!("`{path}`")).collect();
+        md.push_str(&format!("- Outputs saved: {}.\n", paths.join(", ")));
+    }
     md
 }
 
-fn side_lines(label: &str, side: &Side) -> String {
+fn side_lines(label: &str, side: &Side, family: Option<Family>) -> String {
     let mut md = format!("- {label}: {}", provider_and_weights(side));
     if let Some(t) = &side.timing {
         md.push_str(&timing_text(t));
     }
     md.push('\n');
+    let score = side.score.unwrap_or_default();
+    if let (Some(level), Some(family)) = (score.flat, family) {
+        md.push_str(&format!("  - Blank: {}.\n", triage::blank_text(family, level)));
+    }
+    if let Some(off) = score.off_truth {
+        md.push_str(&format!("  - Alone: shrunk back to the input's size, {off:.2}/255 off the input.\n"));
+    }
     if !side.failed.is_empty() {
         md.push_str(&format!("  - Failed before landing on {}:\n", side.provider));
         md.push_str(&fenced(&side.failed.join("\n")));
@@ -307,7 +327,12 @@ fn legend() -> String {
          - **Session**: building the session, cold. **First run**: the first inference, which includes any compile a provider defers. \
          **Steady**: the mean of the timed runs. **CPU steady**: the same on the CPU provider. **Speed-up**: CPU steady over Steady.\n\
          - **Max Δ, Mean Δ, >2/255**: how far the GPU path's output is from the CPU's, in 0-255 levels, \
-         and the share of values more than 2 levels apart. Tolerance (mean Δ / share): {}.\n",
+         and the share of values more than 2 levels apart. Tolerance (mean Δ / share): {}.\n\
+         - **Result** after a colon: which output looks right, each judged alone. **blank**: one value throughout \
+         (for a colorizer, no colour), which no model makes of a photo. On an upscaler's mismatch, **CPU nearer**, \
+         **GPU nearer** or **as near** (within 5%): each upscale shrunk back to its input's size and held against its input. \
+         Other kinds have no truth to score, only the blank check. A mismatch's or a blank output's pictures are saved \
+         beside the report.\n",
         tolerances.join(", "),
     )
 }
@@ -345,7 +370,7 @@ mod tests {
     }
 
     fn ran(provider: &str, weights: &'static str, t: Timing) -> Side {
-        Side { provider: provider.into(), on_cpu: provider == "CPU", weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None }
+        Side { provider: provider.into(), on_cpu: provider == "CPU", weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None, score: None }
     }
 
     fn matched() -> Row {
@@ -358,6 +383,8 @@ mod tests {
             agreement: Some(Agreement { max_abs: 37, mean_abs: 0.41, over_2: 0.012, samples: 262_144 }),
             note: None,
             verdict: Verdict::Match,
+            leaning: None,
+            saved: Vec::new(),
         }
     }
 
@@ -371,6 +398,8 @@ mod tests {
             agreement: None,
             note: None,
             verdict: Verdict::CpuByDesign,
+            leaning: None,
+            saved: Vec::new(),
         }
     }
 
@@ -434,6 +463,32 @@ mod tests {
         assert!(md.contains("    DML device removed | 0x887A0005\n"), "errors keep their text in a block: {md}");
         assert!(md.contains("- GPU path: CPU by design (its sessions run on the CPU provider only)."));
         assert_eq!(md.matches("\n|---|").count(), 2, "one header table, one results table");
+    }
+
+    /// A mismatch says which side looks right, each side's own score is in
+    /// its details, and the saved pictures are named.
+    #[test]
+    fn a_mismatch_shows_which_output_looks_right_and_where_both_were_saved() {
+        use crate::bench::triage::{Leaning, Score};
+        let scored = |side: Side, score| Side { score: Some(score), ..side };
+        let row = Row {
+            model: "4xNomos8kSCHAT-L",
+            name: "nomos8k_schat_l",
+            family: Some(Family::Upscale),
+            cpu: Some(scored(ran("CPU", "FP32", timing(1.0, 9.0, &[])), Score { flat: None, off_truth: Some(3.31) })),
+            gpu: Gpu::Ran(scored(ran("CUDA", "FP16", timing(1.0, 2.0, &[])), Score { flat: Some(0), off_truth: Some(131.5) })),
+            agreement: Some(Agreement { max_abs: 255, mean_abs: 128.0, over_2: 0.99, samples: 10 }),
+            verdict: Verdict::Mismatch,
+            leaning: Some(Leaning::GpuBlank),
+            saved: vec!["out/nomos8k_schat_l-cpu.png".into(), "out/nomos8k_schat_l-gpu.png".into()],
+            ..matched()
+        };
+        assert_eq!(cells(&row)[10], "MISMATCH: GPU blank");
+        assert_eq!(cells(&matched())[10], "match", "no leaning, no colon");
+        let md = details(&row);
+        assert!(md.contains("  - Alone: shrunk back to the input's size, 3.31/255 off the input.\n"), "{md}");
+        assert!(md.contains("  - Blank: every value is 0/255.\n"), "{md}");
+        assert!(md.contains("- Outputs saved: `out/nomos8k_schat_l-cpu.png`, `out/nomos8k_schat_l-gpu.png`.\n"), "{md}");
     }
 
     #[test]

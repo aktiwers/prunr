@@ -11,7 +11,9 @@ pub mod input;
 pub mod needs;
 pub mod report;
 pub mod stats;
+pub mod triage;
 
+use std::path::Path;
 use std::time::Instant;
 
 use prunr_core::engine::{SessionPick, Skip};
@@ -21,6 +23,7 @@ use serde::Serialize;
 
 pub use input::Inputs;
 use stats::{Agreement, Timing, Tolerance};
+use triage::{Leaning, Output, Score};
 
 /// The models only `--heavy` runs: multi-GB downloads that take minutes
 /// on a CPU.
@@ -210,6 +213,8 @@ pub struct Side {
     /// Each provider that failed on the way to `provider`, with its error.
     pub failed: Vec<String>,
     pub error: Option<String>,
+    /// Its first run's output, judged on its own.
+    pub score: Option<Score>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -298,6 +303,10 @@ pub struct Row {
     pub agreement: Option<Agreement>,
     pub note: Option<String>,
     pub verdict: Verdict,
+    /// Which output looks right, when one is blank or they differ.
+    pub leaning: Option<Leaning>,
+    /// The outputs saved for a person to look at.
+    pub saved: Vec<String>,
 }
 
 /// What the runner is doing, for the terminal and the report written as
@@ -308,12 +317,13 @@ pub enum Event {
 }
 
 /// Run `models` one after the other on `inputs`, each side once untimed
-/// and `runs` times timed.
-pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event)) {
+/// and `runs` times timed; the outputs of a model whose sides differ, or
+/// one of which is blank, saved in `save_to`.
+pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, save_to: Option<&Path>, on: &mut dyn FnMut(Event)) {
     let total = models.len();
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
-        let row = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, &mut |stage| {
+        let row = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, save_to, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
         on(Event::Done(Box::new(row)));
@@ -331,7 +341,7 @@ struct Runs {
     gpu: u32,
 }
 
-fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&'static str)) -> Row {
+fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>, stage: &mut dyn FnMut(&'static str)) -> Row {
     let family = Family::of(id);
     let mut row = Row {
         model: display_name(id),
@@ -342,6 +352,8 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
         agreement: None,
         note: None,
         verdict: Verdict::NotInstalled,
+        leaning: None,
+        saved: Vec::new(),
     };
     if !prunr_models::is_available(id) {
         return row;
@@ -359,7 +371,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
     let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs.cpu };
     // A side that needs more memory than is free is not run: the bench
     // must not run the machine out of memory either.
-    let (cpu, cpu_samples) = match (cpu_reference, memory::fits_now(id, CPU)) {
+    let (cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
         (false, _) => {
             row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
             (None, None)
@@ -369,24 +381,29 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
             (None, None)
         }
         (true, Ok(())) => {
-            let (side, samples) = measure(family, id, inputs, true, cpu_runs, stage);
-            (Some(side), samples)
+            let (side, output) = measure(family, id, inputs, true, cpu_runs, stage);
+            (Some(side), output)
         }
     };
     let ladder = prunr_core::engine::gpu_ladder(id);
-    let (gpu, gpu_samples) = match gpu_passed_over(&ladder) {
+    let (gpu, gpu_output) = match gpu_passed_over(&ladder) {
         Some(passed_over) => (passed_over, None),
         None => match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
             Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
             Ok(()) => {
-                let (side, samples) = measure(family, id, inputs, false, runs.gpu, stage);
-                (Gpu::Ran(side), samples)
+                let (side, output) = measure(family, id, inputs, false, runs.gpu, stage);
+                (Gpu::Ran(side), output)
             }
         },
     };
-    let on_gpu = matches!(&gpu, Gpu::Ran(side) if !side.on_cpu);
+    let gpu_ran = match &gpu {
+        Gpu::Ran(side) if !side.on_cpu => Some(side),
+        _ => None,
+    };
+    let gpu_output = gpu_output.filter(|_| gpu_ran.is_some());
     let mut sizes_differ = false;
-    if let (true, Some(a), Some(b)) = (on_gpu, &cpu_samples, &gpu_samples) {
+    if let (Some(a), Some(b)) = (&cpu_output, &gpu_output) {
+        let (a, b) = (&a.samples, &b.samples);
         row.agreement = Agreement::of(a, b);
         sizes_differ = a.len() != b.len();
         if sizes_differ {
@@ -394,6 +411,21 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&
         }
     }
     row.verdict = verdict(Some(family), cpu.as_ref(), &gpu, row.agreement.as_ref(), sizes_differ);
+    row.leaning = triage::leaning(
+        cpu.as_ref().and_then(|side| side.score.as_ref()),
+        gpu_ran.and_then(|side| side.score.as_ref()),
+        row.verdict == Verdict::Mismatch,
+    );
+    if let Some(dir) = save_to.filter(|_| row.verdict == Verdict::Mismatch || row.leaning.is_some()) {
+        let sides = [("cpu", &cpu_output), ("gpu", &gpu_output)].map(|(side, output)| (side, output.as_ref().and_then(|o| o.picture.as_ref())));
+        match triage::save(dir, id.stable_name(), sides) {
+            Ok(saved) => row.saved = saved,
+            Err(e) => row.note = Some(match row.note.take() {
+                Some(note) => format!("{note}; the outputs could not be saved: {e}"),
+                None => format!("the outputs could not be saved: {e}"),
+            }),
+        }
+    }
     row.cpu = cpu;
     row.gpu = gpu;
     row
@@ -431,8 +463,8 @@ fn warm_weights(id: ModelId) {
 }
 
 /// Build one side's session, run it once, then `runs` timed times. The
-/// samples are the first run's, picked as `family` compares them.
-fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u32, stage: &mut dyn FnMut(&'static str)) -> (Side, Option<Vec<u8>>) {
+/// output is the first run's.
+fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u32, stage: &mut dyn FnMut(&'static str)) -> (Side, Option<Output>) {
     let [session_stage, first_stage, timed_stage] = if cpu_only {
         ["CPU session", "CPU first run", "CPU timed runs"]
     } else {
@@ -446,7 +478,7 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         Ok(session) => session,
         Err(error) => {
             let provider = if cpu_only { CPU } else { "none" };
-            return (Side { provider: provider.into(), on_cpu: cpu_only, weights: None, timing: None, failed: Vec::new(), error: Some(error) }, None);
+            return (Side { provider: provider.into(), on_cpu: cpu_only, weights: None, timing: None, failed: Vec::new(), error: Some(error), score: None }, None);
         }
     };
     let pick = session.pick();
@@ -457,13 +489,14 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         timing: None,
         failed: pick.failed.clone(),
         error: None,
+        score: None,
     };
     stage(first_stage);
     let started = Instant::now();
     let first = session.run();
     let mut timing = Timing { session_ms, first_ms: elapsed_ms(started), runs_ms: Vec::new() };
-    let samples = match first {
-        Ok(samples) => samples,
+    let output = match first {
+        Ok(output) => output,
         Err(error) => {
             side.error = Some(error);
             side.timing = Some(timing);
@@ -480,7 +513,8 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         timing.runs_ms.push(elapsed_ms(started));
     }
     side.timing = Some(timing);
-    (side, Some(samples))
+    side.score = Some(triage::score(family, inputs, &output));
+    (side, Some(output))
 }
 
 /// To 0.01 ms, which is all a timer this coarse can say.
@@ -491,7 +525,7 @@ fn elapsed_ms(started: Instant) -> f64 {
 /// A loaded model, run on the bench input as the app runs it.
 trait Run {
     fn pick(&self) -> &SessionPick;
-    fn run(&mut self) -> Result<Vec<u8>, String>;
+    fn run(&mut self) -> Result<Output, String>;
     fn weights(&self) -> Option<&'static str> {
         Some(self.pick().weights.label())
     }
@@ -534,8 +568,9 @@ impl Run for LinesRun {
         &self.pick
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
-        self.engine.detect(&self.photo, &prunr_core::EdgeSettings::default()).map(image::RgbaImage::into_raw).map_err(|e| e.to_string())
+    fn run(&mut self) -> Result<Output, String> {
+        let lines = self.engine.detect(&self.photo, &prunr_core::EdgeSettings::default()).map_err(|e| e.to_string())?;
+        Ok(Output { samples: lines.as_raw().clone(), picture: Some(image::DynamicImage::ImageRgba8(lines)) })
     }
 }
 
@@ -559,17 +594,18 @@ impl Run for FaceFinderRun<'_> {
         &self.pick
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
+    fn run(&mut self) -> Result<Output, String> {
         let photo = &self.inputs.photo;
         let faces = self.finder.find(photo).map_err(|e| e.to_string())?;
         let (w, h) = (photo.width() as f32, photo.height() as f32);
         let level = |v: f32| prunr_core::math::round_u8(v * 255.0);
-        Ok(std::iter::once(faces.len().min(255) as u8)
+        let samples = std::iter::once(faces.len().min(255) as u8)
             .chain(faces.iter().flat_map(|f| {
                 let [x0, y0, x1, y1] = f.bbox;
                 [level(f.score), level(x0 / w), level(y0 / h), level(x1 / w), level(y1 / h)]
             }))
-            .collect())
+            .collect();
+        Ok(Output { samples, picture: None })
     }
 }
 
@@ -596,8 +632,9 @@ impl Run for RedrawRun {
         &self.pick
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
-        self.redrawer.redraw(&self.crop).map(image::RgbImage::into_raw).map_err(|e| e.to_string())
+    fn run(&mut self) -> Result<Output, String> {
+        let redrawn = self.redrawer.redraw(&self.crop).map_err(|e| e.to_string())?;
+        Ok(Output { samples: redrawn.as_raw().clone(), picture: Some(image::DynamicImage::ImageRgb8(redrawn)) })
     }
 }
 
@@ -624,8 +661,12 @@ impl Run for SelectionRun<'_> {
         &self.pick
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
-        crate::gui::processor::magic_brush_masks(&self.sessions, &self.inputs.photo, &CLICKS)
+    fn run(&mut self) -> Result<Output, String> {
+        let masks = crate::gui::processor::magic_brush_masks(&self.sessions, &self.inputs.photo, &CLICKS)?;
+        let side = prunr_core::sam::SAM_MASK_RESOLUTION;
+        // The clicks' masks stacked top to bottom.
+        let picture = image::GrayImage::from_raw(side, side * CLICKS.len() as u32, masks.clone()).map(image::DynamicImage::ImageLuma8);
+        Ok(Output { samples: masks, picture })
     }
 }
 
@@ -652,27 +693,38 @@ impl Run for EngineRun<'_> {
         self.engine.pick()
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
+    fn run(&mut self) -> Result<Output, String> {
         let progress = prunr_core::Progress::none();
         let photo = &self.inputs.photo;
-        let samples = match (self.family, &self.decoded) {
+        let rgba = |img: image::RgbaImage, samples: fn(&image::RgbaImage) -> Vec<u8>| Output {
+            samples: samples(&img),
+            picture: Some(image::DynamicImage::ImageRgba8(img)),
+        };
+        let output = match (self.family, &self.decoded) {
             (Family::Segmentation, Some(decoded)) => {
                 prunr_core::process_image_from_decoded(decoded, &self.engine, &prunr_core::MaskSettings::default(), &progress)
-                    .map(|r| stats::alpha_samples(&r.rgba_image))
+                    .map(|r| rgba(r.rgba_image, stats::alpha_samples))
             }
             (Family::Upscale, _) => {
                 let scale = prunr_models::descriptor(self.id).and_then(|d| d.upscale).map_or(4, |k| k.native_scale);
                 prunr_core::upscale::upscale_rgba_with_engine(&self.inputs.tile, &self.engine, self.id, scale, &progress, None)
-                    .map(|img| stats::rgb_samples(&img))
+                    .map(|img| rgba(img, stats::rgb_samples))
             }
             (Family::Colorize, _) => prunr_core::colorize::colorize_plane(&self.engine, photo, &progress)
-                .map(|plane| stats::rgb_samples(&prunr_core::colorize::colorized(photo, &plane, 1.0))),
-            (Family::Depth, _) => prunr_core::depth::estimate_depth(&self.engine, photo, &progress)
-                .map(|map| stats::gray16_samples(map.to_gray16(photo.width(), photo.height()).as_raw())),
+                .map(|plane| rgba(prunr_core::colorize::colorized(photo, &plane, 1.0), stats::rgb_samples)),
+            (Family::Depth, _) => prunr_core::depth::estimate_depth(&self.engine, photo, &progress).map(|map| {
+                let depth = map.to_gray16(photo.width(), photo.height());
+                Output { samples: stats::gray16_samples(depth.as_raw()), picture: Some(image::DynamicImage::ImageLuma16(depth)) }
+            }),
             (family, _) => return Err(format!("{family:?} does not run on one engine")),
         };
-        samples.map_err(|e| e.to_string())
+        output.map_err(|e| e.to_string())
     }
+}
+
+/// An eraser's photo, compared on what it filled inside `mask`.
+fn filled_output(filled: image::RgbaImage, mask: &image::GrayImage) -> Output {
+    Output { samples: stats::rgb_samples_inside(&filled, mask), picture: Some(image::DynamicImage::ImageRgba8(filled)) }
 }
 
 /// LaMa, Big-LaMa, MI-GAN: the eraser's cached session, released on drop.
@@ -695,10 +747,10 @@ impl Run for LamaRun<'_> {
         &self.pick
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
+    fn run(&mut self) -> Result<Output, String> {
         let Inputs { photo, mask, .. } = self.inputs;
         prunr_core::inpaint::process_lama(photo, mask, self.id, self.cpu_only, prunr_core::inpaint::FillScale::Auto, &prunr_core::Progress::none())
-            .map(|filled| stats::rgb_samples_inside(&filled.rgba, mask))
+            .map(|filled| filled_output(filled.rgba, mask))
             .map_err(|e| e.to_string())
     }
 }
@@ -742,10 +794,10 @@ impl Run for DiffusionRun<'_> {
         self.pick.on_cpu
     }
 
-    fn run(&mut self) -> Result<Vec<u8>, String> {
+    fn run(&mut self) -> Result<Output, String> {
         let Inputs { photo, mask, .. } = self.inputs;
         prunr_core::inpaint::process_inpaint_with(photo, mask, self.id, Some(self.request.clone()), self.cpu_only, &prunr_core::Progress::none())
-            .map(|filled| stats::rgb_samples_inside(&filled.rgba, mask))
+            .map(|filled| filled_output(filled.rgba, mask))
             .map_err(|e| e.to_string())
     }
 }
@@ -884,7 +936,7 @@ mod tests {
     }
 
     fn side(provider: &str) -> Side {
-        Side { provider: provider.into(), on_cpu: provider == CPU, weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None }
+        Side { provider: provider.into(), on_cpu: provider == CPU, weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None, score: None }
     }
 
     /// One row per way a model's run ends.

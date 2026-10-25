@@ -1444,14 +1444,15 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     println!();
     let mut files = ReportFiles::new(args.out.clone());
     files.write(&report);
-    bench::run(&models, &inputs, args.runs, &mut |event| match event {
+    let outputs = files.outputs_dir();
+    bench::run(&models, &inputs, args.runs, Some(&outputs), &mut |event| match event {
         bench::Event::Stage { index, total, model, stage } => {
             eprintln!("[{index}/{total}] {model}: {stage}");
             report.running = Some(format!("{model}: {stage}"));
             files.write(&report);
         }
         bench::Event::Done(row) => {
-            eprintln!("      {}: {}", row.model, row.verdict.label());
+            eprintln!("      {}: {}", row.model, report::result(&row));
             report.rows.push(*row);
             report.running = None;
             files.write(&report);
@@ -1544,6 +1545,12 @@ impl ReportFiles {
 
     fn json(&self) -> PathBuf {
         self.md.with_extension("json")
+    }
+
+    /// Beside the report: `prunr-bench.md` saves into `prunr-bench-outputs/`.
+    fn outputs_dir(&self) -> PathBuf {
+        let stem = self.md.file_stem().map_or_else(|| "prunr-bench".into(), |s| s.to_string_lossy());
+        self.md.with_file_name(format!("{stem}-outputs"))
     }
 
     fn write(&mut self, report: &prunr_app::bench::report::Report) {

@@ -62,7 +62,7 @@ pub fn judge(row: &Row) -> Option<Check> {
 /// run as its time (no timed runs: minutes on the CPU for little), the
 /// GPU path's one timed run after its first.
 pub fn bench_once(id: ModelId) -> Row {
-    super::bench_model(id, &Inputs::built_in(), super::Runs { cpu: 0, gpu: 1 }, &mut |_| {})
+    super::bench_model(id, &Inputs::built_in(), super::Runs { cpu: 0, gpu: 1 }, None, &mut |_| {})
 }
 
 /// `prunr_core::provider_check::Checker`. `None` for a model the bench
@@ -152,6 +152,7 @@ mod tests {
             timing: Some(Timing { session_ms: 1.0, first_ms: ms, runs_ms: vec![ms] }),
             failed: Vec::new(),
             error: None,
+            score: None,
         }
     }
 
@@ -165,6 +166,8 @@ mod tests {
             agreement: Some(Agreement { max_abs: 29, mean_abs: 1.24, over_2: 0.145, samples: 10 }),
             note: None,
             verdict,
+            leaning: None,
+            saved: Vec::new(),
         }
     }
 
