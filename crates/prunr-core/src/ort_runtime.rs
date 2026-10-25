@@ -254,6 +254,11 @@ fn load_runtime(path: &Path) -> Result<(), String> {
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let env = ort::init_from(path)
         .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?
+        // Off, though `ort` turns it on: since 1.29 ONNX Runtime on Linux and
+        // macOS uploads telemetry through Microsoft's 1DS client, whose
+        // thread aborted Prunr at exit (a mutex already torn down: 2 of 3
+        // bench runs on a MacBook Air, ORT 1.30). Prunr reports nothing.
+        .with_telemetry(false)
         .build()
         .map_err(|e| format!("ORT environment on {}: {e}", path.display()))?;
     let _ = ENV.set(env);
@@ -561,6 +566,16 @@ fn bundled_dylib() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The runtime starts with telemetry off: `ort` turns it on, and the
+    /// upload client it starts in ONNX Runtime 1.29+ aborted Prunr at exit.
+    #[test]
+    fn the_runtime_starts_with_telemetry_off() {
+        let source = include_str!("ort_runtime.rs");
+        let init = source.find("ort::init_from(path)").expect("the one runtime init");
+        let built = init + source[init..].find(".build()").expect("built");
+        assert!(source[init..built].contains(".with_telemetry(false)"), "telemetry must be switched off where the environment is built");
+    }
     use super::*;
 
     /// Folding stays off where ORT's aliasing bug lives (1.24 to 1.28, or
