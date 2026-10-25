@@ -422,11 +422,6 @@ pub enum SubprocessEvent {
     InitError {
         error: String,
     },
-    /// A model checked on a GPU provider against the CPU, for the window
-    /// to tell (`prunr_core::provider_check`).
-    ProviderCheck {
-        notice: prunr_core::provider_check::Notice,
-    },
 }
 
 /// PID-namespaced IPC temp dir, RAM-backed (/dev/shm) on Linux when available.
@@ -684,10 +679,9 @@ mod tests {
             SubprocessEvent::RssUpdate { .. } => 7,
             SubprocessEvent::Finished => 8,
             SubprocessEvent::InitError { .. } => 9,
-            SubprocessEvent::ProviderCheck { .. } => 10,
         }
     }
-    const EVENTS: usize = 11;
+    const EVENTS: usize = 10;
 
     /// A path that is not Unicode where the OS allows one, so a path
     /// field that crosses the way serde's `Path` does fails its sample.
@@ -781,7 +775,6 @@ mod tests {
             SubprocessEvent::RssUpdate { rss_bytes: 1 },
             SubprocessEvent::Finished,
             SubprocessEvent::InitError { error: "failed".into() },
-            SubprocessEvent::ProviderCheck { notice: prunr_core::provider_check::Notice::PassedOver { model: ModelId::Silueta, reason: "slower".into() } },
         ]
     }
 

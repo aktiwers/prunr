@@ -954,7 +954,6 @@ fn handle_subprocess_event(
             ctx.request_repaint();
         }
         SubprocessEvent::Ready { .. }
-        | SubprocessEvent::ProviderCheck { .. }
         | SubprocessEvent::InpaintDone { .. }
         | SubprocessEvent::InpaintError { .. }
         | SubprocessEvent::RssUpdate { .. }

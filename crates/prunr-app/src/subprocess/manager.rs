@@ -176,14 +176,9 @@ impl SubprocessManager {
         })?;
 
         // Seg/edge workers build engine pools at Init (a CoreML first-run compile
-        // alone can take 2–5 min), so 300 s, and a model's provider check runs
-        // inside that build; inpaint-only builds lazily, so 30 s bounds a
-        // pre-Ready hang such as a wedged OpenVINO probe.
-        let init_timeout = if inpaint_only {
-            std::time::Duration::from_secs(30)
-        } else {
-            std::time::Duration::from_secs(300) + crate::bench::check::LIMIT
-        };
+        // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
+        // bounds a pre-Ready hang such as a wedged OpenVINO probe.
+        let init_timeout = std::time::Duration::from_secs(if inpaint_only { 30 } else { 300 });
         let active_provider = match event_rx.recv_timeout(init_timeout) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
@@ -595,7 +590,6 @@ fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mps
             let mut reader = BufReader::new(child_stdout);
             // A closed stdout (clean exit or crash) or garbage ends it.
             while let Ok(Some(evt)) = read_message::<_, SubprocessEvent>(&mut reader) {
-                let Some(evt) = relayed(evt) else { continue };
                 if event_tx.send(ReaderEvent::Event(evt)).is_err() {
                     return; // parent dropped receiver
                 }
@@ -612,19 +606,6 @@ fn current_rss_thresholds() -> (u64, u64) {
     let limit = (available as f64 * 0.80) as u64;
     let resume = (limit as f64 * 0.70) as u64;
     (limit, resume)
-}
-
-/// `evt` for whoever reads the worker's events; a provider check's notice
-/// goes to this process's observer here instead, whatever the worker is
-/// doing when it comes (it can come before `Ready`).
-fn relayed(evt: SubprocessEvent) -> Option<SubprocessEvent> {
-    match evt {
-        SubprocessEvent::ProviderCheck { notice } => {
-            prunr_core::provider_check::tell(notice);
-            None
-        }
-        evt => Some(evt),
-    }
 }
 
 fn apply_event_state(
@@ -657,8 +638,7 @@ fn apply_event_state(
         | SubprocessEvent::Report { .. }
         | SubprocessEvent::SpareEdgeScales { .. }
         | SubprocessEvent::Finished
-        | SubprocessEvent::InitError { .. }
-        | SubprocessEvent::ProviderCheck { .. } => {}
+        | SubprocessEvent::InitError { .. } => {}
     }
 }
 
@@ -666,15 +646,6 @@ fn apply_event_state(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    /// A provider check's notice never reaches an event's reader, so it
-    /// cannot be taken for the end of the start-up.
-    #[test]
-    fn a_notice_is_told_not_read() {
-        let notice = prunr_core::provider_check::Notice::Checking { model: prunr_models::ModelId::BiRefNetLite, on: "OpenVINO".into() };
-        assert!(relayed(SubprocessEvent::ProviderCheck { notice }).is_none());
-        assert!(matches!(relayed(SubprocessEvent::Ready { active_provider: "CUDA".into() }), Some(SubprocessEvent::Ready { .. })));
-    }
 
     /// A worker that stopped as soon as it began says why: one of another
     /// version (the app was updated while open) asks for a restart.

@@ -161,9 +161,8 @@ fn init_failed(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::JoinH
 }
 
 /// Let the writer send what is queued and end: it ends once every sender
-/// is gone, the notice relay's too.
+/// is gone.
 fn close_events(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::JoinHandle<()>) {
-    drop(NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
     drop(evt_tx);
     let _ = writer.join();
 }
@@ -273,23 +272,12 @@ fn pixel_weight(image_bytes: &[u8]) -> usize {
     }
 }
 
-/// The worker's link to the window, for the provider check's notices.
-static NOTICES: Mutex<Option<mpsc::Sender<SubprocessEvent>>> = Mutex::new(None);
-
-fn relay_notice(notice: prunr_core::provider_check::Notice) {
-    if let Some(tx) = NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
-        let _ = tx.send(SubprocessEvent::ProviderCheck { notice });
-    }
-}
-
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
 
     let mut reader = BufReader::new(stdin.lock());
     let (evt_tx, evt_rx) = mpsc::channel::<SubprocessEvent>();
-    *NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(evt_tx.clone());
-    prunr_core::provider_check::set_observer(relay_notice);
 
     // Writer thread: flush after every event. The parent blocks on each frame,
     // and a buffered writer would hold back the post-Init `Ready` indefinitely.
@@ -1035,12 +1023,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// The writer ends once every sender goes, the notice relay's too:
-    /// with the relay's left, each clean exit hung on joining the writer.
+    /// The writer ends once the last sender goes: one left behind made
+    /// each clean exit hang on joining the writer.
     #[test]
-    fn closing_the_events_ends_the_writer_with_the_notice_relay_set() {
+    fn closing_the_events_ends_the_writer() {
         let (tx, rx) = mpsc::channel::<SubprocessEvent>();
-        *NOTICES.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx.clone());
         let writer = std::thread::spawn(move || while rx.recv().is_ok() {});
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {

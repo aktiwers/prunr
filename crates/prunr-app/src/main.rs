@@ -94,7 +94,6 @@ fn main() {
             unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
         }
     } else if !cli.inputs.is_empty() {
-        prunr_core::provider_check::set_observer(cli::announce_provider_check);
         let exit_code = cli::run_remove(&cli);
         std::process::exit(exit_code);
     }
@@ -103,7 +102,6 @@ fn main() {
         let log = std::env::var("PRUNR_DEBUG_LOG").unwrap_or_default();
         tracing::info!(log_file = %log, "debug mode — tracing at prunr=debug, tee to file");
     }
-    prunr_core::provider_check::set_observer(gui::provider_notices::observe);
     if let Err(e) = gui::run() {
         tracing::error!(%e, "GUI launch failed");
         std::process::exit(1);
