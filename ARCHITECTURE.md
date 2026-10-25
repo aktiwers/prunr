@@ -452,7 +452,7 @@ OpenVINO goes first because the common non-NVIDIA desktop is Intel; NVIDIA machi
 Two layers decide whether a model runs on an EP:
 
 1. **Measured**: `ModelDescriptor.places`, per model and accelerator: on it, or on the CPU and why (fails, differs, slower, no gain), with the hardware it was measured on. The rule: the CPU's result first, then the faster, and within 10% of that the one taking less system memory. Prunr ships pinned runtimes, so a result measured on one machine of a kind holds on the others; an unmeasured accelerator is tried.
-2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Scoped to the app version, runtime build and graphics drivers, so a change of any retries everything; `prunr --clear-ep-cache` and Settings wipe it.
+2. **Dynamic**: `<data>/prunr/ep_compat.json`, written when an uncached session fails, per copy of the weights so FP16 failing never bars FP32. Each entry names the model's files (a download's checksums, a built-in model's version); the list is scoped to the runtime build and graphics drivers, so a change of either retries everything, while an app update alone does not; `prunr --clear-ep-cache` and Settings wipe it.
 
 ### Compiled-model cache
 
