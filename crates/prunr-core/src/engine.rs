@@ -463,6 +463,13 @@ impl EpKind {
         dispatch.error_on_failure()
     }
 
+    /// Whether an engine on this provider compiles a model for each input
+    /// size it meets (`ModelDescriptor::free_dims`). CoreML: a free size
+    /// compiles to a program for any size, slower and many times larger.
+    pub(crate) fn sizes_each_input(self) -> bool {
+        self.as_str() == COREML_NAME
+    }
+
     /// Whether sessions on this provider load and write ORT's
     /// optimized-graph cache. Never DirectML: ORT turns its graph fusion
     /// off whenever an optimized model path is set.
@@ -757,10 +764,130 @@ pub struct OrtEngine {
     model_kind: ModelKind,
 }
 
-/// One session, or a model cut into parts that run in turn.
+/// One session, one per input size, or a model cut into parts that run
+/// in turn.
 enum Sessions {
     One(Mutex<Session>),
+    Sized(Box<SizedSessions>),
     Parts(Box<crate::upscale::blocks::BlockNet>),
+}
+
+/// A model compiled for one input size at a time, on a provider that runs
+/// it best that way (`EpKind::sizes_each_input`): the session for the size
+/// last run, compiled again when another size comes.
+struct SizedSessions {
+    recipe: SizeRecipe,
+    weights: Weights,
+    /// The size the engine was built at, compiled again when a new size
+    /// failed to compile and left no session.
+    first: Vec<usize>,
+    current: Mutex<Option<(Vec<usize>, Session)>>,
+}
+
+impl SizedSessions {
+    /// `f` on the session for an input of `shape`, compiled first when
+    /// the size is new. The old size's session is freed before the new one
+    /// builds, so the engine holds one at a time.
+    fn with_session<T>(&self, shape: &[usize], f: impl FnOnce(&mut Session) -> Result<T, CoreError>) -> Result<T, CoreError> {
+        let mut current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.as_ref().is_none_or(|(size, _)| size.as_slice() != shape) {
+            drop(current.take());
+            *current = Some((shape.to_vec(), self.build(shape)?));
+        }
+        // just filled when empty
+        let (_, session) = current.as_mut().expect("a session for this size");
+        f(session)
+    }
+
+    /// `f` on the session for the size last run, or the first size's when
+    /// none is compiled.
+    fn with_current<T>(&self, f: impl FnOnce(&mut Session) -> Result<T, CoreError>) -> Result<T, CoreError> {
+        let shape = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or_else(|| self.first.clone(), |(size, _)| size.clone());
+        self.with_session(&shape, f)
+    }
+
+    /// A session for `shape`; a compile it loaded from the cache that
+    /// fails is deleted and compiled afresh, once.
+    fn build(&self, shape: &[usize]) -> Result<Session, CoreError> {
+        let SizeRecipe { model, ep, .. } = self.recipe;
+        let bytes = OrtEngine::weights_bytes(model, self.weights)?
+            .ok_or_else(|| CoreError::Inference(format!("{model:?}: its {} weights are gone from disk", self.weights.label())))?;
+        let started = std::time::SystemTime::now();
+        self.recipe.session(&bytes, shape).or_else(|miss| {
+            let error = miss_text(miss);
+            let cached = compiled_cache_named(model, ep.as_str(), &error, started).ok_or_else(|| CoreError::Inference(error.clone()))?;
+            tracing::warn!(?model, %ep, %error, "a compiled size failed to load; compiling it again");
+            clear_suspect_cache(&cached);
+            self.recipe.session(&bytes, shape).map_err(|miss| CoreError::Inference(miss_text(miss)))
+        })
+    }
+}
+
+fn miss_text(miss: Miss) -> String {
+    match miss {
+        Miss::Unusable(error) | Miss::Failed { error, .. } => error,
+    }
+}
+
+/// What a session of a model compiled for one input size is built with.
+#[derive(Clone, Copy)]
+struct SizeRecipe {
+    model: prunr_models::ModelId,
+    ep: EpKind,
+    intra_threads: usize,
+    level: GraphOptimizationLevel,
+}
+
+impl SizeRecipe {
+    /// A session of `model_bytes` compiled for `shape`, its compile kept
+    /// apart from other sizes'.
+    fn session(self, model_bytes: &[u8], shape: &[usize]) -> Result<Session, Miss> {
+        let Self { model, ep, intra_threads, level } = self;
+        let builder = OrtEngine::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
+        let (builder, coverage) = crate::ep_coverage::watch(ep, fix_sizes(builder, model, shape)?);
+        let key = size_key(shape);
+        let mut built = ep.attach(builder, model, EpSite::Engine { threads: intra_threads, part: Some(&key) })?;
+        let started = Instant::now();
+        let session = built.commit_from_memory(model_bytes)
+            .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}, input {key}): {e}"), suspect_cache: None })?;
+        tracing::info!(?model, %ep, size = %key, elapsed_ms = started.elapsed().as_millis() as u64, "session compiled for one input size");
+        coverage.report(model, None);
+        crate::cache::keep_newest_parts(model, ep.as_str(), &key, "size-", SIZES_KEPT);
+        Ok(session)
+    }
+}
+
+/// The input an engine of `model` on `provider` is first compiled for,
+/// when it compiles each size: an upscaler's tile there, Depth's square.
+/// `None` for a model with a fixed input.
+fn first_input(model: prunr_models::ModelId, provider: &str) -> Option<[usize; 4]> {
+    let descriptor = prunr_models::descriptor(model).filter(|d| !d.free_dims.is_empty())?;
+    let side = match descriptor.category {
+        prunr_models::ModelCategory::Upscale => crate::upscale::tile_for_provider(descriptor.recommended_tile?, provider),
+        prunr_models::ModelCategory::Depth => crate::depth::DEPTH_LONG_SIDE,
+        _ => return None,
+    };
+    Some([1, 3, side as usize, side as usize])
+}
+
+/// What a size's compile is kept under, beside the model's other sizes.
+fn size_key(shape: &[usize]) -> String {
+    shape.iter().fold("size".to_string(), |key, d| format!("{key}-{d}"))
+}
+
+/// How many sizes of a model keep their compile on disk (Real-ESRGAN x4:
+/// 130 MB each, Depth 190 MB).
+const SIZES_KEPT: usize = 4;
+
+/// `builder` with `model`'s free input sizes fixed to `shape`'s.
+fn fix_sizes(builder: ort::session::builder::SessionBuilder, model: prunr_models::ModelId, shape: &[usize]) -> Result<ort::session::builder::SessionBuilder, Miss> {
+    let dims = prunr_models::descriptor(model).map_or(&[][..], |d| d.free_dims);
+    dims.iter().try_fold(builder, |builder, &(name, axis)| {
+        let size = shape.get(axis).ok_or_else(|| Miss::Unusable(format!("{model:?}: input has no axis {axis} for {name}")))?;
+        builder.with_dimension_override(name, *size as i64).map_err(|e| Miss::Unusable(format!("ORT fix input size {name} failed: {e}")))
+    })
 }
 
 impl OrtEngine {
@@ -894,8 +1021,12 @@ impl OrtEngine {
         // One EP per try, not a list: a list hides which EP won and lets a
         // crashing EP (DirectML's AbiCustomRegistry) abort before the CPU
         // fallback is reached.
-        let (session, ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
+        let ((session, first), ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
+            if let Some(shape) = ep.sizes_each_input().then(|| first_input(model_id, ep.as_str())).flatten() {
+                let recipe = SizeRecipe { model: model_id, ep, intra_threads, level };
+                return recipe.session(model_bytes, &shape).map(|session| (session, Some(shape)));
+            }
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
                 apply_ort_graph_cache(builder, model_bytes, model_id, ep.as_str(), weights, None)
@@ -912,10 +1043,19 @@ impl OrtEngine {
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
-            Ok(session)
+            Ok((session, None))
         }).map_err(|walk| CoreError::Inference(walk.reason()))?;
+        let sessions = match first {
+            Some(shape) => Sessions::Sized(Box::new(SizedSessions {
+                recipe: SizeRecipe { model: model_id, ep, intra_threads, level },
+                weights,
+                first: shape.to_vec(),
+                current: Mutex::new(Some((shape.to_vec(), session))),
+            })),
+            None => Sessions::One(Mutex::new(session)),
+        };
         Ok(Self {
-            sessions: Sessions::One(Mutex::new(session)),
+            sessions,
             pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
             model_kind: model,
         })
@@ -968,7 +1108,7 @@ impl OrtEngine {
     pub(crate) fn parts(&self) -> Option<&crate::upscale::blocks::BlockNet> {
         match &self.sessions {
             Sessions::Parts(net) => Some(net),
-            Sessions::One(_) => None,
+            Sessions::One(_) | Sessions::Sized(_) => None,
         }
     }
 
@@ -1065,19 +1205,37 @@ pub(crate) fn directml_active() -> bool {
 }
 
 impl OrtEngine {
-    /// Lock the ORT session for inference.
+    /// Lock the ORT session: for a model whose input size is fixed, or to
+    /// read what the session holds (input types). A run of a model whose
+    /// size varies goes through `with_session_for`.
     pub(crate) fn with_session<T, F>(&self, f: F) -> Result<T, CoreError>
     where
         F: FnOnce(&mut Session) -> Result<T, CoreError>,
     {
-        let mut session = self.one_session()?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&mut session)
+        match &self.sessions {
+            Sessions::Sized(sized) => sized.with_current(f),
+            _ => f(&mut self.one_session()?.lock().unwrap_or_else(std::sync::PoisonError::into_inner)),
+        }
     }
 
-    /// The session, for a model that runs whole; a parted one has none.
+    /// Lock the session that runs an input of `shape`: on a provider that
+    /// compiles each size, the one compiled for it, built first when the
+    /// size is new.
+    pub(crate) fn with_session_for<T, F>(&self, shape: &[usize], f: F) -> Result<T, CoreError>
+    where
+        F: FnOnce(&mut Session) -> Result<T, CoreError>,
+    {
+        match &self.sessions {
+            Sessions::Sized(sized) => sized.with_session(shape, f),
+            _ => self.with_session(f),
+        }
+    }
+
+    /// The session, for a model that runs whole at one size.
     fn one_session(&self) -> Result<&Mutex<Session>, CoreError> {
         match &self.sessions {
             Sessions::One(session) => Ok(session),
+            Sessions::Sized(_) => Err(CoreError::Inference(format!("{:?} runs a session per input size", self.model_kind))),
             Sessions::Parts(_) => Err(CoreError::Inference(format!("{:?} runs part by part, not as one session", self.model_kind))),
         }
     }
@@ -1098,7 +1256,7 @@ impl OrtEngine {
             .map_err(|e| CoreError::Inference(format!("{label}: input shape: {e}")))?;
         let tensor = Tensor::from_array(array).map_err(|e| CoreError::Inference(format!("{label}: input tensor: {e}")))?;
         progress.check_cancelled()?;
-        let out = self.with_session(|session| {
+        let out = self.with_session_for(&shape, |session| {
             let outputs = session.run(ort::inputs![input => &tensor])
                 .map_err(|e| CoreError::Inference(format!("{label}: inference failed: {e}")))?;
             let (_, values) = outputs[0].try_extract_tensor::<f32>()
@@ -1429,6 +1587,43 @@ mod tests {
         cached.set_modified(build_started - std::time::Duration::from_secs(3600)).unwrap();
         assert!(!written_since(&dir, build_started), "compiled before the build: the cache is the suspect");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A size that fails to compile leaves no session; reading the session
+    /// then compiles the first size again instead of failing for good.
+    #[test]
+    fn a_sized_engine_compiles_its_first_size_again_after_a_size_fails() {
+        let id = prunr_models::ModelId::DepthAnythingV2Small;
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        let Some(&ep) = available_gpu_eps().first().filter(|_| prunr_models::is_available(id)) else {
+            eprintln!("SKIP: no GPU provider or no depth model");
+            return;
+        };
+        let first = vec![1, 3, 518, 518];
+        let sized = SizedSessions {
+            recipe: SizeRecipe { model: id, ep, intra_threads: 2, level: GraphOptimizationLevel::Level3 },
+            weights: Weights::Fp32,
+            first: first.clone(),
+            current: Mutex::new(None),
+        };
+        let input_name = |session: &mut Session| Ok(session.inputs()[0].name().to_string());
+        assert!(sized.with_session(&[1, 3], input_name).is_err(), "a size without the input's axes fails");
+        assert_eq!(sized.with_current(input_name).expect("the first size compiles again"), "pixel_values");
+        let current = sized.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|(size, _)| size.clone());
+        assert_eq!(current, Some(first));
+    }
+
+    #[test]
+    fn a_size_is_compiled_first_at_the_input_its_engine_starts_with() {
+        use prunr_models::ModelId;
+        assert_eq!(first_input(ModelId::DepthAnythingV2Small, COREML_NAME), Some([1, 3, 518, 518]));
+        let x4_tile = crate::upscale::tile_for_provider(prunr_models::descriptor(ModelId::RealEsrganX4Plus).and_then(|d| d.recommended_tile).unwrap(), COREML_NAME) as usize;
+        assert_eq!(first_input(ModelId::RealEsrganX4Plus, COREML_NAME), Some([1, 3, x4_tile, x4_tile]));
+        assert_eq!(first_input(ModelId::U2net, COREML_NAME), None, "a fixed input is never resized");
+        assert_eq!(size_key(&[1, 3, 392, 518]), "size-1-3-392-518");
     }
 
     #[test]

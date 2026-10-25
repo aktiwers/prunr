@@ -876,6 +876,7 @@ mod model_credits_tests {
             parallel_jobs_pay_on_cpu: false,
             tile_size_multiple: None,
             recommended_tile: None,
+            free_dims: &[],
             attribution_required,
             upscale: None,
         }

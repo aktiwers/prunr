@@ -61,3 +61,26 @@ fn a_cancelled_depth_run_returns_cancelled() {
     let got = estimate_depth(&engine, &ground_plane(32, 32), &Progress::none().with_cancel(flag));
     assert!(matches!(got, Err(prunr_core::CoreError::Cancelled)));
 }
+
+/// Depth on the GPU path the app takes gives the CPU's map at each photo
+/// shape, also where the engine compiles a session per input size
+/// (CoreML), and going back to a size it ran before.
+#[test]
+fn the_gpu_path_maps_each_photo_shape_as_the_cpu_does() {
+    if skip_if_no_ort("depth") || skip_if_model_missing("depth", MODEL.into()) {
+        return;
+    }
+    let gpu = OrtEngine::for_model(MODEL.into(), 4, false).expect("depth on the GPU path");
+    let cpu = OrtEngine::new_cpu_only(MODEL, 4).expect("depth on the CPU");
+    for (w, h) in [(640, 480), (480, 640), (640, 480), (500, 500)] {
+        let photo = ground_plane(w, h);
+        let [a, b] = [&gpu, &cpu].map(|engine| estimate_depth(engine, &photo, &Progress::none()).expect("depth runs").to_gray16(w, h));
+        let (worst, sum) = a.as_raw().iter().zip(b.as_raw()).fold((0u16, 0u64), |(worst, sum), (x, y)| {
+            let d = x.abs_diff(*y);
+            (worst.max(d), sum + u64::from(d))
+        });
+        let mean = sum as f64 / a.as_raw().len() as f64 / 257.0;
+        eprintln!("[depth] {w}x{h} on {}: mean Δ {mean:.2}/255, max {}/255", gpu.active_provider(), worst / 257);
+        assert!(mean <= 3.0, "{w}x{h} on {}: mean Δ {mean:.2}/255 from the CPU's map", gpu.active_provider());
+    }
+}

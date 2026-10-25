@@ -170,7 +170,7 @@ pub fn upscale_rgba_with_engine(
         } else {
             chw_tensor(rgb_tile, shape, |v| v * INV_255)?
         };
-        engine.with_session(|session| {
+        engine.with_session_for(&shape, |session| {
             let outputs = match terminate {
                 Some(opts) => session.run_with_options(inputs![input_name => &tensor], opts.as_ref()),
                 None => session.run(inputs![input_name => &tensor]),
