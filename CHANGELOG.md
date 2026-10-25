@@ -49,7 +49,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Wide Sketch lines draw with a round pen: round ends and corners instead of square ones.
 - Color splash shows which hues it keeps on a strip under its sliders.
 - **Rebindable hotkeys.** Settings › Hotkeys lists every action with two key slots; click one and press the new keys. A key already in use moves over, and tooltips show your bindings. F1 opens this tab, with the mouse gestures below the keys.
-- **`prunr bench`** checks the GPU path model by model: each installed model runs on the CPU and through the accelerator the app would pick, timed (session build, first run, steady runs), and the two outputs are compared. It names the accelerator each model landed on and why one was passed over, and writes `prunr-bench.md` and `prunr-bench.json` to send back. `--models`, `--runs`, `--image`; `--heavy` adds Stable Diffusion, RORem and 4xNomos8kSCHAT-L.
+- **`prunr bench`** checks the GPU path model by model: each installed model runs on the CPU and through the accelerator the app would pick, timed (session build, first run, steady runs), and the two outputs are compared. When they differ, the report says which one looks right: a blank output is flagged (for a colorizer, one that adds no colour), an upscale is shrunk back and held against its input, and both pictures are saved beside the report. It names the accelerator each model landed on and why one was passed over, and writes `prunr-bench.md` and `prunr-bench.json` to send back. `--models`, `--runs`, `--image`; `--heavy` adds Stable Diffusion, RORem and 4xNomos8kSCHAT-L.
 
 ### Changed
 
