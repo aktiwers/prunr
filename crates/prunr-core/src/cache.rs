@@ -93,8 +93,7 @@ pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
 /// model changes only with the app.
 fn cache_key(id: ModelId, ep_name: &str, runtime: Option<&str>) -> Option<String> {
     let descriptor = prunr_models::descriptor(id)?;
-    let files = prunr_models::content_tag(id)
-        .map_or_else(|| format!("app{}", prunr_models::BUILT_IN_VERSION), |tag| format!("{tag:016x}"));
+    let files = prunr_models::files_id(id);
     let mut key = format!(
         "{}-{}-{files}-ort{}-v{}",
         id.stable_name(), descriptor.version, runtime.unwrap_or("unknown"), CACHE_FORMAT_VERSION,

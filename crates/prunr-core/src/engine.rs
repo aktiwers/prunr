@@ -272,9 +272,8 @@ fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Wh
     if compiles_per_shape(model, ep) {
         return Some(COMPILES_PER_SHAPE);
     }
-    let place = prunr_models::descriptor(model)?.places.get(column_for(model, ep)?);
-    match place {
-        prunr_models::Place::Cpu(why) if place.kept_off(remeasuring()) => Some(why),
+    match prunr_models::place(model, ep.as_str(), openvino_on_gpu(), remeasuring()) {
+        place @ prunr_models::Place::Cpu(why) if place.kept_off(remeasuring()) => Some(why),
         _ => None,
     }
 }
@@ -283,39 +282,29 @@ fn remeasuring() -> bool {
     REMEASURE.get().is_some()
 }
 
-/// The table's column a session of `model` on `ep` reads: OpenVINO's by
-/// the device it runs the model on (`on_intel_gpu`).
-fn column_for(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Column> {
-    #[cfg(not(target_os = "macos"))]
-    if ep == EpKind::OpenVino {
-        return Some(if on_intel_gpu(model) { prunr_models::Column::OpenVinoGpu } else { prunr_models::Column::OpenVino });
-    }
-    #[cfg(target_os = "macos")]
-    let _ = model;
-    prunr_models::Column::of(ep.as_str(), false)
+/// The table's column a session of `model` on `provider` reads here
+/// (`prunr_models::column_for`).
+pub fn column_for(model: prunr_models::ModelId, provider: &str) -> Option<prunr_models::Column> {
+    prunr_models::column_for(model, provider, openvino_on_gpu(), remeasuring())
 }
 
-/// Whether OpenVINO runs `model` on the Intel graphics: they are on, its
-/// kind can use them and the table keeps it there. Otherwise OpenVINO runs
-/// it on the processor where the table says so, so a model the graphics
-/// run slower still gets OpenVINO's processor where that beats ORT's CPU.
-#[cfg(not(target_os = "macos"))]
+/// Whether OpenVINO runs `model` on the Intel graphics here.
 pub(crate) fn on_intel_gpu(model: prunr_models::ModelId) -> bool {
-    let Some(descriptor) = prunr_models::descriptor(model) else { return false };
-    intel_gpu_for(descriptor.places.openvino_gpu, takes_intel_gpu(descriptor.category), intel_gpu_chosen(), remeasuring())
+    column_for(model, OPENVINO_NAME) == Some(prunr_models::Column::OpenVinoGpu)
 }
 
-/// Fills stay on the processor: the GPU plugin cannot build LaMa (dynamic
-/// shapes), and under AUTO it ran ~10% slower than the CPU. SD parts pick
-/// their own device.
-#[cfg(not(target_os = "macos"))]
-fn takes_intel_gpu(category: prunr_models::ModelCategory) -> bool {
-    category != prunr_models::ModelCategory::Inpaint
+/// Whether `model`'s sessions on `provider` run on the host CPU: the CPU
+/// provider, a provider the table keeps it off, or OpenVINO's processor.
+/// Engines are sized by it, so a model the Intel graphics leave to the
+/// processor is not sized like graphics work.
+pub fn model_on_host_cpu(model: prunr_models::ModelId, provider: &str) -> bool {
+    on_host_cpu_at(model, provider, openvino_on_gpu())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn intel_gpu_for(place: prunr_models::Place, takes_gpu: bool, switch_on: bool, remeasuring: bool) -> bool {
-    switch_on && takes_gpu && !place.kept_off(remeasuring)
+fn on_host_cpu_at(model: prunr_models::ModelId, provider: &str, intel_gpu: bool) -> bool {
+    let Some(column) = prunr_models::column_for(model, provider, intel_gpu, false) else { return true };
+    column == prunr_models::Column::OpenVino
+        || prunr_models::place(model, provider, intel_gpu, false).kept_off(false)
 }
 
 /// A session of `id` on the first accelerator that takes it (the
@@ -1230,7 +1219,7 @@ pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
 pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
         Some(&ep) => gpu_skip(model, ep).is_none(),
-        None => !prunr_models::place(model, provider, openvino_on_gpu()).kept_off(false),
+        None => !prunr_models::place(model, provider, openvino_on_gpu(), false).kept_off(false),
     }
 }
 
@@ -1540,7 +1529,7 @@ mod tests {
     fn erasers_and_parted_models_pass_migraphx_over_and_engines_keep_it() {
         for d in prunr_models::REGISTRY.iter() {
             let per_shape = d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts();
-            let kept = per_shape || prunr_models::place(d.id, "MIGraphX", false).kept_off(false);
+            let kept = per_shape || prunr_models::place(d.id, "MIGraphX", false, false).kept_off(false);
             assert_eq!(matches!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX), Some(Skip::KeptOff(_))), kept, "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
@@ -1556,23 +1545,19 @@ mod tests {
         assert!(!on_host_cpu("CUDA", false));
     }
 
-    /// With the Intel graphics on, OpenVINO runs a model there where the
-    /// table keeps it there; one slower there runs on OpenVINO's processor
-    /// instead (its own place decides that), and a fill never asks.
-    #[cfg(not(target_os = "macos"))]
+    /// A model's engines are sized as host-CPU work where its sessions run
+    /// there: the CPU, a provider the table keeps it off, or OpenVINO's
+    /// processor, which the Intel graphics leave some models on.
     #[test]
-    fn openvino_takes_the_intel_graphics_only_where_the_table_keeps_a_model_there() {
-        use prunr_models::{Place, Why};
-        let faster = Place::There("1.5x");
-        let slower = Place::Cpu(Why::Slower("0.65x"));
-        assert!(intel_gpu_for(faster, true, true, false));
-        assert!(!intel_gpu_for(slower, true, true, false), "slower there: the processor");
-        assert!(intel_gpu_for(slower, true, true, true), "measured again by the bench");
-        assert!(!intel_gpu_for(Place::Cpu(Why::Fails("hangs")), true, true, true), "never a failing place");
-        assert!(!intel_gpu_for(faster, true, false, false), "the switch is off");
-        assert!(!intel_gpu_for(faster, false, true, false), "a fill");
-        assert!(intel_gpu_for(Place::Unmeasured, true, true, false), "unmeasured: tried");
-        assert!(!takes_intel_gpu(prunr_models::ModelCategory::Inpaint));
+    fn a_model_left_on_the_processor_is_sized_as_host_cpu_work() {
+        use prunr_models::ModelId;
+        assert!(on_host_cpu_at(ModelId::BiRefNetLite, "OpenVINO", true), "kept off OpenVINO: ORT's CPU");
+        assert!(on_host_cpu_at(ModelId::DepthAnythingV2Small, "OpenVINO", true), "slower on the graphics: the processor");
+        assert!(!on_host_cpu_at(ModelId::RealEsrganX4Plus, "OpenVINO", true), "on the graphics");
+        assert!(on_host_cpu_at(ModelId::RealEsrganX4Plus, "OpenVINO", false), "the switch is off");
+        assert!(!on_host_cpu_at(ModelId::BiRefNetLite, "CUDA", false));
+        assert!(on_host_cpu_at(ModelId::Nomos8kSchatL, "CUDA", false), "kept off CUDA");
+        assert!(on_host_cpu_at(ModelId::BiRefNetLite, CPU_NAME, true));
     }
 
     /// Cut-out and upscale engines ask OpenVINO for the GPU, with the CPU
@@ -1885,7 +1870,7 @@ mod tests {
     fn a_walk_that_tries_no_provider_says_why() {
         use prunr_models::ModelId;
         let model = ModelId::Silueta;
-        let prunr_models::Place::Cpu(why) = prunr_models::place(model, "OpenVINO", false) else { panic!("Silueta stays off OpenVINO") };
+        let prunr_models::Place::Cpu(why) = prunr_models::place(model, "OpenVINO", false, false) else { panic!("Silueta stays off OpenVINO") };
         let line = format!("no GPU provider to try: OpenVINO is kept off: {}", why.text());
         let declared = walk_ladder("", model, Weights::Fp32, &[EpKind::OpenVino], |_| -> Result<(), Miss> { panic!("tried a declared pair") });
         assert_eq!(declared.map_err(|w| w.reason()), Err(line.clone()));

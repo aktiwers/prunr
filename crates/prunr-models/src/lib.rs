@@ -489,11 +489,6 @@ impl Places {
         }
     }
 
-    /// Where it runs on `provider` (`Column::of`); unmeasured on a
-    /// provider this table does not know.
-    pub fn on(&self, provider: &str, openvino_on_gpu: bool) -> Place {
-        Column::of(provider, openvino_on_gpu).map_or(Place::Unmeasured, |column| self.get(column))
-    }
 }
 
 /// One accelerator's entry in `Places`.
@@ -541,11 +536,10 @@ impl Column {
         }
     }
 
-    /// The column a session on `provider` (ORT's name, any case) reads:
-    /// OpenVINO's by whether it may use the Intel graphics.
-    pub fn of(provider: &str, openvino_on_gpu: bool) -> Option<Self> {
-        let column = Self::ALL.into_iter().find(|c| c.provider().eq_ignore_ascii_case(provider))?;
-        Some(if column == Self::OpenVino && openvino_on_gpu { Self::OpenVinoGpu } else { column })
+    /// The provider's own column (ORT's name, any case); OpenVINO's is the
+    /// processor's.
+    pub fn of(provider: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.provider().eq_ignore_ascii_case(provider))
     }
 
     /// The column called `name` (`Column::name`).
@@ -1998,14 +1992,14 @@ pub fn content_tag(id: ModelId) -> Option<u64> {
     }
 }
 
-/// What names a model's files in a record that outlasts app updates (the
-/// failure list): a download's checksums (`content_tag`; a re-export may
-/// keep its version string), a built-in model's own version, bumped with
-/// its file.
+/// What names a model's files in what is kept about them (the compiled
+/// graph cache, the failure list): a download's checksums (`content_tag`;
+/// a re-export may keep its version string), a built-in model's app
+/// version, as it ships with the app and may change with any release.
 pub fn files_id(id: ModelId) -> String {
     match content_tag(id) {
         Some(tag) => format!("{tag:016x}"),
-        None => format!("v{}", descriptor(id).map_or("unknown", |d| d.version)),
+        None => format!("app{BUILT_IN_VERSION}"),
     }
 }
 
@@ -2022,10 +2016,27 @@ fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
     h
 }
 
-/// Where `model` runs on `provider` (`Places::on`); unmeasured for a model
-/// not in the registry.
-pub fn place(model: ModelId, provider: &str, openvino_on_gpu: bool) -> Place {
-    descriptor(model).map_or(Place::Unmeasured, |d| d.places.on(provider, openvino_on_gpu))
+/// The column a session of `model` on `provider` reads. On OpenVINO it is
+/// the Intel graphics' entry when they are on (`intel_gpu`), the model's
+/// kind can use them and that entry keeps it there; else the processor's,
+/// so a model the graphics run slower still gets OpenVINO's processor
+/// where that beats ORT's CPU. Fills stay on the processor: the GPU
+/// plugin cannot build LaMa (dynamic shapes), and under AUTO it ran ~10%
+/// slower. `None` for the CPU and providers the table does not know.
+pub fn column_for(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Option<Column> {
+    let column = Column::of(provider)?;
+    let on_graphics = column == Column::OpenVino
+        && intel_gpu
+        && descriptor(model).is_some_and(|d| d.category != ModelCategory::Inpaint && !d.places.openvino_gpu.kept_off(remeasuring));
+    Some(if on_graphics { Column::OpenVinoGpu } else { column })
+}
+
+/// Where `model` runs on `provider` (`column_for`); unmeasured for a model
+/// not in the registry or a provider the table does not know.
+pub fn place(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
+    column_for(model, provider, intel_gpu, remeasuring)
+        .and_then(|column| descriptor(model).map(|d| d.places.get(column)))
+        .unwrap_or(Place::Unmeasured)
 }
 
 
@@ -2803,7 +2814,7 @@ mod tests {
     /// the Intel graphics; a model runs wherever its place is not the CPU.
     #[test]
     fn a_model_runs_where_its_place_is_not_the_cpu() {
-        let off = |model, ep, on_gpu| place(model, ep, on_gpu).kept_off(false);
+        let off = |model, ep, on_gpu| place(model, ep, on_gpu, false).kept_off(false);
         for ep in ["OpenVINO", "openvino", "OPENVINO"] {
             for on_gpu in [false, true] {
                 assert!(off(ModelId::Silueta, ep, on_gpu), "Silueta + {ep}");
@@ -2814,9 +2825,7 @@ mod tests {
         }
         assert!(off(ModelId::Silueta, "CoreML", false), "no gain, more memory: on the CPU");
         assert!(off(ModelId::Nomos8kSchatL, "cuda", false), "a different result keeps it on the CPU");
-        let split = Places { openvino_gpu: Place::Cpu(Why::Slower("slower")), ..Places::UNMEASURED };
-        assert_eq!((split.on("OpenVINO", false), split.on("OpenVINO", true)), (Place::Unmeasured, Place::Cpu(Why::Slower("slower"))));
-        assert_eq!(split.on("TensorRT", false), Place::Unmeasured, "an unknown provider is unmeasured");
+        assert_eq!(place(ModelId::Silueta, "TensorRT", false, false), Place::Unmeasured, "an unknown provider is unmeasured");
     }
 
     /// A place on the CPU keeps the model off the accelerator; while places
@@ -2836,17 +2845,32 @@ mod tests {
         }
     }
 
-    /// Each column is found by its name and by the provider a session
-    /// runs on, OpenVINO's by the Intel graphics switch.
+    /// Each column is found by its name and by its provider.
     #[test]
     fn a_column_is_found_by_name_and_by_provider() {
         for column in Column::ALL {
             assert_eq!(Column::named(column.name()), Some(column));
         }
-        assert_eq!(Column::of("openvino", false), Some(Column::OpenVino));
-        assert_eq!(Column::of("OpenVINO", true), Some(Column::OpenVinoGpu));
-        assert_eq!(Column::of("CUDA", true), Some(Column::Cuda), "the switch is OpenVINO's only");
-        assert_eq!(Column::of("CPU", false), None);
+        assert_eq!(Column::of("openvino"), Some(Column::OpenVino));
+        assert_eq!(Column::of("CPU"), None);
+    }
+
+    /// With the Intel graphics on, OpenVINO reads a model's graphics entry
+    /// only where that entry keeps it there; a model the graphics run
+    /// slower reads the processor's entry, and a fill never reads it.
+    #[test]
+    fn openvino_reads_the_graphics_entry_only_where_it_keeps_the_model_there() {
+        let column = |model, on, remeasuring| column_for(model, "OpenVINO", on, remeasuring);
+        assert_eq!(column(ModelId::RealEsrganX4Plus, true, false), Some(Column::OpenVinoGpu));
+        assert_eq!(column(ModelId::DepthAnythingV2Small, true, false), Some(Column::OpenVino), "0.65x on the graphics");
+        let processor = descriptor(ModelId::DepthAnythingV2Small).unwrap().places.openvino;
+        assert!(matches!(processor, Place::There(_)), "Depth runs on OpenVINO's processor");
+        assert_eq!(place(ModelId::DepthAnythingV2Small, "OpenVINO", true, false), processor);
+        assert_eq!(column(ModelId::DepthAnythingV2Small, true, true), Some(Column::OpenVinoGpu), "measured again by the bench");
+        assert_eq!(column(ModelId::Nomos8kSchatL, true, true), Some(Column::OpenVino), "a failing entry, even when measuring");
+        assert_eq!(column(ModelId::LaMaFp32, true, false), Some(Column::OpenVino), "a fill");
+        assert_eq!(column(ModelId::RealEsrganX4Plus, false, false), Some(Column::OpenVino), "the switch is off");
+        assert_eq!(column_for(ModelId::RealEsrganX4Plus, "CUDA", true, false), Some(Column::Cuda), "the switch is OpenVINO's only");
     }
 
     /// A fill never runs on the Intel graphics (OpenVINO keeps fills on
