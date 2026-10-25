@@ -728,10 +728,8 @@ fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Resul
 /// `cpu_only`, or when it fits there and not on its GPU. Refused when it
 /// fits neither. A warm restorer is not checked, as for a warm engine.
 fn faces_on_cpu(model: prunr_models::ModelId, cpu_only: bool) -> Result<bool, String> {
-    if prunr_core::face::restorer_is_warm(model, cpu_only) {
-        return Ok(cpu_only);
-    }
-    admitted(prunr_models::descriptor(model).ok_or("the face model is not registered")?, cpu_only)
+    prunr_core::face::warm_restorer_on_cpu(model, cpu_only)
+        .map_or_else(|| admitted(prunr_models::descriptor(model).ok_or("the face model is not registered")?, cpu_only), Ok)
 }
 
 /// The image the upscale model reads: the input, denoised first when
