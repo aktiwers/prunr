@@ -165,7 +165,8 @@ pub fn largest_face<'a>(faces: impl IntoIterator<Item = &'a FacePlace>) -> Optio
 /// models stay loaded for the next search and free after
 /// `crate::IDLE_RELEASE` unused, or when another face model is asked for.
 /// `blend` is how previews show each face blended in; what is returned
-/// is the same whatever it is.
+/// is the same whatever it is. The restorer runs on the GPU unless
+/// `cpu_only`.
 ///
 /// Peak working set: the detector's input (≤ 1280² × 3 f32, 20 MB), the
 /// restorer session (~1.2 GB for GFPGAN while it runs), and two 512²
@@ -173,16 +174,26 @@ pub fn largest_face<'a>(faces: impl IntoIterator<Item = &'a FacePlace>) -> Optio
 /// face blended at a time on top: its 512² RGB f32 planes (3 MB) and its
 /// preview, at most the preview's own size (1536² × 4 = 9 MB for a face
 /// filling the photo; a few hundred KB for a face in a group).
-pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
+pub fn find_and_restore(image: &RgbaImage, id: prunr_models::ModelId, cpu_only: bool, blend: FaceBlend, progress: &Progress) -> Result<Vec<RestoredFace>, CoreError> {
     static SWEEPER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     SWEEPER.get_or_init(|| crate::inpaint_sd::spawn_idle_sweeper("face-idle-sweeper", warm_restorers, "faces: released the idle face model"));
-    let restorer = crate::inpaint_sd::warm_entry(warm_restorers(), id, || FaceRestorer::new(id).map(std::sync::Mutex::new))?;
+    let key = (id, cpu_only);
+    let restorer = crate::inpaint_sd::warm_entry(warm_restorers(), key, || FaceRestorer::new(id, cpu_only).map(std::sync::Mutex::new))?;
     let found = restorer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).find_and_restore(image, blend, progress);
-    crate::inpaint_sd::warm_touch(warm_restorers(), &id);
+    crate::inpaint_sd::warm_touch(warm_restorers(), &key);
     found
 }
 
-type WarmRestorers = std::collections::HashMap<prunr_models::ModelId, crate::inpaint_sd::CacheEntry<std::sync::Arc<std::sync::Mutex<FaceRestorer>>>>;
+/// Whether `find_and_restore` with `id` and `cpu_only` would reuse a
+/// restorer it holds, whose memory is then already taken.
+pub fn restorer_is_warm(id: prunr_models::ModelId, cpu_only: bool) -> bool {
+    let cache = warm_restorers().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(entry) = cache.get(&(id, cpu_only)) else { return false };
+    // A search holding it has its restorer loaded or loading.
+    entry.value.try_lock().map_or(true, |held| held.restorer.is_some())
+}
+
+type WarmRestorers = std::collections::HashMap<(prunr_models::ModelId, bool), crate::inpaint_sd::CacheEntry<std::sync::Arc<std::sync::Mutex<FaceRestorer>>>>;
 
 fn warm_restorers() -> &'static std::sync::Mutex<WarmRestorers> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<WarmRestorers>> = std::sync::OnceLock::new();
@@ -196,6 +207,8 @@ pub struct FaceFinder {
 }
 
 impl FaceFinder {
+    /// On the CPU: it takes about 4 ms there, about what a GPU saves
+    /// (2.7 ms on an RTX 3060) or loses (7 ms on a MacBook Air's GPU).
     pub fn new() -> Result<Self, CoreError> {
         Self::on(true).map(|(finder, _)| finder)
     }
@@ -248,18 +261,19 @@ impl LazyFaceFinder {
 }
 
 /// A face model loaded once for several photos (a command-line batch).
-/// The restorer (~1.2 GB for GFPGAN) loads on the first face and stays
-/// until this is dropped.
+/// The restorer (~1.2 GB for GFPGAN) loads on the first face, on the GPU
+/// unless `cpu_only`, and stays until this is dropped.
 pub struct FaceRestorer {
     id: prunr_models::ModelId,
+    cpu_only: bool,
     finder: FaceFinder,
     restorer: Option<Redrawer>,
 }
 
 impl FaceRestorer {
-    pub fn new(id: prunr_models::ModelId) -> Result<Self, CoreError> {
+    pub fn new(id: prunr_models::ModelId, cpu_only: bool) -> Result<Self, CoreError> {
         restorer_path(id)?;
-        Ok(Self { id, finder: FaceFinder::new()?, restorer: None })
+        Ok(Self { id, cpu_only, finder: FaceFinder::new()?, restorer: None })
     }
 
     /// `find_and_restore` with the models this holds.
@@ -276,7 +290,9 @@ impl FaceRestorer {
             Some(r) => r,
             None => {
                 progress.step(Step::LoadingModel);
-                self.restorer.insert(Redrawer::on(self.id, true)?.0)
+                let (redrawer, pick) = Redrawer::on(self.id, self.cpu_only)?;
+                tracing::info!(model = ?self.id, provider = %pick.provider, "faces: restorer ready");
+                self.restorer.insert(redrawer)
             }
         };
         restore_each(image, &places, blend, progress, |crop| restorer.redraw(crop))

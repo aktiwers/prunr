@@ -757,7 +757,7 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
         color_match: args.color_match,
     };
     let blend = prunr_core::face::FaceBlend { strength: f32::from(args.face_strength) / 100.0, ..Default::default() };
-    let faces = match args.restore_faces.map(|m| prunr_core::face::FaceRestorer::new(m.model_id())).transpose() {
+    let faces = match args.restore_faces.map(|m| prunr_core::face::FaceRestorer::new(m.model_id(), args.cpu)).transpose() {
         Ok(faces) => faces.map(|restorer| (restorer, blend)),
         Err(e) => {
             eprintln!("error: cannot load the face model: {e}");
