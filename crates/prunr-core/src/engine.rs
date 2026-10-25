@@ -773,8 +773,8 @@ enum Sessions {
 }
 
 /// A model compiled for one input size at a time, on a provider that runs
-/// it best that way (`EpKind::sizes_each_input`): the session for the size
-/// last run, compiled again when another size comes.
+/// it best that way (CoreML): the session for the size last run, compiled
+/// again when another size comes.
 struct SizedSessions {
     recipe: SizeRecipe,
     weights: Weights,
@@ -790,12 +790,11 @@ impl SizedSessions {
     /// builds, so the engine holds one at a time.
     fn with_session<T>(&self, shape: &[usize], f: impl FnOnce(&mut Session) -> Result<T, CoreError>) -> Result<T, CoreError> {
         let mut current = self.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current.as_ref().is_none_or(|(size, _)| size.as_slice() != shape) {
-            drop(current.take());
-            *current = Some((shape.to_vec(), self.build(shape)?));
+        if let Some((_, session)) = current.as_mut().filter(|(size, _)| size.as_slice() == shape) {
+            return f(session);
         }
-        // just filled when empty
-        let (_, session) = current.as_mut().expect("a session for this size");
+        drop(current.take());
+        let (_, session) = current.insert((shape.to_vec(), self.build(shape)?));
         f(session)
     }
 
@@ -854,7 +853,7 @@ impl SizeRecipe {
             .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}, input {key}): {e}"), suspect_cache: None })?;
         tracing::info!(?model, %ep, size = %key, elapsed_ms = started.elapsed().as_millis() as u64, "session compiled for one input size");
         coverage.report(model, None);
-        crate::cache::keep_newest_parts(model, ep.as_str(), &key, "size-", SIZES_KEPT);
+        crate::cache::keep_newest_parts(model, ep.as_str(), &key, SIZE_KEY_PREFIX, SIZES_KEPT);
         Ok(session)
     }
 }
@@ -874,8 +873,10 @@ fn first_input(model: prunr_models::ModelId, provider: &str) -> Option<[usize; 4
 
 /// What a size's compile is kept under, beside the model's other sizes.
 fn size_key(shape: &[usize]) -> String {
-    shape.iter().fold("size".to_string(), |key, d| format!("{key}-{d}"))
+    format!("{SIZE_KEY_PREFIX}{}", shape.iter().map(usize::to_string).collect::<Vec<_>>().join("-"))
 }
+
+const SIZE_KEY_PREFIX: &str = "size-";
 
 /// How many sizes of a model keep their compile on disk (Real-ESRGAN x4:
 /// 130 MB each, Depth 190 MB).
@@ -1021,11 +1022,17 @@ impl OrtEngine {
         // One EP per try, not a list: a list hides which EP won and lets a
         // crashing EP (DirectML's AbiCustomRegistry) abort before the CPU
         // fallback is reached.
-        let ((session, first), ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
+        let (sessions, ep, failed) = walk_ladder("", model_id, weights, eps, |ep| {
             crate::cache::gc_stale_for_model(model_id, ep.as_str());
             if let Some(shape) = ep.sizes_each_input().then(|| first_input(model_id, ep.as_str())).flatten() {
                 let recipe = SizeRecipe { model: model_id, ep, intra_threads, level };
-                return recipe.session(model_bytes, &shape).map(|session| (session, Some(shape)));
+                let session = recipe.session(model_bytes, &shape)?;
+                return Ok(Sessions::Sized(Box::new(SizedSessions {
+                    recipe,
+                    weights,
+                    first: shape.to_vec(),
+                    current: Mutex::new(Some((shape.to_vec(), session))),
+                })));
             }
             let builder = Self::builder_with_base(intra_threads, level).map_err(|e| Miss::Unusable(e.to_string()))?;
             let (builder, bytes_owner, draft) = if ep.keeps_optimized_graph() {
@@ -1043,17 +1050,8 @@ impl OrtEngine {
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
-            Ok((session, None))
+            Ok(Sessions::One(Mutex::new(session)))
         }).map_err(|walk| CoreError::Inference(walk.reason()))?;
-        let sessions = match first {
-            Some(shape) => Sessions::Sized(Box::new(SizedSessions {
-                recipe: SizeRecipe { model: model_id, ep, intra_threads, level },
-                weights,
-                first: shape.to_vec(),
-                current: Mutex::new(Some((shape.to_vec(), session))),
-            })),
-            None => Sessions::One(Mutex::new(session)),
-        };
         Ok(Self {
             sessions,
             pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
@@ -1092,9 +1090,7 @@ impl OrtEngine {
         let (sessions, pick) = match walk_ladder("", id, Weights::Fp32, gpu_eps_for(cpu_only), |ep| commit_all(Some(ep))) {
             Ok((sessions, ep, failed)) => (sessions, SessionPick { failed, ..SessionPick::on(ep.as_str()) }),
             Err(walk) => {
-                let sessions = commit_all(None).map_err(|miss| CoreError::Inference(match miss {
-                    Miss::Unusable(e) | Miss::Failed { error: e, .. } => e,
-                }))?;
+                let sessions = commit_all(None).map_err(|miss| CoreError::Inference(miss_text(miss)))?;
                 (sessions, SessionPick { failed: walk.failed, ..SessionPick::on(CPU_NAME) })
             }
         };
@@ -1614,6 +1610,15 @@ mod tests {
         assert_eq!(sized.with_current(input_name).expect("the first size compiles again"), "pixel_values");
         let current = sized.current.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(|(size, _)| size.clone());
         assert_eq!(current, Some(first));
+    }
+
+    /// A model given free sizes in the registry that the engine has no
+    /// first size for would compile for any size again, silently.
+    #[test]
+    fn every_model_with_free_sizes_has_a_first_size() {
+        for d in prunr_models::REGISTRY.iter().filter(|d| !d.free_dims.is_empty()) {
+            assert!(first_input(d.id, COREML_NAME).is_some(), "{:?} has free sizes and no first size", d.id);
+        }
     }
 
     #[test]

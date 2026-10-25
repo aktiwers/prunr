@@ -534,6 +534,8 @@ fn walk_dir_size(dir: &Path, depth: u32) -> std::io::Result<u64> {
 mod tests {
     use super::*;
 
+    // Windows opens a folder as a file only with backup semantics.
+    #[cfg(unix)]
     #[test]
     fn only_the_least_recently_used_sizes_beyond_the_kept_go() {
         let dir = std::env::temp_dir().join(format!("prunr-least-recent-parts-{}", std::process::id()));
