@@ -54,13 +54,15 @@ fn a_portrait_is_found_focused_on_and_restored_face_by_face() {
     };
     let sink = std::sync::Arc::new(RecordingSink::default());
     let progress = prunr_core::Progress::new(sink.clone()).with_tile_previews(1536);
-    let restored = prunr_core::face::find_and_restore(&photo, id, Default::default(), &progress).expect("restored");
+    let restored = prunr_core::face::find_and_restore(&photo, id, true, Default::default(), &progress).expect("restored");
     let updates = sink.updates();
     assert_eq!(check_contract(&updates), Ok(()));
     let found_at = updates.iter().position(|u| matches!(u, ProgressUpdate::Faces(_))).expect("the faces reported as found");
     let previews: Vec<usize> = updates.iter().enumerate().filter_map(|(i, u)| matches!(u, ProgressUpdate::TilePreview(_)).then_some(i)).collect();
     assert_eq!(previews.len(), restored.len(), "one preview per face");
     assert!(previews.iter().all(|&i| i > found_at), "found before any is restored");
+    assert!(prunr_core::face::restorer_is_warm(id, true), "the restorer that redrew stays loaded");
+    assert!(!prunr_core::face::restorer_is_warm(id, false), "the CPU's restorer is not the GPU's");
 }
 
 /// A face model on the GPU path redraws alike in a second session, which
@@ -101,7 +103,7 @@ fn an_installed_face_model_finds_with_the_built_in_finder() {
         if skip_if_model_missing("face", id) {
             continue;
         }
-        let mut restorer = prunr_core::face::FaceRestorer::new(id).expect("an installed face model opens");
+        let mut restorer = prunr_core::face::FaceRestorer::new(id, true).expect("an installed face model opens");
         let found = restorer.find_and_restore(&sky, Default::default(), &prunr_core::Progress::none()).expect("it runs");
         assert!(found.is_empty(), "{id:?}: no face in a clear sky");
     }

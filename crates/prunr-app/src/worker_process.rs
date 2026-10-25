@@ -168,10 +168,12 @@ fn close_events(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::Join
     let _ = writer.join();
 }
 
-/// The edge detector, built on first need.
-fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>) -> Result<(), String> {
+/// The edge detector, built on first need: on the GPU unless `on_cpu`.
+fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>, on_cpu: bool) -> Result<(), String> {
     if edge_engine.is_none() {
-        *edge_engine = Some(Arc::new(EdgeEngine::new().map_err(|e| format!("Edge engine failed: {e}"))?));
+        let (engine, pick) = EdgeEngine::on(on_cpu).map_err(|e| format!("Edge engine failed: {e}"))?;
+        tracing::info!(provider = %pick.provider, "worker: edge engine ready");
+        *edge_engine = Some(Arc::new(engine));
     }
     Ok(())
 }
@@ -340,7 +342,7 @@ pub fn run_worker() -> ! {
     let mut traced_scales = edge_scales.of(&edge);
     let mut edge_engine: Option<Arc<EdgeEngine>> = None;
     if needs_edge {
-        if let Err(error) = ensure_edge_engine(&mut edge_engine) {
+        if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
             init_failed(evt_tx, writer_handle, error);
         }
     }
@@ -419,7 +421,7 @@ pub fn run_worker() -> ! {
                         Pulse::start(PULSE_EVERY, move || events.send(SubprocessEvent::Report { item_id, update: loading.clone() }).is_ok())
                     });
                     if line_mode != LineMode::Off {
-                        ensure_edge_engine(&mut edge_engine)?;
+                        ensure_edge_engine(&mut edge_engine, on_cpu)?;
                     }
                     if line_mode != LineMode::EdgesOnly && engines.is_empty() {
                         let started = std::time::Instant::now();
@@ -776,7 +778,7 @@ pub fn run_worker() -> ! {
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
                 mask: cmd_mask,
             } => {
-                if let Err(error) = ensure_edge_engine(&mut edge_engine) {
+                if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
                     continue;

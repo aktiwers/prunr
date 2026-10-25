@@ -560,7 +560,7 @@ impl PrunrApp {
         if let Some(model) = item.faces_to_find(&photo) {
             let (id, blend) = (item.id, item.settings.faces.blend());
             self.batch.items[idx].begin_face_search(photo.clone(), model);
-            self.processor.dispatch_find_faces(id, photo, model, blend);
+            self.processor.dispatch_find_faces(id, photo, model, blend, self.settings.cpu_only());
         }
     }
 

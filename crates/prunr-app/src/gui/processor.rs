@@ -724,6 +724,16 @@ fn admitted(descriptor: &prunr_models::ModelDescriptor, cpu_only: bool) -> Resul
     Ok(on_cpu)
 }
 
+/// Whether a face search with `model` runs its restorer on the CPU: when
+/// `cpu_only`, or when it fits there and not on its GPU. Refused when it
+/// fits neither. A warm restorer is not checked, as for a warm engine.
+fn faces_on_cpu(model: prunr_models::ModelId, cpu_only: bool) -> Result<bool, String> {
+    if prunr_core::face::restorer_is_warm(model, cpu_only) {
+        return Ok(cpu_only);
+    }
+    admitted(prunr_models::descriptor(model).ok_or("the face model is not registered")?, cpu_only)
+}
+
 /// The image the upscale model reads: the input, denoised first when
 /// `pre_denoise` is above 0, else the same `Arc` (no copy).
 pub(crate) fn build_inference_input(input: &Arc<image::RgbaImage>, pre_denoise: f32) -> Arc<image::RgbaImage> {
@@ -1939,8 +1949,9 @@ impl Processor {
     /// Find and redraw the faces in `photo` with `model` on a thread; the
     /// capsule shows it, and the image the faces as they are found and
     /// redrawn, each blended in at `blend`. The photo is unpacked there,
-    /// never here.
-    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend) {
+    /// never here. The restorer runs on the GPU unless `cpu_only` or it
+    /// does not fit there.
+    pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend, cpu_only: bool) {
         let tx = self.faces_found.tx.clone();
         let (stop, current) = self.begin_faces_search();
         // The capsule belongs to a batch or an upscale while one runs; a
@@ -1952,9 +1963,10 @@ impl Processor {
         std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let result = caught(|| {
+                let on_cpu = faces_on_cpu(model, cpu_only)?;
                 photo.load()
                     .ok_or_else(|| "the photo is no longer there".to_string())
-                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, blend, &progress).map_err(|e| e.to_string()))
+                    .and_then(|rgba| prunr_core::face::find_and_restore(&rgba, model, on_cpu, blend, &progress).map_err(|e| e.to_string()))
             })
             .unwrap_or_else(Err);
             tracing::info!(item_id, ?model, faces = result.as_ref().map_or(0, Vec::len), elapsed_ms = started.elapsed().as_millis() as u64, "face search ended");
@@ -2582,7 +2594,7 @@ mod tests {
         let mut p = fixture();
         let _batch = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject"));
         // Not a face model: the search fails at once, without loading anything.
-        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Original(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default());
+        p.dispatch_find_faces(1, crate::gui::item::FacePhoto::Original(Arc::new(image::RgbaImage::new(8, 8))), prunr_models::ModelId::Silueta, prunr_core::face::FaceBlend::default(), true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let landed = loop {
             if let Some(r) = p.pump_faces_results().pop() { break r; }
