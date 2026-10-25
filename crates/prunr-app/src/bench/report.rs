@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 use super::stats::{speedup, Timing};
-use super::{triage, Family, Gpu, Row, Side, Verdict};
+use super::{Family, Gpu, Row, Side, Verdict};
 
 /// The machine and runtime a report was made on.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -132,7 +132,7 @@ pub fn cells(row: &Row) -> [String; COLUMN_COUNT] {
 /// The verdict, and which output looks right when one is blank or they
 /// differ.
 pub fn result(row: &Row) -> String {
-    match row.leaning {
+    match row.leaning() {
         Some(leaning) => format!("{}: {}", row.verdict.label(), leaning.label()),
         None => row.verdict.label().to_string(),
     }
@@ -283,11 +283,10 @@ fn side_lines(label: &str, side: &Side, family: Option<Family>) -> String {
         md.push_str(&timing_text(t));
     }
     md.push('\n');
-    let score = side.score.unwrap_or_default();
-    if let (Some(level), Some(family)) = (score.flat, family) {
-        md.push_str(&format!("  - Blank: {}.\n", triage::blank_text(family, level)));
+    if let (Some(level), Some(basis)) = (side.score.flat, family.and_then(Family::blank_in)) {
+        md.push_str(&format!("  - Blank: {}.\n", basis.describe(level)));
     }
-    if let Some(off) = score.off_truth {
+    if let Some(off) = side.score.off_input {
         md.push_str(&format!("  - Alone: shrunk back to the input's size, {off:.2}/255 off the input.\n"));
     }
     if !side.failed.is_empty() {
@@ -370,7 +369,7 @@ mod tests {
     }
 
     fn ran(provider: &str, weights: &'static str, t: Timing) -> Side {
-        Side { provider: provider.into(), on_cpu: provider == "CPU", weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None, score: None }
+        Side { provider: provider.into(), on_cpu: provider == "CPU", weights: Some(weights), timing: Some(t), failed: Vec::new(), error: None, score: Default::default() }
     }
 
     fn matched() -> Row {
@@ -383,7 +382,6 @@ mod tests {
             agreement: Some(Agreement { max_abs: 37, mean_abs: 0.41, over_2: 0.012, samples: 262_144 }),
             note: None,
             verdict: Verdict::Match,
-            leaning: None,
             saved: Vec::new(),
         }
     }
@@ -398,7 +396,6 @@ mod tests {
             agreement: None,
             note: None,
             verdict: Verdict::CpuByDesign,
-            leaning: None,
             saved: Vec::new(),
         }
     }
@@ -469,17 +466,16 @@ mod tests {
     /// its details, and the saved pictures are named.
     #[test]
     fn a_mismatch_shows_which_output_looks_right_and_where_both_were_saved() {
-        use crate::bench::triage::{Leaning, Score};
-        let scored = |side: Side, score| Side { score: Some(score), ..side };
+        use crate::bench::triage::Score;
+        let scored = |side: Side, score| Side { score, ..side };
         let row = Row {
             model: "4xNomos8kSCHAT-L",
             name: "nomos8k_schat_l",
             family: Some(Family::Upscale),
-            cpu: Some(scored(ran("CPU", "FP32", timing(1.0, 9.0, &[])), Score { flat: None, off_truth: Some(3.31) })),
-            gpu: Gpu::Ran(scored(ran("CUDA", "FP16", timing(1.0, 2.0, &[])), Score { flat: Some(0), off_truth: Some(131.5) })),
+            cpu: Some(scored(ran("CPU", "FP32", timing(1.0, 9.0, &[])), Score { flat: None, off_input: Some(3.31) })),
+            gpu: Gpu::Ran(scored(ran("CUDA", "FP16", timing(1.0, 2.0, &[])), Score { flat: Some(0), off_input: Some(131.5) })),
             agreement: Some(Agreement { max_abs: 255, mean_abs: 128.0, over_2: 0.99, samples: 10 }),
             verdict: Verdict::Mismatch,
-            leaning: Some(Leaning::GpuBlank),
             saved: vec!["out/nomos8k_schat_l-cpu.png".into(), "out/nomos8k_schat_l-gpu.png".into()],
             ..matched()
         };

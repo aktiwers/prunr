@@ -1,7 +1,9 @@
 //! How closely two outputs agree, how long the runs took, and the
 //! samples each kind of output is compared on.
 
-use image::{GrayImage, RgbaImage};
+use std::borrow::Cow;
+
+use image::{DynamicImage, GrayImage, RgbaImage};
 use serde::Serialize;
 
 /// The difference between the CPU's output and the GPU path's, over the
@@ -93,6 +95,20 @@ pub fn rgb_samples_inside(img: &RgbaImage, mask: &GrayImage) -> Vec<u8> {
         .collect()
 }
 
+/// `picture` as RGBA, converted only when it is in another layout.
+pub fn rgba(picture: &DynamicImage) -> Cow<'_, RgbaImage> {
+    picture.as_rgba8().map_or_else(|| Cow::Owned(picture.to_rgba8()), Cow::Borrowed)
+}
+
+/// `picture`'s 16-bit grey values, converted only when it is in another
+/// layout.
+pub fn luma16(picture: &DynamicImage) -> Cow<'_, [u16]> {
+    match picture.as_luma16() {
+        Some(map) => Cow::Borrowed(map.as_raw()),
+        None => Cow::Owned(picture.to_luma16().into_raw()),
+    }
+}
+
 /// A 16-bit grey map in 0-255 levels.
 pub fn gray16_samples(values: &[u16]) -> Vec<u8> {
     values.iter().map(|&v| (v >> 8) as u8).collect()
@@ -148,5 +164,10 @@ mod tests {
         let mask = GrayImage::from_fn(2, 1, |x, _| Luma([if x == 1 { 255 } else { 0 }]));
         assert_eq!(rgb_samples_inside(&img, &mask), [5, 6, 7]);
         assert_eq!(gray16_samples(&[0, 0x80ff, 0xffff]), [0, 0x80, 0xff]);
+        let as_rgb = DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(img.clone()).into_rgb8());
+        assert!(matches!(rgba(&DynamicImage::ImageRgba8(img.clone())), Cow::Borrowed(_)));
+        assert_eq!(rgb_samples(&rgba(&as_rgb)), [1, 2, 3, 5, 6, 7], "another layout is converted");
+        let depth = DynamicImage::ImageLuma16(image::ImageBuffer::from_raw(2, 1, vec![7u16, 9]).unwrap());
+        assert_eq!(*luma16(&depth), [7, 9]);
     }
 }

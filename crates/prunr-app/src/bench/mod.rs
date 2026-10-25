@@ -13,7 +13,7 @@ pub mod report;
 pub mod stats;
 pub mod triage;
 
-use std::path::Path;
+use std::borrow::Cow;
 use std::time::Instant;
 
 use prunr_core::engine::{SessionPick, Skip};
@@ -23,7 +23,7 @@ use serde::Serialize;
 
 pub use input::Inputs;
 use stats::{Agreement, Timing, Tolerance};
-use triage::{Leaning, Output, Score};
+use triage::{BlankIn, Leaning, Output, Pictures, Score};
 
 /// The models only `--heavy` runs: multi-GB downloads that take minutes
 /// on a CPU.
@@ -102,6 +102,42 @@ impl Family {
             Self::Selection => Tolerance { mean_abs: 1.3, over_2: 0.005 },
             Self::Lines => Tolerance { mean_abs: 3.0, over_2: 0.10 },
             Self::FaceFinder | Self::FaceRedraw => Tolerance { mean_abs: 2.0, over_2: 0.10 },
+        }
+    }
+
+    /// The values `compared_on` names, from what a run made.
+    pub fn samples<'a>(self, output: &'a Output, inputs: &Inputs) -> Cow<'a, [u8]> {
+        let picture = match output {
+            Output::Values(values) => return Cow::Borrowed(values),
+            Output::Picture(picture) => picture,
+        };
+        match self {
+            Self::Segmentation => stats::alpha_samples(&stats::rgba(picture)).into(),
+            Self::Upscale | Self::Colorize => stats::rgb_samples(&stats::rgba(picture)).into(),
+            Self::Depth => stats::gray16_samples(&stats::luma16(picture)).into(),
+            Self::Eraser | Self::Diffusion => stats::rgb_samples_inside(&stats::rgba(picture), &inputs.mask).into(),
+            Self::Selection | Self::Lines | Self::FaceFinder | Self::FaceRedraw => Cow::Borrowed(picture.as_bytes()),
+        }
+    }
+
+    /// What a blank output is flat in; `None` for the face finder's list,
+    /// where no faces found is a real answer.
+    pub fn blank_in(self) -> Option<BlankIn> {
+        match self {
+            Self::Colorize => Some(BlankIn::Colour),
+            Self::FaceFinder => None,
+            Self::Segmentation | Self::Upscale | Self::Depth | Self::Eraser | Self::Diffusion | Self::Selection | Self::Lines
+            | Self::FaceRedraw => Some(BlankIn::Values),
+        }
+    }
+
+    /// Its output, shrunk back to its input's size, should land on its
+    /// input.
+    pub fn shrinks_back(self) -> bool {
+        match self {
+            Self::Upscale => true,
+            Self::Segmentation | Self::Colorize | Self::Depth | Self::Eraser | Self::Diffusion | Self::Selection | Self::Lines
+            | Self::FaceFinder | Self::FaceRedraw => false,
         }
     }
 
@@ -214,7 +250,7 @@ pub struct Side {
     pub failed: Vec<String>,
     pub error: Option<String>,
     /// Its first run's output, judged on its own.
-    pub score: Option<Score>,
+    pub score: Score,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -227,6 +263,16 @@ pub enum Gpu {
     /// Not run: it needs more memory than is free (`memory::Short`).
     NoRoom { short: String },
     NotInstalled,
+}
+
+impl Gpu {
+    /// The side, when it ran on a GPU provider.
+    pub fn on_gpu(&self) -> Option<&Side> {
+        match self {
+            Self::Ran(side) if !side.on_cpu => Some(side),
+            _ => None,
+        }
+    }
 }
 
 /// The outcome a row reports.
@@ -303,30 +349,48 @@ pub struct Row {
     pub agreement: Option<Agreement>,
     pub note: Option<String>,
     pub verdict: Verdict,
-    /// Which output looks right, when one is blank or they differ.
-    pub leaning: Option<Leaning>,
     /// The outputs saved for a person to look at.
     pub saved: Vec<String>,
+}
+
+impl Row {
+    /// Which output looks right, when one is blank or they differ.
+    pub fn leaning(&self) -> Option<Leaning> {
+        let cpu = self.cpu.as_ref().map(|side| &side.score);
+        triage::leaning(cpu, self.gpu.on_gpu().map(|side| &side.score), self.verdict == Verdict::Mismatch)
+    }
+
+    /// Its outputs are worth a person's look: they differ, or one is blank.
+    pub fn worth_a_look(&self) -> bool {
+        self.verdict == Verdict::Mismatch || self.leaning().is_some()
+    }
+
+    pub fn add_note(&mut self, note: String) {
+        self.note = Some(match self.note.take() {
+            Some(earlier) => format!("{earlier}; {note}"),
+            None => note,
+        });
+    }
 }
 
 /// What the runner is doing, for the terminal and the report written as
 /// the bench goes.
 pub enum Event {
     Stage { index: usize, total: usize, model: &'static str, stage: &'static str },
-    Done(Box<Row>),
+    /// A model's row, and its pictures when they are worth a look.
+    Done(Box<Row>, Option<Pictures>),
 }
 
 /// Run `models` one after the other on `inputs`, each side once untimed
-/// and `runs` times timed; the outputs of a model whose sides differ, or
-/// one of which is blank, saved in `save_to`.
-pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, save_to: Option<&Path>, on: &mut dyn FnMut(Event)) {
+/// and `runs` times timed.
+pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event)) {
     let total = models.len();
     for (i, &id) in models.iter().enumerate() {
         let model = display_name(id);
-        let row = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, save_to, &mut |stage| {
+        let (row, pictures) = bench_model(id, inputs, Runs { cpu: runs, gpu: runs }, &mut |stage| {
             on(Event::Stage { index: i + 1, total, model, stage });
         });
-        on(Event::Done(Box::new(row)));
+        on(Event::Done(Box::new(row), pictures));
     }
 }
 
@@ -341,7 +405,7 @@ struct Runs {
     gpu: u32,
 }
 
-fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>, stage: &mut dyn FnMut(&'static str)) -> Row {
+fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, stage: &mut dyn FnMut(&'static str)) -> (Row, Option<Pictures>) {
     let family = Family::of(id);
     let mut row = Row {
         model: display_name(id),
@@ -352,16 +416,15 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>,
         agreement: None,
         note: None,
         verdict: Verdict::NotInstalled,
-        leaning: None,
         saved: Vec::new(),
     };
     if !prunr_models::is_available(id) {
-        return row;
+        return (row, None);
     }
     let Some(family) = family else {
         row.gpu = Gpu::ByDesign { reason: "its sessions run on the CPU provider only".into() };
         row.verdict = Verdict::CpuByDesign;
-        return row;
+        return (row, None);
     };
     stage("reading weights");
     warm_weights(id);
@@ -371,7 +434,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>,
     let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs.cpu };
     // A side that needs more memory than is free is not run: the bench
     // must not run the machine out of memory either.
-    let (cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
+    let (mut cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
         (false, _) => {
             row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
             (None, None)
@@ -386,7 +449,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>,
         }
     };
     let ladder = prunr_core::engine::gpu_ladder(id);
-    let (gpu, gpu_output) = match gpu_passed_over(&ladder) {
+    let (mut gpu, gpu_output) = match gpu_passed_over(&ladder) {
         Some(passed_over) => (passed_over, None),
         None => match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
             Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
@@ -396,39 +459,42 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: Runs, save_to: Option<&Path>,
             }
         },
     };
-    let gpu_ran = match &gpu {
-        Gpu::Ran(side) if !side.on_cpu => Some(side),
+    let gpu_side = match &mut gpu {
+        Gpu::Ran(side) => Some(side),
         _ => None,
     };
-    let gpu_output = gpu_output.filter(|_| gpu_ran.is_some());
+    let cpu_samples = judged(family, inputs, cpu.as_mut(), cpu_output.as_ref());
+    let gpu_samples = judged(family, inputs, gpu_side, gpu_output.as_ref());
+    let on_gpu = gpu.on_gpu().is_some();
     let mut sizes_differ = false;
-    if let (Some(a), Some(b)) = (&cpu_output, &gpu_output) {
-        let (a, b) = (&a.samples, &b.samples);
+    if let (true, Some(a), Some(b)) = (on_gpu, &cpu_samples, &gpu_samples) {
         row.agreement = Agreement::of(a, b);
         sizes_differ = a.len() != b.len();
         if sizes_differ {
             row.note = Some(format!("outputs differ in size: {} values on the CPU, {} on the GPU path", a.len(), b.len()));
         }
     }
+    drop((cpu_samples, gpu_samples));
     row.verdict = verdict(Some(family), cpu.as_ref(), &gpu, row.agreement.as_ref(), sizes_differ);
-    row.leaning = triage::leaning(
-        cpu.as_ref().and_then(|side| side.score.as_ref()),
-        gpu_ran.and_then(|side| side.score.as_ref()),
-        row.verdict == Verdict::Mismatch,
-    );
-    if let Some(dir) = save_to.filter(|_| row.verdict == Verdict::Mismatch || row.leaning.is_some()) {
-        let sides = [("cpu", &cpu_output), ("gpu", &gpu_output)].map(|(side, output)| (side, output.as_ref().and_then(|o| o.picture.as_ref())));
-        match triage::save(dir, id.stable_name(), sides) {
-            Ok(saved) => row.saved = saved,
-            Err(e) => row.note = Some(match row.note.take() {
-                Some(note) => format!("{note}; the outputs could not be saved: {e}"),
-                None => format!("the outputs could not be saved: {e}"),
-            }),
-        }
-    }
     row.cpu = cpu;
     row.gpu = gpu;
-    row
+    let picture = |output: Option<Output>| match output {
+        Some(Output::Picture(picture)) => Some(picture),
+        _ => None,
+    };
+    let pictures = row.worth_a_look().then(|| Pictures {
+        cpu: picture(cpu_output),
+        gpu: picture(gpu_output.filter(|_| on_gpu)),
+    });
+    (row, pictures)
+}
+
+/// `side`'s score from its `output`; the values compared.
+fn judged<'a>(family: Family, inputs: &Inputs, side: Option<&mut Side>, output: Option<&'a Output>) -> Option<Cow<'a, [u8]>> {
+    let (side, output) = (side?, output?);
+    let samples = family.samples(output, inputs);
+    side.score = triage::score(family, &samples, output, &inputs.tile);
+    Some(samples)
 }
 
 /// Bring `id`'s own weights in before either side is timed, so neither
@@ -478,7 +544,7 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         Ok(session) => session,
         Err(error) => {
             let provider = if cpu_only { CPU } else { "none" };
-            return (Side { provider: provider.into(), on_cpu: cpu_only, weights: None, timing: None, failed: Vec::new(), error: Some(error), score: None }, None);
+            return (Side { provider: provider.into(), on_cpu: cpu_only, weights: None, timing: None, failed: Vec::new(), error: Some(error), score: Score::default() }, None);
         }
     };
     let pick = session.pick();
@@ -489,7 +555,7 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
         timing: None,
         failed: pick.failed.clone(),
         error: None,
-        score: None,
+        score: Score::default(),
     };
     stage(first_stage);
     let started = Instant::now();
@@ -506,14 +572,15 @@ fn measure(family: Family, id: ModelId, inputs: &Inputs, cpu_only: bool, runs: u
     stage(timed_stage);
     for _ in 0..runs {
         let started = Instant::now();
-        if let Err(error) = session.run() {
+        let ran = session.run();
+        let ms = elapsed_ms(started);
+        if let Err(error) = ran {
             side.error = Some(format!("a timed run failed: {error}"));
             break;
         }
-        timing.runs_ms.push(elapsed_ms(started));
+        timing.runs_ms.push(ms);
     }
     side.timing = Some(timing);
-    side.score = Some(triage::score(family, inputs, &output));
     (side, Some(output))
 }
 
@@ -569,8 +636,7 @@ impl Run for LinesRun {
     }
 
     fn run(&mut self) -> Result<Output, String> {
-        let lines = self.engine.detect(&self.photo, &prunr_core::EdgeSettings::default()).map_err(|e| e.to_string())?;
-        Ok(Output { samples: lines.as_raw().clone(), picture: Some(image::DynamicImage::ImageRgba8(lines)) })
+        self.engine.detect(&self.photo, &prunr_core::EdgeSettings::default()).map(|lines| Output::Picture(lines.into())).map_err(|e| e.to_string())
     }
 }
 
@@ -599,13 +665,12 @@ impl Run for FaceFinderRun<'_> {
         let faces = self.finder.find(photo).map_err(|e| e.to_string())?;
         let (w, h) = (photo.width() as f32, photo.height() as f32);
         let level = |v: f32| prunr_core::math::round_u8(v * 255.0);
-        let samples = std::iter::once(faces.len().min(255) as u8)
+        Ok(Output::Values(std::iter::once(faces.len().min(255) as u8)
             .chain(faces.iter().flat_map(|f| {
                 let [x0, y0, x1, y1] = f.bbox;
                 [level(f.score), level(x0 / w), level(y0 / h), level(x1 / w), level(y1 / h)]
             }))
-            .collect();
-        Ok(Output { samples, picture: None })
+            .collect()))
     }
 }
 
@@ -633,8 +698,7 @@ impl Run for RedrawRun {
     }
 
     fn run(&mut self) -> Result<Output, String> {
-        let redrawn = self.redrawer.redraw(&self.crop).map_err(|e| e.to_string())?;
-        Ok(Output { samples: redrawn.as_raw().clone(), picture: Some(image::DynamicImage::ImageRgb8(redrawn)) })
+        self.redrawer.redraw(&self.crop).map(|redrawn| Output::Picture(redrawn.into())).map_err(|e| e.to_string())
     }
 }
 
@@ -665,8 +729,9 @@ impl Run for SelectionRun<'_> {
         let masks = crate::gui::processor::magic_brush_masks(&self.sessions, &self.inputs.photo, &CLICKS)?;
         let side = prunr_core::sam::SAM_MASK_RESOLUTION;
         // The clicks' masks stacked top to bottom.
-        let picture = image::GrayImage::from_raw(side, side * CLICKS.len() as u32, masks.clone()).map(image::DynamicImage::ImageLuma8);
-        Ok(Output { samples: masks, picture })
+        image::GrayImage::from_raw(side, side * CLICKS.len() as u32, masks)
+            .map(|stacked| Output::Picture(stacked.into()))
+            .ok_or_else(|| "the masks are not one per click".to_string())
     }
 }
 
@@ -696,35 +761,24 @@ impl Run for EngineRun<'_> {
     fn run(&mut self) -> Result<Output, String> {
         let progress = prunr_core::Progress::none();
         let photo = &self.inputs.photo;
-        let rgba = |img: image::RgbaImage, samples: fn(&image::RgbaImage) -> Vec<u8>| Output {
-            samples: samples(&img),
-            picture: Some(image::DynamicImage::ImageRgba8(img)),
-        };
-        let output = match (self.family, &self.decoded) {
+        let picture = match (self.family, &self.decoded) {
             (Family::Segmentation, Some(decoded)) => {
                 prunr_core::process_image_from_decoded(decoded, &self.engine, &prunr_core::MaskSettings::default(), &progress)
-                    .map(|r| rgba(r.rgba_image, stats::alpha_samples))
+                    .map(|r| r.rgba_image.into())
             }
             (Family::Upscale, _) => {
                 let scale = prunr_models::descriptor(self.id).and_then(|d| d.upscale).map_or(4, |k| k.native_scale);
                 prunr_core::upscale::upscale_rgba_with_engine(&self.inputs.tile, &self.engine, self.id, scale, &progress, None)
-                    .map(|img| rgba(img, stats::rgb_samples))
+                    .map(image::DynamicImage::from)
             }
             (Family::Colorize, _) => prunr_core::colorize::colorize_plane(&self.engine, photo, &progress)
-                .map(|plane| rgba(prunr_core::colorize::colorized(photo, &plane, 1.0), stats::rgb_samples)),
-            (Family::Depth, _) => prunr_core::depth::estimate_depth(&self.engine, photo, &progress).map(|map| {
-                let depth = map.to_gray16(photo.width(), photo.height());
-                Output { samples: stats::gray16_samples(depth.as_raw()), picture: Some(image::DynamicImage::ImageLuma16(depth)) }
-            }),
+                .map(|plane| prunr_core::colorize::colorized(photo, &plane, 1.0).into()),
+            (Family::Depth, _) => prunr_core::depth::estimate_depth(&self.engine, photo, &progress)
+                .map(|map| map.to_gray16(photo.width(), photo.height()).into()),
             (family, _) => return Err(format!("{family:?} does not run on one engine")),
         };
-        output.map_err(|e| e.to_string())
+        picture.map(Output::Picture).map_err(|e| e.to_string())
     }
-}
-
-/// An eraser's photo, compared on what it filled inside `mask`.
-fn filled_output(filled: image::RgbaImage, mask: &image::GrayImage) -> Output {
-    Output { samples: stats::rgb_samples_inside(&filled, mask), picture: Some(image::DynamicImage::ImageRgba8(filled)) }
 }
 
 /// LaMa, Big-LaMa, MI-GAN: the eraser's cached session, released on drop.
@@ -750,7 +804,7 @@ impl Run for LamaRun<'_> {
     fn run(&mut self) -> Result<Output, String> {
         let Inputs { photo, mask, .. } = self.inputs;
         prunr_core::inpaint::process_lama(photo, mask, self.id, self.cpu_only, prunr_core::inpaint::FillScale::Auto, &prunr_core::Progress::none())
-            .map(|filled| filled_output(filled.rgba, mask))
+            .map(|filled| Output::Picture(filled.rgba.into()))
             .map_err(|e| e.to_string())
     }
 }
@@ -797,7 +851,7 @@ impl Run for DiffusionRun<'_> {
     fn run(&mut self) -> Result<Output, String> {
         let Inputs { photo, mask, .. } = self.inputs;
         prunr_core::inpaint::process_inpaint_with(photo, mask, self.id, Some(self.request.clone()), self.cpu_only, &prunr_core::Progress::none())
-            .map(|filled| filled_output(filled.rgba, mask))
+            .map(|filled| Output::Picture(filled.rgba.into()))
             .map_err(|e| e.to_string())
     }
 }
@@ -936,7 +990,7 @@ mod tests {
     }
 
     fn side(provider: &str) -> Side {
-        Side { provider: provider.into(), on_cpu: provider == CPU, weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None, score: None }
+        Side { provider: provider.into(), on_cpu: provider == CPU, weights: Some("FP32"), timing: Some(Timing::default()), failed: Vec::new(), error: None, score: Score::default() }
     }
 
     /// One row per way a model's run ends.
@@ -986,6 +1040,44 @@ mod tests {
             let t = family.tolerance();
             assert!(t.mean_abs > 0.0 && t.over_2 > 0.0 && t.over_2 <= 1.0, "{family:?}");
         }
+    }
+
+    /// Each kind compares the values `compared_on` names, taken from what
+    /// its run made: borrowed where they are the picture's own bytes.
+    #[test]
+    fn each_kind_compares_its_own_values_from_what_it_made() {
+        let inputs = Inputs::built_in();
+        let rgba = Output::Picture(image::RgbaImage::from_fn(2, 1, |x, _| image::Rgba([1, 2, 3, 4 + x as u8 * 4])).into());
+        assert_eq!(*Family::Segmentation.samples(&rgba, &inputs), [4, 8]);
+        assert_eq!(*Family::Upscale.samples(&rgba, &inputs), [1, 2, 3, 1, 2, 3]);
+        assert!(matches!(Family::Lines.samples(&rgba, &inputs), Cow::Borrowed(&[1, 2, 3, 4, 1, 2, 3, 8])));
+        let depth = Output::Picture(image::ImageBuffer::<image::Luma<u16>, _>::from_raw(2, 1, vec![0x80ffu16, 0xffff]).unwrap().into());
+        assert_eq!(*Family::Depth.samples(&depth, &inputs), [0x80, 0xff]);
+        let filled = Output::Picture(inputs.photo.clone().into());
+        let inside = inputs.mask.pixels().filter(|m| m.0[0] >= 128).count();
+        assert_eq!(Family::Eraser.samples(&filled, &inputs).len(), inside * 3, "only what it filled");
+        let found = Output::Values(vec![1, 200, 10, 20, 30, 40]);
+        assert!(matches!(Family::FaceFinder.samples(&found, &inputs), Cow::Borrowed(&[1, 200, 10, 20, 30, 40])));
+    }
+
+    /// The leaning reads only a GPU side that ran on a GPU; a row is worth
+    /// a look on a mismatch or a blank side; notes add up.
+    #[test]
+    fn a_row_leans_on_its_sides_scores() {
+        let blank = Score { flat: Some(0), off_input: None };
+        let mut row = Row {
+            model: "x", name: "x", family: Some(Family::Upscale),
+            cpu: Some(side("CPU")), gpu: Gpu::Ran(Side { score: blank, ..side("CUDA") }),
+            agreement: None, note: None, verdict: Verdict::Match, saved: Vec::new(),
+        };
+        assert_eq!((row.leaning(), row.worth_a_look()), (Some(Leaning::GpuBlank), true));
+        row.gpu = Gpu::Ran(Side { score: blank, ..side("CPU") });
+        assert_eq!((row.leaning(), row.worth_a_look()), (None, false), "a fall-back to the CPU is no GPU output");
+        row.verdict = Verdict::Mismatch;
+        assert!(row.worth_a_look());
+        row.add_note("one".into());
+        row.add_note("two".into());
+        assert_eq!(row.note.as_deref(), Some("one; two"));
     }
 
     #[test]
