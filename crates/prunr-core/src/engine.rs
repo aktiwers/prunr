@@ -290,6 +290,8 @@ fn column_for(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::
     if ep == EpKind::OpenVino {
         return Some(if on_intel_gpu(model) { prunr_models::Column::OpenVinoGpu } else { prunr_models::Column::OpenVino });
     }
+    #[cfg(target_os = "macos")]
+    let _ = model;
     prunr_models::Column::of(ep.as_str(), false)
 }
 
