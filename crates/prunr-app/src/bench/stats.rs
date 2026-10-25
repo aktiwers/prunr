@@ -67,6 +67,22 @@ impl Timing {
     }
 }
 
+/// `cpu`'s and `gpu`'s times to weigh: the middle timed run of each, or
+/// both first runs when a side was timed once (a heavy model's CPU
+/// reference), so both carry their warm-up.
+pub fn steady_pair(cpu: &Timing, gpu: &Timing) -> (f64, f64) {
+    if cpu.runs_ms.is_empty() || gpu.runs_ms.is_empty() {
+        return (cpu.first_ms, gpu.first_ms);
+    }
+    let median = |t: &Timing| {
+        let mut runs = t.runs_ms.clone();
+        runs.sort_by(f64::total_cmp);
+        let mid = runs.len() / 2;
+        if runs.len().is_multiple_of(2) { (runs[mid - 1] + runs[mid]) / 2.0 } else { runs[mid] }
+    };
+    (median(cpu), median(gpu))
+}
+
 /// How many times faster `gpu` ran than `cpu`. A side timed once (a
 /// heavy model's CPU reference) is compared first run to first run, so
 /// both carry their warm-up.
