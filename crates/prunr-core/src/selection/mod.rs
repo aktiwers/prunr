@@ -255,6 +255,26 @@ impl MaskArtifact {
         Self::from_cells(r.width(), r.height(), cells)
     }
 
+    /// Strokes kept as crops (`crop` at their `bounds`), merged in order by
+    /// the brush rule (`add_mask`) onto one empty `width × height` plane:
+    /// one plane however many there are, where `add_mask` makes one each.
+    pub fn from_patches<'a>(width: u32, height: u32, patches: impl IntoIterator<Item = (CellRect, &'a Self)>) -> Self {
+        let w = width as usize;
+        let mut cells = vec![0i8; w * height as usize];
+        for (r, patch) in patches {
+            debug_assert!(r.x1 < width && r.y1 < height && (patch.width, patch.height) == (r.width(), r.height()), "patch outside the plane");
+            let cw = r.width() as usize;
+            for (row, y) in (r.y0..=r.y1).enumerate() {
+                let start = y as usize * w + r.x0 as usize;
+                let src = &patch.data[row * cw..(row + 1) * cw];
+                for (cell, &newer) in cells[start..start + cw].iter_mut().zip(src) {
+                    *cell = merge_cell(*cell, newer);
+                }
+            }
+        }
+        Self::from_cells(width, height, cells)
+    }
+
     /// A copy of this plane with `patch` written over the cells at `r`;
     /// the inverse of `crop`. `patch` must be `r`'s size.
     pub fn paste(&self, r: CellRect, patch: &Self) -> Self {
@@ -658,6 +678,21 @@ mod tests {
         assert!((MaskArtifact::coverage(-FULL) - 1.0).abs() < 1e-6);
         assert!(!mask(2, 1, vec![40, -63]).has_selected_region());
         assert!(mask(2, 1, vec![0, -64]).has_selected_region());
+    }
+
+    #[test]
+    fn strokes_merged_from_their_crops_equal_add_mask_in_order() {
+        let a = mask(4, 3, vec![0, FULL, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0]);
+        let b = mask(4, 3, vec![0, 0, 0, 0, 0, -FULL, 70, 0, 0, 0, 0, 0]);
+        let c = mask(4, 3, vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, FULL]);
+        let crops: Vec<(CellRect, MaskArtifact)> = [&a, &b, &c].iter().map(|m| {
+            let r = m.bounds().unwrap();
+            (r, m.crop(r))
+        }).collect();
+        let merged = MaskArtifact::from_patches(4, 3, crops.iter().map(|(r, m)| (*r, m)));
+        let expected = MaskArtifact::new_empty(4, 3).add_mask(&a).unwrap().add_mask(&b).unwrap().add_mask(&c).unwrap();
+        assert_eq!(merged.cells(), expected.cells());
+        assert!(!MaskArtifact::from_patches(4, 3, std::iter::empty()).has_selected_region(), "none: an empty plane");
     }
 
     #[test]

@@ -323,6 +323,13 @@ pub(crate) struct DocState {
     /// carried over from the image it was made from.
     pub(crate) faced: bool,
     pub(crate) at: Instant,
+    /// Which step this is (`next_step_id`): two can share an `at`.
+    pub(crate) id: u64,
+}
+
+pub(crate) fn next_step_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// What made a step's image: the engine, and where its run started
@@ -386,6 +393,7 @@ impl DocState {
             origin: None,
             faced: false,
             at: Instant::now(),
+            id: next_step_id(),
         }
     }
 }
@@ -419,10 +427,10 @@ impl Timeline {
         self.states.iter().any(|s| s.faced && s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, image)))
     }
 
-    /// Whether the step made at `at` is the shown one or before it: not
-    /// undone, nor dropped by a step made after an undo.
-    pub(crate) fn in_effect(&self, at: Instant) -> bool {
-        self.states.range(..=self.cursor).any(|s| s.at == at)
+    /// Whether step `id` is the shown one or before it: not undone, nor
+    /// dropped by a step made after an undo.
+    pub(crate) fn in_effect(&self, id: u64) -> bool {
+        self.states.range(..=self.cursor).any(|s| s.id == id)
     }
 
     /// The state before the shown one.
@@ -560,6 +568,7 @@ mod tests {
             origin: None,
             faced: false,
             at: Instant::now(),
+            id: next_step_id(),
         }
     }
 

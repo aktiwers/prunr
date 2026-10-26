@@ -1740,7 +1740,7 @@ fn sd_apply_path_cache<'a>(
     let Some(cache_path) = crate::cache::optimized_model_path_for_part(model_id, ep_name, part) else {
         return (builder, Cow::Borrowed(source_path), None);
     };
-    if cache_path.is_file() {
+    if cache_path.is_file() && !crate::cache::graph_not_read(&cache_path) {
         tracing::debug!(?model_id, ep = %ep_name, part, "cache hit (optimized graph, file)");
         return (builder, Cow::Owned(cache_path), None);
     }
