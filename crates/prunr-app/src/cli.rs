@@ -946,6 +946,70 @@ fn report_failure(spinner: Option<&ProgressBar>, input: &std::path::Path, what: 
     }
 }
 
+/// What a batch sends to the worker: each input's index and the file the
+/// worker reads (a downscaled copy for an oversized one).
+struct Sendable {
+    indices: Vec<usize>,
+    paths: Vec<PathBuf>,
+    /// Inputs reported and left out: unreadable, or their output is there
+    /// already without `--force`.
+    refused: usize,
+}
+
+/// The inputs worth a run, checked by their header only: the subprocess
+/// reads each file when its turn comes. An output that is there already
+/// is refused here, before the model runs on its input.
+fn sendable_inputs(args: &Cli, spinners: &[Option<ProgressBar>]) -> Sendable {
+    let mut sendable = Sendable { indices: Vec::new(), paths: Vec::new(), refused: 0 };
+    for (idx, input) in args.inputs.iter().enumerate() {
+        let spinner = spinners.get(idx).and_then(Option::as_ref);
+        if let Err(msg) = check_overwrite(&args.result_path(input), args.force) {
+            report_skipped(spinner, input, &msg, args.quiet);
+            sendable.refused += 1;
+            continue;
+        }
+        match prunr_core::image_dimensions_from_path(input) {
+            Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
+                && prunr_core::exceeds_large_image_limit(w, h) =>
+            {
+                match downscale_to_png(input, args.quiet) {
+                    Ok(bytes) => {
+                        let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
+                            .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
+                        if std::fs::write(&temp, &bytes).is_ok() {
+                            sendable.indices.push(idx);
+                            sendable.paths.push(temp);
+                        } else {
+                            sendable.refused += 1;
+                        }
+                    }
+                    Err(e) => {
+                        sendable.refused += 1;
+                        report_failure(spinner, input, "downscale", e);
+                    }
+                }
+            }
+            Some(_) => {
+                sendable.indices.push(idx);
+                sendable.paths.push(input.clone());
+            }
+            None => {
+                sendable.refused += 1;
+                report_failure(spinner, input, "read", "not a valid image");
+            }
+        }
+    }
+    sendable
+}
+
+fn report_skipped(spinner: Option<&ProgressBar>, input: &std::path::Path, why: &str, quiet: bool) {
+    match spinner {
+        Some(pb) => pb.finish_with_message(format!("X {} — {why}", input.display())),
+        None if !quiet => eprintln!("skipped '{}': {why}", input.display()),
+        None => {}
+    }
+}
+
 /// Check if output exists and --force is not set. Returns Err with message if blocked.
 fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
     if out.exists() && !force {
@@ -1022,45 +1086,8 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         })
     }).collect();
 
-    // Validate images lazily — only check dimensions, don't load bytes into RAM.
-    // The subprocess reads file bytes on demand when processing each image.
     let start_times: Vec<Instant> = args.inputs.iter().map(|_| Instant::now()).collect();
-    let mut valid_indices: Vec<usize> = Vec::new();
-    let mut valid_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut load_fail_count = 0usize;
-
-    for (idx, input) in args.inputs.iter().enumerate() {
-        match prunr_core::image_dimensions_from_path(input) {
-            Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
-                && prunr_core::exceeds_large_image_limit(w, h) =>
-            {
-                match downscale_to_png(input, args.quiet) {
-                    Ok(bytes) => {
-                        let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
-                            .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
-                        if std::fs::write(&temp, &bytes).is_ok() {
-                            valid_indices.push(idx);
-                            valid_paths.push(temp);
-                        } else {
-                            load_fail_count += 1;
-                        }
-                    }
-                    Err(e) => {
-                        load_fail_count += 1;
-                        report_failure(spinners[idx].as_ref(), input, "downscale", e);
-                    }
-                }
-            }
-            Some(_) => {
-                valid_indices.push(idx);
-                valid_paths.push(input.clone());
-            }
-            None => {
-                load_fail_count += 1;
-                report_failure(spinners[idx].as_ref(), input, "read", "not a valid image");
-            }
-        }
-    }
+    let Sendable { indices: valid_indices, paths: valid_paths, refused: load_fail_count } = sendable_inputs(args, &spinners);
 
     let model: ModelKind = args.model.into();
     let spinners_arc = std::sync::Arc::new(spinners);
@@ -1113,12 +1140,9 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 
         match result {
             Ok(pr) => {
+                // Another input of this batch may have written it meanwhile.
                 if let Err(msg) = check_overwrite(&out_path, args.force) {
-                    if let Some(pb) = spinner_opt {
-                        pb.finish_with_message(format!("X {} — {msg}", input.display()));
-                    } else if !args.quiet {
-                        eprintln!("skipped '{}': {msg}", input.display());
-                    }
+                    report_skipped(spinner_opt, input, &msg, args.quiet);
                     fail_count += 1;
                     continue;
                 }
@@ -1631,6 +1655,25 @@ mod tests {
         assert!(photo.command.is_none());
         assert_eq!(photo.inputs.len(), 2);
         assert!(super::Cli::try_parse_from(["prunr", "bench", "--runs", "500"]).is_err());
+    }
+
+    /// A batch input whose output is there already is refused before it
+    /// is sent, not after the model ran on it; `--force` sends it.
+    #[test]
+    fn an_existing_output_is_refused_before_its_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kept, fresh) = (dir.path().join("kept.png"), dir.path().join("fresh.png"));
+        for path in [&kept, &fresh] {
+            image::RgbaImage::new(4, 4).save(path).unwrap();
+        }
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let cli = |force: &[&str]| super::Cli::parse_from(["prunr".as_ref(), kept.as_os_str(), fresh.as_os_str(), "-o".as_ref(), out.as_os_str(), "-q".as_ref()].into_iter().chain(force.iter().map(std::ffi::OsStr::new)));
+        std::fs::write(cli(&[]).result_path(&kept), b"an earlier result").unwrap();
+        let sendable = super::sendable_inputs(&cli(&[]), &[]);
+        assert_eq!((sendable.paths, sendable.indices, sendable.refused), (vec![fresh.clone()], vec![1], 1));
+        let forced = super::sendable_inputs(&cli(&["-f"]), &[]);
+        assert_eq!((forced.paths, forced.refused), (vec![kept.clone(), fresh.clone()], 0));
     }
 
     /// No job slots means nothing is ever sent, and the batch waits forever.
