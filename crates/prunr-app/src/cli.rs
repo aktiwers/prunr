@@ -1079,9 +1079,6 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(format!("{} (waiting...)", input.display()));
-            // Keeps the spinner moving through the multi-second silence of
-            // `session.run()`; the 4 Hz cap above bounds total redraws.
-            pb.enable_steady_tick(std::time::Duration::from_millis(250));
             pb
         })
     }).collect();
@@ -1256,7 +1253,15 @@ fn run_batch_subprocess(
             while room_to_send(in_flight.len(), max_jobs, sub.should_pause_admission()) > 0 {
                 let Some(idx) = pending.pop_front() else { break };
                 match sub.send_image_path(valid_indices[idx] as u64, valid_paths[idx].clone()) {
-                    Ok(()) => in_flight.push(idx),
+                    Ok(()) => {
+                        // Each ticking spinner is a thread of its own: only
+                        // the images being worked on tick, through the
+                        // silence of a model run (the 4 Hz cap bounds redraws).
+                        if let Some(Some(pb)) = spinners.get(valid_indices[idx]) {
+                            pb.enable_steady_tick(std::time::Duration::from_millis(250));
+                        }
+                        in_flight.push(idx);
+                    }
                     // A live worker that cannot take it would refuse it again;
                     // one a dead worker refused is the crash path's to rerun.
                     Err(e) if sub.is_alive() => results[idx] = Some(Err(CoreError::Model(e))),
