@@ -469,9 +469,11 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
 
 /// A test of this computer owns the window while it runs: its dialog
 /// names every control, Escape leaves it up, a click on the toolbar under
-/// it and a shortcut do nothing, and Cancel ends it and stops its process.
+/// it and a shortcut do nothing (the Settings it was started from stays
+/// open), and Cancel ends it and stops its process.
 #[test]
 fn the_computer_test_holds_the_window_until_cancelled() {
+    use egui_kittest::kittest::Queryable;
     #[cfg(unix)]
     let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
     #[cfg(windows)]
@@ -479,6 +481,7 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     #[cfg(target_os = "linux")]
     let pid = child.id();
     let mut h = loaded();
+    h.state_mut().show_settings = true;
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child));
     settle(&mut h);
     assert!(h.state().open_modals().contains(&"machine_test"));
@@ -487,11 +490,17 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     h.key_press(egui::Key::Escape);
     settle(&mut h);
     assert!(h.state().machine_test.is_some(), "Escape leaves it up");
-    click(&mut h, "Settings");
-    assert!(!h.state().show_settings, "the toolbar under it takes no click");
+    assert!(h.state().show_settings, "Escape leaves the Settings under it too");
+    let gear = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Settings") && n.role() == egui::accesskit::Role::Button).rect().center();
+    h.event(egui::Event::PointerMoved(gear));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: gear, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() });
+    }
+    settle(&mut h);
+    assert!(h.state().show_settings, "the toolbar under it takes no click, nor closes the Settings under it");
     let ctx = h.ctx.clone();
     h.state_mut().perform(crate::gui::views::shortcuts::Action::Settings, &ctx);
-    assert!(!h.state().show_settings, "no shortcut acts under it");
+    assert!(h.state().show_settings, "no shortcut acts under it");
     click(&mut h, "Cancel");
     settle(&mut h);
     assert!(h.state().machine_test.is_none(), "Cancel ends it");
