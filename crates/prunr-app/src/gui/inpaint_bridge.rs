@@ -96,9 +96,11 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     let mut strokes = Strokes::new();
 
     loop {
-        // Blocks up to 100 ms, so a Dispatch or Cancel wakes the thread at once
-        // while the subprocess drain below keeps a 100 ms cadence when idle.
-        let first = match msg_rx.recv_timeout(Duration::from_millis(100)) {
+        let received = match look_at_worker_every(&sub_state) {
+            Some(wait) => msg_rx.recv_timeout(wait),
+            None => msg_rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let first = match received {
             Ok(msg) => Some(msg),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             // A sender gone mid-drain lands here on the next tick.
@@ -181,6 +183,13 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             tracing::info!("inpaint subprocess released after idle window");
         }
     }
+}
+
+/// How long the bridge waits for a message before it looks at its worker
+/// again: a message wakes it at once. With no worker, nothing changes
+/// until a message comes.
+fn look_at_worker_every(sub_state: &SubState) -> Option<Duration> {
+    (!matches!(sub_state, SubState::Idle)).then_some(Duration::from_millis(100))
 }
 
 /// Idle: spawn off-thread and queue. Spawning: queue. Ready: send.
@@ -417,6 +426,16 @@ fn shutdown_ready(sub_state: &mut SubState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With no eraser worker the bridge sleeps until it is asked for
+    /// something, not ten times a second all session.
+    #[test]
+    fn the_bridge_sleeps_while_no_eraser_runs() {
+        assert_eq!(look_at_worker_every(&SubState::Idle), None);
+        let (_tx, rx) = mpsc::channel();
+        let spawning = SubState::Spawning { rx, pending: Vec::new(), cancelled: false };
+        assert!(look_at_worker_every(&spawning).is_some(), "a starting worker is looked at");
+    }
 
     /// Every way a stroke ends without a result (Cancel, the memory
     /// watchdog, a model switch, a dead or unstartable worker) goes through
