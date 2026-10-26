@@ -172,7 +172,8 @@ pub const SCRUB_OPACITY: f32 = 0.7;
 pub const WORK_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// How often the slow ambient animations draw (the processing canvas,
-/// the sidebar's sweeps and pending thumbnails): about fifteen a second.
+/// the sidebar's sweeps and pending thumbnails) and a download's or an
+/// install's progress: about fifteen a second.
 pub const ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 
 /// An image's fade-in, on the canvas and in its thumbnail.

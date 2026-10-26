@@ -298,10 +298,13 @@ impl PrunrApp {
             self.refresh_install_cache();
             return;
         }
-        ctx.request_repaint();
+        ctx.request_repaint_after(crate::gui::theme::ANIM_FRAME);
     }
 
     pub(super) fn pump_download_manager(&mut self, ctx: &egui::Context) {
+        if self.download_manager.active().is_some() {
+            ctx.request_repaint_after(crate::gui::theme::ANIM_FRAME);
+        }
         let events = self.download_manager.pump();
         if events.is_empty() {
             return;

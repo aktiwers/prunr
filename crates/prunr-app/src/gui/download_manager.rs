@@ -51,7 +51,9 @@ pub(crate) struct DownloadManager {
 
 /// The download threads' end of the channel: each event wakes the window
 /// too. The checksum pass sends nothing for seconds, the window then goes
-/// idle, and the event that ends a download would sit unread.
+/// idle, and the event that ends a download would sit unread. Progress
+/// comes with every network read, so it wakes nothing: the window draws
+/// it at its own pace while a download runs.
 #[derive(Clone)]
 struct Waking {
     tx: mpsc::Sender<DownloadEvent>,
@@ -60,8 +62,11 @@ struct Waking {
 
 impl Waking {
     fn send(&self, event: DownloadEvent) -> Result<(), mpsc::SendError<DownloadEvent>> {
+        let wakes = !matches!(event, DownloadEvent::Progress { .. });
         let sent = self.tx.send(event);
-        self.wake();
+        if wakes {
+            self.wake();
+        }
         sent
     }
 
@@ -134,7 +139,7 @@ impl DownloadManager {
         self.states.get(&id).cloned().unwrap_or(DownloadState::Idle)
     }
 
-    #[cfg(test)]
+    /// The download under way.
     pub(crate) fn active(&self) -> Option<ModelId> {
         self.active
     }
@@ -598,10 +603,10 @@ mod tests {
 
     /// A download runs on its own thread while the window may sit idle
     /// (the checksum pass sends nothing for seconds): each event it sends
-    /// wakes the window, or a finished download sat unread and the queued
-    /// ones never started until the pointer moved.
+    /// but progress wakes the window, or a finished download sat unread
+    /// and the queued ones never started until the pointer moved.
     #[test]
-    fn every_download_event_wakes_the_window() {
+    fn a_download_s_end_wakes_the_window() {
         let ctx = egui::Context::default();
         for _ in 0..5 {
             let _ = ctx.run_ui(Default::default(), |_| {});
@@ -617,6 +622,27 @@ mod tests {
         assert!(ctx.has_requested_repaint(), "the window is woken");
         dm.pump();
         assert_ne!(dm.state(ModelId::BigLaMa), DownloadState::Queued, "and the next one starts");
+    }
+
+    /// Progress comes with every network read, hundreds a second: it
+    /// wakes nothing, so a download does not draw the window per read.
+    #[test]
+    fn progress_does_not_wake_the_window() {
+        let ctx = egui::Context::default();
+        for _ in 0..5 {
+            let _ = ctx.run_ui(Default::default(), |_| {});
+        }
+        let dm = DownloadManager::new();
+        dm.wake(&ctx);
+        let tx = dm.progress_tx.clone();
+        std::thread::spawn(move || {
+            for bytes_so_far in 0..100 {
+                let _ = tx.send(DownloadEvent::Progress { id: ModelId::LaMaFp32, bytes_so_far, total: 100 });
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(!ctx.has_requested_repaint(), "no read woke the window");
     }
 
     #[test]
