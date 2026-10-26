@@ -205,6 +205,33 @@ impl Drop for GraphDraft {
     }
 }
 
+/// Beside a saved graph: it failed to load back once (`failed`), or the
+/// one saved after that failed too, and it is no longer read (`not-read`).
+/// They live in the graph's folder, so a new runtime or a cleared cache
+/// starts afresh.
+fn graph_mark(path: &Path, mark: &str) -> PathBuf {
+    let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
+    name.push(format!(".{mark}"));
+    path.with_file_name(name)
+}
+
+/// A saved graph at `path` failed to load back (it is deleted by then).
+pub(crate) fn note_graph_failed(path: &Path) {
+    let twice = graph_mark(path, "failed").exists();
+    let mark = graph_mark(path, if twice { "not-read" } else { "failed" });
+    if let Err(e) = std::fs::write(&mark, b"") {
+        tracing::warn!(path = %mark.display(), %e, "could not mark the failed graph");
+    } else if twice {
+        tracing::warn!(graph = %path.display(), "its graph failed to load back twice; it is no longer read");
+    }
+}
+
+/// The model's graph at `path` is no longer read: the one saved here
+/// failed to load back twice under this runtime.
+pub(crate) fn graph_not_read(path: &Path) -> bool {
+    graph_mark(path, "not-read").exists()
+}
+
 /// A cache miss: `builder` writes its optimized graph (about
 /// `graph_bytes`) to a draft of `path`, published once the session
 /// builds. Where the draft cannot be written, or ORT refuses the path,
