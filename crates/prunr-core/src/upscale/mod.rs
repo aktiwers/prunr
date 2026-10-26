@@ -33,8 +33,10 @@ pub type UpscaleRunOptions = RunOptions<NoSelectedOutputs>;
 /// Window-attention transformers (HAT, Swin) use Level2: Level3 bakes the
 /// first tile's input shape into the graph, and a later tile of another
 /// size fails (4xNomos8kSCHAT-L: `InsertedPrecisionFreeCast_…` not found).
+/// Real-ESRGAN x2 pads to a multiple too, for its pixel unshuffle, and
+/// takes Level3: 8% faster on an i7-6700's CPU, within 1/255.
 pub(crate) fn pick_optimization_level(descriptor: &prunr_models::ModelDescriptor) -> GraphOptimizationLevel {
-    if descriptor.tile_size_multiple.is_some() {
+    if descriptor.upscale.is_some_and(|knobs| knobs.uses_window_attention) {
         GraphOptimizationLevel::Level2
     } else {
         GraphOptimizationLevel::Level3
@@ -349,6 +351,41 @@ mod tests {
         assert_eq!(needed_bytes(x4, 4096, 4096, 4), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
     }
 
+    /// Real-ESRGAN x2 at Level3 against Level2 on the CPU: the output on
+    /// two picture shapes in one session each, and the time.
+    #[test]
+    #[ignore = "real model, a minute on a CPU"]
+    fn x2plus_at_level3_against_level2() {
+        let id = prunr_models::ModelId::RealEsrganX2Plus;
+        if crate::ort_runtime::runtime_for_tests().is_err() || !prunr_models::is_available(id) {
+            return;
+        }
+        let picture = |w: u32, h: u32| RgbaImage::from_fn(w, h, |x, y| {
+            let ripple = ((x as f32 * 0.21).sin() * (y as f32 * 0.13).cos() * 60.0) as i32;
+            image::Rgba([(80 + x as i32 / 3 + ripple).clamp(0, 255) as u8, (40 + y as i32 / 4).clamp(0, 255) as u8, (200 - ripple).clamp(0, 255) as u8, 255])
+        });
+        let pictures = [picture(512, 384), picture(300, 700)];
+        let mut outputs = Vec::new();
+        for level in ["Level2", "Level3"] {
+            crate::cache::clear_for_model(id);
+            let engine = match level {
+                "Level2" => OrtEngine::for_model(id, 4, true).unwrap(),
+                _ => OrtEngine::with_threads(crate::ModelKind::try_from(id).unwrap(), 4, true).unwrap(),
+            };
+            let run = |p: &RgbaImage| upscale_rgba_with_engine(p, &engine, id, 2, &Progress::none(), None).unwrap();
+            run(&pictures[0]);
+            let start = std::time::Instant::now();
+            let out: Vec<RgbaImage> = pictures.iter().map(run).collect();
+            eprintln!("{level}: {:.2} s", start.elapsed().as_secs_f32());
+            outputs.push(out);
+        }
+        crate::cache::clear_for_model(id);
+        for (two, three) in outputs[0].iter().zip(&outputs[1]) {
+            let most = two.pixels().zip(three.pixels()).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap()).max().unwrap();
+            eprintln!("{:?}: largest difference {most}", two.dimensions());
+        }
+    }
+
     #[test]
     fn a_real_esrgan_2x_runs_the_native_2x_model_when_installed() {
         use crate::OutputScale;
@@ -380,9 +417,10 @@ mod tests {
         }
     }
 
-    /// `pick_optimization_level` gates Level2 on `tile_size_multiple.is_some()`.
-    /// Without this, HAT-family models panic on the second tile in the same
-    /// session due to Level3 shape baking during graph optimisation.
+    /// `pick_optimization_level` gates Level2 on window attention. Without
+    /// it, HAT-family models fail on the second tile shape in a session
+    /// (Level3 bakes the first); a model that only pads to a multiple
+    /// (Real-ESRGAN x2) keeps Level3.
     #[test]
     fn pick_optimization_level_uses_level2_for_hat_family() {
         let nomos = prunr_models::descriptor(prunr_models::ModelId::Nomos8kSchatL)
@@ -396,8 +434,11 @@ mod tests {
             .expect("RealEsrganX4Plus registered");
         assert!(
             matches!(pick_optimization_level(esrgan), GraphOptimizationLevel::Level3),
-            "RealEsrganX4Plus must use Level3 (no tile_size_multiple)"
+            "RealEsrganX4Plus must use Level3 (no window attention)"
         );
+        let x2 = prunr_models::descriptor(prunr_models::ModelId::RealEsrganX2Plus).expect("RealEsrganX2Plus registered");
+        assert!(x2.tile_size_multiple.is_some(), "pads to a multiple");
+        assert!(matches!(pick_optimization_level(x2), GraphOptimizationLevel::Level3), "and still takes Level3");
     }
 
     #[test]
