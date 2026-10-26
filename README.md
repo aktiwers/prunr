@@ -62,7 +62,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
 - **Presets and undo** — per-model presets, Compare toggle, undo across strokes, results and presets
 - **Drag-and-drop** — in and out of the window (drop into Finder/Explorer/Word/PowerPoint)
-- **No cloud** — everything runs locally, no telemetry, no API keys
+- **No cloud** — everything runs locally, no telemetry, no API keys. Prunr sends nothing. One exception on Windows: DirectML, Microsoft's graphics-card library that comes with Prunr, can add which of your graphics card's features it could use to Windows' own diagnostic reports. Windows sends those only when **Send optional diagnostic data** is on (Settings › Privacy & security › Diagnostics & feedback); DirectML has no switch of its own.
 
 ## CLI
 
