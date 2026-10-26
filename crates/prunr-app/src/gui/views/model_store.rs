@@ -244,10 +244,10 @@ fn render_card(
             }
             let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
             ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                let (meta, color) = card_meta(desc, installed, state, advisory.is_some());
-                let meta = ui.label(RichText::new(meta).size(theme::FONT_SIZE_SECONDARY).color(color));
-                if let DownloadState::Failed { error } = state {
-                    super::chip::tooltip(meta, "Download failed", error, None);
+                let (meta, color, why) = card_meta(desc, installed, state, advisory.is_some());
+                let line = ui.label(RichText::new(&meta).size(theme::FONT_SIZE_SECONDARY).color(color));
+                if let Some(why) = why {
+                    super::chip::tooltip(line, &meta, why, None);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(action, CardAction::Bundled) || (installed && action == CardAction::Delete) {
@@ -274,19 +274,21 @@ fn render_card(
 }
 
 /// The footer's text: the size, or what the download is doing.
-fn card_meta(desc: &ModelDescriptor, installed: bool, state: &DownloadState, advisory: bool) -> (String, Color32) {
+/// The card's footer line, its colour, and what its hover says (why a
+/// download failed).
+fn card_meta<'a>(desc: &ModelDescriptor, installed: bool, state: &'a DownloadState, advisory: bool) -> (String, Color32, Option<&'a str>) {
     let size = desc.size_mb().map(super::get_model::size_label);
     match state {
         DownloadState::InProgress { bytes_so_far, total_bytes } => {
             let pct = if *total_bytes > 0 { bytes_so_far * 100 / total_bytes } else { 0 };
-            (format!("{} of {} \u{00b7} {pct}%", format_byte_size(*bytes_so_far), format_byte_size(*total_bytes)), theme::TEXT_SECONDARY)
+            (format!("{} of {} \u{00b7} {pct}%", format_byte_size(*bytes_so_far), format_byte_size(*total_bytes)), theme::TEXT_SECONDARY, None)
         }
-        DownloadState::Queued => ("Queued".into(), theme::TEXT_SECONDARY),
-        DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY),
-        DownloadState::Failed { .. } if !installed => ("Download failed".into(), FAILED_TEXT),
+        DownloadState::Queued => ("Queued".into(), theme::TEXT_SECONDARY, None),
+        DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY, None),
+        DownloadState::Failed { error } if !installed => ("Download failed".into(), FAILED_TEXT, Some(error)),
         _ => match size {
-            Some(s) => (s, if advisory { theme::ADVISORY_TEXT } else { theme::TEXT_SECONDARY }),
-            None => ("Built-in".into(), theme::TEXT_SECONDARY),
+            Some(s) => (s, if advisory { theme::ADVISORY_TEXT } else { theme::TEXT_SECONDARY }, None),
+            None => ("Built-in".into(), theme::TEXT_SECONDARY, None),
         },
     }
 }

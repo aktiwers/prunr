@@ -182,7 +182,7 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
         let mut response = client
             .get(url)
             .send()
-            .map_err(|e| DlError::request(url, &e))?;
+            .map_err(|e| DlError::request(&e))?;
         let status = response.status();
         if !status.is_success() {
             return Err(DlError::for_status(status, format!("HTTP {status}")));
@@ -190,7 +190,7 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
         let mut buf = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
         response
             .read_to_end(&mut buf)
-            .map_err(|e| DlError::transient(format!("read: {e}")))?;
+            .map_err(|e| DlError::broke_off(&e))?;
         Ok(buf)
     })
     .map_err(|e| anyhow::anyhow!("{e} downloading {url}"))

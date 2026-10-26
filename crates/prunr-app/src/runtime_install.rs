@@ -463,7 +463,7 @@ fn pypi_files(url: &str, cancel: &Arc<AtomicBool>) -> Result<Vec<serde_json::Val
     ri::retry_with_backoff(cancel, ri::DOWNLOAD_ATTEMPTS, ri::DOWNLOAD_BACKOFF_BASE_MS, |_attempt| {
         let client = ri::http_client(USER_AGENT)
             .map_err(|e| ri::DlError::fatal(format!("HTTP client: {}", ri::with_causes(&e))))?;
-        let resp = client.get(url).send().map_err(|e| ri::DlError::request(url, &e))?;
+        let resp = client.get(url).send().map_err(|e| ri::DlError::request(&e))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(ri::DlError::for_status(status, format!("PyPI answered {status}")));
