@@ -156,6 +156,11 @@ impl DownloadManager {
         self.active
     }
 
+    /// Downloads waiting for the one under way.
+    pub(crate) fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
     /// `id` taken as downloading, with no thread behind it.
     #[cfg(test)]
     pub(crate) fn begin_for_test(&mut self, id: ModelId) {

@@ -59,6 +59,11 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
 
         ui.label(RichText::new(&status_text).color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_BODY));
 
+        if let Some(line) = downloads_line(app) {
+            ui.add_space(theme::SPACE_SM);
+            ui.label(RichText::new(line).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+        }
+
         // Steps Cmd+Z can walk back.
         let depth = app.batch.selected_item().map_or(0, |item| item.timeline.undo_steps());
         if depth > 0 {
@@ -166,4 +171,42 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
             }
         });
     });
+}
+
+/// The downloads and the install under way, for eyes off the Model Store
+/// and Settings: "Downloading DDColor 44% · 2 more waiting".
+fn downloads_line(app: &PrunrApp) -> Option<String> {
+    use crate::gui::download_manager::DownloadState;
+    let install = app.runtime_install.as_ref().map(|p| format!("{}: {}", p.target.display_name(), p.last_event.status_text()));
+    let download = app.download_manager.active().map(|id| {
+        let name = prunr_models::display_name(id);
+        let doing = match app.download_manager.state(id) {
+            DownloadState::InProgress { bytes_so_far, total_bytes } if total_bytes > 0 => format!("Downloading {name} {}%", bytes_so_far * 100 / total_bytes),
+            DownloadState::Verifying => format!("Verifying {name}"),
+            _ => format!("Downloading {name}"),
+        };
+        match app.download_manager.queued() {
+            0 => doing,
+            n => format!("{doing} \u{b7} {n} more waiting"),
+        }
+    });
+    match (install, download) {
+        (Some(install), Some(download)) => Some(format!("{install} \u{b7} {download}")),
+        (install, download) => install.or(download),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prunr_models::ModelId;
+
+    /// A download under way shows in the footer with what waits behind
+    /// it; with none, the footer shows nothing for it.
+    #[test]
+    fn the_footer_follows_the_downloads() {
+        let mut app = crate::gui::app::PrunrApp::new_for_test();
+        assert_eq!(super::downloads_line(&app), None);
+        app.download_manager.begin_for_test(ModelId::DdcolorTiny);
+        assert_eq!(super::downloads_line(&app).as_deref(), Some("Downloading DDColor 0%"));
+    }
 }
