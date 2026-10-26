@@ -801,6 +801,54 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
     }
 }
 
+/// A window nothing changes in stops drawing: each of these once drew
+/// every frame for as long as it lasted, a laptop's battery spent on the
+/// same picture.
+#[test]
+fn an_unchanging_window_stops_drawing() {
+    for case in ["the empty window's tips with Animations off", "a photo that could not be opened", "the pointer left on a thumbnail"] {
+        let mut h = harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc));
+        match case {
+            "the empty window's tips with Animations off" => h.state_mut().settings.animations = false,
+            "a photo that could not be opened" => {
+                push_test_item(h.state_mut(), 1);
+                h.state_mut().batch.select_item(0);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while h.state().batch.items[0].unreadable().is_none() && std::time::Instant::now() < deadline {
+                    h.step();
+                }
+                assert!(h.state().batch.items[0].unreadable().is_some(), "an empty file does not decode");
+            }
+            _ => {
+                let app = h.state_mut();
+                super::fixtures::cut_out(push_test_item(app, 1), prunr_core::ModelKind::Silueta);
+                app.batch.select_item(0);
+                settle_until_shown(&mut h);
+                let row = sidebar_row(&h);
+                pointer_to(&mut h, row);
+                // The rest is timed on the clock, not in frames.
+                std::thread::sleep(crate::gui::drag_export_state::HOVER_DWELL * 2);
+            }
+        }
+        // A second for what ends by itself (a tooltip's delay), then a
+        // tip's whole cycle and more; work landing off the UI thread asks
+        // for the odd frame.
+        h.run_steps(60);
+        let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        let at_once = (0..330).filter(|_| {
+            h.step();
+            delay(&h) <= crate::gui::theme::ANIM_FRAME
+        }).count();
+        assert!(at_once < 12, "{case}: {at_once} of 330 frames asked for the next one at an animation's pace; last asked by {:?}", h.ctx.repaint_causes());
+    }
+}
+
+/// The middle of the first thumbnail in the batch list.
+fn sidebar_row(h: &Harness<'_, PrunrApp>) -> egui::Pos2 {
+    use egui_kittest::kittest::Queryable;
+    h.get_by_label("test1.png").rect().center()
+}
+
 /// A strip's full panel keeps its width while its values change: Mask's
 /// ends in a right-aligned row, which takes all the room it is given,
 /// and the panel only had a minimum width, so every wider value pushed

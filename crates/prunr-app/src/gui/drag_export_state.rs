@@ -110,7 +110,8 @@ impl DragExportState {
     }
 
     /// Note the thumbnail under the pointer this frame (`None` off the
-    /// list). Returns when its files are due, for a repaint then.
+    /// list). Returns when its files fall due, for a repaint then; once
+    /// due, this frame's `logic` has queued them, so none.
     pub(crate) fn note_hover(&mut self, hovered: Option<(u64, bool)>, now: Instant) -> Option<Instant> {
         self.hover = match (hovered, self.hover) {
             (Some((id, pressed)), Some((was, since, _))) if id == was => Some((id, since, pressed)),
@@ -121,7 +122,7 @@ impl DragExportState {
             self.settled = None;
         }
         let (_, since, _) = self.hover?;
-        Some(since + HOVER_DWELL)
+        Some(since + HOVER_DWELL).filter(|&due| due > now)
     }
 
     /// The thumbnail whose drag files are due now: pressed, or rested on
@@ -379,5 +380,16 @@ mod tests {
         assert_eq!(s.due(t0 + HOVER_DWELL * 3), None, "not while a drag runs");
         s.note_hover(None, t0);
         assert!(s.hover.is_none());
+    }
+
+    /// A rest wakes the window once, when it is due: a pointer left on a
+    /// thumbnail lets the window idle after.
+    #[test]
+    fn a_rest_wakes_the_window_once() {
+        let mut s = DragExportState::new();
+        let t0 = Instant::now();
+        assert_eq!(s.note_hover(Some((1, false)), t0), Some(t0 + HOVER_DWELL), "woken when the rest is due");
+        assert_eq!(s.note_hover(Some((1, false)), t0 + HOVER_DWELL), None, "due now: this frame's files are queued before the list draws");
+        assert_eq!(s.note_hover(Some((1, false)), t0 + HOVER_DWELL * 40), None, "no frame after");
     }
 }

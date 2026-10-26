@@ -260,7 +260,7 @@ fn render_thumbnail_layer(
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
     // A bg-image texture still building off-thread falls back to the bg colour.
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
-    needs_repaint || fade < 1.0
+    needs_repaint || (has_thumb && fade < 1.0)
 }
 
 /// True when the item needs a thumbnail but hasn't asked for one yet.
