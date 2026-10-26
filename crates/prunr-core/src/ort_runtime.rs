@@ -151,6 +151,12 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     let builder = Session::builder(env)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
         .with_intra_op_spinning(false)
+        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+        // ort sets ORT's own device choice to MaxEfficiency, which puts a
+        // session naming no provider on an NPU when one is listed (the
+        // Windows ML runtime lists DirectML's). Prunr places each session
+        // itself, so one naming none stays on the CPU.
+        .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)
         .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
     without_optimizers(builder, &[])
 }
