@@ -302,6 +302,11 @@ impl PrunrApp {
     /// between surfaces.
     pub(crate) fn perform(&mut self, action: crate::gui::views::shortcuts::Action, ctx: &egui::Context) {
         use crate::gui::views::shortcuts::Action;
+        // A test of this computer owns the machine: nothing starts work
+        // under it, nor waits to after it.
+        if self.machine_test.is_some() && action != Action::Screenshot {
+            return;
+        }
         // Selection actions share the action bar's gate; Copy with no
         // selection is the whole-image copy.
         let selection_idx = |app: &Self, action: SelectionAction| {
@@ -1207,8 +1212,7 @@ impl eframe::App for PrunrApp {
         self.handle_drag_and_drop(ctx);
         self.pump_machine_test(ctx);
         self.pump_download_checks(ctx);
-        // While a test runs it owns the machine: no shortcut starts work.
-        if self.machine_test.is_none() && !self.handle_hotkey_capture(ctx) {
+        if !self.handle_hotkey_capture(ctx) {
             self.handle_keyboard_shortcuts(ctx);
         }
         super::automation::pump(self, ctx);

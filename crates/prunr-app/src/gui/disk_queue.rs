@@ -1,6 +1,7 @@
 //! Files written and removed in the order they were asked for, on one
-//! worker, off the UI thread: settings, presets, and the undo states
-//! kept on disk once they go.
+//! worker, off the UI thread: settings, presets, the undo states kept on
+//! disk once they go, and what the app changes in the store of what it
+//! learned about this machine (`ep_compat`).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +10,8 @@ use std::sync::{mpsc, Mutex, OnceLock};
 enum Job {
     Write(PathBuf, Vec<u8>),
     Remove(PathBuf),
+    /// A change made by another module's own writer, kept in order.
+    Run(Box<dyn FnOnce() + Send>),
     Flush(mpsc::Sender<()>),
 }
 
@@ -37,6 +40,7 @@ fn run(job: Job, failures: &Failures) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => tracing::warn!(?path, %err, "file not removed"),
             _ => {}
         },
+        Job::Run(change) => change(),
         Job::Flush(done) => {
             let _ = done.send(());
         }
@@ -90,6 +94,10 @@ pub(crate) fn write(path: PathBuf, bytes: Vec<u8>) {
 
 pub(crate) fn remove(path: PathBuf) {
     let _ = jobs().send(Job::Remove(path));
+}
+
+pub(crate) fn call(change: impl FnOnce() + Send + 'static) {
+    let _ = jobs().send(Job::Run(Box::new(change)));
 }
 
 /// Wait until everything asked for so far is on disk: before the app

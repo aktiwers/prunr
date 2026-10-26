@@ -95,8 +95,8 @@ fn the_hardware_page_names_every_runtime_control() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: None,
-            testable: Some("DirectML".into()),
-            busy: false,
+            testable: true,
+            test_waits: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -137,8 +137,8 @@ fn the_computer_test_is_offered_with_an_accelerator() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: None,
-            testable: accelerator.map(str::to_string),
-            busy: false,
+            testable: accelerator.is_some(),
+            test_waits: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -188,8 +188,8 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: failure,
-            testable: None,
-            busy: false,
+            testable: false,
+            test_waits: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);

@@ -446,17 +446,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
             (Some(side), output)
         }
     };
-    let ladder = prunr_core::engine::gpu_ladder(id);
-    let (mut gpu, gpu_output) = match gpu_passed_over(&ladder) {
-        Some(passed_over) => (passed_over, None),
-        None => match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
-            Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
-            Ok(()) => {
-                let (side, output) = measure(family, id, inputs, false, runs, stage);
-                (Gpu::Ran(side), output)
-            }
-        },
-    };
+    let (mut gpu, gpu_output) = gpu_side(family, id, inputs, runs, stage);
     let gpu_side = match &mut gpu {
         Gpu::Ran(side) => Some(side),
         _ => None,
@@ -487,17 +477,28 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
     (row, pictures)
 }
 
+/// `id`'s GPU side: passed over (no provider would take it, or it needs
+/// more memory than is free: the bench must not run the machine out of
+/// memory either), or run once and `runs` times timed.
+fn gpu_side(family: Family, id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'static str)) -> (Gpu, Option<Output>) {
+    let ladder = prunr_core::engine::gpu_ladder(id);
+    if let Some(passed_over) = gpu_passed_over(&ladder) {
+        return (passed_over, None);
+    }
+    match first_tried(&ladder).map_or(Ok(()), |provider| memory::fits_now(id, provider)) {
+        Err(short) => (Gpu::NoRoom { short: short.to_string() }, None),
+        Ok(()) => {
+            let (side, output) = measure(family, id, inputs, false, runs, stage);
+            (Gpu::Ran(side), output)
+        }
+    }
+}
+
 /// `id`'s GPU side alone: one untimed run on `inputs`, its output judged
-/// on its own. `None` when no GPU provider would take the model, or its
-/// run needs more memory than is free.
+/// on its own; `None` when it was passed over.
 pub fn gpu_alone(id: ModelId, inputs: &Inputs) -> Option<Side> {
     let family = Family::of(id)?;
-    let ladder = prunr_core::engine::gpu_ladder(id);
-    if gpu_passed_over(&ladder).is_some() {
-        return None;
-    }
-    memory::fits_now(id, first_tried(&ladder)?).ok()?;
-    let (mut side, output) = measure(family, id, inputs, false, 0, &mut |_| {});
+    let (Gpu::Ran(mut side), output) = gpu_side(family, id, inputs, 0, &mut |_| {}) else { return None };
     judged(family, inputs, Some(&mut side), output.as_ref());
     Some(side)
 }

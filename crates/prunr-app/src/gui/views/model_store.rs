@@ -240,9 +240,7 @@ fn render_card(
             ui.add_space((size.y.max(natural) - 2.0 * CARD_PADDING - content).max(0.0) + theme::SPACE_XS);
             if let DownloadState::InProgress { bytes_so_far, total_bytes } = *state {
                 let fraction = if total_bytes > 0 { bytes_so_far as f32 / total_bytes as f32 } else { 0.0 };
-                let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), BAR_HEIGHT), egui::Sense::hover());
-                ui.painter().rect_filled(bar, 2.0, theme::RAIL);
-                ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * fraction, BAR_HEIGHT)), 2.0, theme::ACCENT_BRIGHT);
+                super::chip::progress_bar(ui, fraction, BAR_HEIGHT);
             }
             let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
             ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {

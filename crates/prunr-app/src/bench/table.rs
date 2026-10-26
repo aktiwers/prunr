@@ -20,10 +20,6 @@ const EVEN: f64 = 1.1;
 /// an HD 530).
 const FAR_FROM_INPUT: f64 = 16.0;
 
-fn placed(kind: PlaceKind, text: impl Into<String>) -> Measured {
-    Measured { kind, text: text.into() }
-}
-
 /// As the registry writes `place`, measured where `label` says.
 fn rust(place: &Measured, label: &str) -> String {
     let text = format!("{} ({label})", place.text);
@@ -39,38 +35,33 @@ fn rust(place: &Measured, label: &str) -> String {
 fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
     let gpu = row.gpu.on_gpu();
     match row.verdict {
-        Verdict::GpuFailed => {
-            let error = gpu.and_then(|s| s.error.as_deref()).filter(|e| lasting(e))?;
-            Some(placed(PlaceKind::Fails, first_line(error)))
-        }
-        Verdict::FellBack => {
-            let Gpu::Ran(side) = &row.gpu else { return None };
-            let error = side.failed.iter().find(|e| lasting(e))?;
-            Some(placed(PlaceKind::Fails, first_line(error)))
-        }
+        Verdict::GpuFailed | Verdict::FellBack => match &row.gpu {
+            Gpu::Ran(side) => lasting_failure(side),
+            _ => None,
+        },
         Verdict::Mismatch => {
             let off = row.agreement.as_ref().map_or_else(
                 || "a different size".to_string(),
                 |a| format!("mean {:.2}/255, {:.1}% of values more than 2/255 apart", a.mean_abs, a.over_2 * 100.0),
             );
-            Some(placed(PlaceKind::Differs, off))
+            Some(Measured::new(PlaceKind::Differs, off))
         }
         Verdict::Match => {
             let (cpu_ms, gpu_ms) = steady_pair(row.cpu.as_ref()?.timing.as_ref()?, gpu?.timing.as_ref()?);
             let ratio = cpu_ms / gpu_ms;
             let times = format!("{ratio:.2}x: {} against the CPU's {}", fmt_ms(gpu_ms), fmt_ms(cpu_ms));
             if ratio >= EVEN {
-                return Some(placed(PlaceKind::There, times));
+                return Some(Measured::new(PlaceKind::There, times));
             }
             if ratio <= 1.0 / EVEN {
-                return Some(placed(PlaceKind::Slower, times));
+                return Some(Measured::new(PlaceKind::Slower, times));
             }
             let within = format!("{times}, within {:.0}%", (EVEN - 1.0) * 100.0);
             let faster = if ratio >= 1.0 { PlaceKind::There } else { PlaceKind::NoGain };
             // `Needs` has one OpenVINO entry, measured on the processor.
             let measured = column != Column::OpenVinoGpu && matches!(needs.on(column.provider()), Priced::Same(_));
             if !measured {
-                return Some(placed(faster, format!("{within}; its memory there not measured")));
+                return Some(Measured::new(faster, format!("{within}; its memory there not measured")));
             }
             let cpu_mb = Charge::of(needs, prunr_core::engine::CPU_NAME).ram_mb;
             let there_mb = Charge::of(needs, column.provider()).ram_mb;
@@ -79,7 +70,7 @@ fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
                 std::cmp::Ordering::Equal => faster,
                 std::cmp::Ordering::Greater => PlaceKind::NoGain,
             };
-            Some(placed(kind, format!("{within}, in {there_mb} MB of system memory against the CPU's {cpu_mb} MB")))
+            Some(Measured::new(kind, format!("{within}, in {there_mb} MB of system memory against the CPU's {cpu_mb} MB")))
         }
         _ => None,
     }
@@ -90,18 +81,27 @@ fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
 /// the model off. `None` when nothing is wrong: it stays unmeasured, and
 /// runs there.
 pub fn found_alone(side: &Side, family: Family) -> Option<Measured> {
-    if let Some(error) = side.error.as_deref() {
-        return lasting(error).then(|| placed(PlaceKind::Fails, first_line(error)));
-    }
-    if side.on_cpu {
-        return side.failed.iter().find(|e| lasting(e)).map(|e| placed(PlaceKind::Fails, first_line(e)));
+    if side.error.is_some() || side.on_cpu {
+        return lasting_failure(side);
     }
     if let (Some(level), Some(blank)) = (side.score.flat, family.blank_in()) {
-        return Some(placed(PlaceKind::Differs, format!("its result here is blank: {}", blank.describe(level))));
+        return Some(Measured::new(PlaceKind::Differs, format!("its result here is blank: {}", blank.describe(level))));
     }
     side.score.off_input.filter(|&off| off > FAR_FROM_INPUT).map(|off| {
-        placed(PlaceKind::Differs, format!("its upscale here, shrunk back, lands {off:.0}/255 from its input; a right one within 4"))
+        Measured::new(PlaceKind::Differs, format!("its upscale here, shrunk back, lands {off:.0}/255 from its input; a right one within 4"))
     })
+}
+
+/// A GPU side's failure that says something lasting about the model
+/// there: its run's error, or for a session that fell back to the CPU the
+/// failures on the way. `None` for one that passes (out of memory, a lost
+/// device).
+fn lasting_failure(side: &Side) -> Option<Measured> {
+    let error = match &side.error {
+        Some(error) => Some(error.as_str()).filter(|e| lasting(e)),
+        None => side.failed.iter().map(String::as_str).find(|e| lasting(e)),
+    };
+    error.map(|e| Measured::new(PlaceKind::Fails, first_line(e)))
 }
 
 /// `row`'s place for `id` in `column`, the column its GPU side ran on.
@@ -219,7 +219,7 @@ mod tests {
         assert!(graphics.text.ends_with("its memory there not measured"), "the OpenVINO figure is the processor's: {}", graphics.text);
 
         let faster = found(&row(300.0, Verdict::Match), &needs(900), Column::OpenVino).expect("placed");
-        assert_eq!(faster, placed(PlaceKind::There, "1.33x: 300 ms against the CPU's 400 ms"));
+        assert_eq!(faster, Measured::new(PlaceKind::There, "1.33x: 300 ms against the CPU's 400 ms"));
         assert_eq!(rust(&faster, "test, 2026-10-25"), r#"Place::There("1.33x: 300 ms against the CPU's 400 ms (test, 2026-10-25)")"#);
 
         let mut failed = row(300.0, Verdict::GpuFailed);
@@ -249,7 +249,7 @@ mod tests {
                 "FP32 weights: Output names mismatch".into(),
             ];
         }
-        assert_eq!(found(&fell_back, &needs(600), Column::OpenVino), Some(placed(PlaceKind::Fails, "FP32 weights: Output names mismatch")));
+        assert_eq!(found(&fell_back, &needs(600), Column::OpenVino), Some(Measured::new(PlaceKind::Fails, "FP32 weights: Output names mismatch")));
     }
 
     /// A GPU run judged alone keeps the model off only when it failed for

@@ -699,13 +699,27 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
 /// A bare modal's page: the margin, the header row, then `body`. True on
 /// the frame its close was clicked.
 pub(super) fn modal_page(ui: &mut Ui, title: &str, subtitle: &str, body: impl FnOnce(&mut Ui)) -> bool {
-    egui::Frame::NONE.inner_margin(theme::MODAL_PAGE_MARGIN).show(ui, |ui| {
-        ui.set_width(ui.available_width());
+    modal_frame(ui, |ui| {
         let close = modal_header(ui, title, subtitle);
         ui.add_space(theme::SPACE_MD);
         body(ui);
         close
+    })
+}
+
+/// A bare modal's page margin and full width, around `body`.
+pub(super) fn modal_frame<R>(ui: &mut Ui, body: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE.inner_margin(theme::MODAL_PAGE_MARGIN).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        body(ui)
     }).inner
+}
+
+/// A progress bar the width of the row, `height` tall, `fraction` full.
+pub(super) fn progress_bar(ui: &mut Ui, fraction: f32, height: f32) {
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    ui.painter().rect_filled(bar, 2.0, theme::RAIL);
+    ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * fraction.clamp(0.0, 1.0), height)), 2.0, theme::ACCENT_BRIGHT);
 }
 
 /// A modal's header row: its title, a line under it, and the round close

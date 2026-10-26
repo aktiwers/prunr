@@ -1339,7 +1339,7 @@ mod tests {
         };
         let (_, pick) = lama_ladder(id, &bytes, &[ep], 1, builder).expect("the CPU takes the session");
         assert_eq!((pick.provider.as_str(), pick.failed.as_slice()), ("CPU", ["LaMa: no builder here".to_string()].as_slice()));
-        assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), "the machine's lack, not the model's");
+        assert!(!crate::ep_compat::is_known_failure(ep, id, Weights::Fp32, crate::engine::asks_intel_gpu(ep, id)), "the machine's lack, not the model's");
     }
 
     /// Growing or shrinking past the image's size does what its size

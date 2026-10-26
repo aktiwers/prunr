@@ -112,6 +112,12 @@ pub enum PlaceKind {
 /// The reason a place measured here gives, wherever a `Place` is shown.
 pub const MEASURED_HERE: &str = "measured on this computer (Settings › Hardware › Test this computer)";
 
+impl Measured {
+    pub fn new(kind: PlaceKind, text: impl Into<String>) -> Self {
+        Self { kind, text: text.into() }
+    }
+}
+
 impl PlaceKind {
     pub fn place(self) -> prunr_models::Place {
         use prunr_models::{Place, Why};
@@ -140,25 +146,11 @@ fn cache_path() -> Option<PathBuf> {
 /// the weights, so a failure of one copy leaves the others to try, and
 /// `"@{files}"` so a failure sticks to the files that failed. The EP part
 /// keeps the historic `Display` strings ("OpenVINO", "CUDA", "CoreML",
-/// "DirectML"), plus `"+gpu"` for an OpenVINO session on the Intel GPU, so
-/// a GPU failure does not bar OpenVINO on the CPU once the switch is off.
-fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> String {
-    key_with(ep, model, weights, &prunr_models::files_id(model), on_intel_gpu(ep, model))
-}
-
-/// Whether `model`'s session on `ep` asks for the Intel GPU: OpenVINO
-/// engines with the switch on. Fills stay on the CPU, and SD parts carry
-/// their own device.
-fn on_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
-    #[cfg(not(target_os = "macos"))]
-    {
-        ep == EpKind::OpenVino && crate::engine::on_intel_gpu(model)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (ep, model);
-        false
-    }
+/// "DirectML"), plus `"+gpu"` for an OpenVINO session on the Intel GPU
+/// (`engine::asks_intel_gpu`), so a GPU failure does not bar OpenVINO on
+/// the CPU once the switch is off.
+fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights, intel_gpu: bool) -> String {
+    key_with(ep, model, weights, &prunr_models::files_id(model), intel_gpu)
 }
 
 fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &str, intel_gpu: bool) -> String {
@@ -173,8 +165,8 @@ fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &
 
 /// `"{column}::{model}@{files}"`: a place belongs to the files measured,
 /// as a failure does.
-fn measured_key(column: prunr_models::Column, model: prunr_models::ModelId) -> String {
-    format!("{}::{model:?}@{}", column.field(), prunr_models::files_id(model))
+fn measured_key(column: prunr_models::Column, model: prunr_models::ModelId, files: &str) -> String {
+    format!("{}::{model:?}@{files}", column.field())
 }
 
 /// What was learned as last read or written, and the file's stamp then.
@@ -182,6 +174,12 @@ fn measured_key(column: prunr_models::Column, model: prunr_models::ModelId) -> S
 struct Store {
     learned: Learned,
     stamp: Option<(SystemTime, u64)>,
+}
+
+/// The store, locked. Nothing here reaches into the engine while it holds
+/// it: the engine asks for the measured places under the same lock.
+fn locked() -> std::sync::MutexGuard<'static, Store> {
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn cache() -> &'static Mutex<Store> {
@@ -223,21 +221,26 @@ fn save_to(path: &Path, scope: &str, learned: &Learned) {
     }
 }
 
-fn save(store: &mut Store) {
-    let Some(path) = cache_path() else { return };
-    save_to(&path, &scope(), &store.learned);
-    store.stamp = stamp(&path);
-}
-
 /// Change what is learned on top of what any process wrote last, and save
-/// it: the test's process and the app's both write the file.
+/// it: the test's process and the app's both write the file. The write
+/// happens outside the store's lock, which the engine takes every frame
+/// while a batch runs; this process's changes are written one at a time.
 fn change<R>(edit: impl FnOnce(&mut Learned) -> R) -> R {
-    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(path) = cache_path() {
-        store.refresh_from(&path, &scope());
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _writing = WRITING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = cache_path();
+    let (out, learned) = {
+        let mut store = locked();
+        if let Some(path) = &path {
+            store.refresh_from(path, &scope());
+        }
+        let out = edit(&mut store.learned);
+        (out, store.learned.clone())
+    };
+    if let Some(path) = path {
+        save_to(&path, &scope(), &learned);
+        locked().stamp = stamp(&path);
     }
-    let out = edit(&mut store.learned);
-    save(&mut store);
     out
 }
 
@@ -247,8 +250,7 @@ fn change<R>(edit: impl FnOnce(&mut Learned) -> R) -> R {
 /// builds call it, never a frame.
 pub fn refresh() {
     let Some(path) = cache_path() else { return };
-    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.refresh_from(&path, &scope());
+    locked().refresh_from(&path, &scope());
 }
 
 impl Store {
@@ -270,26 +272,22 @@ pub(crate) fn warm() {
 }
 
 /// True when these weights of the model are on the EP's persistent skip
-/// list.
-pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
-    // Before the lock: the key asks where the model runs, which reads the
-    // places measured here under the same lock.
-    let key = key(ep, model, weights);
-    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.learned.failures.contains_key(&key)
+/// list; `intel_gpu`: the session asks for the Intel GPU.
+pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, intel_gpu: bool) -> bool {
+    let key = key(ep, model, weights, intel_gpu);
+    locked().learned.failures.contains_key(&key)
 }
 
 /// Idempotent. A transient failure is logged and not recorded. A failed
 /// write is logged, not fatal: the next session re-discovers the failure.
-pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, error: &str) {
+pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights, intel_gpu: bool, error: &str) {
     if is_transient(error) {
         tracing::info!(%ep, ?model, ?weights, %error, "EP failure looks transient; not recorded");
         return;
     }
-    let k = key(ep, model, weights);
-    {
-        let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if store.learned.failures.contains_key(&k) { return; }
+    let k = key(ep, model, weights, intel_gpu);
+    if locked().learned.failures.contains_key(&k) {
+        return;
     }
     tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
     change(|learned| learned.failures.insert(k, error.to_string()));
@@ -301,31 +299,32 @@ pub fn clear() -> usize {
     change(|learned| std::mem::take(&mut learned.failures).len())
 }
 
-/// Where a test measured `model` runs in `column`, for its files on disk
-/// now.
-pub fn measured(model: prunr_models::ModelId, column: prunr_models::Column) -> Option<Measured> {
-    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.learned.measured.get(&measured_key(column, model)).cloned()
+/// Where a test measured `model` runs, per column in `Column::ALL` order,
+/// for its files on disk now. The engine asks every frame while a batch
+/// runs: one lock, and no key built when nothing was measured.
+pub fn measured_for(model: prunr_models::ModelId) -> [Option<PlaceKind>; prunr_models::Column::ALL.len()] {
+    let store = locked();
+    if store.learned.measured.is_empty() {
+        return [None; prunr_models::Column::ALL.len()];
+    }
+    let files = prunr_models::files_id(model);
+    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).map(|m| m.kind))
 }
 
-/// Every place a test measured for the models' files on disk now, and
-/// when the last test finished (seconds since 1970).
-pub fn measured_here() -> (Option<u64>, Vec<(prunr_models::ModelId, prunr_models::Column, Measured)>) {
-    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let places = prunr_models::REGISTRY.iter()
-        .flat_map(|d| prunr_models::Column::ALL.map(|column| (d.id, column)))
-        .filter_map(|(model, column)| store.learned.measured.get(&measured_key(column, model)).map(|m| (model, column, m.clone())))
-        .collect();
-    (store.learned.tested, places)
+/// When the last test finished, in seconds since 1970.
+pub fn tested() -> Option<u64> {
+    locked().learned.tested
 }
 
 pub fn set_measured(model: prunr_models::ModelId, column: prunr_models::Column, measured: Measured) {
-    change(|learned| learned.measured.insert(measured_key(column, model), measured));
+    let key = measured_key(column, model, &prunr_models::files_id(model));
+    change(|learned| learned.measured.insert(key, measured));
 }
 
-/// A test finished at `when` (seconds since 1970).
-pub fn set_tested(when: u64) {
-    change(|learned| learned.tested = Some(when));
+/// A test finished now.
+pub fn set_tested() {
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    change(|learned| learned.tested = Some(now));
 }
 
 /// Forget every place a test measured: the registry's apply again.
@@ -351,7 +350,7 @@ mod tests {
             key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, "v1.0.0", false),
             "OpenVINO::Silueta@v1.0.0",
         );
-        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
+        assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32, false)
             .starts_with("CUDA::SdV15InpaintFp16@"));
     }
 
@@ -359,7 +358,7 @@ mod tests {
     #[test]
     fn key_format_is_stable_coreml() {
         assert_eq!(
-            key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Fp32),
+            key(EpKind::CoreMl, prunr_models::ModelId::Silueta, Weights::Fp32, false),
             format!("CoreML::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
         );
     }
@@ -367,7 +366,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn key_format_is_stable_directml() {
-        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32)
+        assert!(key(EpKind::DirectMl, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32, false)
             .starts_with("DirectML::SdV15InpaintFp16@"));
     }
 
@@ -380,9 +379,9 @@ mod tests {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
         let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000001", false);
         assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000002", false));
-        assert!(key(EpKind::OpenVino, lcm, Weights::Fp32).starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
+        assert!(key(EpKind::OpenVino, lcm, Weights::Fp32, false).starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
         let silueta = prunr_models::ModelId::Silueta;
-        assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32), format!("OpenVINO::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
+        assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32, false), format!("OpenVINO::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
             "a built-in model by the app it ships with");
     }
 
@@ -398,11 +397,11 @@ mod tests {
             key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", false),
         );
         if crate::engine::openvino_on_gpu() {
-            assert!(on_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::RealEsrganX4Plus), "faster on the graphics");
-            assert!(!on_intel_gpu(EpKind::OpenVino, silueta), "kept off the graphics");
+            assert!(crate::engine::asks_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::RealEsrganX4Plus), "faster on the graphics");
+            assert!(!crate::engine::asks_intel_gpu(EpKind::OpenVino, silueta), "kept off the graphics");
         }
-        assert!(!on_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::LaMaFp32), "a fill stays on the CPU");
-        assert!(!on_intel_gpu(EpKind::Cuda, silueta));
+        assert!(!crate::engine::asks_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::LaMaFp32), "a fill stays on the CPU");
+        assert!(!crate::engine::asks_intel_gpu(EpKind::Cuda, silueta));
     }
 
     /// Each copy of the weights fails on its own key.
@@ -481,6 +480,21 @@ mod tests {
         assert!(worker.learned.failures.is_empty(), "the other process's reset is taken in");
     }
 
+    /// A place written for a model's files reads back in its column, and
+    /// only there; a test's finish is stamped.
+    #[test]
+    fn a_measured_place_reads_back_in_its_column() {
+        use prunr_models::{Column, ModelId};
+        let model = ModelId::Teed;
+        set_measured(model, Column::MiGraphX, Measured::new(PlaceKind::Slower, "0.8x"));
+        set_tested();
+        let found = measured_for(model);
+        assert_eq!(found[Column::MiGraphX.index()], Some(PlaceKind::Slower));
+        assert_eq!(found.iter().flatten().count(), 1, "{found:?}");
+        assert!(tested().is_some());
+        assert_eq!(measured_for(ModelId::U2net), [None; Column::ALL.len()], "another model has none");
+    }
+
     #[test]
     fn a_transient_failure_is_not_recorded() {
         let model = prunr_models::ModelId::RealEsrganX2Plus;
@@ -488,8 +502,8 @@ mod tests {
         let ep = EpKind::OpenVino;
         #[cfg(target_os = "macos")]
         let ep = EpKind::CoreMl;
-        record_failure(ep, model, Weights::Fp16, "CUDA failure 2: out of memory");
-        assert!(!is_known_failure(ep, model, Weights::Fp16));
+        record_failure(ep, model, Weights::Fp16, false, "CUDA failure 2: out of memory");
+        assert!(!is_known_failure(ep, model, Weights::Fp16, false));
     }
 
     /// A file written while checks against the CPU were kept beside the

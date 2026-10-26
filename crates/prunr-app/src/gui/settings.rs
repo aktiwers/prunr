@@ -482,7 +482,7 @@ fn migrate_sd_margin(value: &mut serde_json::Value) {
     obj.entry("sd_memory").or_insert_with(|| serde_json::to_value(SdMemoryGuard::from_margin_gb(gb)).unwrap_or_default());
 }
 
-fn now_unix_secs() -> i64 {
+pub(crate) fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64).unwrap_or(0)
