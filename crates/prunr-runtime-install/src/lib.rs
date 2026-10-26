@@ -257,38 +257,50 @@ pub trait Retryable {
 pub struct DlError {
     pub message: String,
     retryable: bool,
-    patience: u64,
+    /// The network itself is down: no name lookup, no route.
+    offline: bool,
 }
 
-/// The wait before the next try, against the usual, when the connection
-/// itself is down (no name lookup, no route, no answer): a Wi-Fi coming
-/// back or a VPN reconnecting takes seconds, not one.
+/// The wait before the next try, against the usual, when the network is
+/// down: a Wi-Fi coming back after sleep or a VPN reconnecting takes
+/// seconds. A timeout has waited its own 15-60 s already, and a refused
+/// connection will not clear by waiting.
 const OFFLINE_PATIENCE: u64 = 8;
 
 impl DlError {
-    pub fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false, patience: 1 } }
-    pub fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true, patience: 1 } }
+    pub fn fatal(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: false, offline: false } }
+    pub fn transient(msg: impl Into<String>) -> Self { Self { message: msg.into(), retryable: true, offline: false } }
 
-    /// A request to `url` that got no answer, said in the person's words,
-    /// worth another try, after a longer wait when the connection itself
-    /// is down.
-    pub fn request(url: &str, error: &reqwest::Error) -> Self {
-        let host = reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| url.to_string());
-        Self::unanswered(&host, &with_causes(error), error.is_timeout(), error.is_connect())
+    /// A request that got no answer, said in the person's words, worth
+    /// another try.
+    pub fn request(error: &reqwest::Error) -> Self {
+        let host = error.url().and_then(|u| u.host_str()).unwrap_or("the server");
+        Self::unanswered(host, &with_causes(error), error.is_timeout(), error.is_connect())
     }
 
+    /// A download that broke off part way, worth another try.
+    pub fn broke_off(error: &std::io::Error) -> Self {
+        let causes = with_causes(error);
+        Self::transient(format!("the download broke off ({})", last_cause(&causes)))
+    }
+
+    // hyper-util words every failed name lookup "dns error"; the system's
+    // own text under it differs per platform.
     fn unanswered(host: &str, causes: &str, timeout: bool, connect: bool) -> Self {
         let lower = causes.to_ascii_lowercase();
-        let message = if lower.contains("dns error") || lower.contains("failed to lookup address") {
+        let unreachable = lower.contains("unreachable") || lower.contains("no route to host");
+        let message = if causes.contains("dns error") {
             format!("no internet connection ({host} could not be found)")
+        } else if unreachable {
+            format!("no internet connection ({host} could not be reached)")
         } else if timeout {
             format!("{host} did not answer in time")
         } else if connect {
-            format!("could not reach {host} ({})", causes.rsplit(": ").next().unwrap_or(causes))
+            format!("could not reach {host} ({})", last_cause(causes))
         } else {
             format!("the request to {host} failed: {causes}")
         };
-        Self { message, retryable: true, patience: if connect || timeout { OFFLINE_PATIENCE } else { 1 } }
+        Self { message, retryable: true, offline: causes.contains("dns error") || unreachable }
     }
 
     /// A response that was not a success: a 5xx is the server's passing
@@ -308,7 +320,12 @@ impl std::fmt::Display for DlError {
 impl Retryable for DlError {
     fn is_retryable(&self) -> bool { self.retryable }
     fn cancelled() -> Self { DlError::fatal("cancelled") }
-    fn patience(&self) -> u64 { self.patience }
+    fn patience(&self) -> u64 { if self.offline { OFFLINE_PATIENCE } else { 1 } }
+}
+
+/// The innermost of `with_causes`' "a: b: c".
+fn last_cause(causes: &str) -> &str {
+    causes.rsplit_once(": ").map_or(causes, |(_, last)| last)
 }
 
 /// `error` with the causes under it, "a: b: c". A failed request's own
@@ -353,8 +370,7 @@ fn download_wheel_attempt(
 ) -> Result<Vec<u8>, DlError> {
     let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .map_err(|e| DlError::fatal(format!("HTTP client: {}", with_causes(&e))))?;
-    let response = client.get(&info.url).send()
-        .map_err(|e| DlError::request(&info.url, &e))?;
+    let response = client.get(&info.url).send().map_err(|e| DlError::request(&e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -375,8 +391,7 @@ fn download_wheel_attempt(
         }
         let n = match response.read(&mut chunk) {
             Ok(n) => n,
-            // Partial-stream errors (broken pipe, timeout) are transient.
-            Err(e) => return Err(DlError::transient(format!("read: {}", with_causes(&e)))),
+            Err(e) => return Err(DlError::broke_off(&e)),
         };
         if n == 0 { break; }
         hasher.update(&chunk[..n]);
@@ -511,21 +526,35 @@ pub const DYLIB_NAME: &str = if cfg!(windows) {
 
 #[cfg(test)]
 mod tests {
-    /// A request that got no answer says why in plain words, and a
-    /// connection that is down waits longer before the next try: 8 s, then
-    /// 16 s, against 1 s and 2 s.
+    /// A request that got no answer says why in plain words, and only a
+    /// network that is down waits longer before the next try.
     #[test]
     fn a_dropped_connection_says_so_and_waits_longer() {
         use super::{backoff, DlError, Retryable};
-        let dns = DlError::unanswered("github.com", "error sending request for url (https://github.com/x): client error (Connect): dns error: failed to lookup address information: Name or service not known", false, true);
-        assert_eq!(dns.message, "no internet connection (github.com could not be found)");
+        let unreachable = DlError::unanswered("github.com", "error sending request: client error (Connect): tcp connect error: Network is unreachable (os error 101)", false, true);
+        assert_eq!(unreachable.message, "no internet connection (github.com could not be reached)");
         let refused = DlError::unanswered("github.com", "error sending request: client error (Connect): tcp connect error: Connection refused (os error 111)", false, true);
         assert_eq!(refused.message, "could not reach github.com (Connection refused (os error 111))");
-        assert_eq!(DlError::unanswered("pypi.org", "operation timed out", true, false).message, "pypi.org did not answer in time");
-        assert!(dns.is_retryable() && refused.is_retryable());
+        let timed_out = DlError::unanswered("pypi.org", "operation timed out", true, false);
+        assert_eq!(timed_out.message, "pypi.org did not answer in time");
+        assert!(unreachable.is_retryable() && refused.is_retryable() && timed_out.is_retryable());
         let waits = |e: &DlError| [1, 2].map(|tries| backoff(500, tries, e.patience()).as_secs());
-        assert_eq!(waits(&dns), [8, 16]);
-        assert_eq!(waits(&DlError::transient("HTTP 503")), [1, 2], "a server's trouble keeps the usual wait");
+        assert_eq!(waits(&unreachable), [8, 16]);
+        assert_eq!(waits(&refused), [1, 2], "a refusal will not clear by waiting");
+        assert_eq!(waits(&timed_out), [1, 2], "a timeout has waited already");
+        assert_eq!(waits(&DlError::transient("HTTP 503")), [1, 2]);
+    }
+
+    /// A name no resolver knows, asked for for real: the wording and the
+    /// wait come from what reqwest says, on any platform.
+    #[test]
+    fn a_name_that_cannot_be_found_reads_as_no_internet() {
+        use super::{DlError, Retryable};
+        let client = super::http_client("prunr-test").unwrap();
+        let error = client.get("http://prunr-test.invalid/").send().expect_err(".invalid never resolves");
+        let error = DlError::request(&error);
+        assert_eq!(error.message, "no internet connection (prunr-test.invalid could not be found)");
+        assert_eq!(error.patience(), super::OFFLINE_PATIENCE);
     }
 
     /// An error reads with its causes, each once: a wrapper that repeats

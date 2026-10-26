@@ -431,7 +431,7 @@ fn download_attempt(
     let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
         .map_err(|e| DlError::fatal(format!("Could not start the download: {}", prunr_runtime_install::with_causes(&e))))?;
 
-    let response = client.get(url).send().map_err(|e| DlError::request(url, &e))?;
+    let response = client.get(url).send().map_err(|e| DlError::request(&e))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -474,7 +474,7 @@ fn fetch_into(
             return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
         }
         let n = std::io::Read::read(&mut response, &mut buf)
-            .map_err(|e| DlError::transient(format!("Read error: {}", prunr_runtime_install::with_causes(&e))))?;
+            .map_err(|e| DlError::broke_off(&e))?;
         if n == 0 {
             break;
         }
