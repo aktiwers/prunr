@@ -511,9 +511,14 @@ fn fresh_staging(target: &Path) -> Result<PathBuf, String> {
     Ok(staging)
 }
 
-/// The file a wheel for `target` downloads to, beside it.
+/// The file a wheel for `target` downloads to, beside it; the folder
+/// they share is made first, as the first install meets none.
 fn spool_for(target: &Path) -> Result<PathBuf, String> {
-    beside(target, "wheel")
+    let spool = beside(target, "wheel")?;
+    if let Some(dir) = spool.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    Ok(spool)
 }
 
 /// `.{name}.{what}` beside `target`, named after it.
@@ -659,6 +664,17 @@ mod tests {
         assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"new");
         assert!(!target.join("stale").exists(), "the rest is replaced");
         assert!(!staging.exists());
+    }
+
+    /// The first install on a computer meets no runtime folder yet: the
+    /// download it writes beside its install has somewhere to go (Windows,
+    /// 2026-10-26: "The system cannot find the path specified").
+    #[test]
+    fn the_first_install_has_a_folder_to_download_into() {
+        let store = tempfile::tempdir().unwrap();
+        let target = store.path().join("runtimes").join(RuntimeId::Cuda.install_subdir());
+        let spool = super::spool_for(&target).unwrap();
+        assert!(std::fs::File::create(&spool).is_ok(), "{}", spool.display());
     }
 
     /// Windows offers CUDA alone (DirectML is built in, OpenVINO's wheel
