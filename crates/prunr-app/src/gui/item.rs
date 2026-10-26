@@ -431,10 +431,20 @@ pub(crate) struct Job {
     /// When the step it started on was made: an undo or redo to a step
     /// made since, on the same pixels, leaves the run landable.
     pub(crate) since: std::time::Instant,
-    /// The strokes landed while an erase fills, each with when its step
-    /// was made: those whose step is still in effect are the next area,
-    /// which the fill's landing keeps.
-    pub(crate) painted: Vec<(std::time::Instant, Arc<prunr_core::selection::MaskArtifact>)>,
+    /// The strokes landed while an erase fills: those whose step is still
+    /// in effect are the next area, which the fill's landing keeps.
+    pub(crate) painted: Vec<PaintedStroke>,
+}
+
+/// A stroke landed while an erase fills, cropped to where it painted, and
+/// the step it made: the step undone, the stroke is no next area.
+#[derive(Clone)]
+pub(crate) struct PaintedStroke {
+    step: u64,
+    rect: prunr_core::selection::CellRect,
+    cells: prunr_core::selection::MaskArtifact,
+    /// The stroke's plane, cells across and down.
+    plane: (u32, u32),
 }
 
 /// What "Try another" reruns: the shown fill's start (`None`: the
@@ -1408,6 +1418,7 @@ impl BatchItem {
             origin: if kind == StepKind::Edit { None } else { shown.origin.clone() },
             faced: shown.faced,
             at: std::time::Instant::now(),
+            id: super::timeline::next_step_id(),
         }
     }
 
@@ -1463,23 +1474,25 @@ impl BatchItem {
     /// A stroke landed: while an erase fills, where it was painted is the
     /// next area, which the fill's landing keeps, kept with the step it
     /// made so an undo of that step takes it back out.
-    pub(crate) fn note_painted_during_erase(&mut self, stroke: &Arc<prunr_core::selection::MaskArtifact>) {
-        let at = self.timeline.current().at;
+    pub(crate) fn note_painted_during_erase(&mut self, stroke: &prunr_core::selection::MaskArtifact) {
         let Some(job) = self.job.as_mut().filter(|j| j.engine == Engine::Erase) else { return };
-        job.painted.push((at, Arc::clone(stroke)));
+        let Some(rect) = stroke.bounds() else { return };
+        let step = self.timeline.current().id;
+        job.painted.push(PaintedStroke { step, rect, cells: stroke.crop(rect), plane: (stroke.width, stroke.height) });
     }
 
     /// The fill landed: the marks it was made from go, those painted while
     /// it ran (and not undone since) stay as the next area. Undoing the
     /// fill brings both back.
     pub(crate) fn clear_filled_marks(&mut self) {
-        let painted = self.job.as_ref().and_then(|job| {
-            job.painted.iter()
-                .filter(|(at, _)| self.timeline.in_effect(*at))
-                .map(|(_, stroke)| stroke.as_ref().clone())
-                .reduce(|all, stroke| all.add_mask(&stroke).unwrap_or(all))
+        let next = self.selection_mask.as_ref().zip(self.job.as_ref()).and_then(|(now, job)| {
+            let mut strokes = job.painted.iter()
+                .filter(|s| s.plane == (now.width, now.height) && self.timeline.in_effect(s.step))
+                .map(|s| (s.rect, &s.cells))
+                .peekable();
+            strokes.peek()?;
+            now.within(&prunr_core::selection::MaskArtifact::from_patches(now.width, now.height, strokes))
         });
-        let next = painted.zip(self.selection_mask.as_ref()).and_then(|(painted, now)| now.within(&painted));
         self.invalidate_selection();
         if let Some(next) = next {
             self.selection_hash = Some(next.content_hash());
@@ -1537,7 +1550,7 @@ impl BatchItem {
     /// Fold the working copy into the shown step: a job it started landed.
     pub(crate) fn amend(&mut self) {
         let shown = self.timeline.current();
-        let state = DocState { at: shown.at, ..self.snapshot(shown.kind) };
+        let state = DocState { at: shown.at, id: shown.id, ..self.snapshot(shown.kind) };
         *self.timeline.current_mut() = state;
     }
 
@@ -3099,21 +3112,25 @@ mod tests {
             on.iter().for_each(|&c| cells[c] = prunr_core::selection::FULL);
             Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, cells))
         };
-        let next_area = |undo: bool| {
+        let next_area = |undo: bool, redo: bool| {
             let mut item = fixture_item(1);
             assert!(item.commit_selection_mask(cells(&[5]), StepKind::Stroke));
             item.start_erase(None);
             let stroke = cells(&[5, 9]);
-            assert!(item.commit_selection_mask(cells(&[5, 9]), StepKind::Stroke));
+            assert!(item.commit_selection_mask(Arc::clone(&stroke), StepKind::Stroke));
             item.note_painted_during_erase(&stroke);
             if undo {
                 item.undo_step().unwrap();
             }
+            if redo {
+                item.redo_step().unwrap();
+            }
             item.clear_filled_marks();
             item.selection_mask.as_ref().map(|m| m.has_selected_region())
         };
-        assert_eq!(next_area(false), Some(true), "the stroke is the next area");
-        assert_eq!(next_area(true), None, "undone, it leaves none");
+        assert_eq!(next_area(false, false), Some(true), "the stroke is the next area");
+        assert_eq!(next_area(true, false), None, "undone, it leaves none");
+        assert_eq!(next_area(true, true), Some(true), "redone, it counts again");
     }
 
     /// Undo and redo between strokes painted while an erase fills keep it;

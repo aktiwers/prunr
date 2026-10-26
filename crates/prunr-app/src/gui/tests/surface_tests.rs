@@ -492,10 +492,9 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     assert!(h.state().machine_test.is_some(), "Escape leaves it up");
     assert!(h.state().show_settings, "Escape leaves the Settings under it too");
     let gear = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Settings") && n.role() == egui::accesskit::Role::Button).rect().center();
-    h.event(egui::Event::PointerMoved(gear));
-    for pressed in [true, false] {
-        h.event(egui::Event::PointerButton { pos: gear, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() });
-    }
+    pointer_to(&mut h, gear);
+    press(&mut h, gear, true);
+    press(&mut h, gear, false);
     settle(&mut h);
     assert!(h.state().show_settings, "the toolbar under it takes no click, nor closes the Settings under it");
     let ctx = h.ctx.clone();
@@ -526,6 +525,26 @@ fn the_save_preset_dialog_takes_a_name_typed_at_once() {
     h.event(egui::Event::Text("Mine".into()));
     settle(&mut h);
     assert_eq!(h.state().save_preset.as_deref(), Some("Mine"), "the typing went into the name");
+}
+
+/// One click beside stacked modals closes one, the topmost, as one
+/// Escape does: the licence dialog over the Model Store goes, the store
+/// stays for the next click.
+#[test]
+fn a_click_beside_stacked_modals_closes_only_the_top_one() {
+    let mut h = loaded();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    settle(&mut h);
+    h.state_mut().pending_license_request = Some(crate::gui::views::model_store::LicenseRequest::Model(prunr_models::ModelId::SdV15InpaintFp16));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    settle(&mut h);
+    let corner = egui::pos2(8.0, 8.0);
+    pointer_to(&mut h, corner);
+    press(&mut h, corner, true);
+    press(&mut h, corner, false);
+    settle(&mut h);
+    assert!(h.state().pending_license_request.is_none(), "the top one closed");
+    assert!(h.state().model_store.is_some(), "the one under it stays");
 }
 
 #[test]

@@ -727,10 +727,14 @@ pub(crate) fn walk_ladder<S>(
             }
             Err(Miss::Failed { error, suspect_cache }) => {
                 tracing::warn!(?model, ?weights, ep = %ep, %error, "{prefix}GPU session failed — trying next EP");
-                match (suspect_cache, compiled_cache_named(model, ep.as_str(), &error, started)) {
-                    (Some(graph), _) => drop_cached_graph(&graph),
-                    (None, Some(compiled)) => clear_suspect_cache(&compiled),
-                    (None, None) => crate::ep_compat::record_failure(ep, model, weights, asks_intel_gpu(ep, model), &error),
+                match suspect_cache {
+                    // Out of memory or a lost device says nothing against the graph.
+                    Some(_) if crate::ep_compat::is_transient(&error) => {}
+                    Some(graph) => drop_cached_graph(&graph),
+                    None => match compiled_cache_named(model, ep.as_str(), &error, started) {
+                        Some(compiled) => clear_suspect_cache(&compiled),
+                        None => crate::ep_compat::record_failure(ep, model, weights, asks_intel_gpu(ep, model), &error),
+                    },
                 }
                 walk.failed.push(error);
             }
@@ -1448,14 +1452,9 @@ fn clear_suspect_cache(path: &std::path::Path) {
 }
 
 /// An optimized graph a session failed on: deleted, and saved again by
-/// the next build, as one copied from another machine fails once. When
-/// the graph saved here fails too, it does not load back (Nomos8k's FP16
-/// network on the CPU: ORT's optimizers, run again on its saved graph,
-/// look for casts the first run folded away), and it is no longer read
-/// under this runtime, so a start no longer pays a failed load first. It
-/// is still written: Nomos8k built with its graph written runs in 0.8 GB,
-/// without in 2.7 GB (ORT keeps the weights in the graph it saves; i7-6700,
-/// same speed and output).
+/// the next build. One this machine saved will not load back, so it is
+/// no longer read; it is still written, which keeps Nomos8k's run in
+/// 0.8 GB, not 2.7.
 fn drop_cached_graph(path: &std::path::Path) {
     clear_suspect_cache(path);
     crate::cache::note_graph_failed(path);
@@ -1500,10 +1499,8 @@ pub(crate) fn commit_past_bad_cache<T, E: std::fmt::Display>(mut commit: impl Fn
 }
 
 /// Per-(model, EP, weights) optimized-graph cache: a hit returns the
-/// optimized bytes; a miss has ORT write them for the next launch. A graph
-/// that fails to load back here (`drop_cached_graph`) is still written,
-/// not read. Best-effort: any failure logs and falls back to the
-/// uncached path.
+/// optimized bytes; a miss has ORT write them for the next launch.
+/// Best-effort: any failure logs and falls back to the uncached path.
 pub(crate) fn apply_ort_graph_cache<'a>(
     builder: ort::session::builder::SessionBuilder,
     model_bytes: &'a [u8],
@@ -1515,20 +1512,17 @@ pub(crate) fn apply_ort_graph_cache<'a>(
     let Some(path) = optimized_graph_path(model_id, ep_name, weights, part) else {
         return (builder, Cow::Borrowed(model_bytes), None);
     };
-    let read = if crate::cache::graph_not_read(&path) {
-        Err(std::io::ErrorKind::NotFound.into())
-    } else {
-        std::fs::read(&path)
-    };
-    match read {
-        Ok(cached) => {
-            tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
-            return (builder, Cow::Owned(cached), None);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(?model_id, ep = %ep_name, %e, path = %path.display(),
-                "cached optimized graph unreadable; rebuilding");
+    if !crate::cache::graph_not_read(&path) {
+        match std::fs::read(&path) {
+            Ok(cached) => {
+                tracing::debug!(?model_id, ep = %ep_name, bytes = cached.len(), "cache hit (optimized graph)");
+                return (builder, Cow::Owned(cached), None);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(?model_id, ep = %ep_name, %e, path = %path.display(),
+                    "cached optimized graph unreadable; rebuilding");
+            }
         }
     }
     let dir = match part {
@@ -1546,11 +1540,9 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 mod tests {
     use super::*;
 
-    /// Nomos8k's FP16 network on the CPU: its saved graph fails to load
-    /// back (ORT's optimizers, run again, look for casts the first run
-    /// folded away). After the second failure it is no longer read, so a
-    /// start builds it from the model without a failed load first, and it
-    /// is still written.
+    /// The real case: Nomos8k's FP16 network on the CPU, whose saved graph
+    /// never loads back (ORT's optimizers, run again, look for casts the
+    /// first run folded away).
     #[test]
     #[ignore = "optimizes 4xNomos8kSCHAT-L on the CPU three times: about two minutes"]
     fn nomos8k_s_graph_is_no_longer_read_once_it_fails_to_load_back() {
@@ -1567,11 +1559,10 @@ mod tests {
         assert!(crate::cache::graph_not_read(&graph), "and no longer read");
     }
 
-    /// A cached CPU graph the session cannot load (damaged, or written on
-    /// another machine) is deleted and the session built from the model,
-    /// its graph saved again: the CPU is the last provider, so a bad cache
-    /// must not stop a model. When the graph saved here fails too, it is
-    /// no longer read under this runtime, still written.
+    /// A cached CPU graph the session cannot load (one written elsewhere)
+    /// is deleted and the model built and saved again: the CPU is the last
+    /// provider, so a bad cache must not stop a model. One saved here that
+    /// fails is no longer read, still written.
     #[test]
     fn a_cpu_session_builds_past_a_broken_cached_graph() {
         if let Err(why) = crate::ort_runtime::runtime_for_tests() {
@@ -1584,12 +1575,16 @@ mod tests {
             .into_iter()
             .filter_map(|w| crate::cache::optimized_model_path(id, CPU_NAME, w))
             .collect();
-        let break_them = || broken.iter().for_each(|path| std::fs::write(path, b"not a graph").unwrap());
+        let break_them = || broken.iter().for_each(|path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"not a graph").unwrap();
+        });
+        crate::cache::clear_for_model(id);
         break_them();
         let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("the model loads past its broken cache");
         let used = crate::cache::optimized_model_path(id, CPU_NAME, engine.pick.weights).unwrap();
         assert_ne!(std::fs::read(&used).ok().as_deref(), Some(&b"not a graph"[..]), "the broken graph is gone");
-        assert!(used.exists() && !crate::cache::graph_not_read(&used), "and saved again");
+        assert!(used.exists() && !crate::cache::graph_not_read(&used), "and saved again, here");
         break_them();
         OrtEngine::new_cpu_only(ModelKind::Silueta, 1).expect("it loads past the second one");
         assert!(crate::cache::graph_not_read(&used), "the second failure stops reading it");

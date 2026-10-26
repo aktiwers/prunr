@@ -66,6 +66,7 @@ const MODAL_SCRIM: Color32 = Color32::from_rgba_unmultiplied_const(0, 0, 0, 56);
 
 /// Check if the user clicked the backdrop (outside the modal window).
 /// Must be called AFTER the window is rendered so we know the window rect.
+/// One click closes one modal, the topmost, as one Escape does.
 pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::InnerResponse<Option<()>>>) -> bool {
     let clicked = ctx.input(|i| i.pointer.primary_clicked());
     if !clicked { return false; }
@@ -74,13 +75,36 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 
     let click_pos = ctx.input(|i| i.pointer.interact_pos());
     if let (Some(pos), Some(resp)) = (click_pos, window_response) {
-        // Another modal over this one took the click (its window, or a
-        // backdrop that holds the window): not this one's to close on.
-        let taken_above = ctx.layer_id_at(pos).is_some_and(|layer| layer.order >= egui::Order::Middle && layer != resp.response.layer_id);
-        !resp.response.rect.contains(pos) && !taken_above
+        !resp.response.rect.contains(pos) && modal_on_top(ctx, resp.response.layer_id)
     } else {
         false
     }
+}
+
+/// The window layers of the modals shown lately, with the pass each was
+/// last shown in: a modal shown before another in a pass learns of it
+/// from the pass before.
+fn modal_layers() -> egui::Id {
+    egui::Id::new("prunr_modal_layers")
+}
+
+fn note_modal_shown(ctx: &egui::Context, layer: egui::LayerId) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        let shown: &mut Vec<(egui::LayerId, u64)> = d.get_temp_mut_or_default(modal_layers());
+        shown.retain(|&(other, at)| other != layer && at + 1 >= pass);
+        shown.push((layer, pass));
+    });
+}
+
+/// No modal shown lately sits over the one on `layer`.
+fn modal_on_top(ctx: &egui::Context, layer: egui::LayerId) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    let shown: Vec<(egui::LayerId, u64)> = ctx.data(|d| d.get_temp(modal_layers())).unwrap_or_default();
+    let order: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().collect());
+    let place = |l: egui::LayerId| order.iter().position(|&o| o == l);
+    let own = place(layer);
+    !shown.iter().any(|&(other, at)| other != layer && at + 1 >= pass && place(other) > own)
 }
 
 
@@ -346,6 +370,7 @@ fn show_modal(
         .show(ctx, body);
     if let Some(shown) = &resp {
         ctx.set_sublayer(backdrop, shown.response.layer_id);
+        note_modal_shown(ctx, shown.response.layer_id);
     }
 
     !open || (debounce_passed && backdrop_clicked(ctx, &resp))

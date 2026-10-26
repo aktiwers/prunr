@@ -185,15 +185,18 @@ impl GraphDraft {
         &self.draft
     }
 
-    /// The session built: its graph becomes the cache.
+    /// The session built: its graph becomes the cache, marked as made
+    /// on this machine.
     pub fn publish(self) {
         if std::fs::metadata(&self.draft).is_ok_and(|m| m.len() == 0) {
             return;
         }
-        if let Err(e) = std::fs::rename(&self.draft, &self.path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(cache = %self.path.display(), %e, "optimized graph not cached");
+        match std::fs::rename(&self.draft, &self.path) {
+            Ok(()) => {
+                let _ = std::fs::write(graph_mark(&self.path, MADE_HERE), b"");
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(cache = %self.path.display(), %e, "optimized graph not cached"),
         }
     }
 }
@@ -205,10 +208,12 @@ impl Drop for GraphDraft {
     }
 }
 
-/// Beside a saved graph: it failed to load back once (`failed`), or the
-/// one saved after that failed too, and it is no longer read (`not-read`).
-/// They live in the graph's folder, so a new runtime or a cleared cache
-/// starts afresh.
+/// Marks beside a saved graph: this machine wrote it, or one it wrote
+/// failed to load back and it is no longer read. In the graph's folder,
+/// so a new runtime or a cleared cache starts afresh.
+const MADE_HERE: &str = "made-here";
+const NOT_READ: &str = "not-read";
+
 fn graph_mark(path: &Path, mark: &str) -> PathBuf {
     let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
     name.push(format!(".{mark}"));
@@ -216,20 +221,20 @@ fn graph_mark(path: &Path, mark: &str) -> PathBuf {
 }
 
 /// A saved graph at `path` failed to load back (it is deleted by then).
+/// One copied from another machine is simply built again here; one this
+/// machine wrote will fail again, so it is no longer read.
 pub(crate) fn note_graph_failed(path: &Path) {
-    let twice = graph_mark(path, "failed").exists();
-    let mark = graph_mark(path, if twice { "not-read" } else { "failed" });
-    if let Err(e) = std::fs::write(&mark, b"") {
-        tracing::warn!(path = %mark.display(), %e, "could not mark the failed graph");
-    } else if twice {
-        tracing::warn!(graph = %path.display(), "its graph failed to load back twice; it is no longer read");
+    if !graph_mark(path, MADE_HERE).exists() {
+        return;
+    }
+    match std::fs::write(graph_mark(path, NOT_READ), b"") {
+        Ok(()) => tracing::warn!(graph = %path.display(), "a graph saved here failed to load back; it is no longer read"),
+        Err(e) => tracing::warn!(graph = %path.display(), %e, "could not mark the failed graph"),
     }
 }
 
-/// The model's graph at `path` is no longer read: the one saved here
-/// failed to load back twice under this runtime.
 pub(crate) fn graph_not_read(path: &Path) -> bool {
-    graph_mark(path, "not-read").exists()
+    graph_mark(path, NOT_READ).exists()
 }
 
 /// A cache miss: `builder` writes its optimized graph (about
@@ -657,7 +662,8 @@ mod tests {
         built.publish();
         assert_eq!(std::fs::read(&path).unwrap(), b"graph");
         drop(other);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the cache stays");
+        assert!(graph_mark(&path, MADE_HERE).exists(), "marked as made here");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "only the cache and its mark stay");
     }
 
     /// A CPU entry that differs from this machine's only by its vector
