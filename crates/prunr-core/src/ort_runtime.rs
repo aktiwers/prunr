@@ -199,6 +199,7 @@ fn folding_is_broken(version: Option<&str>) -> bool {
 const PRELOAD_BESIDE_RUNTIME: &[&str] = if cfg!(windows) { &["DirectML.dll"] } else { &[] };
 
 fn init() -> Result<DylibSource, String> {
+    telemetry_is_off()?;
     let candidates = candidates()?;
     // After a failed load ort's library cell reads as loaded and holds
     // nothing, so ort is called once: each candidate is opened and checked
@@ -217,6 +218,16 @@ fn init() -> Result<DylibSource, String> {
     let _ = VERSION.set(version);
     let _ = LOADED.set(path.clone());
     Ok(*source)
+}
+
+/// Prunr loads no runtime that could report usage: the switch is read
+/// once, as the library loads, so a process that missed it stays without.
+fn telemetry_is_off() -> Result<(), String> {
+    let (name, value) = prunr_models::ORT_TELEMETRY_OFF;
+    match std::env::var(name) {
+        Ok(set) if set == value => Ok(()),
+        _ => Err(format!("{name} is not {value}, so ONNX Runtime could report usage to Microsoft: not loaded")),
+    }
 }
 
 /// Every runtime to try, in order. `ORT_DYLIB_PATH` names the only one:
@@ -254,10 +265,9 @@ fn load_runtime(path: &Path) -> Result<(), String> {
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let env = ort::init_from(path)
         .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?
-        // Off, though `ort` turns it on: since 1.29 ONNX Runtime on Linux and
-        // macOS uploads telemetry through Microsoft's 1DS client, whose
-        // thread aborted Prunr at exit (a mutex already torn down: 2 of 3
-        // bench runs on a MacBook Air, ORT 1.30). Prunr reports nothing.
+        // Off, though `ort` turns it on. Windows reads only this: the
+        // official build there reports through Windows' event tracing.
+        // Linux and macOS need `ORT_TELEMETRY_OFF` as well.
         .with_telemetry(false)
         .build()
         .map_err(|e| format!("ORT environment on {}: {e}", path.display()))?;
@@ -567,8 +577,8 @@ fn bundled_dylib() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
 
-    /// The runtime starts with telemetry off: `ort` turns it on, and the
-    /// upload client it starts in ONNX Runtime 1.29+ aborted Prunr at exit.
+    /// The runtime starts with telemetry off where its API switch is the
+    /// one there is: Windows, whose build reports through event tracing.
     #[test]
     fn the_runtime_starts_with_telemetry_off() {
         let source = include_str!("ort_runtime.rs");
@@ -577,6 +587,78 @@ mod tests {
         assert!(source[init..built].contains(".with_telemetry(false)"), "telemetry must be switched off where the environment is built");
     }
     use super::*;
+
+    /// The variables under which ONNX Runtime keeps quiet by itself: CI
+    /// runners and its own tests.
+    const ORT_QUIET_UNDER: &[&str] = &[
+        "CI", "TF_BUILD", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "JENKINS_URL", "CODEBUILD_BUILD_ID",
+        "BUILDKITE", "TEAMCITY_VERSION", "APPVEYOR", "BITBUCKET_BUILD_NUMBER", "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+        "ORT_RUNNING_UNIT_TESTS",
+    ];
+
+    /// ONNX Runtime 1.29+ on Linux and macOS starts Microsoft's upload
+    /// client when it loads, writing a device ID under the user's cache
+    /// first. A fresh process that loads the runtime the way Prunr does
+    /// leaves none, and one without the switch loads no runtime. Should
+    /// the client start anyway, its uploads point at nothing: a dead proxy
+    /// and no trusted certificates.
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_reports_nothing() {
+        if runtime_for_tests().is_err() {
+            return;
+        }
+        let dylib = loaded_dylib().expect("loaded");
+        let (name, value) = prunr_models::ORT_TELEMETRY_OFF;
+        for (switch, child_test) in
+            [(Some(value), "a_process_that_loads_the_runtime"), (None, "a_process_without_the_switch_loads_no_runtime")]
+        {
+            let home = tempfile::tempdir().expect("temp home");
+            let no_certificates = home.path().join("none.pem");
+            std::fs::write(&no_certificates, "").expect("empty certificate bundle");
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+            child
+                .args(["--exact", &format!("ort_runtime::tests::{child_test}"), "--ignored"])
+                .env("ORT_DYLIB_PATH", dylib)
+                .env("HOME", home.path())
+                .env("XDG_CACHE_HOME", home.path().join(".cache"))
+                .env("SSL_CERT_FILE", &no_certificates)
+                .env("https_proxy", "http://127.0.0.1:9")
+                .env("HTTPS_PROXY", "http://127.0.0.1:9");
+            match switch {
+                Some(value) => child.env(name, value),
+                None => child.env_remove(name),
+            };
+            for quiet in ORT_QUIET_UNDER {
+                child.env_remove(quiet);
+            }
+            let out = child.output().expect("child runs");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "{child_test} on {}: {stdout}{}",
+                dylib.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            for cache in [".cache", "Library/Application Support"] {
+                let device_id = home.path().join(cache).join("Microsoft/DeveloperTools/.onnxruntime");
+                assert!(!device_id.exists(), "{child_test}: {} started its usage reporting", dylib.display());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "run in a process of its own by the_runtime_reports_nothing"]
+    fn a_process_that_loads_the_runtime() {
+        ensure_initialized().expect("the runtime loads");
+    }
+
+    #[test]
+    #[ignore = "run in a process of its own by the_runtime_reports_nothing"]
+    fn a_process_without_the_switch_loads_no_runtime() {
+        let why = ensure_initialized().expect_err("no runtime without the switch");
+        assert!(why.contains(prunr_models::ORT_TELEMETRY_OFF.0), "{why}");
+    }
 
     /// Folding stays off where ORT's aliasing bug lives (1.24 to 1.28, or
     /// no readable version); on for the rest.

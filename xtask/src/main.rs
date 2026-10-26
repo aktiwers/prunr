@@ -34,6 +34,10 @@ fn mirror_to_user_data_dir(src: &Path, id: prunr_models::ModelId) -> anyhow::Res
 }
 
 fn main() -> anyhow::Result<()> {
+    // The probe loads ONNX Runtime, which reads this as it loads.
+    let (name, value) = prunr_models::ORT_TELEMETRY_OFF;
+    // SAFETY: single-threaded at this point in main.
+    unsafe { std::env::set_var(name, value); }
     let task = std::env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "fetch-models" => fetch_models(),

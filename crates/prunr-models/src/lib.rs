@@ -2226,6 +2226,13 @@ pub fn runtime_store_dir() -> Option<std::path::PathBuf> {
     data_dir().map(|d| d.join("runtimes"))
 }
 
+/// Set in every process before ONNX Runtime loads: from 1.29 on Linux and
+/// macOS it starts Microsoft's usage-report uploader as it loads, unless
+/// this says no. Its API switch (`with_telemetry(false)`) still leaves the
+/// uploader running, a device ID under the user's cache and the machine's
+/// OS, processor, memory and network type on their way out.
+pub const ORT_TELEMETRY_OFF: (&str, &str) = ("ORT_DISABLE_TELEMETRY", "1");
+
 /// SHA verification happens at download time, not load time: re-hashing
 /// 200+ MB on every launch would be wasteful.
 fn read_on_demand(dir: &std::path::Path, filename: &str) -> Option<Vec<u8>> {
