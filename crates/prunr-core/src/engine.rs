@@ -1569,6 +1569,7 @@ mod tests {
             eprintln!("SKIP: {why}");
             return;
         }
+        let _own = crate::cache::OwnCacheRoot::new("broken-graph");
         let id = prunr_models::ModelId::Silueta;
         assert!(crate::cache::cache_dir_for(id, CPU_NAME).is_some());
         let broken: Vec<PathBuf> = Weights::ALL

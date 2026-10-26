@@ -33,10 +33,36 @@ const MAX_WALK_DEPTH: u32 = 16;
 /// no such dir; callers fall back to no-cache rather than erroring out.
 pub fn cache_root() -> Option<PathBuf> {
     #[cfg(test)]
-    if let Some(root) = tests::temp_root() {
+    if let Some(root) = OWN_ROOT.with_borrow(Clone::clone).or_else(tests::temp_root) {
         return Some(root);
     }
     root_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static OWN_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The calling test's own cache root until dropped: a test that breaks a
+/// model's cached files on purpose would otherwise race other tests
+/// building that model in the same process.
+#[cfg(test)]
+pub(crate) struct OwnCacheRoot;
+
+#[cfg(test)]
+impl OwnCacheRoot {
+    pub(crate) fn new(name: &str) -> Self {
+        OWN_ROOT.set(tests::temp_root().and_then(|run| Some(run.parent()?.join(name).join("ep_cache"))));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnCacheRoot {
+    fn drop(&mut self) {
+        OWN_ROOT.set(None);
+    }
 }
 
 /// macOS keeps the cache out of `Application Support`: CoreML opens
