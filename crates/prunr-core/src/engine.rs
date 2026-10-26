@@ -1587,6 +1587,108 @@ mod tests {
         }
     }
 
+    /// DirectML on models it refuses or breaks on, under each set of
+    /// session switches: does each load, run, and land near the CPU?
+    /// `PRUNR_DML_PROBE` lists the files, `;`-separated; a folder stands
+    /// for every .onnx in it. Free dimensions take `PRUNR_DML_PROBE_SIDE`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "real models on DirectML"]
+    fn directml_switches_probe() {
+        use ort::value::{DynValue, TensorElementType};
+        let Ok(list) = std::env::var("PRUNR_DML_PROBE") else { return };
+        let side: i64 = std::env::var("PRUNR_DML_PROBE_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
+        let files: Vec<PathBuf> = list.split(';').map(PathBuf::from).flat_map(|p| {
+            if p.is_dir() {
+                let mut v: Vec<PathBuf> = std::fs::read_dir(&p).unwrap().flatten().map(|e| e.path()).filter(|f| f.extension().is_some_and(|x| x == "onnx")).collect();
+                v.sort();
+                v
+            } else {
+                vec![p]
+            }
+        }).collect();
+        let build = |bytes: &[u8], dml: bool, folding: bool, no_fusion: bool, no_mem_pattern: bool, level: GraphOptimizationLevel| -> Result<Session, String> {
+            let mut b = crate::ort_runtime::session_builder().map_err(|e| e.to_string())?
+                .with_optimization_level(level).map_err(|e| e.to_string())?
+                .with_intra_threads(4).map_err(|e| e.to_string())?;
+            if folding {
+                b = b.with_disabled_optimizers("NoSuchOptimizer").map_err(|e| e.to_string())?;
+            }
+            if no_fusion {
+                b = b.with_config_entry("ep.dml.disable_graph_fusion", "1").map_err(|e| e.to_string())?;
+            }
+            if no_mem_pattern {
+                b = b.with_memory_pattern(false).map_err(|e| e.to_string())?;
+            }
+            if dml {
+                b = b.with_execution_providers([directml_provider()]).map_err(|e| e.to_string())?;
+            }
+            b.commit_from_memory(bytes).map_err(|e| e.to_string().lines().next().unwrap_or_default().to_string())
+        };
+        let inputs_of = |session: &Session| -> Vec<(String, DynValue)> {
+            session.inputs().iter().enumerate().map(|(n, input)| {
+                let ty = input.dtype();
+                let dims: Vec<i64> = ty.tensor_shape().map(|s| s.iter().copied().collect()).unwrap_or_default();
+                let shape: Vec<usize> = dims.iter().enumerate().map(|(i, &d)| if d > 0 { d as usize } else if i < 2 { if i == 1 { 3 } else { 1 } } else { side as usize }).collect();
+                let count: usize = shape.iter().product();
+                let data: Vec<f32> = (0..count).map(|i| (((i * 7919 + n * 104729) % 1000) as f32) / 1000.0).collect();
+                let value: DynValue = match ty.tensor_type() {
+                    Some(TensorElementType::Float16) => Tensor::from_array((shape, data.into_iter().map(half::f16::from_f32).collect::<Vec<_>>())).unwrap().into_dyn(),
+                    _ => Tensor::from_array((shape, data)).unwrap().into_dyn(),
+                };
+                (input.name().to_string(), value)
+            }).collect()
+        };
+        let first_output = |session: &mut Session, inputs: &[(String, DynValue)]| -> Result<Vec<f32>, String> {
+            let feed: Vec<(String, &DynValue)> = inputs.iter().map(|(n, v)| (n.clone(), v)).collect();
+            let outputs = session.run(feed).map_err(|e| e.to_string().lines().next().unwrap_or_default().to_string())?;
+            let out = &outputs[0];
+            Ok(match out.try_extract_tensor::<f32>() {
+                Ok((_, v)) => v.to_vec(),
+                Err(_) => out.try_extract_tensor::<half::f16>().map_err(|e| e.to_string())?.1.iter().map(|x| x.to_f32()).collect(),
+            })
+        };
+        let variants: [(&str, bool, bool, bool, GraphOptimizationLevel); 7] = [
+            ("as the app", false, false, false, GraphOptimizationLevel::Level3),
+            ("no DML fusion", false, true, false, GraphOptimizationLevel::Level3),
+            ("no memory pattern", false, false, true, GraphOptimizationLevel::Level3),
+            ("no DML fusion, no memory pattern", false, true, true, GraphOptimizationLevel::Level3),
+            ("folding on", true, false, false, GraphOptimizationLevel::Level3),
+            ("folding on, no DML fusion", true, true, false, GraphOptimizationLevel::Level3),
+            ("Level1, folding on", true, false, false, GraphOptimizationLevel::Level1),
+        ];
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            let bytes = std::fs::read(&path).unwrap();
+            let mut cpu = match build(&bytes, false, false, false, false, GraphOptimizationLevel::Level3) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("{name}: CPU: {e}"); continue; }
+            };
+            let inputs = inputs_of(&cpu);
+            let reference = match first_output(&mut cpu, &inputs) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("{name}: CPU run: {e}"); continue; }
+            };
+            let range = reference.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+            for (label, folding, no_fusion, no_mem, level) in variants {
+                let started = Instant::now();
+                let outcome = build(&bytes, true, folding, no_fusion, no_mem, level).and_then(|mut s| {
+                    let built = started.elapsed().as_millis();
+                    first_output(&mut s, &inputs).map(|out| (built, out))
+                });
+                match outcome {
+                    Ok((built, out)) => {
+                        let diffs: Vec<f32> = out.iter().zip(&reference).map(|(a, b)| (a - b).abs() / range).collect();
+                        let max = diffs.iter().fold(0f32, |m, &d| m.max(d));
+                        let mean = diffs.iter().sum::<f32>() / diffs.len().max(1) as f32;
+                        eprintln!("{name}: {label}: runs (built {built} ms), off the CPU by max {:.4}, mean {:.5} of its range", max, mean);
+                    }
+                    Err(e) => eprintln!("{name}: {label}: FAILS: {}", e.chars().take(160).collect::<String>()),
+                }
+            }
+        }
+    }
+
     /// The real case: Nomos8k's FP16 network on the CPU, whose saved graph
     /// never loads back (ORT's optimizers, run again, look for casts the
     /// first run folded away).
