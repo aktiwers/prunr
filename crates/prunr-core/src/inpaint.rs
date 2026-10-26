@@ -657,7 +657,7 @@ fn lama_ladder(
             .map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
         tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
         coverage.report(id, None);
-        crate::engine::kept_after_a_run(ep, &mut session, TILE as usize).map_err(failed)?;
+        crate::engine::kept_after_a_run(id, ep, &mut session).map_err(failed)?;
         if let Some(draft) = draft { draft.publish(); }
         tracing::info!(ep = %ep, "LaMa: session on the GPU");
         Ok(session)

@@ -352,8 +352,8 @@ pub fn session_on_ladder(
         let landed = walk_ladder("", id, Weights::Fp32, eps, |ep| {
             let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
             let built = ep.attach(builder, id, EpSite::Engine { threads: num_cpus::get(), part: None })?;
-            let mut session = commit(built).map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}): {e}"), suspect_cache: None })?;
-            kept_after_a_run(ep, &mut session, test_side(id, ep)).map_err(|error| Miss::Failed { error, suspect_cache: None })?;
+            let mut session = commit(built).map_err(|e| Miss::failed(format!("ORT session creation failed ({ep}): {e}")))?;
+            kept_after_a_run(id, ep, &mut session).map_err(Miss::failed)?;
             Ok(session)
         });
         match landed {
@@ -555,18 +555,19 @@ impl EpKind {
         }
     }
 
-    /// Whether a session this provider took can still fail its first run.
-    /// CUDA loads cuDNN's parts on first use (BiRefNet-lite failed with
-    /// CUDNN_BACKEND_API_FAILED while one was missing) and once failed a
-    /// LaMa export in a Reshape; DirectML builds its fused nodes then
-    /// (BiRefNet-lite, LaMa and Nomos2 on an RTX 3060). OpenVINO, CoreML
-    /// and MIGraphX compile the whole graph as the session builds.
+    /// Whether a session this provider took can still fail its first run:
+    /// CUDA loads cuDNN's parts on first use, DirectML builds its fused
+    /// nodes then, and MIGraphX compiles a free size when it first meets
+    /// it. OpenVINO and CoreML compile the graph for its sizes as the
+    /// session builds.
     pub(crate) fn may_fail_its_first_run(self) -> bool {
         match self {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => true,
             #[cfg(windows)]
             EpKind::DirectMl => true,
+            #[cfg(target_os = "linux")]
+            EpKind::MiGraphX => true,
             _ => false,
         }
     }
@@ -602,6 +603,13 @@ pub(crate) enum Miss {
     /// optimized graph it loaded, which is then the suspect and is deleted
     /// instead of the failure being held against the provider.
     Failed { error: String, suspect_cache: Option<PathBuf> },
+}
+
+impl Miss {
+    /// A failure with no cached graph to suspect.
+    pub(crate) fn failed(error: String) -> Self {
+        Self::Failed { error, suspect_cache: None }
+    }
 }
 
 /// Why the ladder passes a provider over without trying it.
@@ -716,31 +724,53 @@ fn test_side(model: prunr_models::ModelId, ep: EpKind) -> usize {
     first_input(model, ep.as_str()).map_or(TEST_SIDE, |shape| shape[2])
 }
 
-/// Whether `session` may stay on `ep`: where a provider can take a session
-/// and fail its first run (`EpKind::may_fail_its_first_run`), one run on
-/// zeros, each free size `side` and a free batch 1, so a model it cannot
-/// run lands on the next provider instead of failing the user's run.
-pub(crate) fn kept_after_a_run(ep: EpKind, session: &mut Session, side: usize) -> Result<(), String> {
-    if !ep.may_fail_its_first_run() {
+/// Whether `session` of `model` may stay on `ep`: where a provider can
+/// take a session and fail its first run (`EpKind::may_fail_its_first_run`)
+/// and this machine's test has not run the model there, one run on zeros,
+/// so a model the provider cannot run lands on the next one instead of
+/// failing the user's run.
+pub(crate) fn kept_after_a_run(model: prunr_models::ModelId, ep: EpKind, session: &mut Session) -> Result<(), String> {
+    if !ep.may_fail_its_first_run() || ran_here(model, ep) {
         return Ok(());
     }
-    let inputs = session.inputs().iter().map(|input| Ok((input.name().to_string(), zeros_for(input, side)?))).collect::<Result<Vec<_>, String>>();
-    inputs
-        .and_then(|inputs| session.run(inputs).map(drop).map_err(|e| e.to_string()))
-        .map_err(|e| format!("{ep} test run failed: {e}"))
+    run_on_zeros(session, test_side(model, ep)).map_err(|e| format!("{ep} test run failed: {e}"))
 }
 
-fn zeros_for(input: &Outlet, side: usize) -> Result<DynValue, String> {
+/// Whether this machine's test ran `model` on `ep` and kept it there.
+fn ran_here(model: prunr_models::ModelId, ep: EpKind) -> bool {
+    column_for(model, ep.as_str()).is_some_and(|column| crate::ep_compat::measured_for(model)[column.index()] == Some(crate::ep_compat::PlaceKind::There))
+}
+
+/// One run of `session` on zeros. An input it cannot fill (not a float
+/// tensor, or a free channel axis) is no verdict: the run is skipped.
+fn run_on_zeros(session: &mut Session, side: usize) -> Result<(), String> {
+    let Some(inputs) = session.inputs().iter().map(|input| Some((input.name().to_string(), zeros_for(input, side)?))).collect::<Option<Vec<_>>>() else {
+        tracing::debug!("a session's inputs take no test input; not run");
+        return Ok(());
+    };
+    session.run(inputs).map(drop).map_err(|e| e.to_string())
+}
+
+fn zeros_for(input: &Outlet, side: usize) -> Option<DynValue> {
     let ty = input.dtype();
-    let dims = ty.tensor_shape().ok_or_else(|| format!("input {} is not a tensor", input.name()))?;
-    let shape: Vec<usize> = dims.iter().enumerate().map(|(axis, &d)| if d > 0 { d as usize } else if axis == 0 { 1 } else { side }).collect();
+    let shape = concrete_shape(ty.tensor_shape()?, side)?;
     let count = shape.iter().product();
-    match ty.tensor_type() {
-        Some(TensorElementType::Float32) => Tensor::from_array((shape, vec![0f32; count])).map(|t| t.into_dyn()),
-        Some(TensorElementType::Float16) => Tensor::from_array((shape, vec![half::f16::ZERO; count])).map(|t| t.into_dyn()),
-        other => return Err(format!("input {} holds {other:?}", input.name())),
+    match ty.tensor_type()? {
+        TensorElementType::Float32 => Tensor::from_array((shape, vec![0f32; count])).ok().map(Tensor::into_dyn),
+        TensorElementType::Float16 => Tensor::from_array((shape, vec![half::f16::ZERO; count])).ok().map(Tensor::into_dyn),
+        _ => None,
     }
-    .map_err(|e| e.to_string())
+}
+
+/// `dims` with a free batch 1 and each free size after the channels
+/// `side`; `None` for a free channel axis, whose count no size says.
+fn concrete_shape(dims: &[i64], side: usize) -> Option<Vec<usize>> {
+    dims.iter().enumerate().map(|(axis, &d)| match axis {
+        _ if d > 0 => Some(d as usize),
+        0 => Some(1),
+        1 => None,
+        _ => Some(side),
+    }).collect()
 }
 
 /// Each provider in `eps` with `weights` until `commit` builds a session,
@@ -1006,7 +1036,7 @@ impl SizeRecipe {
         let mut built = ep.attach(builder, model, EpSite::Engine { threads: intra_threads, part: Some(&key) })?;
         let started = Instant::now();
         let session = built.commit_from_memory(model_bytes)
-            .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}, input {key}): {e}"), suspect_cache: None })?;
+            .map_err(|e| Miss::failed(format!("ORT session creation failed ({ep}, input {key}): {e}")))?;
         tracing::info!(?model, %ep, size = %key, elapsed_ms = started.elapsed().as_millis() as u64, "session compiled for one input size");
         coverage.report(model, None);
         crate::cache::keep_newest_parts(model, ep.as_str(), &key, SIZE_KEY_PREFIX, SIZES_KEPT);
@@ -1206,7 +1236,7 @@ impl OrtEngine {
                 error: format!("ORT session creation failed ({ep}): {e}"),
                 suspect_cache: suspect(),
             })?;
-            kept_after_a_run(ep, &mut session, test_side(model_id, ep)).map_err(|error| Miss::Failed { error, suspect_cache: suspect() })?;
+            kept_after_a_run(model_id, ep, &mut session).map_err(|error| Miss::Failed { error, suspect_cache: suspect() })?;
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
@@ -1241,11 +1271,8 @@ impl OrtEngine {
                     ),
                 };
                 let mut session = built.commit_from_memory(bytes)
-                    .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({key}): {e}"), suspect_cache: None })?;
-                if let Some(ep) = ep {
-                    kept_after_a_run(ep, &mut session, test_side(id, ep))
-                        .map_err(|error| Miss::Failed { error: format!("{key}: {error}"), suspect_cache: None })?;
-                }
+                    .map_err(|e| Miss::failed(format!("ORT session creation failed ({key}): {e}")))?;
+                ep.map_or(Ok(()), |ep| kept_after_a_run(id, ep, &mut session)).map_err(|error| Miss::failed(format!("{key}: {error}")))?;
                 coverage.report(id, Some(key));
                 Ok((*key, session))
             }).collect()
@@ -1641,25 +1668,46 @@ mod tests {
     }
 
     /// A CUDA or DirectML session stays only once it has run: one whose
-    /// run fails goes to the next provider. Its free sizes take the side,
-    /// a free batch 1 (3·16·16 = 768 values make rows of 256 only then).
-    /// Providers that compile the whole graph as the session builds are
-    /// not run.
+    /// run fails goes to the next provider. Providers that compile the
+    /// whole graph as the session builds are not run. Silueta's input has
+    /// no free size, so the model's is 256: 3·256·256 values make no rows
+    /// of 7.
     #[test]
     fn a_session_that_cannot_run_is_not_kept() {
         if crate::ort_runtime::runtime_for_tests().is_err() {
             return;
         }
         let session = |to| crate::ort_runtime::session_builder().unwrap().commit_from_memory(&reshape_model(to)).expect("any reshape commits");
+        let silueta = prunr_models::ModelId::Silueta;
         #[cfg(not(target_os = "macos"))]
         {
-            assert_eq!(kept_after_a_run(EpKind::Cuda, &mut session([3, 256]), 16), Ok(()));
-            let refused = kept_after_a_run(EpKind::Cuda, &mut session([-1, 7]), 16).expect_err("768 values make no rows of 7");
+            assert_eq!(kept_after_a_run(silueta, EpKind::Cuda, &mut session([3, -1])), Ok(()));
+            let refused = kept_after_a_run(silueta, EpKind::Cuda, &mut session([-1, 7])).expect_err("no rows of 7");
             assert!(refused.starts_with("CUDA test run failed"), "{refused}");
-            assert_eq!(kept_after_a_run(EpKind::OpenVino, &mut session([-1, 7]), 16), Ok(()));
+            assert_eq!(kept_after_a_run(silueta, EpKind::OpenVino, &mut session([-1, 7])), Ok(()));
         }
         #[cfg(target_os = "macos")]
-        assert_eq!(kept_after_a_run(EpKind::CoreMl, &mut session([-1, 7]), 16), Ok(()));
+        assert_eq!(kept_after_a_run(silueta, EpKind::CoreMl, &mut session([-1, 7])), Ok(()));
+    }
+
+    /// A test run's free sizes take the side and a free batch 1
+    /// (3·16·16 = 768 values make rows of 256 only then).
+    #[test]
+    fn a_test_run_is_one_image_of_the_side() {
+        if crate::ort_runtime::runtime_for_tests().is_err() {
+            return;
+        }
+        let mut session = crate::ort_runtime::session_builder().unwrap().commit_from_memory(&reshape_model([3, 256])).unwrap();
+        assert_eq!(run_on_zeros(&mut session, 16), Ok(()));
+        assert!(run_on_zeros(&mut session, 17).is_err());
+    }
+
+    /// A free channel axis says no count, so a session with one is not run.
+    #[test]
+    fn a_free_channel_axis_takes_no_test_input() {
+        assert_eq!(concrete_shape(&[-1, 3, -1, -1], 64), Some(vec![1, 3, 64, 64]));
+        assert_eq!(concrete_shape(&[1, 3, 512, 512], 64), Some(vec![1, 3, 512, 512]));
+        assert_eq!(concrete_shape(&[-1, -1, -1, -1], 64), None);
     }
 
     /// On OpenVINO's processor a session loads the model's own weights,
@@ -1707,9 +1755,8 @@ mod tests {
     #[test]
     #[ignore = "real models on DirectML"]
     fn directml_switches_probe() {
-        use ort::value::{DynValue, TensorElementType};
         let Ok(list) = std::env::var("PRUNR_DML_PROBE") else { return };
-        let side: i64 = std::env::var("PRUNR_DML_PROBE_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
+        let side: usize = std::env::var("PRUNR_DML_PROBE_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(TEST_SIDE);
         let files: Vec<PathBuf> = list.split(';').map(PathBuf::from).flat_map(|p| {
             if p.is_dir() {
                 let mut v: Vec<PathBuf> = std::fs::read_dir(&p).unwrap().flatten().map(|e| e.path()).filter(|f| f.extension().is_some_and(|x| x == "onnx")).collect();
@@ -1740,8 +1787,7 @@ mod tests {
         let inputs_of = |session: &Session| -> Vec<(String, DynValue)> {
             session.inputs().iter().enumerate().map(|(n, input)| {
                 let ty = input.dtype();
-                let dims: Vec<i64> = ty.tensor_shape().map(|s| s.iter().copied().collect()).unwrap_or_default();
-                let shape: Vec<usize> = dims.iter().enumerate().map(|(i, &d)| if d > 0 { d as usize } else if i < 2 { if i == 1 { 3 } else { 1 } } else { side as usize }).collect();
+                let shape = ty.tensor_shape().and_then(|dims| concrete_shape(dims, side)).expect("an input with a fixed channel count");
                 let count: usize = shape.iter().product();
                 let data: Vec<f32> = (0..count).map(|i| (((i * 7919 + n * 104729) % 1000) as f32) / 1000.0).collect();
                 let value: DynValue = match ty.tensor_type() {

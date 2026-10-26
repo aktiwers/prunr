@@ -142,22 +142,23 @@ static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
 pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     ensure_initialized().map_err(CoreError::Inference)?;
     let env = ENV.get().ok_or_else(|| CoreError::Inference("ORT environment missing after load".into()))?;
-    #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded two lines above
+    let init = |e: ort::Error| CoreError::Inference(format!("ORT builder init failed: {e}"));
+    #[allow(clippy::disallowed_methods)] // the sanctioned wrapper: the runtime is loaded above
     // No spin-waiting between ops: idle ORT threads spinning steal the cores
     // from rayon's tile blending and from a second session running at once.
     // Measured (4-core i7): LaMa 5.2 s -> 3.5 s alone,
     // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
     // an OpenVINO session is unchanged.
     let builder = Session::builder(env)
-        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+        .map_err(init)?
         .with_intra_op_spinning(false)
-        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?
+        .map_err(|e| init(e.into()))?
         // ort sets ORT's own device choice to MaxEfficiency, which puts a
         // session naming no provider on an NPU when one is listed (the
         // Windows ML runtime lists DirectML's). Prunr places each session
         // itself, so one naming none stays on the CPU.
         .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)
-        .map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
+        .map_err(|e| init(e.into()))?;
     without_optimizers(builder, &[])
 }
 
