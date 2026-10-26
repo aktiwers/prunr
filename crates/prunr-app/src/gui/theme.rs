@@ -74,7 +74,10 @@ pub fn backdrop_clicked(ctx: &egui::Context, window_response: &Option<egui::Inne
 
     let click_pos = ctx.input(|i| i.pointer.interact_pos());
     if let (Some(pos), Some(resp)) = (click_pos, window_response) {
-        !resp.response.rect.contains(pos)
+        // Another modal over this one took the click (its window, or a
+        // backdrop that holds the window): not this one's to close on.
+        let taken_above = ctx.layer_id_at(pos).is_some_and(|layer| layer.order >= egui::Order::Middle && layer != resp.response.layer_id);
+        !resp.response.rect.contains(pos) && !taken_above
     } else {
         false
     }
