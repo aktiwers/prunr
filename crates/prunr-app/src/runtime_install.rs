@@ -54,9 +54,12 @@ impl RuntimeId {
     /// DLL without `openvino.dll` (Python loads that from the separate
     /// `openvino` package), so the provider never registers and every
     /// session would run on the CPU, where DirectML runs the same iGPU.
-    /// CUDA and MIGraphX are offered where DirectML is not and their
-    /// runtimes have a wheel: Linux on x86-64.
-    pub const OFFERED: &'static [RuntimeId] = if cfg!(windows) {
+    /// CUDA is offered on Windows too: DirectML's last build (1.24.4)
+    /// refuses or breaks LaMa, Big-LaMa, DDColor and Nomos2 on an RTX 3060
+    /// that CUDA runs. MIGraphX has a Linux wheel only.
+    pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
+        &[Self::Cuda]
+    } else if cfg!(windows) {
         &[]
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         &[Self::OpenVino, Self::Cuda, Self::MiGraphX]
@@ -213,7 +216,7 @@ pub fn nvidia_libraries_dir() -> Option<PathBuf> {
 }
 
 pub fn nvidia_libraries_installed() -> bool {
-    nvidia_libraries_dir().is_some_and(|d| d.join("libcudnn.so.9").is_file())
+    nvidia_libraries_dir().is_some_and(|d| d.join(prunr_core::ort_runtime::CUDNN_LIBRARY).is_file())
 }
 
 /// What one install fetches: a runtime, or the NVIDIA libraries the CUDA
@@ -658,11 +661,13 @@ mod tests {
         assert!(!staging.exists());
     }
 
-    /// Windows offers no download (DirectML is built in, OpenVINO's wheel
+    /// Windows offers CUDA alone (DirectML is built in, OpenVINO's wheel
     /// there lacks openvino.dll); CUDA only where its wheel exists.
     #[test]
     fn each_platform_offers_the_runtimes_it_has_a_wheel_for() {
-        let expected: &[RuntimeId] = if cfg!(windows) {
+        let expected: &[RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
+            &[RuntimeId::Cuda]
+        } else if cfg!(windows) {
             &[]
         } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             &[RuntimeId::OpenVino, RuntimeId::Cuda, RuntimeId::MiGraphX]

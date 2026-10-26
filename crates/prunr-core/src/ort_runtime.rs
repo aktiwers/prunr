@@ -395,16 +395,41 @@ pub fn intel_gpu_file() -> Option<PathBuf> {
 pub const NVIDIA_LIBS_DIR: &str = "nvidia";
 
 /// The NVIDIA libraries the CUDA provider links, in the order each one's
-/// own links are met. The rest (cuDNN's engines, NVRTC) load later, from
-/// beside these: NVIDIA builds them with `$ORIGIN` as their search path.
-const NVIDIA_LINKED: [&str; 6] = [
+/// own links are met. On Linux the rest (cuDNN's engines, NVRTC) load
+/// later, from beside these: NVIDIA builds them with `$ORIGIN` as their
+/// search path. Windows has no such path, so cuDNN's parts and NVRTC load
+/// here too, in the order ONNX Runtime's own Python package loads them
+/// (`preload_dlls`), each with its folder searched for what it needs.
+#[cfg(not(windows))]
+const NVIDIA_LINKED: &[&str] = &[
     "libcudart.so.12",
     "libcublasLt.so.12",
     "libcublas.so.12",
     "libcurand.so.10",
     "libcufft.so.11",
-    "libcudnn.so.9",
+    CUDNN_LIBRARY,
 ];
+#[cfg(windows)]
+const NVIDIA_LINKED: &[&str] = &[
+    "cublasLt64_12.dll",
+    "cublas64_12.dll",
+    "cufft64_11.dll",
+    "cudart64_12.dll",
+    "curand64_10.dll",
+    "nvrtc64_120_0.dll",
+    "nvrtc-builtins64_129.dll",
+    "cudnn_engines_runtime_compiled64_9.dll",
+    "cudnn_engines_precompiled64_9.dll",
+    "cudnn_heuristic64_9.dll",
+    "cudnn_ops64_9.dll",
+    "cudnn_adv64_9.dll",
+    "cudnn_graph64_9.dll",
+    CUDNN_LIBRARY,
+];
+
+/// cuDNN's main library: the downloaded NVIDIA libraries are whole when
+/// it is there.
+pub const CUDNN_LIBRARY: &str = if cfg!(windows) { "cudnn64_9.dll" } else { "libcudnn.so.9" };
 
 /// Load the NVIDIA libraries beside the loaded runtime, when there are
 /// any, so the CUDA provider finds them: it links them by name and has no
@@ -418,13 +443,29 @@ pub fn preload_nvidia_libraries() {
             return;
         }
         let started = std::time::Instant::now();
-        for name in NVIDIA_LINKED {
-            if let Err(e) = load_global(&dir.join(name)) {
+        let present = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok());
+        for name in nvidia_load_order(NVIDIA_LINKED, present, cfg!(windows)) {
+            if let Err(e) = load_global(&dir.join(&name)) {
                 tracing::warn!(name, %e, "NVIDIA library did not load");
             }
         }
         tracing::info!(dir = %dir.display(), elapsed_ms = started.elapsed().as_millis() as u64, "NVIDIA libraries loaded");
     });
+}
+
+/// The NVIDIA libraries to load: `linked` in its order, then with
+/// `every_dll` each other DLL `present`. cuDNN loads parts of itself by
+/// name as it needs them (its convolution engine `cudnn_cnn64_9.dll`
+/// among them, which ONNX Runtime's own list leaves out), and Windows
+/// finds by name only what is loaded already or on its search path:
+/// without it a convolution fails with CUDNN_BACKEND_API_FAILED.
+fn nvidia_load_order(linked: &[&str], present: impl IntoIterator<Item = String>, every_dll: bool) -> Vec<String> {
+    let mut rest: Vec<String> = present
+        .into_iter()
+        .filter(|name| every_dll && name.to_ascii_lowercase().ends_with(".dll") && !linked.contains(&name.as_str()))
+        .collect();
+    rest.sort();
+    linked.iter().map(|name| name.to_string()).chain(rest).collect()
 }
 
 /// Load `path` for the whole process and keep it loaded.
@@ -438,10 +479,19 @@ fn load_global(path: &Path) -> Result<(), String> {
         std::mem::forget(lib);
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library, LOAD_WITH_ALTERED_SEARCH_PATH};
+        // SAFETY: as above. The flag has Windows look in `path`'s own
+        // folder for what it links, beside the system folders.
+        let lib = unsafe { Library::load_with_flags(path, LOAD_WITH_ALTERED_SEARCH_PATH) }.map_err(|e| e.to_string())?;
+        std::mem::forget(lib);
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
-        Err("NVIDIA libraries are preloaded on Linux only".to_string())
+        Err("NVIDIA libraries are preloaded on Linux and Windows only".to_string())
     }
 }
 
@@ -587,6 +637,17 @@ mod tests {
         assert!(source[init..built].contains(".with_telemetry(false)"), "telemetry must be switched off where the environment is built");
     }
     use super::*;
+
+    /// On Windows every DLL in the NVIDIA folder loads, the linked ones
+    /// first in their order: cuDNN's convolution engine was not in the
+    /// list, and BiRefNet's first convolution failed on CUDA without it.
+    #[test]
+    fn every_nvidia_dll_loads_on_windows_the_linked_ones_first() {
+        let present = ["cudnn64_9.dll", "cudnn_cnn64_9.dll", "cudart64_12.dll", "cudnn_ext64_9.dll", "readme.txt"].map(String::from);
+        let linked = ["cudart64_12.dll", "cudnn64_9.dll"];
+        assert_eq!(super::nvidia_load_order(&linked, present.clone(), true), ["cudart64_12.dll", "cudnn64_9.dll", "cudnn_cnn64_9.dll", "cudnn_ext64_9.dll"]);
+        assert_eq!(super::nvidia_load_order(&linked, present, false), ["cudart64_12.dll", "cudnn64_9.dll"], "elsewhere the linked ones only");
+    }
 
     /// The variables under which ONNX Runtime keeps quiet by itself: CI
     /// runners and its own tests.
