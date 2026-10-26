@@ -421,6 +421,8 @@ Edge planes are kept per scale: Bold, for the dual-scale style, and the newest o
 
 Every session in the workspace starts from `ort_runtime::session_builder()`, which initialises first; `clippy.toml` disallows the raw `Session::builder` and `ort::init_from`. Under `load-dynamic` a builder on an unloaded runtime hangs instead of failing, so the one entry point turns a missing runtime into an error. The app exits at startup if the runtime cannot load; `prunr --doctor` runs before that check.
 
+ONNX Runtime 1.29+ on Linux and macOS starts Microsoft's usage-report uploader as it loads; its API switch (`with_telemetry(false)`) leaves it running. Only `ORT_DISABLE_TELEMETRY=1`, read once as the library loads, keeps it from starting, so every program that loads a runtime sets it first thing in `main` (the app, which its workers inherit, and xtask; cargo sets it for tests), and `ort_runtime` refuses to load without it. Windows' official build reports through Windows' event tracing instead: the API switch turns it off, though Windows' own diagnostics can switch it back on.
+
 | Platform | Shipped runtime | GPU route |
 |---|---|---|
 | Linux | CPU-only ORT 1.30.0 (PyPI wheel) | OpenVINO, CUDA and MIGraphX builds via Settings → Hardware (Runtime Store); the CUDA build brings its own CUDA 12 and cuDNN 9 libraries |

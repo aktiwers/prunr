@@ -131,7 +131,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
-- **ONNX Runtime's usage reporting is off.** The library Prunr runs models with had its telemetry switched on, which since ONNX Runtime 1.29 means uploads to Microsoft over the network on Linux and macOS. It is now off. On a Mac its upload thread could also crash Prunr as it quit.
+- **Prunr sends nothing to Microsoft.** Since 1.29, ONNX Runtime (the library Prunr runs models with) starts an uploader on Linux and macOS that reports to Microsoft: a device ID it saves, the OS, processor, memory and network type, and which models ran and how fast. Its usual off switch leaves that running, so Prunr now stops it before the library loads and will not load the library otherwise. No released version shipped it. On a Mac the uploader could also crash Prunr as it quit.
 - Sliders' value boxes keep their width as the number changes, so the strip no longer jumps while you drag; the Mask panel opened from its strip no longer grows to the right each time a value widens; flyouts stay more opaque (70 %) while a slider is held.
 - A model whose half-precision copy failed on the accelerator (U2Net on OpenVINO) never tried the accelerator again, not even with its full-precision weights, and ran on the processor from then on. It now falls back to the full-precision weights on the same accelerator, and only the copy that failed is skipped next time.
 - Settings › Hardware said "none detected" for the graphics on every Windows machine. It now finds the graphics card and the built-in graphics, and tells a virtual machine's or remote desktop's stand-in from a real one.
