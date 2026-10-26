@@ -219,7 +219,7 @@ fn render_item_row(
         // can land while egui idles, leaving the old image up until the
         // next mouse event.
         egui_ctx.request_repaint();
-        egui_ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        egui_ctx.request_repaint_after(theme::ANIM_FRAME);
     }
 
     paint_insertion_line(ui, &item_response, item_rect);
@@ -231,8 +231,8 @@ fn render_item_row(
 }
 
 /// Request on demand, show a spinner while pending, then fade the texture in.
-/// Returns `true` if anything painted here is still animating and the frame
-/// needs another repaint.
+/// Returns `true` while a thumbnail is on its way; egui draws the fade's
+/// frames itself.
 fn render_thumbnail_layer(
     ui: &mut egui::Ui,
     app: &mut PrunrApp,
@@ -260,7 +260,7 @@ fn render_thumbnail_layer(
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
     // A bg-image texture still building off-thread falls back to the bg colour.
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
-    needs_repaint || (has_thumb && fade < 1.0)
+    needs_repaint
 }
 
 /// True when the item needs a thumbnail but hasn't asked for one yet.

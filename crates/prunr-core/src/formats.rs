@@ -13,8 +13,13 @@ use crate::types::{CoreError, LARGE_IMAGE_LIMIT};
 /// so a transparent pixel's colour does not bleed into its neighbours;
 /// a fully opaque one skips that, which changes nothing but the time.
 fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u32, filter: ResizeFilter) -> Vec<u8> {
-    let opaque = pixel == PixelType::U8x4 && src.chunks_exact(4).all(|p| p[3] == u8::MAX);
+    let opaque = pixel == PixelType::U8x4 && is_opaque(src);
     resize_raw_with(src, w, h, pixel, (dst_w, dst_h), filter, !opaque)
+}
+
+/// Every pixel of interleaved RGBA `rgba` fully opaque.
+pub(crate) fn is_opaque(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).all(|p| p[3] == u8::MAX)
 }
 
 fn resize_raw_with(src: &[u8], w: u32, h: u32, pixel: PixelType, (dst_w, dst_h): (u32, u32), filter: ResizeFilter, weigh_alpha: bool) -> Vec<u8> {
@@ -434,7 +439,7 @@ fn build_bg_layer(
     // background effect always is): no resample, crop or copy. It goes
     // opaque, as the resampled path's RGB does.
     if fit != BgImageFit::Tile && (bg.width(), bg.height()) == (dst_w, dst_h) {
-        if let Some(rgba) = bg.as_rgba8().filter(|rgba| rgba.pixels().all(|p| p[3] == u8::MAX)) {
+        if let Some(rgba) = bg.as_rgba8().filter(|rgba| is_opaque(rgba)) {
             return std::borrow::Cow::Borrowed(rgba);
         }
         let mut rgba = bg.to_rgba8();

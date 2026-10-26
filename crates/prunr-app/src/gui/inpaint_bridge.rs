@@ -98,7 +98,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
     loop {
         let received = match look_at_worker_every(&sub_state) {
             Some(wait) => msg_rx.recv_timeout(wait),
-            None => msg_rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            None => msg_rx.recv().map_err(mpsc::RecvTimeoutError::from),
         };
         let first = match received {
             Ok(msg) => Some(msg),

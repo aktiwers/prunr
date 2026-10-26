@@ -1269,7 +1269,6 @@ impl BatchItem {
         }
     }
 
-    /// Why the photo could not be decoded, when it could not.
     pub(crate) fn unreadable(&self) -> Option<&str> {
         self.failure.as_deref().filter(|_| self.decode_failed)
     }

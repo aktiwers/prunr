@@ -15,7 +15,7 @@ pub fn upscale_alpha_lanczos3(rgba: &RgbaImage, out_w: u32, out_h: u32) -> GrayI
 /// resample of a flat plane the output's size costs seconds on a large
 /// upscale and gives the same 255.
 pub(crate) fn take_input_alpha(out: &mut RgbaImage, input: &RgbaImage) {
-    if input.pixels().all(|p| p[3] == u8::MAX) {
+    if crate::formats::is_opaque(input) {
         out.pixels_mut().for_each(|p| p.0[3] = u8::MAX);
         return;
     }

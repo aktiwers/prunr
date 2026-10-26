@@ -31,7 +31,8 @@ mod shown_rule_tests;
 /// whether anything is happening.
 const BUSY_PILL_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How often the frame loop looks for a file dialog's answer.
+/// How often the frame loop looks for an answer from another thread whose
+/// wake-up an idle Wayland window can drop: a file dialog's, a download's.
 const DIALOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How often the frame loop wakes itself while async work is in flight.
@@ -226,10 +227,13 @@ impl PrunrApp {
         // Earlier runs' files go off the window's start: a crashed session
         // can leave gigabytes of undo states to delete. Neither touches
         // this process's own folders.
-        let _ = std::thread::Builder::new().name("startup-sweep".into()).spawn(|| {
+        let sweep = || {
             super::drag_export::cleanup_stale();
             super::history_disk::cleanup_stale();
-        });
+        };
+        if let Err(e) = std::thread::Builder::new().name("startup-sweep".into()).spawn(sweep) {
+            tracing::warn!(%e, "could not start the sweep of earlier runs' files; they stay until the next start");
+        }
 
         let (mut settings, settings_note) = Settings::load();
         // The probe runs on its own thread (`gui::run`); a GPU driver that
@@ -626,8 +630,8 @@ impl PrunrApp {
         self.dispatch_next_queued_run();
     }
 
-    /// Toolbar mirror for `handle_process_intent`: Process can run when
-    /// nothing refuses it.
+    /// Process can run when nothing refuses it (`process_refusal`, which
+    /// the toolbar reads for its tooltip too).
     pub fn can_process_intent(&self) -> bool {
         self.process_refusal().is_none()
     }

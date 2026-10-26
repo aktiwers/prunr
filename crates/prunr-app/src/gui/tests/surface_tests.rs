@@ -763,9 +763,7 @@ fn a_dialog_reopened_from_a_menu_stays_open() {
 fn a_run_in_flight_draws_thirty_frames_a_second() {
     use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
     for status in [BatchStatus::Done, BatchStatus::Processing] {
-        // egui takes the frame time off every wait it is asked for: at
-        // the harness's default quarter second, each would read as none.
-        let mut h = harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc));
+        let mut h = paced_harness();
         let photo = h.ctx.load_texture("photo", egui::ColorImage::filled([4, 4], egui::Color32::GRAY), Default::default());
         {
             let app = h.state_mut();
@@ -781,7 +779,7 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
         // runner, parallel tests) it lands at any time, over 10 s in. The
         // pace is what the frames return to after such a frame and hold:
         // one landing is made here, and only a failure waits out the budget.
-        let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        let delay = repaint_delay;
         let paced = |d: std::time::Duration| d >= std::time::Duration::from_millis(15);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let (mut streak, mut landed, mut unpaced) = (0, false, None);
@@ -806,41 +804,61 @@ fn a_run_in_flight_draws_thirty_frames_a_second() {
 /// same picture.
 #[test]
 fn an_unchanging_window_stops_drawing() {
-    for case in ["the empty window's tips with Animations off", "a photo that could not be opened", "the pointer left on a thumbnail"] {
-        let mut h = harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc));
-        match case {
-            "the empty window's tips with Animations off" => h.state_mut().settings.animations = false,
-            "a photo that could not be opened" => {
-                push_test_item(h.state_mut(), 1);
-                h.state_mut().batch.select_item(0);
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                while h.state().batch.items[0].unreadable().is_none() && std::time::Instant::now() < deadline {
-                    h.step();
+    type Setup = fn(&mut Harness<'_, PrunrApp>);
+    let cases: [(&str, Setup); 4] = [
+        ("the empty window's tips with Animations off", |h| h.state_mut().settings.animations = false),
+        ("a photo that could not be opened", |h| {
+            let item = push_test_item(h.state_mut(), 1);
+            item.land_decode(Err("The file was moved or deleted since it was opened. Open it again.".into()));
+            h.state_mut().batch.select_item(0);
+        }),
+        ("the pointer left on a thumbnail", |h| {
+            let app = h.state_mut();
+            super::fixtures::cut_out(push_test_item(app, 1), prunr_core::ModelKind::Silueta);
+            app.batch.select_item(0);
+            settle_until_shown(h);
+            let row = sidebar_row(h);
+            pointer_to(h, row);
+            // The rest is timed on the clock, not in frames.
+            std::thread::sleep(crate::gui::drag_export_state::HOVER_DWELL * 2);
+        }),
+        ("a download read by read with the Model Store closed", |h| {
+            h.state_mut().settings.animations = false;
+            let id = prunr_models::ModelId::LaMaFp32;
+            let dm = &mut h.state_mut().download_manager;
+            dm.begin_for_test(id);
+            let send = dm.sender_for_test();
+            std::thread::spawn(move || {
+                for bytes_so_far in 0..5_000 {
+                    send(crate::gui::download_manager::DownloadEvent::Progress { id, bytes_so_far, total: 5_000 });
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                assert!(h.state().batch.items[0].unreadable().is_some(), "an empty file does not decode");
-            }
-            _ => {
-                let app = h.state_mut();
-                super::fixtures::cut_out(push_test_item(app, 1), prunr_core::ModelKind::Silueta);
-                app.batch.select_item(0);
-                settle_until_shown(&mut h);
-                let row = sidebar_row(&h);
-                pointer_to(&mut h, row);
-                // The rest is timed on the clock, not in frames.
-                std::thread::sleep(crate::gui::drag_export_state::HOVER_DWELL * 2);
-            }
-        }
+            });
+        }),
+    ];
+    for (case, setup) in cases {
+        let mut h = paced_harness();
+        setup(&mut h);
         // A second for what ends by itself (a tooltip's delay), then a
         // tip's whole cycle and more; work landing off the UI thread asks
         // for the odd frame.
         h.run_steps(60);
-        let delay = |h: &Harness<'_, PrunrApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
         let at_once = (0..330).filter(|_| {
             h.step();
-            delay(&h) <= crate::gui::theme::ANIM_FRAME
+            repaint_delay(&h) <= crate::gui::theme::ANIM_FRAME
         }).count();
         assert!(at_once < 12, "{case}: {at_once} of 330 frames asked for the next one at an animation's pace; last asked by {:?}", h.ctx.repaint_causes());
     }
+}
+
+/// egui takes the frame time off every wait it is asked for: at the
+/// harness's default quarter second, each would read as none.
+fn paced_harness() -> Harness<'static, PrunrApp> {
+    harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc))
+}
+
+fn repaint_delay(h: &Harness<'_, PrunrApp>) -> std::time::Duration {
+    h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay
 }
 
 /// The middle of the first thumbnail in the batch list.
