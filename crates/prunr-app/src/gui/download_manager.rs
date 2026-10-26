@@ -60,6 +60,19 @@ struct Waking {
     repaint: Arc<OnceLock<egui::Context>>,
 }
 
+/// What a download's file reports as its checksum is checked: only the
+/// last file of a download says Verifying. A download in parts (Nomos2's
+/// thirty) or with a half-precision companion otherwise flips its card
+/// between the bar and "Verifying" at every file.
+fn verifying(tx: &Waking, id: ModelId, last: bool) -> impl Fn() {
+    let tx = tx.clone();
+    move || {
+        if last {
+            let _ = tx.send(DownloadEvent::Verifying { id });
+        }
+    }
+}
+
 impl Waking {
     fn send(&self, event: DownloadEvent) -> Result<(), mpsc::SendError<DownloadEvent>> {
         let wakes = !matches!(event, DownloadEvent::Progress { .. });
@@ -279,13 +292,7 @@ impl DownloadManager {
                     let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
                 }
             };
-            let on_verifying = {
-                let tx = tx.clone();
-                move || {
-                    let _ = tx.send(DownloadEvent::Verifying { id });
-                }
-            };
-            if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &on_verifying) {
+            if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &verifying(&tx, id, fp16.is_none())) {
                 let _ = tx.send(failure_event(id, e.message, &cancel));
                 return;
             }
@@ -300,7 +307,7 @@ impl DownloadManager {
                         });
                     }
                 };
-                if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &on_verifying) {
+                if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &verifying(&tx, id, true)) {
                     // fp16 companion failed: keep the main fp32 install
                     // and surface a non-fatal warning. Without the fp16
                     // file on disk the engine loads the fp32 weights.
@@ -337,7 +344,7 @@ impl DownloadManager {
                 return;
             }
             let mut bytes_done: u64 = 0;
-            for part in parts {
+            for (index, part) in parts.iter().enumerate() {
                 let dest = bundle_dir.join(part.filename);
                 if dest.is_file() {
                     bytes_done += part.size_bytes;
@@ -353,11 +360,7 @@ impl DownloadManager {
                         });
                     }
                 };
-                let on_verifying = {
-                    let tx = tx.clone();
-                    move || { let _ = tx.send(DownloadEvent::Verifying { id }); }
-                };
-                match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &on_verifying) {
+                match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &verifying(&tx, id, index + 1 == parts.len())) {
                     Ok(()) => { bytes_done += part.size_bytes; }
                     Err(e) => {
                         let _ = tx.send(failure_event(id, format!("{}: {}", part.key, e.message), &cancel));
@@ -662,6 +665,20 @@ mod tests {
         assert!(!ctx.has_requested_repaint(), "no read woke the window");
         assert!(dm.pump().is_empty(), "nothing for the window to act on");
         assert_eq!(dm.state(ModelId::LaMaFp32), DownloadState::InProgress { bytes_so_far: 100, total_bytes: 100 });
+    }
+
+    /// Only a download's last file says Verifying: the card of one in
+    /// parts kept flipping between its bar and "Verifying" at each part.
+    #[test]
+    fn only_the_last_file_says_verifying() {
+        let mut dm = DownloadManager::new();
+        dm.begin_for_test(ModelId::FourXNomos2RealPlksr);
+        for last in [false, false, true] {
+            super::verifying(&dm.progress_tx, ModelId::FourXNomos2RealPlksr, last)();
+            dm.pump();
+            let verifying = dm.state(ModelId::FourXNomos2RealPlksr) == DownloadState::Verifying;
+            assert_eq!(verifying, last, "a part that is not the last says nothing");
+        }
     }
 
     #[test]
