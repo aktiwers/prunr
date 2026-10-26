@@ -6,6 +6,7 @@
 //! The runs go through the same core entry points as the app, so a
 //! mismatch here is a mismatch a user sees.
 
+pub mod here;
 pub mod input;
 pub mod needs;
 pub mod report;
@@ -484,6 +485,21 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
         gpu: picture(gpu_output.filter(|_| on_gpu)),
     });
     (row, pictures)
+}
+
+/// `id`'s GPU side alone: one untimed run on `inputs`, its output judged
+/// on its own. `None` when no GPU provider would take the model, or its
+/// run needs more memory than is free.
+pub fn gpu_alone(id: ModelId, inputs: &Inputs) -> Option<Side> {
+    let family = Family::of(id)?;
+    let ladder = prunr_core::engine::gpu_ladder(id);
+    if gpu_passed_over(&ladder).is_some() {
+        return None;
+    }
+    memory::fits_now(id, first_tried(&ladder)?).ok()?;
+    let (mut side, output) = measure(family, id, inputs, false, 0, &mut |_| {});
+    judged(family, inputs, Some(&mut side), output.as_ref());
+    Some(side)
 }
 
 /// `side`'s score from its `output`; the values compared.

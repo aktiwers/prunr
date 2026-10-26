@@ -19,6 +19,7 @@ mod dispatch;
 mod export;
 pub(crate) mod import;
 mod installs;
+mod machine_test;
 mod preview;
 mod results;
 mod textures;
@@ -134,6 +135,9 @@ pub struct PrunrApp {
     told_gpu_failure: bool,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
+    /// Settings › Hardware › Test this computer, while it runs: a modal
+    /// over everything, since the test owns the machine.
+    pub(crate) machine_test: Option<super::machine_test::MachineTest>,
     /// Snapshot of `RuntimeId::is_installed()` to avoid syscalling per-frame
     /// while the Settings → Hardware tab is open. Refreshed on settings open,
     /// install completion, and uninstall.
@@ -442,6 +446,7 @@ impl PrunrApp {
             pending_first_toasts: Vec::new(),
             told_gpu_failure: false,
             runtime_install: None,
+            machine_test: None,
             hardware_install_cache: Default::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
@@ -692,7 +697,9 @@ impl PrunrApp {
     /// Every modal the app can show, by name, whether it is up, and how
     /// Escape closes it (`None`: Escape leaves it up). Topmost first:
     /// Escape closes the first one up that it can.
-    pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 10] = [
+    pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 11] = [
+        // Escape leaves it: a test takes minutes to start over.
+        ("machine_test", |a| a.machine_test.is_some(), None),
         ("discard_prompt", |a| a.pending_discard.is_some(), Some(|a| a.pending_discard = None)),
         ("save_preset", |a| a.save_preset.is_some(), Some(|a| a.save_preset = None)),
         ("license", |a| a.pending_license_request.is_some(), Some(|a| a.pending_license_request = None)),
@@ -1198,7 +1205,10 @@ impl eframe::App for PrunrApp {
         super::macos_quit::set_unsaved(!self.close_anyway && self.batch.unsaved_count() > 0);
         self.poll_worker_results(ctx);
         self.handle_drag_and_drop(ctx);
-        if !self.handle_hotkey_capture(ctx) {
+        self.pump_machine_test(ctx);
+        self.pump_download_checks(ctx);
+        // While a test runs it owns the machine: no shortcut starts work.
+        if self.machine_test.is_none() && !self.handle_hotkey_capture(ctx) {
             self.handle_keyboard_shortcuts(ctx);
         }
         super::automation::pump(self, ctx);
@@ -1423,6 +1433,12 @@ impl PrunrApp {
             }
         }
         self.render_discard_prompt(ctx);
+        if let Some(test) = &self.machine_test {
+            let accelerator = self.settings.active_backend.as_str();
+            if super::views::machine_test::render(ctx, test.step(), accelerator) {
+                self.cancel_machine_test();
+            }
+        }
         // Toasts — rendered last as foreground overlay.
         self.toasts.show(ctx);
     }
@@ -1706,6 +1722,7 @@ mod field_list_tests {
             pending_first_toasts: _,
             told_gpu_failure: _,
             runtime_install: _,
+            machine_test: _,
             hardware_install_cache: _,
             runtime_prompt: _,
             runtime_prompt_evaluated: _,

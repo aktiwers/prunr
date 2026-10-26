@@ -316,6 +316,9 @@ impl PrunrApp {
                         self.toasts.info(note);
                     }
                     self.refresh_install_cache();
+                    if self.download_needs_check(id) {
+                        self.download_manager.queue_check(id);
+                    }
                 }
                 DownloadEvent::Failed { id, error } => {
                     let name = prunr_models::display_name(id);

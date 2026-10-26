@@ -95,6 +95,8 @@ fn the_hardware_page_names_every_runtime_control() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: None,
+            testable: Some("DirectML".into()),
+            busy: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
@@ -105,6 +107,49 @@ fn the_hardware_page_names_every_runtime_control() {
         }
         let choice_shown = present.iter().any(|n| n == "Built in");
         assert_eq!(choice_shown, shape == "both installed", "{shape}: the runtime choice needs two to load");
+    }
+}
+
+/// Test this computer: offered with an accelerator, Test before a test
+/// and Test again with Forget after one; without an accelerator (or on
+/// CPU only) the row is not there. Every control is named.
+#[test]
+fn the_computer_test_is_offered_with_an_accelerator() {
+    use crate::gui::hardware_cache::{HardwareInstallCache, TestSummary};
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    let mut tested = HardwareInstallCache::default();
+    tested.test = TestSummary { tested: Some(1), there: 9, off: 3 };
+    let mut cancelled = HardwareInstallCache::default();
+    cancelled.test = TestSummary { tested: None, there: 2, off: 0 };
+    let shapes = [
+        ("never tested", HardwareInstallCache::default(), Some("CUDA"), vec!["Test this computer"], vec!["Forget the test"]),
+        ("tested", tested, Some("CUDA"), vec!["Test this computer", "Forget the test"], vec![]),
+        ("cancelled after two models", cancelled, Some("CUDA"), vec!["Test this computer", "Forget the test"], vec![]),
+        ("no accelerator", tested, None, vec![], vec!["Test this computer", "Forget the test"]),
+    ];
+    for (shape, installs, accelerator, present_names, absent_names) in shapes {
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing: None,
+            active_provider: accelerator.unwrap_or("CPU").into(),
+            sd_margin_mb: 2048,
+            sd_cpu_only: false,
+            gpu_failure: None,
+            testable: accelerator.map(str::to_string),
+            busy: false,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert_all_controls_named(&harness, shape);
+        let present = names(&harness);
+        for name in present_names {
+            assert!(present.iter().any(|n| n == name), "{shape}: {name} missing: {present:?}");
+        }
+        for name in absent_names {
+            assert!(!present.iter().any(|n| n == name), "{shape}: {name} shown: {present:?}");
+        }
     }
 }
 
@@ -143,6 +188,8 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
             sd_margin_mb: 2048,
             sd_cpu_only: false,
             gpu_failure: failure,
+            testable: None,
+            busy: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);

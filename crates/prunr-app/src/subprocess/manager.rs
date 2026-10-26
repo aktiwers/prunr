@@ -530,7 +530,7 @@ impl Drop for SubprocessManager {
 /// The binary to run a worker from: this process's own. On Linux an update
 /// can replace the file while the app runs (the path then reads
 /// "… (deleted)"); /proc/self/exe still reaches the binary running.
-fn worker_exe() -> Result<std::path::PathBuf, String> {
+pub(crate) fn worker_exe() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
         let own = std::path::PathBuf::from("/proc/self/exe");

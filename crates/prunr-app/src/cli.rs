@@ -300,6 +300,16 @@ pub struct BenchArgs {
     /// own process by `--needs`.
     #[arg(long, hide = true, value_name = "MODEL:SIDE")]
     pub needs_one: Option<String>,
+
+    /// Settings › Hardware › Test this computer: place each installed
+    /// model on this machine, its progress on stdout for the app.
+    #[arg(long, hide = true)]
+    pub here: bool,
+
+    /// After a download onto an accelerator no one measured the model on:
+    /// check its result there, run alone.
+    #[arg(long, hide = true, value_name = "MODEL")]
+    pub check: Option<String>,
 }
 
 /// Upscale model selection.
@@ -1417,6 +1427,18 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     use prunr_app::bench::{self, report};
     if let Some(one) = &args.needs_one {
         return run_needs_one(one, args.image.as_deref());
+    }
+    if args.here {
+        bench::here::run(&mut |told| println!("{}", told.line()));
+        return 0;
+    }
+    if let Some(name) = &args.check {
+        let Some(id) = bench::model_named(name) else {
+            eprintln!("error: no model named {name}");
+            return 1;
+        };
+        bench::here::check(id, &mut |told| println!("{}", told.line()));
+        return 0;
     }
     let models = match bench::select(&args.models, args.heavy, prunr_models::is_available) {
         Ok(models) => models,

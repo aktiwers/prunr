@@ -80,6 +80,11 @@ pub(crate) struct HardwareSectionContext {
     pub sd_cpu_only: bool,
     /// Why the loaded runtime's GPU provider does not run, when it does not.
     pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
+    /// The accelerator a test of this computer measures; `None` without
+    /// one, or with Settings › Processor on CPU only.
+    pub testable: Option<String>,
+    /// Work is under way: a test waits for it.
+    pub busy: bool,
 }
 
 /// View-layer intent the Hardware page returns so platform side effects
@@ -94,6 +99,8 @@ pub(crate) enum HardwareSectionIntent {
     GetNvidiaLibraries,
     ClearCompiledCache,
     ForgetGpuFailures,
+    TestThisComputer,
+    ForgetTest,
 }
 
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -190,6 +197,8 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
         HardwareSectionIntent::GetNvidiaLibraries => app.request_install(InstallTarget::NvidiaLibraries),
         HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
         HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(),
+        HardwareSectionIntent::TestThisComputer => app.start_machine_test(ctx),
+        HardwareSectionIntent::ForgetTest => app.forget_machine_test(),
     }
 }
 
@@ -214,6 +223,8 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
                 sd_cpu_only: app.settings.cpu_only(),
                 gpu_failure: prunr_core::engine::gpu_start_failure(),
+                testable: app.machine_test_accelerator(),
+                busy: crate::gui::automation::state::busy(app),
             };
             render_page_hardware(ui, &hw_ctx)
         }
@@ -551,6 +562,9 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                 },
             );
         }
+        if let Some(accelerator) = &ctx.testable {
+            test_row(rows, ctx, accelerator, &mut intent);
+        }
         rows.row(
             "Compiled-model cache",
             "Models are compiled for your graphics hardware the first time they run. Clear it if a compiled file is corrupt or to free disk space.",
@@ -571,6 +585,32 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         );
     });
     intent
+}
+
+/// Test this computer: what the last test found, and Test or Forget.
+fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, accelerator: &str, intent: &mut Option<HardwareSectionIntent>) {
+    let summary = ctx.installs.test;
+    let found = || format!(
+        "{} with {accelerator}, {} without it.",
+        super::fmt::count(summary.there, "model", "models"),
+        super::fmt::count(summary.off, "model", "models"),
+    );
+    let status = match summary.tested {
+        _ if ctx.busy => "Waits until the current work is done.".to_string(),
+        Some(when) => format!("Tested {}: {}", super::fmt::days_ago(when, crate::bench::here::now_secs()), found()),
+        None if summary.any() => format!("Partly tested: {}", found()),
+        None => format!("Runs each installed model with {accelerator} and without it, and keeps the faster way that gives the same result. Takes a few minutes; close other busy apps first."),
+    };
+    rows.row("Test this computer", &status, |ui| {
+        if summary.any() && super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget the test").clicked() {
+            *intent = Some(HardwareSectionIntent::ForgetTest);
+        }
+        let label = if summary.any() { "Test again" } else { "Test" };
+        let resp = ui.add_enabled_ui(!ctx.busy, |ui| button(ui, ButtonKind::Secondary, label)).inner;
+        if super::chip::named(resp, "Test this computer").clicked() {
+            *intent = Some(HardwareSectionIntent::TestThisComputer);
+        }
+    });
 }
 
 /// One runtime: its state, and Install, Uninstall or Cancel. One install
