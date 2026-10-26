@@ -197,6 +197,7 @@ pub const UNVISITED_MODALS: &[(&str, &str)] = &[
     ("runtime_prompt", "opens once at first launch, from the hardware probe"),
     ("file_dialog", "a native window, not drawn by the app"),
     ("discard_prompt", "opens on a window close or a removal while work is unsaved; the walk closes no window and its image holds no unsaved work"),
+    ("machine_test", "opens while Test this computer runs, a process of its own that runs every installed model for minutes"),
 ];
 
 fn effects() -> Vec<Variant> {

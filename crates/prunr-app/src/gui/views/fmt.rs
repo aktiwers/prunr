@@ -8,6 +8,16 @@ pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// "today", "yesterday", "3 days ago": how long before `now` the time
+/// `then` was, both in seconds since 1970.
+pub fn days_ago(then: u64, now: u64) -> String {
+    match now.saturating_sub(then) / 86_400 {
+        0 => "today".to_string(),
+        1 => "yesterday".to_string(),
+        days => format!("{days} days ago"),
+    }
+}
+
 /// "Off" below `off_below`, otherwise `f(v)`.
 pub fn off_or(v: f32, off_below: f32, f: impl FnOnce(f32) -> String) -> String {
     if v.abs() < off_below { "Off".to_string() } else { f(v) }
@@ -55,6 +65,15 @@ fn signed(v: f32, decimals: usize, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn days_ago_reads_today_yesterday_then_a_count() {
+        let now = 1_000_000_000;
+        assert_eq!(days_ago(now - 60, now), "today");
+        assert_eq!(days_ago(now - 86_400, now), "yesterday");
+        assert_eq!(days_ago(now - 3 * 86_400 - 5, now), "3 days ago");
+        assert_eq!(days_ago(now + 60, now), "today", "a clock set back is not the future");
+    }
 
     #[test]
     fn count_says_one_image_and_two_images() {

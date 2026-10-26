@@ -272,7 +272,7 @@ fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Wh
     if compiles_per_shape(model, ep) {
         return Some(COMPILES_PER_SHAPE);
     }
-    match prunr_models::place(model, ep.as_str(), openvino_on_gpu(), remeasuring()) {
+    match place_here(model, ep.as_str(), openvino_on_gpu(), remeasuring()) {
         place @ prunr_models::Place::Cpu(why) if place.kept_off(remeasuring()) => Some(why),
         _ => None,
     }
@@ -282,10 +282,38 @@ fn remeasuring() -> bool {
     REMEASURE.get().is_some()
 }
 
+/// Where `model` runs on this machine: the registry's places, each one a
+/// test measured here (`ep_compat::measured`) standing in for it. Never
+/// over one the registry knows fails: it may hang or take the machine's
+/// memory, and the registry may have learned it after the test.
+pub fn places_here(model: prunr_models::ModelId) -> prunr_models::Places {
+    with_measured(prunr_models::registry_places(model), |column| crate::ep_compat::measured(model, column))
+}
+
+fn with_measured(
+    mut places: prunr_models::Places,
+    measured: impl Fn(prunr_models::Column) -> Option<crate::ep_compat::Measured>,
+) -> prunr_models::Places {
+    use prunr_models::{Place, Why};
+    for column in prunr_models::Column::ALL {
+        if matches!(places.get(column), Place::Cpu(Why::Fails(_))) {
+            continue;
+        }
+        if let Some(found) = measured(column) {
+            places.set(column, found.kind.place());
+        }
+    }
+    places
+}
+
+fn place_here(model: prunr_models::ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> prunr_models::Place {
+    prunr_models::place_in(&places_here(model), model, provider, intel_gpu, remeasuring)
+}
+
 /// The table's column a session of `model` on `provider` reads here
-/// (`prunr_models::column_for`).
+/// (`prunr_models::column_in`).
 pub fn column_for(model: prunr_models::ModelId, provider: &str) -> Option<prunr_models::Column> {
-    prunr_models::column_for(model, provider, openvino_on_gpu(), remeasuring())
+    prunr_models::column_in(&places_here(model), model, provider, openvino_on_gpu(), remeasuring())
 }
 
 /// Whether OpenVINO runs `model` on the Intel graphics here.
@@ -303,9 +331,9 @@ pub fn model_on_host_cpu(model: prunr_models::ModelId, provider: &str) -> bool {
 }
 
 fn on_host_cpu_at(model: prunr_models::ModelId, provider: &str, intel_gpu: bool) -> bool {
-    let Some(column) = prunr_models::column_for(model, provider, intel_gpu, false) else { return true };
-    column == prunr_models::Column::OpenVino
-        || prunr_models::place(model, provider, intel_gpu, false).kept_off(false)
+    let places = places_here(model);
+    let Some(column) = prunr_models::column_in(&places, model, provider, intel_gpu, false) else { return true };
+    column == prunr_models::Column::OpenVino || places.get(column).kept_off(false)
 }
 
 /// A session of `id` on the first accelerator that takes it (the
@@ -1220,7 +1248,7 @@ pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
 pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
         Some(&ep) => gpu_skip(model, ep).is_none(),
-        None => !prunr_models::place(model, provider, openvino_on_gpu(), false).kept_off(false),
+        None => !place_here(model, provider, openvino_on_gpu(), false).kept_off(false),
     }
 }
 
@@ -1534,6 +1562,25 @@ mod tests {
             assert_eq!(matches!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX), Some(Skip::KeptOff(_))), kept, "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
+    }
+
+    /// A place a test measured here stands in for the registry's; one the
+    /// registry knows fails is never measured over. A measured failure
+    /// stays skipped while places are measured again, the rest are tried.
+    #[test]
+    fn a_place_measured_here_stands_in_for_the_registrys() {
+        use crate::ep_compat::{Measured, PlaceKind, MEASURED_HERE};
+        use prunr_models::{Column, Place, Places, Why};
+        let registry = Places { openvino: Place::Cpu(Why::Fails("hangs")), cuda: Place::There("2x"), ..Places::UNMEASURED };
+        let slower = |column| (column != Column::CoreMl).then(|| Measured { kind: PlaceKind::Slower, text: "0.8x".into() });
+        let here = with_measured(registry, slower);
+        assert_eq!(here.cuda, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured over the registry's place");
+        assert_eq!(here.directml, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured where the registry has none");
+        assert_eq!(here.coreml, Place::Unmeasured, "not measured: the registry's");
+        assert_eq!(here.openvino, Place::Cpu(Why::Fails("hangs")), "never over a known failure");
+        assert!(here.cuda.kept_off(false) && !here.cuda.kept_off(true), "tried again when measuring");
+        let failed = with_measured(Places::UNMEASURED, |_| Some(Measured { kind: PlaceKind::Fails, text: "crashed".into() }));
+        assert!(failed.cuda.kept_off(true), "a measured failure stays off");
     }
 
     /// With Intel graphics on, OpenVINO engines are sized like a GPU's;

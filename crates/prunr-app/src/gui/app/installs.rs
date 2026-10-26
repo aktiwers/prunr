@@ -59,12 +59,13 @@ impl PrunrApp {
         self.toasts.info("Models that failed on the graphics card will try it again");
     }
 
-    /// Run `remove` on a worker; its toast text lands through
-    /// `bg_io.removed_rx`, which reads the installed set again.
-    fn off_thread(&self, ctx: &egui::Context, remove: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    /// Run `change` (a removal, or a write to what is installed) on a
+    /// worker; its toast text lands through `bg_io.removed_rx`, which reads
+    /// the installed set again.
+    pub(super) fn off_thread(&self, ctx: &egui::Context, change: impl FnOnce() -> Result<String, String> + Send + 'static) {
         let (done, ctx) = (self.batch.bg_io.removed_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = done.send(remove());
+            let _ = done.send(change());
             ctx.request_repaint();
         });
     }

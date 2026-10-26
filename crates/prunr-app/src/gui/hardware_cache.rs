@@ -33,6 +33,40 @@ pub(crate) struct HardwareInstallCache {
     registry: u128,
     /// Bytes the downloaded models take, multi-part bundles included.
     pub models_on_disk: u64,
+    /// What the last test of this computer found (Settings › Hardware).
+    pub test: TestSummary,
+}
+
+/// What the last test of this computer found, for the places this
+/// process reads (`engine::column_for`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TestSummary {
+    /// When it finished, in seconds since 1970; `None`: never, or reset.
+    pub tested: Option<u64>,
+    /// Models it placed on the accelerator.
+    pub there: usize,
+    /// Models it left on the CPU.
+    pub off: usize,
+}
+
+impl TestSummary {
+    /// Some place is measured here: a test ran, or one was cancelled after
+    /// its first models.
+    pub fn any(&self) -> bool {
+        self.tested.is_some() || self.there + self.off > 0
+    }
+
+    pub fn read() -> Self {
+        use prunr_core::ep_compat::PlaceKind;
+        prunr_core::ep_compat::refresh();
+        let (tested, places) = prunr_core::ep_compat::measured_here();
+        places.into_iter()
+            .filter(|(model, column, _)| prunr_core::engine::column_for(*model, column.provider()) == Some(*column))
+            .fold(Self { tested, ..Self::default() }, |sum, (.., place)| match place.kind {
+                PlaceKind::There => Self { there: sum.there + 1, ..sum },
+                _ => Self { off: sum.off + 1, ..sum },
+            })
+    }
 }
 
 /// Bytes the downloaded models take in `dir`, multi-part bundles included.
@@ -76,6 +110,7 @@ impl HardwareInstallCache {
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
             registry: registry_bits(),
             models_on_disk: prunr_models::on_demand_dir().map_or(0, |dir| disk_usage_in(&dir)),
+            test: TestSummary::read(),
         }
     }
 
@@ -105,6 +140,7 @@ impl HardwareInstallCache {
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
             registry: u128::MAX,
             models_on_disk: 0,
+            test: TestSummary::default(),
         }
     }
 

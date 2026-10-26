@@ -1,9 +1,12 @@
-//! Persistent EP × model compatibility cache.
+//! What this machine learned about each model on each accelerator: the
+//! loads that failed, and where Settings › Hardware › Test this computer
+//! found each model runs best.
 //!
 //! `is_available()` only says the EP is compiled in, not that it can run
 //! a given model (OpenVINO rejects Silueta's graph for cycles), so failed
 //! pairs are recorded and skipped instead of paying the failed load
-//! (~5 s for OpenVINO+Silueta) on every cold start.
+//! (~5 s for OpenVINO+Silueta) on every cold start. A test's places stand
+//! in for the registry's (`engine::places_here`).
 //!
 //! Cache location: `<data>/prunr/ep_compat.json`.
 //! Scoped to what a failure says something about: the loaded runtime
@@ -68,11 +71,59 @@ struct CacheFile {
     // The on-disk key is named for what the scope once was: the app version.
     #[serde(rename = "version")]
     scope: String,
-    failures: HashMap<String, String>,
+    #[serde(flatten)]
+    learned: Learned,
 }
 
-/// What the file holds for one scope: each failing pair's key and error.
+/// Each failing pair's key and error.
 type Failures = HashMap<String, String>;
+
+/// What the file holds for one scope.
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+struct Learned {
+    failures: Failures,
+    /// Each place a test measured, by `measured_key`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    measured: HashMap<String, Measured>,
+    /// When the last test finished, in seconds since 1970.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tested: Option<u64>,
+}
+
+/// Where a test found a model runs on one accelerator, as the registry's
+/// `Place` says it, and the measurement behind it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Measured {
+    pub kind: PlaceKind,
+    pub text: String,
+}
+
+/// `Place::There`, or the `Why` of `Place::Cpu`, by name.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceKind {
+    There,
+    Fails,
+    Differs,
+    Slower,
+    NoGain,
+}
+
+/// The reason a place measured here gives, wherever a `Place` is shown.
+pub const MEASURED_HERE: &str = "measured on this computer (Settings › Hardware › Test this computer)";
+
+impl PlaceKind {
+    pub fn place(self) -> prunr_models::Place {
+        use prunr_models::{Place, Why};
+        match self {
+            Self::There => Place::There(MEASURED_HERE),
+            Self::Fails => Place::Cpu(Why::Fails(MEASURED_HERE)),
+            Self::Differs => Place::Cpu(Why::Differs(MEASURED_HERE)),
+            Self::Slower => Place::Cpu(Why::Slower(MEASURED_HERE)),
+            Self::NoGain => Place::Cpu(Why::NoGain(MEASURED_HERE)),
+        }
+    }
+}
 
 fn cache_path() -> Option<PathBuf> {
     #[cfg(test)]
@@ -120,10 +171,16 @@ fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &
     format!("{ep}{device}::{model:?}{copy}@{files}")
 }
 
-/// The failures as last read or written, and the file's stamp then.
+/// `"{column}::{model}@{files}"`: a place belongs to the files measured,
+/// as a failure does.
+fn measured_key(column: prunr_models::Column, model: prunr_models::ModelId) -> String {
+    format!("{}::{model:?}@{}", column.field(), prunr_models::files_id(model))
+}
+
+/// What was learned as last read or written, and the file's stamp then.
 #[derive(Default)]
 struct Store {
-    failures: Failures,
+    learned: Learned,
     stamp: Option<(SystemTime, u64)>,
 }
 
@@ -133,7 +190,7 @@ fn cache() -> &'static Mutex<Store> {
         let mut store = Store::default();
         if let Some(path) = cache_path() {
             store.stamp = stamp(&path);
-            store.failures = load_from(&path, &scope()).unwrap_or_default();
+            store.learned = load_from(&path, &scope()).unwrap_or_default();
         }
         Mutex::new(store)
     })
@@ -144,20 +201,20 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// The failures in the file at `path` recorded under `scope`; none for
-/// another scope, `None` when the file cannot be read.
-fn load_from(path: &Path, scope: &str) -> Option<Failures> {
+/// What the file at `path` holds under `scope`; nothing for another
+/// scope, `None` when the file cannot be read.
+fn load_from(path: &Path, scope: &str) -> Option<Learned> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.scope == scope { file.failures } else { Failures::default() })
+    Some(if file.scope == scope { file.learned } else { Learned::default() })
 }
 
 /// Written whole and renamed into place, so another process reading it
 /// never sees half a file.
-fn save_to(path: &Path, scope: &str, failures: &Failures) {
+fn save_to(path: &Path, scope: &str, learned: &Learned) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = CacheFile { scope: scope.to_string(), failures: failures.clone() };
+    let file = CacheFile { scope: scope.to_string(), learned: learned.clone() };
     let Ok(json) = serde_json::to_string_pretty(&file) else { return };
     let draft = path.with_extension(format!("json.{}", std::process::id()));
     if let Err(e) = std::fs::write(&draft, json).and_then(|()| std::fs::rename(&draft, path)) {
@@ -168,14 +225,27 @@ fn save_to(path: &Path, scope: &str, failures: &Failures) {
 
 fn save(store: &mut Store) {
     let Some(path) = cache_path() else { return };
-    save_to(&path, &scope(), &store.failures);
+    save_to(&path, &scope(), &store.learned);
     store.stamp = stamp(&path);
+}
+
+/// Change what is learned on top of what any process wrote last, and save
+/// it: the test's process and the app's both write the file.
+fn change<R>(edit: impl FnOnce(&mut Learned) -> R) -> R {
+    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(path) = cache_path() {
+        store.refresh_from(&path, &scope());
+    }
+    let out = edit(&mut store.learned);
+    save(&mut store);
+    out
 }
 
 /// Take in what another process wrote since this one last read the
 /// file: a worker sees the list Settings reset, and does not write the
-/// failures it held back over it. Session builds call it, never a frame.
-pub(crate) fn refresh() {
+/// failures it held back over it; the app sees a test's places. Session
+/// builds call it, never a frame.
+pub fn refresh() {
     let Some(path) = cache_path() else { return };
     let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     store.refresh_from(&path, &scope());
@@ -187,8 +257,8 @@ impl Store {
         if now.is_none() || now == self.stamp {
             return;
         }
-        if let Some(failures) = load_from(path, scope) {
-            self.failures = failures;
+        if let Some(learned) = load_from(path, scope) {
+            self.learned = learned;
             self.stamp = now;
         }
     }
@@ -202,8 +272,11 @@ pub(crate) fn warm() {
 /// True when these weights of the model are on the EP's persistent skip
 /// list.
 pub(crate) fn is_known_failure(ep: EpKind, model: prunr_models::ModelId, weights: Weights) -> bool {
+    // Before the lock: the key asks where the model runs, which reads the
+    // places measured here under the same lock.
+    let key = key(ep, model, weights);
     let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    store.failures.contains_key(&key(ep, model, weights))
+    store.learned.failures.contains_key(&key)
 }
 
 /// Idempotent. A transient failure is logged and not recorded. A failed
@@ -214,21 +287,54 @@ pub(crate) fn record_failure(ep: EpKind, model: prunr_models::ModelId, weights: 
         return;
     }
     let k = key(ep, model, weights);
-    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if store.failures.contains_key(&k) { return; }
+    {
+        let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store.learned.failures.contains_key(&k) { return; }
+    }
     tracing::info!(%ep, ?model, ?weights, %error, "recording EP failure to skip cache");
-    store.failures.insert(k, error.to_string());
-    save(&mut store);
+    change(|learned| learned.failures.insert(k, error.to_string()));
 }
 
-/// Wipe the cache, so each failed pair is tried again. Returns the number
-/// of failures removed.
+/// Wipe the failures, so each failed pair is tried again. Returns the
+/// number of failures removed.
 pub fn clear() -> usize {
-    let mut store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let n = store.failures.len();
-    store.failures.clear();
-    save(&mut store);
-    n
+    change(|learned| std::mem::take(&mut learned.failures).len())
+}
+
+/// Where a test measured `model` runs in `column`, for its files on disk
+/// now.
+pub fn measured(model: prunr_models::ModelId, column: prunr_models::Column) -> Option<Measured> {
+    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.learned.measured.get(&measured_key(column, model)).cloned()
+}
+
+/// Every place a test measured for the models' files on disk now, and
+/// when the last test finished (seconds since 1970).
+pub fn measured_here() -> (Option<u64>, Vec<(prunr_models::ModelId, prunr_models::Column, Measured)>) {
+    let store = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let places = prunr_models::REGISTRY.iter()
+        .flat_map(|d| prunr_models::Column::ALL.map(|column| (d.id, column)))
+        .filter_map(|(model, column)| store.learned.measured.get(&measured_key(column, model)).map(|m| (model, column, m.clone())))
+        .collect();
+    (store.learned.tested, places)
+}
+
+pub fn set_measured(model: prunr_models::ModelId, column: prunr_models::Column, measured: Measured) {
+    change(|learned| learned.measured.insert(measured_key(column, model), measured));
+}
+
+/// A test finished at `when` (seconds since 1970).
+pub fn set_tested(when: u64) {
+    change(|learned| learned.tested = Some(when));
+}
+
+/// Forget every place a test measured: the registry's apply again.
+/// Returns how many there were.
+pub fn clear_measured() -> usize {
+    change(|learned| {
+        learned.tested = None;
+        std::mem::take(&mut learned.measured).len()
+    })
 }
 
 #[cfg(test)]
@@ -346,11 +452,15 @@ mod tests {
         let path = dir.path().join("ep_compat.json");
         let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
         assert_eq!(then, format!("setup {SESSION_SETUP} ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094"), "no app version in it: an update keeps the list");
-        let failures = Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]);
-        save_to(&path, &then, &failures);
-        assert_eq!(load_from(&path, &then), Some(failures));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Failures::default()));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Failures::default()));
+        let learned = Learned {
+            failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]),
+            measured: HashMap::from([("directml::Silueta@app1".to_string(), Measured { kind: PlaceKind::Slower, text: "0.8x".into() })]),
+            tested: Some(1),
+        };
+        save_to(&path, &then, &learned);
+        assert_eq!(load_from(&path, &then), Some(learned));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Learned::default()));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Learned::default()));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
     }
 
@@ -360,15 +470,15 @@ mod tests {
     fn a_reset_by_another_process_is_seen_on_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
-        let failures = Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]);
-        save_to(&path, "scope", &failures);
-        let mut worker = Store { failures, stamp: stamp(&path) };
+        let learned = Learned { failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]), ..Learned::default() };
+        save_to(&path, "scope", &learned);
+        let mut worker = Store { learned, stamp: stamp(&path) };
         worker.refresh_from(&path, "scope");
-        assert_eq!(worker.failures.len(), 1, "an unchanged file keeps the list");
+        assert_eq!(worker.learned.failures.len(), 1, "an unchanged file keeps the list");
         std::thread::sleep(std::time::Duration::from_millis(20));
-        save_to(&path, "scope", &Failures::default());
+        save_to(&path, "scope", &Learned::default());
         worker.refresh_from(&path, "scope");
-        assert!(worker.failures.is_empty(), "the other process's reset is taken in");
+        assert!(worker.learned.failures.is_empty(), "the other process's reset is taken in");
     }
 
     #[test]
@@ -387,7 +497,8 @@ mod tests {
     #[test]
     fn a_file_with_passed_checks_reads() {
         let parsed: CacheFile = serde_json::from_str(r#"{"version":"v","failures":{"CUDA::U2net":"broke"},"passed":["CUDA::Silueta"]}"#).unwrap();
-        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.learned.failures.len(), 1);
+        assert!(parsed.learned.measured.is_empty(), "a file from before tests has none");
     }
 
     #[test]
@@ -396,18 +507,20 @@ mod tests {
         // unchanged so an upgrade doesn't wipe `ep_compat.json` entries.
         let stale = CacheFile {
             scope: "0.0.0-stale".to_string(),
-            failures: HashMap::from([(
-                "OpenVINO::Silueta".to_string(),
-                "graph cycles".to_string(),
-            )]),
+            learned: Learned {
+                failures: HashMap::from([(
+                    "OpenVINO::Silueta".to_string(),
+                    "graph cycles".to_string(),
+                )]),
+                ..Learned::default()
+            },
         };
         let json = serde_json::to_string(&stale).unwrap();
-        assert!(json.contains("\"OpenVINO::Silueta\""));
-        assert!(json.contains("\"version\":\"0.0.0-stale\""));
+        assert_eq!(json, r#"{"version":"0.0.0-stale","failures":{"OpenVINO::Silueta":"graph cycles"}}"#, "nothing new in a file without tests");
         let parsed: CacheFile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.scope, "0.0.0-stale");
         assert_eq!(
-            parsed.failures.get("OpenVINO::Silueta").map(String::as_str),
+            parsed.learned.failures.get("OpenVINO::Silueta").map(String::as_str),
             Some("graph cycles"),
         );
     }

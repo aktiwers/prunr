@@ -3,7 +3,9 @@
 //! One active download at a time; more queue in submission order, so a
 //! burst of strokes can't stack five 800 MB downloads. HTTP, SHA and the
 //! atomic write live in `download_to_file`, so the state machine here is
-//! testable without a network.
+//! testable without a network. A download onto an accelerator no one
+//! measured the model on ends with a check of its result there
+//! (`bench::here::check`), one at a time while the app is idle.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -42,6 +44,9 @@ pub(crate) struct DownloadManager {
     progress_tx: Waking,
     progress_rx: mpsc::Receiver<DownloadEvent>,
     active: Option<ModelId>,
+    /// Downloads waiting for their check, and the one being checked.
+    checks: VecDeque<ModelId>,
+    checking: Option<(ModelId, crate::gui::machine_test::MachineTest)>,
 }
 
 /// The download threads' end of the channel: each event wakes the window
@@ -73,7 +78,42 @@ impl DownloadManager {
             progress_tx: Waking { tx, repaint: Arc::default() },
             progress_rx: rx,
             active: None,
+            checks: VecDeque::new(),
+            checking: None,
         }
+    }
+
+    /// Check `id`'s result once the app is idle.
+    pub(crate) fn queue_check(&mut self, id: ModelId) {
+        let checking = self.checking.as_ref().is_some_and(|(m, _)| *m == id);
+        if !checking && !self.checks.contains(&id) {
+            self.checks.push_back(id);
+        }
+    }
+
+    /// Each frame: follow the check under way, or start the next while the
+    /// app is `idle`. The model whose check just ended, and how.
+    pub(crate) fn pump_checks(&mut self, idle: bool) -> Option<(ModelId, crate::gui::machine_test::Ended)> {
+        if let Some((id, check)) = &mut self.checking {
+            let (id, ended) = (*id, check.pump()?);
+            self.checking = None;
+            return Some((id, ended));
+        }
+        if !idle {
+            return None;
+        }
+        let id = self.checks.pop_front()?;
+        let repaint = Arc::clone(&self.progress_tx.repaint);
+        let wake = move || {
+            if let Some(ctx) = repaint.get() {
+                ctx.request_repaint();
+            }
+        };
+        match crate::gui::machine_test::MachineTest::check(id, wake) {
+            Ok(check) => self.checking = Some((id, check)),
+            Err(e) => tracing::warn!(?id, %e, "a download's check did not start"),
+        }
+        None
     }
 
     /// The window the download threads wake with each event.

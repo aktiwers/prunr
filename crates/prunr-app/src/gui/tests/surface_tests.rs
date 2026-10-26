@@ -467,6 +467,39 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
     }
 }
 
+/// A test of this computer owns the window while it runs: its dialog
+/// names every control, Escape leaves it up, and Cancel ends it and
+/// stops its process.
+#[test]
+fn the_computer_test_holds_the_window_until_cancelled() {
+    #[cfg(unix)]
+    let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
+    #[cfg(windows)]
+    let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("a process to stand in for the test");
+    let pid = child.id();
+    let mut h = loaded();
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child));
+    settle(&mut h);
+    assert!(h.state().open_modals().contains(&"machine_test"));
+    assert_all_controls_named(&h, "computer test");
+    assert!(names(&h).iter().any(|n| n == "Cancel"), "{:?}", names(&h));
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().machine_test.is_some(), "Escape leaves it up");
+    click(&mut h, "Cancel");
+    settle(&mut h);
+    assert!(h.state().machine_test.is_none(), "Cancel ends it");
+    #[cfg(target_os = "linux")]
+    {
+        let gone = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !std::path::Path::new(&format!("/proc/{pid}")).exists()
+        });
+        assert!(gone, "its process stopped");
+    }
+    let _ = pid;
+}
+
 /// The save dialog takes the popover's place and opens ready for a name:
 /// text typed at once goes into it. (Saving writes the presets folder, so
 /// Enter is checked live.)

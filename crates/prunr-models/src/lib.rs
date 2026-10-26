@@ -489,10 +489,20 @@ impl Places {
         }
     }
 
+    pub fn set(&mut self, column: Column, place: Place) {
+        *match column {
+            Column::Cuda => &mut self.cuda,
+            Column::DirectMl => &mut self.directml,
+            Column::CoreMl => &mut self.coreml,
+            Column::MiGraphX => &mut self.migraphx,
+            Column::OpenVino => &mut self.openvino,
+            Column::OpenVinoGpu => &mut self.openvino_gpu,
+        } = place;
+    }
 }
 
 /// One accelerator's entry in `Places`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Column {
     Cuda,
     DirectMl,
@@ -2016,27 +2026,43 @@ fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
     h
 }
 
-/// The column a session of `model` on `provider` reads. On OpenVINO it is
-/// the Intel graphics' entry when they are on (`intel_gpu`), the model's
-/// kind can use them and that entry keeps it there; else the processor's,
-/// so a model the graphics run slower still gets OpenVINO's processor
-/// where that beats ORT's CPU. Fills stay on the processor: the GPU
-/// plugin cannot build LaMa (dynamic shapes), and under AUTO it ran ~10%
-/// slower. `None` for the CPU and providers the table does not know.
+/// The column a session of `model` on `provider` reads (`column_in`), by
+/// the registry's places.
 pub fn column_for(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Option<Column> {
+    column_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
+}
+
+/// Where `model` runs on `provider` (`place_in`), by the registry's places.
+pub fn place(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
+    place_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
+}
+
+/// The registry's places for `model`; unmeasured for a model not in it.
+pub fn registry_places(model: ModelId) -> Places {
+    descriptor(model).map_or(Places::UNMEASURED, |d| d.places)
+}
+
+/// The column a session of `model` on `provider` reads in `places`. On
+/// OpenVINO it is the Intel graphics' entry when they are on
+/// (`intel_gpu`), the model's kind can use them and that entry keeps it
+/// there; else the processor's, so a model the graphics run slower still
+/// gets OpenVINO's processor where that beats ORT's CPU. Fills stay on the
+/// processor: the GPU plugin cannot build LaMa (dynamic shapes), and under
+/// AUTO it ran ~10% slower. `None` for the CPU and providers the table
+/// does not know.
+pub fn column_in(places: &Places, model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Option<Column> {
     let column = Column::of(provider)?;
     let on_graphics = column == Column::OpenVino
         && intel_gpu
-        && descriptor(model).is_some_and(|d| d.category != ModelCategory::Inpaint && !d.places.openvino_gpu.kept_off(remeasuring));
+        && descriptor(model).is_some_and(|d| d.category != ModelCategory::Inpaint)
+        && !places.openvino_gpu.kept_off(remeasuring);
     Some(if on_graphics { Column::OpenVinoGpu } else { column })
 }
 
-/// Where `model` runs on `provider` (`column_for`); unmeasured for a model
-/// not in the registry or a provider the table does not know.
-pub fn place(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
-    column_for(model, provider, intel_gpu, remeasuring)
-        .and_then(|column| descriptor(model).map(|d| d.places.get(column)))
-        .unwrap_or(Place::Unmeasured)
+/// Where `model` runs on `provider` in `places` (`column_in`); unmeasured
+/// for a provider the table does not know.
+pub fn place_in(places: &Places, model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
+    column_in(places, model, provider, intel_gpu, remeasuring).map_or(Place::Unmeasured, |column| places.get(column))
 }
 
 
