@@ -590,6 +590,7 @@ mod tests {
 
     /// The variables under which ONNX Runtime keeps quiet by itself: CI
     /// runners and its own tests.
+    #[cfg(unix)]
     const ORT_QUIET_UNDER: &[&str] = &[
         "CI", "TF_BUILD", "GITHUB_ACTIONS", "GITLAB_CI", "CIRCLECI", "TRAVIS", "JENKINS_URL", "CODEBUILD_BUILD_ID",
         "BUILDKITE", "TEAMCITY_VERSION", "APPVEYOR", "BITBUCKET_BUILD_NUMBER", "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
