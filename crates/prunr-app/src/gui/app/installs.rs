@@ -51,22 +51,32 @@ impl PrunrApp {
         self.toasts.info("Clearing compiled-model cache…");
     }
 
-    pub(crate) fn forget_gpu_failures(&mut self) {
-        std::thread::spawn(|| {
+    pub(crate) fn forget_gpu_failures(&mut self, ctx: &egui::Context) {
+        self.change_places(ctx, || {
             let entries = prunr_core::ep_compat::clear();
             tracing::info!(entries, "forgot recorded GPU failures");
+            Ok("Models that failed on the graphics card will try it again".to_string())
         });
-        self.toasts.info("Models that failed on the graphics card will try it again");
     }
 
-    /// Run `change` (a removal, or a write to what is installed) on a
-    /// worker; its toast text lands through `bg_io.removed_rx`, which reads
-    /// the installed set again.
-    pub(super) fn off_thread(&self, ctx: &egui::Context, change: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    /// Change what the app learned about this machine (`ep_compat`) on the
+    /// disk queue, in order with every other such change.
+    pub(super) fn change_places(&self, ctx: &egui::Context, change: impl FnOnce() -> Result<String, String> + Send + 'static) {
+        crate::gui::disk_queue::call(self.landing(ctx, change));
+    }
+
+    /// Run `remove` on a worker of its own.
+    fn off_thread(&self, ctx: &egui::Context, remove: impl FnOnce() -> Result<String, String> + Send + 'static) {
+        std::thread::spawn(self.landing(ctx, remove));
+    }
+
+    /// `change`, its toast text landing through `bg_io.removed_rx`, which
+    /// reads the installed set again.
+    fn landing(&self, ctx: &egui::Context, change: impl FnOnce() -> Result<String, String> + Send + 'static) -> impl FnOnce() + Send + 'static {
         let (done, ctx) = (self.batch.bg_io.removed_tx.clone(), ctx.clone());
-        std::thread::spawn(move || {
+        move || {
             let _ = done.send(change());
             ctx.request_repaint();
-        });
+        }
     }
 }

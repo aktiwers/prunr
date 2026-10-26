@@ -59,13 +59,24 @@ impl TestSummary {
     pub fn read() -> Self {
         use prunr_core::ep_compat::PlaceKind;
         prunr_core::ep_compat::refresh();
-        let (tested, places) = prunr_core::ep_compat::measured_here();
-        places.into_iter()
-            .filter(|(model, column, _)| prunr_core::engine::column_for(*model, column.provider()) == Some(*column))
-            .fold(Self { tested, ..Self::default() }, |sum, (.., place)| match place.kind {
-                PlaceKind::There => Self { there: sum.there + 1, ..sum },
-                _ => Self { off: sum.off + 1, ..sum },
-            })
+        let mut summary = Self { tested: prunr_core::ep_compat::tested(), ..Self::default() };
+        for model in prunr_models::REGISTRY.iter().map(|d| d.id) {
+            let measured = prunr_core::ep_compat::measured_for(model);
+            for (column, kind) in prunr_models::Column::ALL.into_iter().zip(measured) {
+                let Some(kind) = kind.filter(|_| prunr_core::engine::column_for(model, column.provider()) == Some(column)) else { continue };
+                match kind {
+                    PlaceKind::There => summary.there += 1,
+                    _ => summary.off += 1,
+                }
+            }
+        }
+        summary
+    }
+
+    /// "9 models with CUDA, 3 models without it."
+    pub fn found(&self, accelerator: &str) -> String {
+        use crate::gui::views::fmt::count;
+        format!("{} with {accelerator}, {} without it.", count(self.there, "model", "models"), count(self.off, "model", "models"))
     }
 }
 

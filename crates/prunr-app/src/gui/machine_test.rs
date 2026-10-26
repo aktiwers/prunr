@@ -2,27 +2,17 @@
 //! The test runs in a process of its own (`prunr bench --here`) and owns
 //! the machine while it runs: a run of the user's would skew its timings
 //! and take the memory it measures with, so the window shows it as a
-//! modal until it ends.
+//! modal until it ends. A download's check (`bench --check`) runs the
+//! same way, in the background.
 
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
 use prunr_core::ep_compat::{Measured, PlaceKind};
-use prunr_models::{Column, ModelId};
+use prunr_models::ModelId;
 
-use crate::bench::here::Told;
-
-/// Where the test is: the model at `index` of `total`, on the GPU side or
-/// the CPU's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Step {
-    pub index: usize,
-    pub total: usize,
-    pub model: ModelId,
-    pub on_gpu: bool,
-    pub column: Column,
-}
+use crate::bench::here::{Step, Told};
 
 /// How a test ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,8 +30,6 @@ pub(crate) struct MachineTest {
     told: mpsc::Receiver<Told>,
     step: Option<Step>,
     finished: Option<Vec<ModelId>>,
-    /// Its output closed: the process is ending.
-    closed: bool,
 }
 
 impl MachineTest {
@@ -80,14 +68,14 @@ impl MachineTest {
                 wake();
             })
             .map_err(|e| format!("The test could not start: {e}"))?;
-        Ok(Self { child: Some(child), told, step: None, finished: None, closed: false })
+        Ok(Self { child: Some(child), told, step: None, finished: None })
     }
 
     /// A test whose process is `child` and that reports nothing.
     #[cfg(test)]
     pub(crate) fn for_test(child: Child) -> Self {
         let (_, told) = mpsc::channel();
-        Self { child: Some(child), told, step: None, finished: None, closed: false }
+        Self { child: Some(child), told, step: None, finished: None }
     }
 
     pub(crate) fn step(&self) -> Option<Step> {
@@ -96,21 +84,17 @@ impl MachineTest {
 
     /// Take in what the test told; `Some` once its process has ended.
     pub(crate) fn pump(&mut self) -> Option<Ended> {
-        loop {
+        let closed = loop {
             match self.told.try_recv() {
-                Ok(Told::Step { index, total, model, on_gpu, column }) => {
-                    self.step = Some(Step { index, total, model, on_gpu, column });
-                }
+                Ok(Told::Step(step)) => self.step = Some(step),
                 Ok(Told::Finished { left_out }) => self.finished = Some(left_out),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.closed = true;
-                    break;
-                }
+                Err(mpsc::TryRecvError::Empty) => break false,
+                Err(mpsc::TryRecvError::Disconnected) => break true,
             }
-        }
-        let exited = self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
-        if !self.closed || !exited {
+        };
+        // Its output closes as it ends; until then there is nothing to wait for.
+        let exited = closed && self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
+        if !exited {
             return None;
         }
         Some(match self.finished.take() {
@@ -131,8 +115,9 @@ impl Drop for MachineTest {
     }
 }
 
-/// The place a test that stopped during `step` leaves: a process that died
-/// running a model on the graphics card would die running it in the app.
-pub(crate) fn stopped_place(step: Step) -> Option<(ModelId, Column, Measured)> {
-    step.on_gpu.then(|| (step.model, step.column, Measured { kind: PlaceKind::Fails, text: "the test's process stopped while it ran here".into() }))
+/// The place a model gets when Prunr's test or check stopped while it ran
+/// on the accelerator: a process that died running it there would die
+/// running it in the app.
+pub(crate) fn stopped_here() -> Measured {
+    Measured::new(PlaceKind::Fails, "Prunr's test stopped while it ran here")
 }

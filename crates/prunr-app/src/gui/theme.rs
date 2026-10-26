@@ -261,7 +261,7 @@ pub fn standard_modal_window(
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let window = egui::Window::new(title).collapsible(false).frame(panel_frame());
-    show_modal(ctx, id, window, size, body)
+    show_modal(ctx, id, window, size, false, body)
 }
 
 /// A modal like `standard_modal_window` with no title bar and its frame
@@ -277,8 +277,16 @@ pub fn bare_modal_window(
     // Opaque: a page of text over a busy photo should not let it through.
     let window = egui::Window::new(title).title_bar(false).frame(panel_frame().inner_margin(0).fill(MODAL_FILL));
     let mut close_clicked = false;
-    let closed = show_modal(ctx, id, window, size, |ui| close_clicked = body(ui));
+    let closed = show_modal(ctx, id, window, size, false, |ui| close_clicked = body(ui));
     closed || close_clicked
+}
+
+/// A modal like `bare_modal_window` that holds the window while it is up:
+/// a click anywhere else lands on nothing, nor closes it. The body says
+/// how it ends.
+pub fn holding_modal_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], body: impl FnOnce(&mut egui::Ui)) {
+    let window = egui::Window::new(title).title_bar(false).frame(panel_frame().inner_margin(0).fill(MODAL_FILL));
+    let _ = show_modal(ctx, id, window, size, true, body);
 }
 
 fn show_modal(
@@ -286,6 +294,7 @@ fn show_modal(
     id: &str,
     window: egui::Window<'_>,
     size: [f32; 2],
+    holds: bool,
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let opened_key = egui::Id::new(id).with("opened_at");
@@ -311,8 +320,13 @@ fn show_modal(
     let backdrop = egui::Area::new(egui::Id::new(id).with("backdrop"))
         .order(egui::Order::Middle)
         .fixed_pos(screen.min)
-        .interactable(false)
-        .show(ctx, |ui| ui.painter().rect_filled(screen, 0.0, MODAL_SCRIM))
+        .interactable(holds)
+        .show(ctx, |ui| {
+            ui.painter().rect_filled(screen, 0.0, MODAL_SCRIM);
+            if holds {
+                ui.allocate_rect(screen, egui::Sense::click());
+            }
+        })
         .response
         .layer_id;
 

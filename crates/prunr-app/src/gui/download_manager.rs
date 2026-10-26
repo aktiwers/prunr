@@ -61,10 +61,14 @@ struct Waking {
 impl Waking {
     fn send(&self, event: DownloadEvent) -> Result<(), mpsc::SendError<DownloadEvent>> {
         let sent = self.tx.send(event);
+        self.wake();
+        sent
+    }
+
+    fn wake(&self) {
         if let Some(ctx) = self.repaint.get() {
             ctx.request_repaint();
         }
-        sent
     }
 }
 
@@ -81,6 +85,15 @@ impl DownloadManager {
             checks: VecDeque::new(),
             checking: None,
         }
+    }
+
+    /// A check waits, or runs.
+    pub(crate) fn has_checks(&self) -> bool {
+        self.checking.is_some() || !self.checks.is_empty()
+    }
+
+    pub(crate) fn checking(&self) -> bool {
+        self.checking.is_some()
     }
 
     /// Check `id`'s result once the app is idle.
@@ -103,13 +116,8 @@ impl DownloadManager {
             return None;
         }
         let id = self.checks.pop_front()?;
-        let repaint = Arc::clone(&self.progress_tx.repaint);
-        let wake = move || {
-            if let Some(ctx) = repaint.get() {
-                ctx.request_repaint();
-            }
-        };
-        match crate::gui::machine_test::MachineTest::check(id, wake) {
+        let waking = self.progress_tx.clone();
+        match crate::gui::machine_test::MachineTest::check(id, move || waking.wake()) {
             Ok(check) => self.checking = Some((id, check)),
             Err(e) => tracing::warn!(?id, %e, "a download's check did not start"),
         }

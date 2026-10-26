@@ -287,20 +287,20 @@ fn remeasuring() -> bool {
 /// over one the registry knows fails: it may hang or take the machine's
 /// memory, and the registry may have learned it after the test.
 pub fn places_here(model: prunr_models::ModelId) -> prunr_models::Places {
-    with_measured(prunr_models::registry_places(model), |column| crate::ep_compat::measured(model, column))
+    with_measured(prunr_models::registry_places(model), crate::ep_compat::measured_for(model))
 }
 
 fn with_measured(
     mut places: prunr_models::Places,
-    measured: impl Fn(prunr_models::Column) -> Option<crate::ep_compat::Measured>,
+    measured: [Option<crate::ep_compat::PlaceKind>; prunr_models::Column::ALL.len()],
 ) -> prunr_models::Places {
     use prunr_models::{Place, Why};
     for column in prunr_models::Column::ALL {
         if matches!(places.get(column), Place::Cpu(Why::Fails(_))) {
             continue;
         }
-        if let Some(found) = measured(column) {
-            places.set(column, found.kind.place());
+        if let Some(kind) = measured[column.index()] {
+            places.set(column, kind.place());
         }
     }
     places
@@ -618,10 +618,25 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
     if let Some(why) = kept_off(model, ep) {
         Some(Skip::KeptOff(why))
-    } else if crate::ep_compat::is_known_failure(ep, model, weights) {
+    } else if crate::ep_compat::is_known_failure(ep, model, weights, asks_intel_gpu(ep, model)) {
         Some(Skip::FailedBefore)
     } else {
         None
+    }
+}
+
+/// Whether `model`'s session on `ep` asks for the Intel GPU: OpenVINO
+/// engines with the switch on. Fills stay on the CPU, and SD parts carry
+/// their own device. A failure there is its own (`ep_compat`).
+pub(crate) fn asks_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        ep == EpKind::OpenVino && on_intel_gpu(model)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (ep, model);
+        false
     }
 }
 
@@ -714,7 +729,7 @@ pub(crate) fn walk_ladder<S>(
                 tracing::warn!(?model, ?weights, ep = %ep, %error, "{prefix}GPU session failed — trying next EP");
                 match suspect_cache.or_else(|| compiled_cache_named(model, ep.as_str(), &error, started)) {
                     Some(path) => clear_suspect_cache(&path),
-                    None => crate::ep_compat::record_failure(ep, model, weights, &error),
+                    None => crate::ep_compat::record_failure(ep, model, weights, asks_intel_gpu(ep, model), &error),
                 }
                 walk.failed.push(error);
             }
@@ -752,11 +767,10 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
     if let Some(why) = kept_off(model, ep) {
         return Some(Skip::KeptOff(why));
     }
-    let mut why = None;
-    for weights in [lighter_weights(model, false), Some(Weights::Fp32)].into_iter().flatten() {
-        why = Some(skip_reason(model, weights, ep)?);
-    }
-    why
+    let intel_gpu = asks_intel_gpu(ep, model);
+    [lighter_weights(model, false), Some(Weights::Fp32)].into_iter().flatten()
+        .all(|weights| crate::ep_compat::is_known_failure(ep, model, weights, intel_gpu))
+        .then_some(Skip::FailedBefore)
 }
 
 /// Run options that shrink CUDA device 0's pool as a run ends; `None`
@@ -1558,7 +1572,7 @@ mod tests {
     fn erasers_and_parted_models_pass_migraphx_over_and_engines_keep_it() {
         for d in prunr_models::REGISTRY.iter() {
             let per_shape = d.category == prunr_models::ModelCategory::Inpaint || d.runs_in_parts();
-            let kept = per_shape || prunr_models::place(d.id, "MIGraphX", false, false).kept_off(false);
+            let kept = per_shape || place_here(d.id, "MIGraphX", false, false).kept_off(false);
             assert_eq!(matches!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX), Some(Skip::KeptOff(_))), kept, "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
@@ -1569,17 +1583,17 @@ mod tests {
     /// stays skipped while places are measured again, the rest are tried.
     #[test]
     fn a_place_measured_here_stands_in_for_the_registrys() {
-        use crate::ep_compat::{Measured, PlaceKind, MEASURED_HERE};
+        use crate::ep_compat::{PlaceKind, MEASURED_HERE};
         use prunr_models::{Column, Place, Places, Why};
         let registry = Places { openvino: Place::Cpu(Why::Fails("hangs")), cuda: Place::There("2x"), ..Places::UNMEASURED };
-        let slower = |column| (column != Column::CoreMl).then(|| Measured { kind: PlaceKind::Slower, text: "0.8x".into() });
+        let slower = Column::ALL.map(|column| (column != Column::CoreMl).then_some(PlaceKind::Slower));
         let here = with_measured(registry, slower);
         assert_eq!(here.cuda, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured over the registry's place");
         assert_eq!(here.directml, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured where the registry has none");
         assert_eq!(here.coreml, Place::Unmeasured, "not measured: the registry's");
         assert_eq!(here.openvino, Place::Cpu(Why::Fails("hangs")), "never over a known failure");
         assert!(here.cuda.kept_off(false) && !here.cuda.kept_off(true), "tried again when measuring");
-        let failed = with_measured(Places::UNMEASURED, |_| Some(Measured { kind: PlaceKind::Fails, text: "crashed".into() }));
+        let failed = with_measured(Places::UNMEASURED, [Some(PlaceKind::Fails); Column::ALL.len()]);
         assert!(failed.cuda.kept_off(true), "a measured failure stays off");
     }
 
@@ -1762,7 +1776,7 @@ mod tests {
         let Some(dir) = crate::cache::cache_dir_for(id, ep.as_str()) else { return };
         let cache_file = dir.join("optimized.onnx");
         std::fs::write(&cache_file, b"stale").unwrap();
-        let initial = crate::ep_compat::is_known_failure(ep, id, Weights::Fp32);
+        let initial = crate::ep_compat::is_known_failure(ep, id, Weights::Fp32, crate::engine::asks_intel_gpu(ep, id));
 
         let walk = walk_ladder("", id, Weights::Fp32, &[ep], |_| {
             Err::<(), _>(Miss::Failed { error: "test cache failure".into(), suspect_cache: Some(cache_file.clone()) })
@@ -1771,7 +1785,7 @@ mod tests {
         assert_eq!(walk.map_err(|w| w.failed), Err(vec!["test cache failure".to_string()]));
         assert!(!cache_file.exists(), "cache file must be deleted");
         assert_eq!(
-            crate::ep_compat::is_known_failure(ep, id, Weights::Fp32), initial,
+            crate::ep_compat::is_known_failure(ep, id, Weights::Fp32, crate::engine::asks_intel_gpu(ep, id)), initial,
             "a failure on a cached graph must not be recorded",
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1849,8 +1863,8 @@ mod tests {
         let picked = walk_ladder("", model, Weights::Fp32, &[ep], commit_fp16_fails(Weights::Fp32));
         assert_eq!(picked, Ok(("session", ep, Vec::new())), "FP32 ran on the provider FP16 failed on");
         assert_eq!(*tried.borrow(), [(ep, Weights::Fp16), (ep, Weights::Fp32)]);
-        assert!(crate::ep_compat::is_known_failure(ep, model, Weights::Fp16), "the FP16 failure is remembered");
-        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "and only that");
+        assert!(crate::ep_compat::is_known_failure(ep, model, Weights::Fp16, crate::engine::asks_intel_gpu(ep, model)), "the FP16 failure is remembered");
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32, crate::engine::asks_intel_gpu(ep, model)), "and only that");
     }
 
     /// A session says where it landed: a CPU-only one on the CPU, with
@@ -1889,7 +1903,7 @@ mod tests {
         });
         assert_eq!(walk, Ok(("session", ep, Vec::new())));
         assert_eq!(tries.get(), 2);
-        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32));
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32, crate::engine::asks_intel_gpu(ep, model)));
         let cpu = commit_past_bad_cache(|| if crate::cache::take_draft_slot() { Err(("write failed", None)) } else { Ok("cpu session") });
         assert_eq!(cpu, Ok("cpu session"), "the CPU's commit too");
     }
@@ -1907,7 +1921,7 @@ mod tests {
         let model = ModelId::FourXNmkdSiaxCx;
         let walk = walk_ladder("", model, Weights::Fp32, &[ep], |_| Err::<(), _>(Miss::Unusable("no DirectX 12 device".into())));
         assert_eq!(walk.map_err(|w| w.reason()), Err("no DirectX 12 device".to_string()));
-        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32), "the machine's lack, not the model's");
+        assert!(!crate::ep_compat::is_known_failure(ep, model, Weights::Fp32, crate::engine::asks_intel_gpu(ep, model)), "the machine's lack, not the model's");
     }
 
     /// A provider is passed over without a try when the registry keeps
@@ -1918,7 +1932,7 @@ mod tests {
     fn a_walk_that_tries_no_provider_says_why() {
         use prunr_models::ModelId;
         let model = ModelId::Silueta;
-        let prunr_models::Place::Cpu(why) = prunr_models::place(model, "OpenVINO", false, false) else { panic!("Silueta stays off OpenVINO") };
+        let prunr_models::Place::Cpu(why) = place_here(model, "OpenVINO", false, false) else { panic!("Silueta stays off OpenVINO") };
         let line = format!("no GPU provider to try: OpenVINO is kept off: {}", why.text());
         let declared = walk_ladder("", model, Weights::Fp32, &[EpKind::OpenVino], |_| -> Result<(), Miss> { panic!("tried a declared pair") });
         assert_eq!(declared.map_err(|w| w.reason()), Err(line.clone()));

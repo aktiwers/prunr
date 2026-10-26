@@ -16,12 +16,21 @@ const RUNS: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Told {
-    /// Model `index` of `total` is at a step; `on_gpu` while its GPU side
-    /// runs, on `column`.
-    Step { index: usize, total: usize, model: ModelId, on_gpu: bool, column: Column },
+    Step(Step),
     /// All done. `left_out`: installed models a test does not run, which
     /// take many minutes on the processor.
     Finished { left_out: Vec<ModelId> },
+}
+
+/// Where a test is: the model at `index` of `total`; `on_gpu` while its
+/// GPU side runs, on `column`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Step {
+    pub index: usize,
+    pub total: usize,
+    pub model: ModelId,
+    pub on_gpu: bool,
+    pub column: Column,
 }
 
 impl Told {
@@ -52,7 +61,7 @@ pub fn run(on: &mut dyn FnMut(Told)) {
     super::run(&models, &inputs, RUNS, &mut |event| match event {
         Event::Stage { index, total, stage, .. } => {
             let (model, column) = (models[index - 1], columns[index - 1]);
-            on(Told::Step { index, total, model, on_gpu: stage.starts_with("GPU"), column });
+            on(Told::Step(Step { index, total, model, on_gpu: stage.starts_with("GPU"), column }));
         }
         Event::Done(row, _) => {
             let Some(i) = models.iter().position(|id| id.stable_name() == row.name) else { return };
@@ -63,7 +72,7 @@ pub fn run(on: &mut dyn FnMut(Told)) {
             }
         }
     });
-    prunr_core::ep_compat::set_tested(now_secs());
+    prunr_core::ep_compat::set_tested();
     on(Told::Finished { left_out });
 }
 
@@ -116,10 +125,6 @@ fn plan(installed: Vec<ModelId>, column_of: impl Fn(ModelId) -> Option<Column>) 
     plan
 }
 
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,8 +146,8 @@ mod tests {
     #[test]
     fn every_event_reads_back_from_its_line() {
         for told in [
-            Told::Step { index: 2, total: 9, model: ModelId::U2net, on_gpu: true, column: Column::OpenVinoGpu },
-            Told::Step { index: 1, total: 9, model: ModelId::Silueta, on_gpu: false, column: Column::Cuda },
+            Told::Step(Step { index: 2, total: 9, model: ModelId::U2net, on_gpu: true, column: Column::OpenVinoGpu }),
+            Told::Step(Step { index: 1, total: 9, model: ModelId::Silueta, on_gpu: false, column: Column::Cuda }),
             Told::Finished { left_out: vec![ModelId::Nomos8kSchatL] },
         ] {
             assert_eq!(Told::parse(&told.line()), Some(told.clone()), "{}", told.line());

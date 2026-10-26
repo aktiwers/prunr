@@ -468,14 +468,15 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
 }
 
 /// A test of this computer owns the window while it runs: its dialog
-/// names every control, Escape leaves it up, and Cancel ends it and
-/// stops its process.
+/// names every control, Escape leaves it up, a click on the toolbar under
+/// it and a shortcut do nothing, and Cancel ends it and stops its process.
 #[test]
 fn the_computer_test_holds_the_window_until_cancelled() {
     #[cfg(unix)]
     let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
     #[cfg(windows)]
     let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("a process to stand in for the test");
+    #[cfg(target_os = "linux")]
     let pid = child.id();
     let mut h = loaded();
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child));
@@ -486,6 +487,11 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     h.key_press(egui::Key::Escape);
     settle(&mut h);
     assert!(h.state().machine_test.is_some(), "Escape leaves it up");
+    click(&mut h, "Settings");
+    assert!(!h.state().show_settings, "the toolbar under it takes no click");
+    let ctx = h.ctx.clone();
+    h.state_mut().perform(crate::gui::views::shortcuts::Action::Settings, &ctx);
+    assert!(!h.state().show_settings, "no shortcut acts under it");
     click(&mut h, "Cancel");
     settle(&mut h);
     assert!(h.state().machine_test.is_none(), "Cancel ends it");
@@ -497,7 +503,6 @@ fn the_computer_test_holds_the_window_until_cancelled() {
         });
         assert!(gone, "its process stopped");
     }
-    let _ = pid;
 }
 
 /// The save dialog takes the popover's place and opens ready for a name:

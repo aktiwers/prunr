@@ -515,6 +515,18 @@ pub enum Column {
 impl Column {
     pub const ALL: [Self; 6] = [Self::Cuda, Self::DirectMl, Self::CoreMl, Self::MiGraphX, Self::OpenVino, Self::OpenVinoGpu];
 
+    /// Its place in `ALL`.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Cuda => 0,
+            Self::DirectMl => 1,
+            Self::CoreMl => 2,
+            Self::MiGraphX => 3,
+            Self::OpenVino => 4,
+            Self::OpenVinoGpu => 5,
+        }
+    }
+
     /// The provider ORT names.
     pub fn provider(self) -> &'static str {
         match self {
@@ -2027,17 +2039,6 @@ fn tag_of_shas<'a>(shas: impl IntoIterator<Item = &'a str>) -> u64 {
     h
 }
 
-/// The column a session of `model` on `provider` reads (`column_in`), by
-/// the registry's places.
-pub fn column_for(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Option<Column> {
-    column_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
-}
-
-/// Where `model` runs on `provider` (`place_in`), by the registry's places.
-pub fn place(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
-    place_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
-}
-
 /// The registry's places for `model`; unmeasured for a model not in it.
 pub fn registry_places(model: ModelId) -> Places {
     descriptor(model).map_or(Places::UNMEASURED, |d| d.places)
@@ -2501,6 +2502,15 @@ mod dev_model_bytes_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registry's own answer, without what a machine measured.
+    fn place(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Place {
+        place_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
+    }
+
+    fn column_for(model: ModelId, provider: &str, intel_gpu: bool, remeasuring: bool) -> Option<Column> {
+        column_in(&registry_places(model), model, provider, intel_gpu, remeasuring)
+    }
     use std::collections::HashSet;
 
     fn ids_in(category: ModelCategory) -> Vec<ModelId> {
@@ -2879,11 +2889,13 @@ mod tests {
         }
     }
 
-    /// Each column is found by its name and by its provider.
+    /// Each column is found by its name and by its provider, and sits at
+    /// its index in `ALL`.
     #[test]
     fn a_column_is_found_by_name_and_by_provider() {
-        for column in Column::ALL {
+        for (i, column) in Column::ALL.into_iter().enumerate() {
             assert_eq!(Column::named(column.name()), Some(column));
+            assert_eq!(column.index(), i);
         }
         assert_eq!(Column::of("openvino"), Some(Column::OpenVino));
         assert_eq!(Column::of("CPU"), None);
