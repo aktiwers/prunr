@@ -302,7 +302,7 @@ fn compress_to_zst(onnx_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Examples:
 ///   cargo xtask install-runtime onnxruntime-openvino 1.24.1
 ///   cargo xtask install-runtime onnxruntime 1.24.1 --stage-to dist/runtime
-///   cargo xtask install-runtime onnxruntime-directml 1.24.1 --stage-to runtime-stage
+///   cargo xtask install-runtime onnxruntime-windowsml 1.30.0.202609102321 --stage-to runtime-stage
 fn install_runtime() -> anyhow::Result<()> {
     use prunr_runtime_install as ri;
     let package = std::env::args().nth(2)
