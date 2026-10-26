@@ -182,7 +182,7 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> anyhow::Result<Vec
         let mut response = client
             .get(url)
             .send()
-            .map_err(|e| DlError::transient(format!("connect: {e}")))?;
+            .map_err(|e| DlError::request(url, &e))?;
         let status = response.status();
         if !status.is_success() {
             return Err(DlError::for_status(status, format!("HTTP {status}")));
