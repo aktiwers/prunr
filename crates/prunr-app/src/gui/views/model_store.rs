@@ -245,7 +245,10 @@ fn render_card(
             let footer_size = egui::vec2(ui.available_width(), FOOTER_HEIGHT);
             ui.allocate_ui_with_layout(footer_size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let (meta, color) = card_meta(desc, installed, state, advisory.is_some());
-                ui.label(RichText::new(meta).size(theme::FONT_SIZE_SECONDARY).color(color));
+                let meta = ui.label(RichText::new(meta).size(theme::FONT_SIZE_SECONDARY).color(color));
+                if let DownloadState::Failed { error } = state {
+                    super::chip::tooltip(meta, "Download failed", error, None);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(action, CardAction::Bundled) || (installed && action == CardAction::Delete) {
                         badge(ui, if action == CardAction::Bundled { "Ready" } else { "Installed" });
