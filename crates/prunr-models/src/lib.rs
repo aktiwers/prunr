@@ -567,8 +567,9 @@ const ROREM_ON_OPENVINO: Why = Why::Fails(
 );
 
 const BIREFNET_ON_OPENVINO: Why = Why::Fails(
-    "a run fails: OpenVINO's output names do not match the model's (\"Output names mismatch between OpenVINO and \
-     ONNX\") (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+    "a run fails: with ORT 1.24's constant folding off (it frees weights still in use), OpenVINO's EP matches an \
+     output to the wrong name (\"Output names mismatch\"; fixed upstream in microsoft/onnxruntime#29882, after \
+     1.24.1). With folding on it runs, 1.1x slower than the CPU (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-26)",
 );
 
 const MIGAN_ON_OPENVINO: Why = Why::Fails(
