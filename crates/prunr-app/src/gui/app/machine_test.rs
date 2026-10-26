@@ -115,8 +115,8 @@ impl PrunrApp {
         match ended {
             Ended::Finished { .. } => {
                 prunr_core::ep_compat::refresh();
-                if prunr_core::ep_compat::measured_for(id)[column.index()].is_some() {
-                    self.toasts.warning(format!("{name} gave a wrong result with {accelerator} on this computer, so it runs without it."));
+                if let Some(kind) = prunr_core::ep_compat::measured_for(id)[column.index()] {
+                    self.toasts.warning(check_found(name, &accelerator, kind));
                     self.places_changed();
                 }
             }
@@ -152,9 +152,26 @@ impl PrunrApp {
     }
 }
 
+/// What a download's check found that keeps the model off `accelerator`.
+fn check_found(name: &str, accelerator: &str, kind: prunr_core::ep_compat::PlaceKind) -> String {
+    match kind {
+        prunr_core::ep_compat::PlaceKind::Fails => format!("{name} does not run with {accelerator} on this computer, so it runs without it."),
+        _ => format!("{name} gave a wrong result with {accelerator} on this computer, so it runs without it."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prunr_models::ModelId;
+
+    /// A model the accelerator refuses or breaks on is not said to give a
+    /// wrong result: four on DirectML were, and none had run.
+    #[test]
+    fn a_check_says_what_it_found() {
+        use prunr_core::ep_compat::PlaceKind;
+        assert_eq!(super::check_found("LaMa", "DirectML", PlaceKind::Fails), "LaMa does not run with DirectML on this computer, so it runs without it.");
+        assert_eq!(super::check_found("Nomos8k", "CUDA", PlaceKind::Differs), "Nomos8k gave a wrong result with CUDA on this computer, so it runs without it.");
+    }
 
     /// A download is checked only where it runs on an accelerator no one
     /// measured it on: not on a measured one, not on CPU only, and never a
