@@ -623,11 +623,6 @@ impl Drop for LamaSession {
 
 /// Build the LaMa session, GPU EPs first, then CPU. Returns where it
 /// runs, with each GPU provider that failed on the way.
-///
-/// Each GPU candidate is smoke-tested with one inference: some EPs (CUDA
-/// on certain ORT versions) commit fine but fail at runtime on specific
-/// ops ("Reshape node ... GetElementType is not implemented"), which
-/// would silently leave every tile unchanged.
 fn build_lama_session(
     id: prunr_models::ModelId,
     bytes: &[u8],
@@ -662,9 +657,9 @@ fn lama_ladder(
             .map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
         tracing::info!(?id, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "LaMa: session committed");
         coverage.report(id, None);
-        smoke_test_session(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+        crate::engine::kept_after_a_run(ep, &mut session, TILE as usize).map_err(failed)?;
         if let Some(draft) = draft { draft.publish(); }
-        tracing::info!(ep = %ep, "LaMa: GPU session validated");
+        tracing::info!(ep = %ep, "LaMa: session on the GPU");
         Ok(session)
     });
     let failed = match landed {
@@ -685,26 +680,6 @@ fn lama_ladder(
         Ok(session)
     })?;
     Ok((session, SessionPick { failed, ..SessionPick::on(crate::engine::CPU_NAME) }))
-}
-
-/// One inference on zero inputs: catches EP/op incompatibilities that
-/// don't surface until the first run.
-fn smoke_test_session(session: &mut Session) -> Result<(), String> {
-    let s = TILE as usize;
-    let img = ndarray::Array4::<f32>::zeros((1, 3, s, s));
-    let msk = ndarray::Array4::<f32>::zeros((1, 1, s, s));
-    let (img_name, mask_name) = lama_input_names(session)
-        .map_err(|inputs| format!("smoke test: need 2 inputs, got {inputs:?}"))?;
-    let img_t = Tensor::from_array(img)
-        .map_err(|e| format!("smoke test: image tensor: {e}"))?;
-    let msk_t = Tensor::from_array(msk)
-        .map_err(|e| format!("smoke test: mask tensor: {e}"))?;
-    session.run(inputs![
-        img_name.as_str() => &img_t,
-        mask_name.as_str() => &msk_t,
-    ])
-        .map_err(|e| format!("smoke test: inference failed: {e}"))?;
-    Ok(())
 }
 
 fn base_builder(threads: usize) -> Result<ort::session::builder::SessionBuilder, String> {

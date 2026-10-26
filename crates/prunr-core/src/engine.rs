@@ -9,7 +9,7 @@ use ort::{
     ep::{ExecutionProviderDispatch, CPU},
     memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
-    value::Tensor,
+    value::{DynValue, Outlet, Tensor, TensorElementType},
 };
 
 /// GPU execution providers, platform-gated so ladder matches stay
@@ -352,7 +352,9 @@ pub fn session_on_ladder(
         let landed = walk_ladder("", id, Weights::Fp32, eps, |ep| {
             let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
             let built = ep.attach(builder, id, EpSite::Engine { threads: num_cpus::get(), part: None })?;
-            commit(built).map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}): {e}"), suspect_cache: None })
+            let mut session = commit(built).map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({ep}): {e}"), suspect_cache: None })?;
+            kept_after_a_run(ep, &mut session, test_side(id, ep)).map_err(|error| Miss::Failed { error, suspect_cache: None })?;
+            Ok(session)
         });
         match landed {
             Ok((session, ep, failed)) => return Ok((session, SessionPick { failed, ..SessionPick::on(ep.as_str()) })),
@@ -552,6 +554,22 @@ impl EpKind {
             _ => false,
         }
     }
+
+    /// Whether a session this provider took can still fail its first run.
+    /// CUDA loads cuDNN's parts on first use (BiRefNet-lite failed with
+    /// CUDNN_BACKEND_API_FAILED while one was missing) and once failed a
+    /// LaMa export in a Reshape; DirectML builds its fused nodes then
+    /// (BiRefNet-lite, LaMa and Nomos2 on an RTX 3060). OpenVINO, CoreML
+    /// and MIGraphX compile the whole graph as the session builds.
+    pub(crate) fn may_fail_its_first_run(self) -> bool {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda => true,
+            #[cfg(windows)]
+            EpKind::DirectMl => true,
+            _ => false,
+        }
+    }
 }
 
 /// CoreML set to compile ML Programs: NeuralNetwork, its default, takes no
@@ -687,6 +705,42 @@ impl Walk {
             "No GPU EPs available on this platform".to_string()
         }
     }
+}
+
+/// The size a test run gives a free input size the model names no size
+/// for (`first_input`).
+const TEST_SIDE: usize = 256;
+
+/// The side a test run of `model` on `ep` gives its free sizes.
+fn test_side(model: prunr_models::ModelId, ep: EpKind) -> usize {
+    first_input(model, ep.as_str()).map_or(TEST_SIDE, |shape| shape[2])
+}
+
+/// Whether `session` may stay on `ep`: where a provider can take a session
+/// and fail its first run (`EpKind::may_fail_its_first_run`), one run on
+/// zeros, each free size `side` and a free batch 1, so a model it cannot
+/// run lands on the next provider instead of failing the user's run.
+pub(crate) fn kept_after_a_run(ep: EpKind, session: &mut Session, side: usize) -> Result<(), String> {
+    if !ep.may_fail_its_first_run() {
+        return Ok(());
+    }
+    let inputs = session.inputs().iter().map(|input| Ok((input.name().to_string(), zeros_for(input, side)?))).collect::<Result<Vec<_>, String>>();
+    inputs
+        .and_then(|inputs| session.run(inputs).map(drop).map_err(|e| e.to_string()))
+        .map_err(|e| format!("{ep} test run failed: {e}"))
+}
+
+fn zeros_for(input: &Outlet, side: usize) -> Result<DynValue, String> {
+    let ty = input.dtype();
+    let dims = ty.tensor_shape().ok_or_else(|| format!("input {} is not a tensor", input.name()))?;
+    let shape: Vec<usize> = dims.iter().enumerate().map(|(axis, &d)| if d > 0 { d as usize } else if axis == 0 { 1 } else { side }).collect();
+    let count = shape.iter().product();
+    match ty.tensor_type() {
+        Some(TensorElementType::Float32) => Tensor::from_array((shape, vec![0f32; count])).map(|t| t.into_dyn()),
+        Some(TensorElementType::Float16) => Tensor::from_array((shape, vec![half::f16::ZERO; count])).map(|t| t.into_dyn()),
+        other => return Err(format!("input {} holds {other:?}", input.name())),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Each provider in `eps` with `weights` until `commit` builds a session,
@@ -1147,10 +1201,12 @@ impl OrtEngine {
             let (builder, coverage) = crate::ep_coverage::watch(ep, builder);
             let mut built = ep.attach(builder, model_id, EpSite::Engine { threads: intra_threads, part: None })?;
             let started = Instant::now();
-            let session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
+            let suspect = || cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep.as_str(), weights, None);
+            let mut session = built.commit_from_memory(&bytes_owner).map_err(|e| Miss::Failed {
                 error: format!("ORT session creation failed ({ep}): {e}"),
-                suspect_cache: cached_graph(matches!(bytes_owner, Cow::Owned(_)), model_id, ep.as_str(), weights, None),
+                suspect_cache: suspect(),
             })?;
+            kept_after_a_run(ep, &mut session, test_side(model_id, ep)).map_err(|error| Miss::Failed { error, suspect_cache: suspect() })?;
             if let Some(draft) = draft { draft.publish(); }
             tracing::info!(?model, ?weights, ep = %ep, elapsed_ms = started.elapsed().as_millis() as u64, "session committed");
             coverage.report(model_id, None);
@@ -1184,8 +1240,12 @@ impl OrtEngine {
                         crate::ep_coverage::CoverageWatch::default(),
                     ),
                 };
-                let session = built.commit_from_memory(bytes)
+                let mut session = built.commit_from_memory(bytes)
                     .map_err(|e| Miss::Failed { error: format!("ORT session creation failed ({key}): {e}"), suspect_cache: None })?;
+                if let Some(ep) = ep {
+                    kept_after_a_run(ep, &mut session, test_side(id, ep))
+                        .map_err(|error| Miss::Failed { error: format!("{key}: {error}"), suspect_cache: None })?;
+                }
                 coverage.report(id, Some(key));
                 Ok((*key, session))
             }).collect()
@@ -1549,6 +1609,58 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model reshaping its one input `x` ([batch, 3, h, w], each free)
+    /// to `to`, hand-encoded: a session takes it whatever `to` is, and its
+    /// run fails when the input's size does not divide into `to`.
+    fn reshape_model(to: [i64; 2]) -> Vec<u8> {
+        fn varint(mut v: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let byte = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    out.push(byte);
+                    return out;
+                }
+                out.push(byte | 0x80);
+            }
+        }
+        let number = |field: u64, value: u64| [varint(field << 3), varint(value)].concat();
+        let bytes = |field: u64, payload: &[u8]| [varint(field << 3 | 2), varint(payload.len() as u64), payload.to_vec()].concat();
+        let free = |name: &str| bytes(1, &bytes(2, name.as_bytes()));
+        let fixed = |size: u64| bytes(1, &number(1, size));
+        let float_tensor = |shape: Vec<u8>| bytes(1, &[number(1, 1), shape].concat());
+        let x = [bytes(1, b"x"), bytes(2, &float_tensor(bytes(2, &[free("n"), fixed(3), free("h"), free("w")].concat())))].concat();
+        let y = [bytes(1, b"y"), bytes(2, &float_tensor(Vec::new()))].concat();
+        let target: Vec<u8> = to.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let to = [number(1, 2), number(2, 7), bytes(8, b"to"), bytes(9, &target)].concat();
+        let node = [bytes(1, b"x"), bytes(1, b"to"), bytes(2, b"y"), bytes(4, b"Reshape")].concat();
+        let graph = [bytes(1, &node), bytes(2, b"g"), bytes(5, &to), bytes(11, &x), bytes(12, &y)].concat();
+        [number(1, 8), bytes(8, &number(2, 13)), bytes(7, &graph)].concat()
+    }
+
+    /// A CUDA or DirectML session stays only once it has run: one whose
+    /// run fails goes to the next provider. Its free sizes take the side,
+    /// a free batch 1 (3·16·16 = 768 values make rows of 256 only then).
+    /// Providers that compile the whole graph as the session builds are
+    /// not run.
+    #[test]
+    fn a_session_that_cannot_run_is_not_kept() {
+        if crate::ort_runtime::runtime_for_tests().is_err() {
+            return;
+        }
+        let session = |to| crate::ort_runtime::session_builder().unwrap().commit_from_memory(&reshape_model(to)).expect("any reshape commits");
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(kept_after_a_run(EpKind::Cuda, &mut session([3, 256]), 16), Ok(()));
+            let refused = kept_after_a_run(EpKind::Cuda, &mut session([-1, 7]), 16).expect_err("768 values make no rows of 7");
+            assert!(refused.starts_with("CUDA test run failed"), "{refused}");
+            assert_eq!(kept_after_a_run(EpKind::OpenVino, &mut session([-1, 7]), 16), Ok(()));
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(kept_after_a_run(EpKind::CoreMl, &mut session([-1, 7]), 16), Ok(()));
+    }
 
     /// On OpenVINO's processor a session loads the model's own weights,
     /// not its FP16 copy, which is widened back there.
