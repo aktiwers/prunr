@@ -79,18 +79,19 @@ impl HardwareProfile {
     }
 
     /// The runtime download the first-launch prompt and Settings
-    /// recommend, among those offered here. A graphics card that suits
-    /// DirectML needs none, since DirectML is built in, even with an
-    /// Intel iGPU beside it. A graphics card wins over an Intel iGPU beside
-    /// it (the usual Linux laptop): CUDA or MIGraphX runs the card,
-    /// OpenVINO only the iGPU.
+    /// recommend, among those offered here. An NVIDIA card gets CUDA where
+    /// it is offered, Windows included: it runs models DirectML refuses or
+    /// breaks. Any other card that suits DirectML needs none, since
+    /// DirectML is built in, even with an Intel iGPU beside it. A graphics
+    /// card wins over an Intel iGPU beside it (the usual Linux laptop):
+    /// CUDA or MIGraphX runs the card, OpenVINO only the iGPU.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
         use crate::runtime_install::RuntimeId;
-        if self.suits_directml {
-            return None;
+        let cuda = (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda).filter(|rt| RuntimeId::OFFERED.contains(rt));
+        if cuda.is_some() || self.suits_directml {
+            return cuda;
         }
         [
-            (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda),
             self.recommends_rocm().then_some(RuntimeId::MiGraphX),
             self.recommends_openvino().then_some(RuntimeId::OpenVino),
         ]
@@ -550,9 +551,12 @@ mod tests {
         };
         let openvino_if_offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino).then_some(RuntimeId::OpenVino);
         assert_eq!(p.recommended_runtime(), openvino_if_offered);
-        p.dgpu = Some(GpuVendor::Nvidia);
+        p.dgpu = Some(GpuVendor::Amd);
         p.suits_directml = true;
         assert_eq!(p.recommended_runtime(), None, "DirectML is built in");
+        p.dgpu = Some(GpuVendor::Nvidia);
+        let cuda_if_offered = RuntimeId::OFFERED.contains(&RuntimeId::Cuda).then_some(RuntimeId::Cuda);
+        assert_eq!(p.recommended_runtime(), cuda_if_offered, "an NVIDIA card gets CUDA where offered, DirectML or not");
         p.dgpu = None;
         p.igpu = None;
         p.suits_directml = false;

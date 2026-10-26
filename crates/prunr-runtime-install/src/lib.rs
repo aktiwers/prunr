@@ -175,7 +175,7 @@ pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
     // The GPU wheel's TensorRT provider: no session registers it.
-    if stripped.starts_with("libonnxruntime_providers_tensorrt") { return None; }
+    if stripped.trim_start_matches("lib").starts_with("onnxruntime_providers_tensorrt") { return None; }
     if stripped.ends_with(".py") { return None; }
     if stripped.starts_with("libonnxruntime.so.") {
         return Some("libonnxruntime.so".to_string());
@@ -492,16 +492,19 @@ pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<Pat
 }
 
 /// Filter + flatten for files extracted from an NVIDIA library wheel
-/// (`nvidia/<package>/lib/libX.so.N`): its shared libraries, by file
-/// name. The same path-traversal guard as `repackage_target_filename`.
+/// (`nvidia/<package>/lib/libX.so.N` on Linux, `nvidia/<package>/bin/
+/// X64_N.dll` on Windows): its shared libraries, by file name. The same
+/// path-traversal guard as `repackage_target_filename`.
 pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
     let rest = zip_name.strip_prefix("nvidia/")?;
-    let (_package, file) = rest.split_once("/lib/")?;
-    if file.is_empty() || file.contains('/') || file.contains('\\') || !file.contains(".so") {
+    let (_package, file) = rest.split_once("/lib/").or_else(|| rest.split_once("/bin/"))?;
+    let library = file.contains(".so") || file.ends_with(".dll");
+    if file.is_empty() || file.contains('/') || file.contains('\\') || !library {
         return None;
     }
     // Shipped beside what ORT links but never loaded by it.
-    if file.starts_with("libnvblas") || file.starts_with("libcufftw") || file.contains(".alt.") {
+    let name = file.trim_start_matches("lib");
+    if name.starts_with("nvblas") || name.starts_with("cufftw") || file.contains(".alt.") {
         return None;
     }
     Some(file.to_string())
@@ -829,6 +832,11 @@ mod tests {
             ("onnxruntime/capi/libonnxruntime_providers_shared.so", Some("libonnxruntime_providers_shared.so")),
             ("onnxruntime/capi/libonnxruntime_providers_tensorrt.so", None),
             ("onnxruntime/capi/onnxruntime_pybind11_state.so", None),
+            // The Windows GPU wheel, as on PyPI for 1.24.1.
+            ("onnxruntime/capi/onnxruntime_providers_cuda.dll", Some("onnxruntime_providers_cuda.dll")),
+            ("onnxruntime/capi/onnxruntime_providers_shared.dll", Some("onnxruntime_providers_shared.dll")),
+            ("onnxruntime/capi/onnxruntime_providers_tensorrt.dll", None),
+            ("onnxruntime/capi/onnxruntime_pybind11_state.pyd", None),
             ("onnxruntime/capi/__init__.py", None),
             ("onnxruntime/__init__.py", None),
             // A separator after `capi/` could escape the target dir: `/` on
@@ -872,6 +880,27 @@ mod tests {
         assert!(nvidia_target_filename("onnxruntime/capi/libonnxruntime.so").is_none());
         for unused in ["libnvblas.so.12", "libcufftw.so.11", "libnvrtc.alt.so.12", "libnvrtc-builtins.alt.so.12.9"] {
             assert!(nvidia_target_filename(&format!("nvidia/x/lib/{unused}")).is_none(), "{unused}");
+        }
+    }
+
+    /// The Windows wheels keep their DLLs under `bin/` (as on PyPI for the
+    /// pinned versions); the same ones are left out as on Linux.
+    #[test]
+    fn nvidia_windows_wheels_give_up_their_dlls() {
+        for (entry, kept) in [
+            ("nvidia/cudnn/bin/cudnn64_9.dll", Some("cudnn64_9.dll")),
+            ("nvidia/cudnn/bin/cudnn_engines_precompiled64_9.dll", Some("cudnn_engines_precompiled64_9.dll")),
+            ("nvidia/cublas/bin/cublasLt64_12.dll", Some("cublasLt64_12.dll")),
+            ("nvidia/cuda_runtime/bin/cudart64_12.dll", Some("cudart64_12.dll")),
+            ("nvidia/cuda_nvrtc/bin/nvrtc64_120_0.dll", Some("nvrtc64_120_0.dll")),
+            ("nvidia/cuda_nvrtc/bin/nvrtc-builtins64_129.dll", Some("nvrtc-builtins64_129.dll")),
+            ("nvidia/cublas/bin/nvblas64_12.dll", None),
+            ("nvidia/cufft/bin/cufftw64_11.dll", None),
+            ("nvidia/cuda_nvrtc/bin/nvrtc64_120_0.alt.dll", None),
+            ("nvidia/cudnn/bin/..\\evil.dll", None),
+            ("nvidia/cudnn/include/cudnn.h", None),
+        ] {
+            assert_eq!(nvidia_target_filename(entry).as_deref(), kept, "{entry}");
         }
     }
 
