@@ -530,8 +530,11 @@ fn render_empty(ui: &mut egui::Ui) {
     let tips = tip_text(ui.ctx());
     let tip_index = ((time / TIP_CYCLE_SECS) as usize) % tips.tips.len();
     let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
+    let fades = theme::motion(ui.ctx());
 
-    let alpha = if phase < TIP_FADE_SECS {
+    let alpha = if !fades {
+        1.0
+    } else if phase < TIP_FADE_SECS {
         (phase / TIP_FADE_SECS) as f32
     } else if phase > TIP_CYCLE_SECS - TIP_FADE_SECS {
         ((TIP_CYCLE_SECS - phase) / TIP_FADE_SECS) as f32
@@ -559,8 +562,8 @@ fn render_empty(ui: &mut egui::Ui) {
     if alpha < 1.0 {
         ui.ctx().request_repaint(); // smooth fade
     } else {
-        let secs_until_fade_out = TIP_CYCLE_SECS - TIP_FADE_SECS - phase;
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(secs_until_fade_out.max(0.016)));
+        let next_change = if fades { TIP_CYCLE_SECS - TIP_FADE_SECS } else { TIP_CYCLE_SECS } - phase;
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next_change.max(0.016)));
     }
 }
 
@@ -666,6 +669,9 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         draw_selection(ui, app, item, img_rect);
         draw_found_faces(ui, app, item, img_rect);
         Some(img_rect)
+    } else if let Some(why) = app.batch.selected_item().and_then(crate::gui::item::BatchItem::unreadable) {
+        render_unreadable(ui, canvas_rect.center(), why);
+        None
     } else {
         let center = canvas_rect.center();
         ui.put(
@@ -675,6 +681,25 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         ui.ctx().request_repaint();
         None
     }
+}
+
+/// A photo that could not be opened: why, in place of the image.
+fn render_unreadable(ui: &egui::Ui, center: Pos2, why: &str) {
+    let painter = ui.painter();
+    painter.text(
+        center - Vec2::new(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        "Could not open this image",
+        egui::FontId::proportional(theme::FONT_SIZE_HEADING),
+        theme::TEXT_PRIMARY,
+    );
+    painter.text(
+        center + Vec2::new(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        why,
+        egui::FontId::proportional(theme::FONT_SIZE_BODY),
+        theme::TEXT_SECONDARY,
+    );
 }
 
 /// Paint the canvas-background "work in progress" effect: gentle

@@ -1269,6 +1269,11 @@ impl BatchItem {
         }
     }
 
+    /// Why the photo could not be decoded, when it could not.
+    pub(crate) fn unreadable(&self) -> Option<&str> {
+        self.failure.as_deref().filter(|_| self.decode_failed)
+    }
+
     /// Why the image failed, while the failure is what it shows.
     pub(crate) fn error(&self) -> Option<&str> {
         self.failure.as_deref().filter(|_| !self.is_cutting() && !self.has_result())
