@@ -223,8 +223,13 @@ impl PrunrApp {
         }
         cc.egui_ctx.set_global_style(style);
 
-        super::drag_export::cleanup_stale();
-        super::history_disk::cleanup_stale();
+        // Earlier runs' files go off the window's start: a crashed session
+        // can leave gigabytes of undo states to delete. Neither touches
+        // this process's own folders.
+        let _ = std::thread::Builder::new().name("startup-sweep".into()).spawn(|| {
+            super::drag_export::cleanup_stale();
+            super::history_disk::cleanup_stale();
+        });
 
         let (mut settings, settings_note) = Settings::load();
         // The probe runs on its own thread (`gui::run`); a GPU driver that
