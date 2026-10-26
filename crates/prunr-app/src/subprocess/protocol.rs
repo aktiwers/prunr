@@ -430,21 +430,37 @@ pub enum SubprocessEvent {
 pub fn ipc_temp_dir() -> &'static std::path::Path {
     use std::sync::OnceLock;
     static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
+    let dir = DIR.get_or_init(|| {
         let pid = std::process::id();
         let dir = init_temp_dir_for_pid(pid);
         if let Some(parent) = dir.parent() {
             crate::fs_util::sweep_dead_pid_dirs(parent, "prunr-ipc-", pid);
         }
         dir
-    }).as_path()
+    });
+    still_there(dir)
+}
+
+/// `dir`, made again when it has gone: on Windows the folder went between
+/// the worker's start and the first image sent to it (cause not yet
+/// found), and every hand-off then failed until a restart.
+fn still_there(dir: &std::path::Path) -> &std::path::Path {
+    if !dir.is_dir() {
+        tracing::warn!(dir = %dir.display(), "the worker temp folder had gone; made again");
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::error!(dir = %dir.display(), %e, "the worker temp folder cannot be made");
+        }
+    }
+    dir
 }
 
 /// `ipc_temp_dir()`'s init without the dead-PID sweep, so tests can drive
 /// it with synthetic PIDs in isolation.
 fn init_temp_dir_for_pid(pid: u32) -> std::path::PathBuf {
     let dir = resolve_temp_dir_path(pid);
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::error!(dir = %dir.display(), %e, "the worker temp folder cannot be made");
+    }
     crate::fs_util::sweep_dir_files(&dir);
     dir
 }
@@ -631,6 +647,17 @@ mod tests {
     use serde::de::DeserializeOwned;
     use std::fmt::Debug;
     use std::path::PathBuf;
+
+    /// A worker temp folder that has gone is made again before the next
+    /// hand-off, which otherwise failed with "cannot find the path".
+    #[test]
+    fn a_gone_temp_folder_is_made_again() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("prunr-ipc-1");
+        assert!(super::still_there(&dir).is_dir());
+        std::fs::remove_dir(&dir).unwrap();
+        assert!(std::fs::write(super::still_there(&dir).join("input-0"), b"x").is_ok());
+    }
 
     #[test]
     fn a_cancel_reads_as_a_cancel_whoever_reported_it() {
