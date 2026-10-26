@@ -696,7 +696,7 @@ impl PrunrApp {
     }
 
     pub(crate) fn any_modal_open(&self) -> bool {
-        !self.open_modals().is_empty()
+        Self::MODALS.iter().any(|(_, open, _)| open(self))
     }
 
     /// Every modal the app can show, by name, whether it is up, and how

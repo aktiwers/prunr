@@ -216,7 +216,9 @@ fn trail_mesh(
 ) -> std::sync::Arc<egui::Mesh> {
     let id = egui::Id::new("brush_trail_mesh");
     let stamps: Vec<(f32, f32, f32)> = stamps.collect();
-    let mut kept: TrailMesh = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    // Taken out, not copied: a second holder would make `make_mut` copy
+    // the whole trail each frame it grows.
+    let mut kept: TrailMesh = ctx.data_mut(|d| d.remove_temp(id)).unwrap_or_default();
     if kept.key != Some(key) || kept.first != stamps.first().copied() || stamps.len() < kept.done {
         kept = TrailMesh { key: Some(key), first: stamps.first().copied(), ..TrailMesh::default() };
     }
@@ -298,6 +300,21 @@ mod tests {
         assert!(grown.vertices.len() > first.vertices.len() && grown.vertices.starts_with(&first.vertices), "the new stamp is appended");
         let other = super::trail_mesh(&ctx, key, options, [(50.0, 50.0, 6.0)].into_iter());
         assert_eq!(other.vertices.len(), first.vertices.len(), "another stroke starts over");
+    }
+
+    /// A new stamp adds to the kept mesh in place: once the frame that
+    /// painted it lets go, nothing else holds it, so a long stroke is not
+    /// copied whole every frame it grows.
+    #[test]
+    fn a_growing_trail_is_not_copied() {
+        let ctx = egui::Context::default();
+        let key = super::TrailKey { shape: prunr_core::brush::BrushShape::Circle, hardness: 0.5, accent: egui::Color32::RED, alpha: 100, ppp: 1.0 };
+        let options = egui::epaint::TessellationOptions::default();
+        let painted = super::trail_mesh(&ctx, key, options, [(10.0, 10.0, 6.0)].into_iter());
+        let kept = std::sync::Arc::as_ptr(&painted);
+        drop(painted);
+        let grown = super::trail_mesh(&ctx, key, options, [(10.0, 10.0, 6.0), (14.0, 10.0, 6.0)].into_iter());
+        assert_eq!(std::sync::Arc::as_ptr(&grown), kept, "the same mesh, added to");
     }
 
     use super::*;

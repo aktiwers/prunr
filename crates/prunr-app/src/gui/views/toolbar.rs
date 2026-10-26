@@ -181,11 +181,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
 
             // Process button — always visible; routing and gating live in
-            // `handle_process_intent` / `can_process_intent`.
+            // `handle_process_intent` / `process_refusal`.
             {
                 let inpaint_mode = app.settings.model.is_inpaint();
                 let label = app.batch.process_button_label();
-                let has_processable = app.can_process_intent();
+                let refusal = app.process_refusal();
+                let has_processable = refusal.is_none();
 
                 let (label_text, is_all) = match label {
                     ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
@@ -211,7 +212,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let refusal = app.process_refusal();
                 let body: std::borrow::Cow<'static, str> = if let Some(why) = refusal {
                     why.into()
                 } else if inpaint_mode {
