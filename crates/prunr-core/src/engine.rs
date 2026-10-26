@@ -754,16 +754,23 @@ pub fn gpu_provider_names() -> Vec<String> {
 }
 
 /// The lighter copy of `id`'s weights a session tries before its own,
-/// when one is on disk: FP16 on a GPU, INT8 on the CPU. Never on macOS,
-/// where CoreML converts to FP16 itself.
-fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool) -> Option<Weights> {
+/// when one is on disk: FP16 on a GPU in `eps` that gains from it, INT8
+/// on the CPU. Never on macOS, where CoreML converts to FP16 itself.
+fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) -> Option<Weights> {
     if cfg!(target_os = "macos") {
         None
     } else if cpu_only {
         prunr_models::has_int8_variant(id).then_some(Weights::Int8)
     } else {
-        prunr_models::has_fp16_variant(id).then_some(Weights::Fp16)
+        (prunr_models::has_fp16_variant(id) && eps.iter().any(|&ep| gains_from_fp16(id, ep))).then_some(Weights::Fp16)
     }
+}
+
+/// A session on the host CPU widens FP16 back to FP32: OpenVINO on the
+/// processor ran Real-ESRGAN x4 no faster (7.78 s a 256 tile against
+/// 7.69 s on an i7-6700) and 0.8/255 off on average, up to 10.
+fn gains_from_fp16(id: prunr_models::ModelId, ep: EpKind) -> bool {
+    !model_on_host_cpu(id, ep.as_str())
 }
 
 /// Why a GPU session of `model` passes `ep` over for every weights it
@@ -773,7 +780,7 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
         return Some(Skip::KeptOff(why));
     }
     let intel_gpu = asks_intel_gpu(ep, model);
-    [lighter_weights(model, false), Some(Weights::Fp32)].into_iter().flatten()
+    [lighter_weights(model, false, &[ep]), Some(Weights::Fp32)].into_iter().flatten()
         .all(|weights| crate::ep_compat::is_known_failure(ep, model, weights, intel_gpu))
         .then_some(Skip::FailedBefore)
 }
@@ -1024,7 +1031,14 @@ impl OrtEngine {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         let id: prunr_models::ModelId = model.into();
         let mut failed = Vec::new();
-        for weights in [lighter_weights(id, cpu_only), Some(Weights::Fp32)].into_iter().flatten() {
+        for weights in [lighter_weights(id, cpu_only, eps), Some(Weights::Fp32)].into_iter().flatten() {
+            let fp16_eps: Vec<EpKind>;
+            let eps = if weights == Weights::Fp16 {
+                fp16_eps = eps.iter().copied().filter(|&ep| gains_from_fp16(id, ep)).collect();
+                &fp16_eps
+            } else {
+                eps
+            };
             if let Some(walk) = (!cpu_only).then(|| Walk::without_a_try(id, weights, eps)).flatten() {
                 failed.push(format!("{} weights: {}", weights.label(), CoreError::Inference(walk.reason())));
                 continue;
@@ -1540,6 +1554,55 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 mod tests {
     use super::*;
 
+    /// On OpenVINO's processor a session loads the model's own weights,
+    /// not its FP16 copy, which is widened back there.
+    #[test]
+    fn openvino_on_the_processor_loads_full_precision() {
+        let id = prunr_models::ModelId::RealEsrganX4Plus;
+        if crate::ort_runtime::runtime_for_tests().is_err() || !available_gpu_eps().contains(&EpKind::OpenVino) || on_intel_gpu(id) || !prunr_models::has_fp16_variant(id) {
+            return;
+        }
+        let engine = OrtEngine::for_model(id, 2, false).unwrap();
+        assert_eq!((engine.active_provider(), engine.pick().weights), (OPENVINO_NAME, Weights::Fp32));
+    }
+
+    /// Real-ESRGAN x4 on OpenVINO's processor with its FP16 copy and its
+    /// own weights: the time of a 256 and a 128 tile, and how far apart
+    /// the two weights land.
+    #[test]
+    #[ignore = "real model on the OpenVINO runtime, minutes"]
+    fn openvino_on_the_processor_fp16_against_fp32() {
+        let id = prunr_models::ModelId::RealEsrganX4Plus;
+        if crate::ort_runtime::runtime_for_tests().is_err() || !available_gpu_eps().contains(&EpKind::OpenVino) || on_intel_gpu(id) || !prunr_models::has_fp16_variant(id) {
+            return;
+        }
+        let kind = ModelKind::try_from(id).unwrap();
+        let picture = |side: u32| image::RgbaImage::from_fn(side, side, |x, y| {
+            let ripple = ((x as f32 * 0.21).sin() * (y as f32 * 0.13).cos() * 60.0) as i32;
+            image::Rgba([(80 + x as i32 / 3 + ripple).clamp(0, 255) as u8, (40 + y as i32 / 4).clamp(0, 255) as u8, (200 - ripple).clamp(0, 255) as u8, 255])
+        });
+        let upscale = |engine: &OrtEngine, input: &image::RgbaImage| crate::upscale::upscale_rgba_with_engine(input, engine, id, 4, &crate::Progress::none(), None).unwrap();
+        let mut outputs = Vec::new();
+        for weights in [Weights::Fp32, Weights::Fp16] {
+            let bytes = OrtEngine::weights_bytes(id, weights).unwrap().unwrap();
+            let engine = OrtEngine::build_session(&bytes, weights, 4, kind, &[EpKind::OpenVino], GraphOptimizationLevel::Level3).unwrap();
+            assert_eq!(engine.active_provider(), OPENVINO_NAME);
+            for side in [128, 256] {
+                let input = picture(side);
+                upscale(&engine, &input);
+                let start = Instant::now();
+                let out: Vec<_> = (0..3).map(|_| upscale(&engine, &input)).collect();
+                eprintln!("{weights:?}: {:.2} s a {side} tile", start.elapsed().as_secs_f32() / 3.0);
+                if side == 256 {
+                    outputs.extend(out.into_iter().last());
+                }
+            }
+        }
+        let diffs: Vec<u8> = outputs[0].pixels().zip(outputs[1].pixels()).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap()).collect();
+        let mean = diffs.iter().map(|&d| f64::from(d)).sum::<f64>() / diffs.len() as f64;
+        eprintln!("FP16 against FP32: mean {mean:.3}, max {}", diffs.iter().max().unwrap());
+    }
+
     /// The real case: Nomos8k's FP16 network on the CPU, whose saved graph
     /// never loads back (ORT's optimizers, run again, look for casts the
     /// first run folded away).
@@ -2031,13 +2094,13 @@ mod tests {
             .expect("Silueta is bundled");
         let none = "Inference error: No GPU EPs available on this platform";
         let mut expected = Vec::new();
-        if lighter_weights(ModelId::Silueta, false).is_some() {
+        if lighter_weights(ModelId::Silueta, false, &[]).is_some() {
             expected.push(format!("FP16 weights: {none}"));
         }
         expected.push(format!("FP32 weights: {none}"));
         assert_eq!(engine.pick().provider, "CPU");
         assert_eq!(engine.pick().failed, expected);
-        assert_eq!(engine.pick().weights, lighter_weights(ModelId::Silueta, true).unwrap_or(Weights::Fp32));
+        assert_eq!(engine.pick().weights, lighter_weights(ModelId::Silueta, true, &[]).unwrap_or(Weights::Fp32));
     }
 
     /// Level2 is a valid value for all bundled models — the constructor must not
