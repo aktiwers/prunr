@@ -6,7 +6,7 @@ Prunr is built from the open-source Rust crates below (every platform's build co
 
 | Component | Licence | Source |
 |---|---|---|
-| ONNX Runtime (bundled CPU build, and the OpenVINO, CUDA, DirectML and CoreML builds the app can download) | MIT | https://github.com/microsoft/onnxruntime |
+| ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; and the OpenVINO, CUDA and MIGraphX builds the app can download) | MIT | https://github.com/microsoft/onnxruntime |
 | OpenVINO Toolkit (inside the OpenVINO build of ONNX Runtime) | Apache-2.0 | https://github.com/openvinotoolkit/openvino |
 | NVIDIA CUDA and cuDNN libraries (downloaded with the CUDA build of ONNX Runtime) | NVIDIA's licence terms, shown before the download | https://pypi.org/user/nvidia/ |
 | Material Symbols (icon font, through egui_material_icons) | Apache-2.0 | https://github.com/google/material-design-icons |

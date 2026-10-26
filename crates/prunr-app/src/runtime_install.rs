@@ -54,9 +54,9 @@ impl RuntimeId {
     /// DLL without `openvino.dll` (Python loads that from the separate
     /// `openvino` package), so the provider never registers and every
     /// session would run on the CPU, where DirectML runs the same iGPU.
-    /// CUDA is offered on Windows too: DirectML's last build (1.24.4)
-    /// refuses or breaks LaMa, Big-LaMa, DDColor and Nomos2 on an RTX 3060
-    /// that CUDA runs. MIGraphX has a Linux wheel only.
+    /// CUDA is offered on Windows too: the built-in DirectML (Windows ML
+    /// 1.30) fails BiRefNet-lite, LaMa, Big-LaMa and Nomos2 on an RTX 3060,
+    /// which CUDA runs. MIGraphX has a Linux wheel only.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
         &[Self::Cuda]
     } else if cfg!(windows) {

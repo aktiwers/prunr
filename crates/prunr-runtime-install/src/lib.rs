@@ -34,6 +34,13 @@ pub const PINNED_ORT_VERSION: &str = "1.24.1";
 /// bump checks that too.
 pub const PLAIN_ORT_VERSION: &str = "1.30.0";
 
+/// The Windows ML build of ONNX Runtime the Windows release ships
+/// (`onnxruntime-windowsml`: `onnxruntime.dll` and `DirectML.dll`).
+/// Microsoft's DirectML builds (`onnxruntime-directml`) end at 1.24.4,
+/// where constant folding corrupts weights and runs off: DDColor then
+/// gives a wrong result on DirectML, and runs right on this 1.30 build.
+pub const WINDOWS_ML_VERSION: &str = "1.30.0.202609102321";
+
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
@@ -603,7 +610,7 @@ mod tests {
         // (path, package, version, expected occurrence count)
         let cases: &[(&str, &str, &str, usize)] = &[
             ("/../../.github/workflows/release.yml", "onnxruntime", PLAIN_ORT_VERSION, 1),           // Linux + macOS staging
-            ("/../../.github/workflows/release.yml", "onnxruntime-directml", PINNED_ORT_VERSION, 1), // Windows staging
+            ("/../../.github/workflows/release.yml", "onnxruntime-windowsml", WINDOWS_ML_VERSION, 1), // Windows staging
             ("/../../.github/workflows/ci.yml", "onnxruntime", PLAIN_ORT_VERSION, 2),                // Linux install before tests, macOS smoke test
         ];
         for (rel, package, version, expected) in cases {
@@ -849,15 +856,15 @@ mod tests {
         }
     }
 
-    /// The Windows release ships the DirectML runtime as its default:
-    /// both DLLs staged from the DirectML wheel, side by side in
-    /// `<exe>/runtime/` in the zip and in the installer.
+    /// The Windows release ships the Windows ML runtime as its default:
+    /// both DLLs staged from its wheel, side by side in `<exe>/runtime/`
+    /// in the zip and in the installer.
     #[test]
-    fn release_yml_ships_the_directml_runtime_on_windows() {
+    fn release_yml_ships_the_windows_ml_runtime_on_windows() {
         let abs = format!("{}/../../.github/workflows/release.yml", env!("CARGO_MANIFEST_DIR"));
         let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
         for line in [
-            format!("cargo xtask install-runtime onnxruntime-directml {PINNED_ORT_VERSION} --stage-to runtime-stage"),
+            format!("cargo xtask install-runtime onnxruntime-windowsml {WINDOWS_ML_VERSION} --stage-to runtime-stage"),
             "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/".to_string(),
             "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/".to_string(),
             "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
