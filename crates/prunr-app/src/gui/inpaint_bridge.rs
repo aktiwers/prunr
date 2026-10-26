@@ -32,7 +32,7 @@ pub enum InpaintBridgeMsg {
     /// One SD inpaint stroke; image + mask are temp-file PNGs the worker
     /// decodes. Its generation round-trips on `Done` so the GUI can drop a
     /// stroke a fresher one superseded.
-    Dispatch(InpaintJob),
+    Dispatch(Box<InpaintJob>),
     /// Kill the subprocess; every in-flight stroke ends Cancelled.
     Cancel,
     /// Release the subprocess regardless of in-flight state: unlike Cancel,
@@ -115,7 +115,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                     last_used = Instant::now();
                     keep_loaded = job.sd_req.as_ref().is_some_and(|r| r.tuning.keep_loaded);
                     strokes.insert((job.item_id, job.generation));
-                    handle_dispatch(&mut sub_state, &mut strokes, &res_tx, job);
+                    handle_dispatch(&mut sub_state, &mut strokes, &res_tx, *job);
                 }
                 InpaintBridgeMsg::Cancel => {
                     // SD's UNet `run()` can't be interrupted mid-step, so only a kill

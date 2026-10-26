@@ -1328,7 +1328,7 @@ impl Processor {
                 sharpen: tuning.sharpen,
                 edge_colour: tuning.edge_colour,
             };
-            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(job));
+            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(Box::new(job)));
         });
     }
 
