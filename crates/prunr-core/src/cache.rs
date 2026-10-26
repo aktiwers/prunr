@@ -53,7 +53,7 @@ pub(crate) struct OwnCacheRoot;
 #[cfg(test)]
 impl OwnCacheRoot {
     pub(crate) fn new(name: &str) -> Self {
-        OWN_ROOT.set(tests::temp_root().and_then(|run| Some(run.parent()?.join(name).join("ep_cache"))));
+        OWN_ROOT.set(tests::temp_root().map(|run| run.with_file_name(name).join("ep_cache")));
         Self
     }
 }

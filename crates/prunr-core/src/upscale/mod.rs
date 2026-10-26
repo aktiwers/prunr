@@ -311,6 +311,15 @@ pub fn model_for_scale(model: prunr_models::ModelId, scale: crate::OutputScale, 
     }
 }
 
+/// A busy test picture: ripples over two gradients, opaque.
+#[cfg(test)]
+pub(crate) fn ripple_picture(w: u32, h: u32) -> RgbaImage {
+    RgbaImage::from_fn(w, h, |x, y| {
+        let ripple = ((x as f32 * 0.21).sin() * (y as f32 * 0.13).cos() * 60.0) as i32;
+        image::Rgba([(80 + x as i32 / 3 + ripple).clamp(0, 255) as u8, (40 + y as i32 / 4).clamp(0, 255) as u8, (200 - ripple).clamp(0, 255) as u8, 255])
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,41 +358,6 @@ mod tests {
         assert_eq!(needed_bytes(nomos2, 1000, 1000, 2), needed_bytes(nomos2, 1000, 1000, 4), "the run at 4x outweighs the resample");
         let x4 = ModelId::RealEsrganX4Plus;
         assert_eq!(needed_bytes(x4, 4096, 4096, 4), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
-    }
-
-    /// Real-ESRGAN x2 at Level3 against Level2 on the CPU: the output on
-    /// two picture shapes in one session each, and the time.
-    #[test]
-    #[ignore = "real model, a minute on a CPU"]
-    fn x2plus_at_level3_against_level2() {
-        let id = prunr_models::ModelId::RealEsrganX2Plus;
-        if crate::ort_runtime::runtime_for_tests().is_err() || !prunr_models::is_available(id) {
-            return;
-        }
-        let picture = |w: u32, h: u32| RgbaImage::from_fn(w, h, |x, y| {
-            let ripple = ((x as f32 * 0.21).sin() * (y as f32 * 0.13).cos() * 60.0) as i32;
-            image::Rgba([(80 + x as i32 / 3 + ripple).clamp(0, 255) as u8, (40 + y as i32 / 4).clamp(0, 255) as u8, (200 - ripple).clamp(0, 255) as u8, 255])
-        });
-        let pictures = [picture(512, 384), picture(300, 700)];
-        let mut outputs = Vec::new();
-        for level in ["Level2", "Level3"] {
-            crate::cache::clear_for_model(id);
-            let engine = match level {
-                "Level2" => OrtEngine::for_model(id, 4, true).unwrap(),
-                _ => OrtEngine::with_threads(crate::ModelKind::try_from(id).unwrap(), 4, true).unwrap(),
-            };
-            let run = |p: &RgbaImage| upscale_rgba_with_engine(p, &engine, id, 2, &Progress::none(), None).unwrap();
-            run(&pictures[0]);
-            let start = std::time::Instant::now();
-            let out: Vec<RgbaImage> = pictures.iter().map(run).collect();
-            eprintln!("{level}: {:.2} s", start.elapsed().as_secs_f32());
-            outputs.push(out);
-        }
-        crate::cache::clear_for_model(id);
-        for (two, three) in outputs[0].iter().zip(&outputs[1]) {
-            let most = two.pixels().zip(three.pixels()).map(|(a, b)| (0..3).map(|k| a[k].abs_diff(b[k])).max().unwrap()).max().unwrap();
-            eprintln!("{:?}: largest difference {most}", two.dimensions());
-        }
     }
 
     #[test]

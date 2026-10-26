@@ -941,10 +941,7 @@ mod tests {
         }
         let input = match std::env::var("PRUNR_TEST_IMAGE") {
             Ok(path) => image::imageops::crop_imm(&image::open(path).expect("PRUNR_TEST_IMAGE opens").to_rgba8(), 0, 0, 300, 600).to_image(),
-            Err(_) => RgbaImage::from_fn(300, 600, |x, y| {
-                let ripple = (((x as f32) * 0.21).sin() * ((y as f32) * 0.13).cos() * 60.0) as i32;
-                image::Rgba([(80 + x as i32 / 3 + ripple).clamp(0, 255) as u8, (40 + y as i32 / 4).clamp(0, 255) as u8, (200 - ripple).clamp(0, 255) as u8, 255])
-            }),
+            Err(_) => crate::upscale::ripple_picture(300, 600),
         };
         let engine = crate::OrtEngine::for_model(id, 4, true).expect("Nomos2 builds");
         let net = engine.parts().expect("Nomos2 runs in parts");

@@ -530,14 +530,12 @@ fn render_empty(ui: &mut egui::Ui) {
     let tips = tip_text(ui.ctx());
     let tip_index = ((time / TIP_CYCLE_SECS) as usize) % tips.tips.len();
     let phase = time % TIP_CYCLE_SECS; // 0..TIP_CYCLE_SECS
-    let fades = theme::motion(ui.ctx());
+    let fade = if theme::motion(ui.ctx()) { TIP_FADE_SECS } else { 0.0 };
 
-    let alpha = if !fades {
-        1.0
-    } else if phase < TIP_FADE_SECS {
-        (phase / TIP_FADE_SECS) as f32
-    } else if phase > TIP_CYCLE_SECS - TIP_FADE_SECS {
-        ((TIP_CYCLE_SECS - phase) / TIP_FADE_SECS) as f32
+    let alpha = if phase < fade {
+        (phase / fade) as f32
+    } else if phase > TIP_CYCLE_SECS - fade {
+        ((TIP_CYCLE_SECS - phase) / fade) as f32
     } else {
         1.0
     };
@@ -562,7 +560,7 @@ fn render_empty(ui: &mut egui::Ui) {
     if alpha < 1.0 {
         ui.ctx().request_repaint(); // smooth fade
     } else {
-        let next_change = if fades { TIP_CYCLE_SECS - TIP_FADE_SECS } else { TIP_CYCLE_SECS } - phase;
+        let next_change = TIP_CYCLE_SECS - fade - phase;
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(next_change.max(0.016)));
     }
 }
@@ -646,7 +644,8 @@ fn paint_image_or_reveal(ui: &egui::Ui, img_rect: Rect, item: &crate::gui::item:
 
 fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let canvas_rect = ui.available_rect_before_wrap();
-    if let Some((item, texture)) = app.batch.selected_item().and_then(|i| Some((i, i.source_texture.as_ref()?))) {
+    let selected = app.batch.selected_item();
+    if let Some((item, texture)) = selected.and_then(|i| Some((i, i.source_texture.as_ref()?))) {
         let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         let fade = ui.ctx().animate_bool_with_time(
             egui::Id::new(("canvas_fade", app.canvas_switch_id)),
@@ -654,7 +653,6 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
             theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
         );
         let alpha = prunr_core::math::round_u8(fade * 255.0);
-        if fade < 1.0 { ui.ctx().request_repaint(); }
         // Undone back to the original: the source reveals over the cut.
         if item.reveal_progress().is_some() {
             draw_checkerboard(ui, img_rect, app.settings.dark_checker);
@@ -669,7 +667,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         draw_selection(ui, app, item, img_rect);
         draw_found_faces(ui, app, item, img_rect);
         Some(img_rect)
-    } else if let Some(why) = app.batch.selected_item().and_then(crate::gui::item::BatchItem::unreadable) {
+    } else if let Some(why) = selected.and_then(crate::gui::item::BatchItem::unreadable) {
         render_unreadable(ui, canvas_rect.center(), why);
         None
     } else {
@@ -683,13 +681,12 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     }
 }
 
-/// A photo that could not be opened: why, in place of the image.
 fn render_unreadable(ui: &egui::Ui, center: Pos2, why: &str) {
     let painter = ui.painter();
     painter.text(
         center - Vec2::new(0.0, 14.0),
         egui::Align2::CENTER_CENTER,
-        "Could not open this image",
+        crate::gui::capability::Reason::Unreadable.text(),
         egui::FontId::proportional(theme::FONT_SIZE_HEADING),
         theme::TEXT_PRIMARY,
     );

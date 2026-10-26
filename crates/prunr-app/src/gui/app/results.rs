@@ -302,8 +302,11 @@ impl PrunrApp {
     }
 
     pub(super) fn pump_download_manager(&mut self, ctx: &egui::Context) {
+        // Only the Model Store draws a download's progress. Without it a
+        // slow look still lands the download's end: an idle Wayland window
+        // can drop a thread's wake-up.
         if self.download_manager.active().is_some() {
-            ctx.request_repaint_after(crate::gui::theme::ANIM_FRAME);
+            ctx.request_repaint_after(if self.model_store.is_some() { crate::gui::theme::ANIM_FRAME } else { super::DIALOG_POLL });
         }
         let events = self.download_manager.pump();
         if events.is_empty() {
