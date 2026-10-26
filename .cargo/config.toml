@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Prunr loads ONNX Runtime only with its usage reporting off (see
+# `ORT_TELEMETRY_OFF`); the app sets it in `main`, tests read it here.
+[env]
+ORT_DISABLE_TELEMETRY = "1"

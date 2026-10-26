@@ -18,6 +18,11 @@ fn attach_parent_console() {
 }
 
 fn main() {
+    // First, while the process has one thread: ONNX Runtime reads it as it
+    // loads, in this process and in the workers that inherit it.
+    let (name, value) = prunr_models::ORT_TELEMETRY_OFF;
+    // SAFETY: single-threaded at this point in main.
+    unsafe { std::env::set_var(name, value); }
     let cli = Cli::parse();
 
     // `--debug` reaches subprocess workers through env vars they inherit,
