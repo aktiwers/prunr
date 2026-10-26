@@ -34,7 +34,7 @@ pub fn encoder(cpu_only: bool) -> Result<(Session, SessionPick), String> {
         };
         let mut built = ep.attach(builder, ID, EpSite::Selection { part: ENCODER })?;
         let mut session = built.commit_from_memory(&graph).map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
-        test_run(&mut session).map_err(|e| failed(format!("{ep} test run failed: {e}")))?;
+        crate::engine::kept_after_a_run(ep, &mut session, crate::sam::SAM_ENCODER_INPUT as usize).map_err(failed)?;
         if let Some(draft) = draft {
             draft.publish();
         }
@@ -69,13 +69,4 @@ fn on_cpu(bytes: &[u8], part: &str) -> Result<Session, String> {
 
 fn part_bytes(part: &str) -> Result<std::sync::Arc<Vec<u8>>, String> {
     prunr_models::resolve_part_bytes(ID, part).map_err(|e| format!("Could not load the Magic Brush model ({part}): {e:?}"))
-}
-
-/// One encode of a blank photo: a provider can build a session and still
-/// fail its first run on an op.
-fn test_run(session: &mut Session) -> Result<(), String> {
-    let side = crate::sam::SAM_ENCODER_INPUT as usize;
-    let input = ort::value::Tensor::from_array(ndarray::Array4::<f32>::zeros((1, 3, side, side))).map_err(|e| e.to_string())?;
-    let name = session.inputs()[0].name().to_string();
-    session.run(ort::inputs![name.as_str() => &input]).map(drop).map_err(|e| e.to_string())
 }
