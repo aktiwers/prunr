@@ -10,10 +10,9 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// The ONNX Runtime version of the accelerator builds: the DirectML one
-/// Windows ships and the OpenVINO and CUDA ones the runtime store offers.
-/// Their wheels lag the plain one: DirectML's stop at 1.24.4, OpenVINO's
-/// at 1.24.1, and CUDA's need CUDA 13 from 1.27.
+/// The ONNX Runtime version of the accelerator builds the runtime store
+/// offers (OpenVINO, CUDA). Their wheels lag the plain one: OpenVINO's
+/// stop at 1.24.1, and CUDA's need CUDA 13 from 1.27.
 /// The pykeio/ort `api-23` feature refuses a runtime older than 1.23 at
 /// load.
 ///
@@ -600,7 +599,7 @@ mod tests {
     /// would silently ship mismatched bundled-CPU vs runtime-store
     /// runtimes (release) or run e2e tests against a stale runtime
     /// (ci). This test reads both YAMLs and asserts every
-    /// `install-runtime onnxruntime[-directml] <ver>` invocation matches
+    /// `install-runtime onnxruntime[-windowsml] <ver>` invocation matches
     /// the const.
     /// Counts each file's occurrences too — drift in just one of two
     /// release.yml call sites would be silently accepted by a plain
@@ -829,7 +828,7 @@ mod tests {
             ("onnxruntime/capi/libonnxruntime.1.24.1.dylib", Some("libonnxruntime.dylib")),
             ("onnxruntime/capi/libonnxruntime.so", Some("libonnxruntime.so")),
             ("onnxruntime/capi/libonnxruntime.dylib", Some("libonnxruntime.dylib")),
-            // The DirectML wheel's onnxruntime.dll delay-loads DirectML.dll
+            // The Windows ML wheel's onnxruntime.dll delay-loads DirectML.dll
             // from its own folder; without it there the system's older copy loads.
             ("onnxruntime/capi/DirectML.dll", Some("DirectML.dll")),
             ("onnxruntime/capi/onnxruntime.dll", Some("onnxruntime.dll")),
@@ -856,21 +855,20 @@ mod tests {
         }
     }
 
-    /// The Windows release ships the Windows ML runtime as its default:
-    /// both DLLs staged from its wheel, side by side in `<exe>/runtime/`
-    /// in the zip and in the installer.
+    /// The Windows release ships the Windows ML runtime (staged as
+    /// `yaml_pins_match_const` checks) as its default: both DLLs side by
+    /// side in `<exe>/runtime/` in the zip and in the installer.
     #[test]
     fn release_yml_ships_the_windows_ml_runtime_on_windows() {
         let abs = format!("{}/../../.github/workflows/release.yml", env!("CARGO_MANIFEST_DIR"));
         let yml = std::fs::read_to_string(&abs).unwrap_or_else(|e| panic!("read {abs}: {e}"));
         for line in [
-            format!("cargo xtask install-runtime onnxruntime-windowsml {WINDOWS_ML_VERSION} --stage-to runtime-stage"),
-            "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/".to_string(),
-            "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/".to_string(),
-            "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
-            "Source: \"runtime-stage\\DirectML.dll\"; DestDir: \"{app}\\runtime\"".to_string(),
+            "Copy-Item \"runtime-stage/onnxruntime.dll\" dist/runtime/",
+            "Copy-Item \"runtime-stage/DirectML.dll\" dist/runtime/",
+            "Source: \"runtime-stage\\onnxruntime.dll\"; DestDir: \"{app}\\runtime\"",
+            "Source: \"runtime-stage\\DirectML.dll\"; DestDir: \"{app}\\runtime\"",
         ] {
-            assert!(yml.contains(&line), "release.yml no longer has `{line}`");
+            assert!(yml.contains(line), "release.yml no longer has `{line}`");
         }
     }
 

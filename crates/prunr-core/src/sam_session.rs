@@ -34,7 +34,7 @@ pub fn encoder(cpu_only: bool) -> Result<(Session, SessionPick), String> {
         };
         let mut built = ep.attach(builder, ID, EpSite::Selection { part: ENCODER })?;
         let mut session = built.commit_from_memory(&graph).map_err(|e| failed(format!("ORT session creation failed ({ep}): {e}")))?;
-        crate::engine::kept_after_a_run(ep, &mut session, crate::sam::SAM_ENCODER_INPUT as usize).map_err(failed)?;
+        crate::engine::kept_after_a_run(ID, ep, &mut session).map_err(failed)?;
         if let Some(draft) = draft {
             draft.publish();
         }
