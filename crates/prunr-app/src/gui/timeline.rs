@@ -419,6 +419,12 @@ impl Timeline {
         self.states.iter().any(|s| s.faced && s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, image)))
     }
 
+    /// Whether the step made at `at` is the shown one or before it: not
+    /// undone, nor dropped by a step made after an undo.
+    pub(crate) fn in_effect(&self, at: Instant) -> bool {
+        self.states.range(..=self.cursor).any(|s| s.at == at)
+    }
+
     /// The state before the shown one.
     pub(crate) fn previous(&self) -> Option<&DocState> {
         self.cursor.checked_sub(1).map(|i| &self.states[i])
