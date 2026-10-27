@@ -44,10 +44,32 @@ pub fn cuda_card_name() -> Option<String> {
     }
 }
 
+/// The memory of the graphics card DirectML runs on, as Windows gives it
+/// to this process: what it may use (its budget, which other apps' use
+/// lowers) and what is left of that. `None` off Windows or with no reading.
+pub fn directml_card_memory() -> Option<CardMemory> {
+    #[cfg(windows)]
+    {
+        dxgi::budget().map(|(budget, used)| CardMemory { free_mb: budget.saturating_sub(used) / MB, total_mb: budget / MB })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[cfg(windows)]
+const MB: u64 = 1024 * 1024;
+
 /// What process `pid` holds on CUDA's card, MB; `None` with no NVIDIA
-/// driver, or when the driver does not say (Windows' display model).
+/// driver, or when the driver does not say (Windows' display model, where
+/// this process's own use comes from DXGI instead).
 pub fn process_card_mb(pid: u32) -> Option<u64> {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(windows)]
+    {
+        nvml::process_card_mb(pid).or_else(|| (pid == std::process::id()).then(dxgi::budget).flatten().map(|(_, used)| used / MB))
+    }
+    #[cfg(target_os = "linux")]
     {
         nvml::process_card_mb(pid)
     }
@@ -72,6 +94,30 @@ fn pick(cards: c_uint, cuda_device0: impl FnOnce() -> Option<&'static [c_char]>)
         0 => None,
         1 => Some(Pick::Index(0)),
         _ => cuda_device0().map(Pick::PciBusId),
+    }
+}
+
+/// The high-performance adapter's local memory, as DXGI reports it for
+/// this process: no device is created to ask.
+#[cfg(windows)]
+mod dxgi {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory6, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+        DXGI_QUERY_VIDEO_MEMORY_INFO,
+    };
+
+    /// (budget, current use) in bytes.
+    pub(super) fn budget() -> Option<(u64, u64)> {
+        // SAFETY: DXGI factory and adapter calls whose out-values the
+        // `windows` wrappers own and release; `info` is written in full on
+        // success.
+        unsafe {
+            let factory: IDXGIFactory6 = CreateDXGIFactory1().ok()?;
+            let adapter: IDXGIAdapter3 = factory.EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE).ok()?;
+            let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).ok()?;
+            Some((info.Budget, info.CurrentUsage))
+        }
     }
 }
 

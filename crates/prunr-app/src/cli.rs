@@ -296,6 +296,11 @@ pub struct BenchArgs {
     #[arg(long)]
     pub needs: bool,
 
+    /// With `--needs`, run an upscaler on tiles of this side instead of its
+    /// own: how its memory grows with the tile.
+    #[arg(long, value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(16..=2048))]
+    pub tile: Option<u32>,
+
     /// One `--needs` measurement, `MODEL:cpu` or `MODEL:gpu`, run in its
     /// own process by `--needs`.
     #[arg(long, hide = true, value_name = "MODEL:SIDE")]
@@ -1455,7 +1460,7 @@ fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
 pub fn run_bench(args: &BenchArgs) -> i32 {
     use prunr_app::bench::{self, report};
     if let Some(one) = &args.needs_one {
-        return run_needs_one(one, args.image.as_deref());
+        return run_needs_one(one, args.image.as_deref(), args.tile);
     }
     if args.here {
         bench::here::run(&args.models, &mut |told| println!("{}", told.line()));
@@ -1538,7 +1543,7 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
     use prunr_app::bench::{needs, report};
     let header = report::Header::detect("", 0);
     let machine = format!("{}, {}, {} RAM, {}", header.gpus.join(" + "), header.cpu, header.ram, header.os);
-    let points = needs::measure_all(models, args.image.as_deref(), &mut |p| {
+    let points = needs::measure_all(models, args.image.as_deref(), args.tile, &mut |p| {
         let side = p.side_label();
         match &p.error {
             Some(e) => eprintln!("{} ({side}): {e}", p.name),
@@ -1555,7 +1560,7 @@ fn run_needs(models: &[prunr_models::ModelId], args: &BenchArgs) -> i32 {
 }
 
 /// One `--needs` point, in this process, printed for the parent.
-fn run_needs_one(one: &str, image: Option<&std::path::Path>) -> i32 {
+fn run_needs_one(one: &str, image: Option<&std::path::Path>, tile: Option<u32>) -> i32 {
     let Some((name, side)) = one.split_once(':') else {
         eprintln!("error: --needs-one takes MODEL:cpu or MODEL:gpu");
         return 1;
@@ -1572,7 +1577,7 @@ fn run_needs_one(one: &str, image: Option<&std::path::Path>) -> i32 {
         Some(Ok(photo)) => Some(photo),
         None => None,
     };
-    prunr_app::bench::needs::measure_here(id, side == "gpu", photo);
+    prunr_app::bench::needs::measure_here(id, side == "gpu", photo, tile);
     0
 }
 

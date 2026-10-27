@@ -41,6 +41,11 @@ instant-clip-tokenizer = "0.1"
 sysinfo = { workspace = true }
 dunce = { workspace = true }
 
+# Graphics memory on Windows: DXGI's budget for this process and what it
+# holds, which counts CUDA's allocations under WDDM too.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
 # The integration tests in tests/ record progress with RecordingSink.
