@@ -42,19 +42,22 @@ impl Point {
 /// The line a child prints its point on, apart from any log output.
 const MARK: &str = "PRUNR-NEEDS ";
 
-/// Measure `id` on one side here, in this process, and print the point.
-pub fn measure_here(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) {
-    let point = measure(id, gpu_side, image);
+/// Measure `id` on one side here, in this process, and print the point;
+/// an upscaler on `tile` px tiles when given, else its own.
+pub fn measure_here(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>, tile: Option<u32>) {
+    let point = measure(id, gpu_side, image, tile);
     println!("{MARK}{}", serde_json::to_string(&point).unwrap_or_default());
 }
 
-fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> Point {
+fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>, tile: Option<u32>) -> Point {
     let runtime = prunr_core::ort_runtime::ensure_initialized();
     // The tile the upscaler takes on the provider it will run on.
     let provider = if gpu_side { prunr_core::memory::provider_for(id, false) } else { prunr_core::engine::CPU_NAME };
-    let tile = prunr_models::descriptor(id)
-        .and_then(|d| d.recommended_tile)
-        .map_or(super::input::UPSCALE_SIDE, |tile| prunr_core::upscale::tile_for_provider(tile, provider));
+    let tile = tile.unwrap_or_else(|| {
+        prunr_models::descriptor(id)
+            .and_then(|d| d.recommended_tile)
+            .map_or(super::input::UPSCALE_SIDE, |tile| prunr_core::upscale::tile_for_provider(tile, provider))
+    });
     let photo = image.unwrap_or_else(|| image::DynamicImage::ImageRgba8(super::input::synthetic_photo()));
     let inputs = Inputs::from_photo_with_tile(photo, String::new(), tile);
     let family = Family::of(id);
@@ -93,15 +96,16 @@ fn measure(id: ModelId, gpu_side: bool, image: Option<image::DynamicImage>) -> P
 }
 
 /// Each of `models` on the CPU and on its GPU path, each in a child
-/// process; `on` hears each point as it lands.
-pub fn measure_all(models: &[ModelId], image: Option<&std::path::Path>, on: &mut dyn FnMut(&Point)) -> Vec<Point> {
+/// process, an upscaler on `tile` px tiles when given; `on` hears each
+/// point as it lands.
+pub fn measure_all(models: &[ModelId], image: Option<&std::path::Path>, tile: Option<u32>, on: &mut dyn FnMut(&Point)) -> Vec<Point> {
     let exe = std::env::current_exe().ok();
     let mut points = Vec::new();
     for &id in models {
         let gpu_ladder = super::gpu_passed_over(&prunr_core::engine::gpu_ladder(id)).is_none();
         for gpu_side in [false, true].into_iter().filter(|&gpu| !gpu || gpu_ladder) {
             let point = match &exe {
-                Some(exe) => in_child(exe, id, gpu_side, image),
+                Some(exe) => in_child(exe, id, gpu_side, image, tile),
                 None => Err("cannot find this program to run a measurement".into()),
             }
             .unwrap_or_else(|error| Point { error: Some(error), ..Point::new(id, gpu_side, (0, 0)) });
@@ -112,12 +116,15 @@ pub fn measure_all(models: &[ModelId], image: Option<&std::path::Path>, on: &mut
     points
 }
 
-fn in_child(exe: &std::path::Path, id: ModelId, gpu_side: bool, image: Option<&std::path::Path>) -> Result<Point, String> {
+fn in_child(exe: &std::path::Path, id: ModelId, gpu_side: bool, image: Option<&std::path::Path>, tile: Option<u32>) -> Result<Point, String> {
     let side = if gpu_side { "gpu" } else { "cpu" };
     let mut cmd = Command::new(exe);
     cmd.args(["bench", "--needs-one", &format!("{}:{side}", id.stable_name())]);
     if let Some(image) = image {
         cmd.arg("--image").arg(image);
+    }
+    if let Some(tile) = tile {
+        cmd.arg("--tile").arg(tile.to_string());
     }
     let out = cmd.output().map_err(|e| format!("could not start the measurement: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -226,7 +233,34 @@ mod peak {
         }
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    /// Windows: the working set, the resident set's counterpart.
+    #[cfg(windows)]
+    mod imp {
+        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        const MB: usize = 1024 * 1024;
+
+        fn counters() -> Option<PROCESS_MEMORY_COUNTERS> {
+            // SAFETY: plain data; zero is a valid value of every field.
+            let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+            counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            // SAFETY: writes one PROCESS_MEMORY_COUNTERS of the size given,
+            // for this process's pseudo-handle.
+            (unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) } != 0).then_some(counters)
+        }
+        pub fn current_mb() -> Option<u64> {
+            counters().map(|c| (c.WorkingSetSize / MB) as u64)
+        }
+        /// The peak since the process started: each measurement has a
+        /// process of its own.
+        pub fn reset() {}
+        pub fn peak_mb() -> Option<u64> {
+            counters().map(|c| (c.PeakWorkingSetSize / MB) as u64)
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     mod imp {
         pub fn current_mb() -> Option<u64> {
             None
@@ -238,7 +272,7 @@ mod peak {
     }
 }
 
-/// The most memory this process holds on CUDA's card while a model runs,
+/// The most memory this process holds on its graphics card while a model runs,
 /// read every 20 ms.
 mod card_sampler {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

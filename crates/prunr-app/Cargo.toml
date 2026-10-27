@@ -82,7 +82,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # reaches the user. Paired with `#![windows_subsystem = "windows"]` in main.rs
 # to suppress the empty console window on GUI launch.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_Foundation"] }
 # GPU detection: DXGI lists the display adapters without creating a
 # device. The same version and features the GPU stack already builds.
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }

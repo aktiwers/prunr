@@ -132,10 +132,16 @@ pub fn room_now(charge: Charge, provider: &str) -> Option<Room> {
     Some(Room { ram_mb, card_mb })
 }
 
-/// Free memory on `provider`'s card now, in MB: CUDA's is read; `None`
-/// for another, or no reading.
+/// Free memory on `provider`'s card now, in MB: CUDA's through NVML,
+/// DirectML's as Windows budgets it for this process; `None` for another,
+/// or no reading.
 pub fn card_free_mb(provider: &str) -> Option<u64> {
-    (provider == crate::engine::CUDA_NAME).then(crate::card_memory::cuda_card_memory).flatten().map(|card| card.free_mb)
+    let card = match provider {
+        crate::engine::CUDA_NAME => crate::card_memory::cuda_card_memory(),
+        crate::engine::DIRECTML_NAME => crate::card_memory::directml_card_memory(),
+        _ => None,
+    };
+    card.map(|card| card.free_mb)
 }
 
 #[cfg(test)]
