@@ -416,3 +416,43 @@ fn a_store_card_s_details_open_in_place() {
     let toggle = tree(&h).iter().find(|n| n.name.as_deref() == Some("Details Silueta")).map(|n| n.toggled);
     assert_eq!(toggle, Some(Some(true)), "the card opened");
 }
+
+/// The Model Store offers Test on an installed model this computer never
+/// measured, and none on a measured one; while a model's own test runs,
+/// its card has Cancel and no window covers the store. Every control is
+/// named.
+#[test]
+fn a_store_card_tests_its_own_model() {
+    use crate::gui::hardware_cache::{Cell, Engine, TestResults, TestRow};
+    use prunr_models::ModelId;
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.settings.active_backend = "CUDA".into();
+        app.test_results = std::sync::Arc::new(TestResults {
+            tested: None,
+            engines: vec![Engine { name: "CUDA", installed: true }],
+            rows: vec![TestRow { model: ModelId::Silueta, cpu_ms: Some(620.0), cells: vec![Cell::Time(40.0)], runs_on: "CUDA" }],
+            changed: Vec::new(),
+        });
+        app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    }
+    settle(&mut h);
+    assert_all_controls_named(&h, "the Model Store with tests to offer");
+    let present = names(&h);
+    assert!(present.iter().any(|n| n == "Test U2Net"), "an installed model never measured here: {present:?}");
+    assert!(!present.iter().any(|n| n == "Test Silueta"), "a measured one has nothing to test");
+
+    #[cfg(unix)]
+    let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
+    #[cfg(windows)]
+    let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("a process to stand in for the test");
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test_of(child, ModelId::U2net));
+    settle(&mut h);
+    assert_all_controls_named(&h, "the Model Store while a model's test runs");
+    let present = names(&h);
+    assert!(present.iter().any(|n| n == "Cancel the test of U2Net"), "{present:?}");
+    assert!(!h.state().open_modals().contains(&"machine_test"), "no window over the store");
+    click(&mut h, "Cancel the test of U2Net");
+    assert!(h.state().machine_test.is_none(), "Cancel ends it");
+}

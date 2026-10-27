@@ -353,7 +353,8 @@ mod tests {
         let id = std::env::var("PRUNR_TILE_MODEL").ok()
             .and_then(|name| prunr_models::ModelId::ALL.iter().copied().find(|id| id.stable_name() == name))
             .unwrap_or(prunr_models::ModelId::RealEsrganX4Plus);
-        let engine = crate::OrtEngine::for_model(id, 4, false).expect("the model loads");
+        let on_cpu = std::env::var_os("PRUNR_TILE_CPU").is_some();
+        let engine = crate::OrtEngine::for_model(id, num_cpus::get(), on_cpu).expect("the model loads");
         let photo = crate::load_image_from_path(std::path::Path::new(&path)).expect("the photo").to_rgba8();
         let side: u32 = std::env::var("PRUNR_TILE_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
         let (w, h) = (side.min(photo.width()), (side * 3 / 4).min(photo.height()));
@@ -362,10 +363,12 @@ mod tests {
         let mut runs: Vec<(String, RgbaImage, std::time::Duration)> = Vec::new();
         let knobs = prunr_models::descriptor(id).and_then(|d| d.upscale).expect("an upscaler");
         let multiple = prunr_models::descriptor(id).and_then(|d| d.tile_size_multiple);
-        let tiles = [(side, 16), (side / 2, 16), (side / 4, 16), (side / 2, 32), (side / 2, 64)];
-        for (tile_size, overlap) in tiles {
+        let tiles = [(side, 16), (side / 2, 16), (side / 4, 16), (side / 2, 32), (side / 2, 64), (side / 2, 96), (side / 2, 128)];
+        for (tile_size, overlap) in tiles.into_iter().filter(|&(tile, overlap)| !on_cpu || (tile != side / 4 && overlap < tile / 4)) {
             let cfg = TilingConfig { tile_size, tile_multiple: multiple, overlap };
-            let _ = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
+            if !on_cpu {
+                let _ = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
+            }
             let started = std::time::Instant::now();
             let (out, _) = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
             runs.push((format!("{tile_size} px tiles, overlap {overlap}"), fit_to_scale(out, &photo, scale), started.elapsed()));
