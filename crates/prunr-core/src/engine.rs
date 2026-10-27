@@ -68,60 +68,96 @@ impl std::fmt::Display for EpKind {
     }
 }
 
+/// The GPU providers this process offers, once probed; the CUDA add-on
+/// joins them when it installs (`start_cuda_addon`).
+static AVAILABLE: std::sync::RwLock<Option<std::sync::Arc<[EpKind]>>> = std::sync::RwLock::new(None);
+
 /// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
 /// runtime may lack EPs (the OpenVINO wheel has CPU + OpenVINO only).
 /// Probed once per process.
 ///
 /// OpenVINO goes before CUDA so Intel users get it; an NVIDIA machine
 /// has no OpenVINO runtime, so it still reaches CUDA.
-pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<Vec<EpKind>> = OnceLock::new();
-    CACHED.get_or_init(|| {
-        use ort::ep::ExecutionProvider;
-        let mut eps: Vec<EpKind> = Vec::new();
-        // ort panics on any call before the runtime is loaded.
-        if crate::ort_runtime::ensure_initialized().is_err() {
-            return eps;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            if ort::ep::CoreML::is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if ort::ep::OpenVINO::is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            let cuda = if ort::ep::CUDA::is_available().unwrap_or(false) {
-                crate::ort_runtime::preload_nvidia_libraries();
-                Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
-            } else {
-                crate::ort_runtime::register_cuda_addon().then(cuda_addon_starts)
-            };
-            match cuda {
-                Some(Ok(())) => eps.push(EpKind::Cuda),
-                Some(Err(failure)) => {
-                    tracing::info!(?failure, "CUDA cannot start; sessions run on the CPU");
-                    let _ = GPU_START_FAILURE.set(failure);
-                }
-                None => {}
+pub(crate) fn available_gpu_eps() -> std::sync::Arc<[EpKind]> {
+    use std::sync::{Arc, PoisonError};
+    if let Some(eps) = AVAILABLE.read().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        return Arc::clone(eps);
+    }
+    let mut slot = AVAILABLE.write().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(slot.get_or_insert_with(|| probe_gpu_eps().into()))
+}
+
+/// Start the CUDA add-on installed after this process probed its
+/// providers: sessions built from now on may take it. Off the UI thread:
+/// registering loads NVIDIA's libraries, seconds the first time.
+#[cfg(not(target_os = "macos"))]
+pub fn start_cuda_addon() -> Result<(), String> {
+    use std::sync::PoisonError;
+    if available_gpu_eps().contains(&EpKind::Cuda) {
+        return Ok(());
+    }
+    if !crate::ort_runtime::register_cuda_addon() {
+        return Err("the CUDA add-on did not register; the log says why".to_string());
+    }
+    cuda_addon_starts().map_err(|failure| failure.text())?;
+    let mut slot = AVAILABLE.write().unwrap_or_else(PoisonError::into_inner);
+    let mut eps: Vec<EpKind> = slot.as_deref().unwrap_or_default().to_vec();
+    eps.insert(cuda_position(&eps), EpKind::Cuda);
+    *slot = Some(eps.into());
+    tracing::info!("CUDA add-on started; sessions may take it from now on");
+    Ok(())
+}
+
+/// Where CUDA goes among `eps`, in the probe's order: after OpenVINO.
+#[cfg(not(target_os = "macos"))]
+fn cuda_position(eps: &[EpKind]) -> usize {
+    eps.iter().position(|&ep| ep != EpKind::OpenVino).unwrap_or(eps.len())
+}
+
+fn probe_gpu_eps() -> Vec<EpKind> {
+    use ort::ep::ExecutionProvider;
+    let mut eps: Vec<EpKind> = Vec::new();
+    // ort panics on any call before the runtime is loaded.
+    if crate::ort_runtime::ensure_initialized().is_err() {
+        return eps;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if ort::ep::CoreML::is_available().unwrap_or(false) { eps.push(EpKind::CoreMl); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if ort::ep::OpenVINO::is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
+        let cuda = if ort::ep::CUDA::is_available().unwrap_or(false) {
+            crate::ort_runtime::preload_nvidia_libraries();
+            Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
+        } else {
+            crate::ort_runtime::register_cuda_addon().then(cuda_addon_starts)
+        };
+        match cuda {
+            Some(Ok(())) => eps.push(EpKind::Cuda),
+            Some(Err(failure)) => {
+                tracing::info!(?failure, "CUDA cannot start; sessions run on the CPU");
+                let _ = GPU_START_FAILURE.set(failure);
             }
-            #[cfg(target_os = "linux")]
-            if ort::ep::MIGraphX::is_available().unwrap_or(false) {
-                match provider_starts(ort::ep::MIGraphX::default().with_device_id(0).build().error_on_failure()) {
-                    Ok(()) => eps.push(EpKind::MiGraphX),
-                    Err(e) => {
-                        tracing::info!(%e, "MIGraphX cannot start; sessions run on the CPU");
-                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of(GpuStack::Rocm, &e));
-                    }
+            None => {}
+        }
+        #[cfg(target_os = "linux")]
+        if ort::ep::MIGraphX::is_available().unwrap_or(false) {
+            match provider_starts(ort::ep::MIGraphX::default().with_device_id(0).build().error_on_failure()) {
+                Ok(()) => eps.push(EpKind::MiGraphX),
+                Err(e) => {
+                    tracing::info!(%e, "MIGraphX cannot start; sessions run on the CPU");
+                    let _ = GPU_START_FAILURE.set(GpuStartFailure::of(GpuStack::Rocm, &e));
                 }
             }
-            #[cfg(windows)]
-            if ort::ep::DirectML::is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
         }
-        let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
-        tracing::info!(eps = ?eps_str, "Available GPU execution providers");
-        eps
-    }).as_slice()
+        #[cfg(windows)]
+        if ort::ep::DirectML::is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
+    }
+    let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
+    tracing::info!(eps = ?eps_str, "Available GPU execution providers");
+    eps
 }
 
 /// Why the loaded runtime's GPU provider could not start, when it could not.
@@ -277,7 +313,7 @@ pub(crate) fn gpu_eps_for(model: prunr_models::ModelId, cpu_only: bool) -> Vec<E
     }
     let places = places_here(model);
     let (intel_gpu, remeasuring) = (openvino_on_gpu(), remeasuring());
-    fastest_first(available_gpu_eps(), |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
+    fastest_first(&available_gpu_eps(), |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
 }
 
 /// `eps` with those measured faster first, quickest first, then the
@@ -2046,6 +2082,19 @@ mod tests {
         let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(walk)).collect();
         assert!(threads.into_iter().all(|t| t.join().expect("no panic")), "each built");
         assert_eq!(MOST.load(Ordering::SeqCst), 1);
+    }
+
+    /// The CUDA add-on, started after the probe, takes CUDA's place in its
+    /// order: after OpenVINO, before the rest.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_started_add_on_joins_the_providers_where_cuda_goes() {
+        assert_eq!(cuda_position(&[]), 0);
+        assert_eq!(cuda_position(&[EpKind::OpenVino]), 1);
+        #[cfg(windows)]
+        assert_eq!(cuda_position(&[EpKind::DirectMl]), 0, "before DirectML");
+        #[cfg(target_os = "linux")]
+        assert_eq!(cuda_position(&[EpKind::OpenVino, EpKind::MiGraphX]), 1, "between OpenVINO and MIGraphX");
     }
 
     /// A model tries the providers measured faster first, quickest first;
