@@ -55,6 +55,9 @@ pub struct HardwareProfile {
     pub cpu_vendor: CpuVendor,
     pub cpu_brand: String,
     pub dgpu: Option<GpuVendor>,
+    /// The graphics card's name, where the system tells it: DXGI on
+    /// Windows, NVIDIA's driver on Linux.
+    pub dgpu_name: Option<String>,
     pub igpu: Option<GpuVendor>,
     /// A graphics card DirectML runs well on (Windows only).
     pub suits_directml: bool,
@@ -210,11 +213,12 @@ fn throttled<T: Copy>(cache: &Reading<T>, read: impl FnOnce() -> T) -> T {
 
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
-    let GpuSlots { dgpu, igpu, suits_directml } = detect_gpus(cpu_vendor);
+    let (GpuSlots { dgpu, igpu, suits_directml }, dgpu_name) = detect_gpus(cpu_vendor);
     HardwareProfile {
         cpu_vendor,
         cpu_brand,
         dgpu,
+        dgpu_name,
         igpu,
         suits_directml,
         os: std::env::consts::OS,
@@ -271,11 +275,13 @@ struct GpuSlots {
     suits_directml: bool,
 }
 
-fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
+/// The GPUs found, and the graphics card's name where the system tells it.
+fn detect_gpus(cpu_vendor: CpuVendor) -> (GpuSlots, Option<String>) {
     #[cfg(target_os = "linux")]
     {
         let (dgpu, igpu) = detect_gpus_linux(cpu_vendor);
-        GpuSlots { dgpu, igpu, suits_directml: false }
+        let name = (dgpu == Some(GpuVendor::Nvidia)).then(prunr_core::card_memory::cuda_card_name).flatten();
+        (GpuSlots { dgpu, igpu, suits_directml: false }, name)
     }
     #[cfg(target_os = "macos")]
     {
@@ -283,19 +289,19 @@ fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
         // (we don't ship OpenVINO on macOS, so detail isn't needed).
         let _ = cpu_vendor;
         let igpu = (std::env::consts::ARCH == "aarch64").then_some(GpuVendor::Apple);
-        GpuSlots { dgpu: None, igpu, suits_directml: false }
+        (GpuSlots { dgpu: None, igpu, suits_directml: false }, None)
     }
     #[cfg(target_os = "windows")]
     {
         // DXGI says which card is which; the CPU vendor guess is not needed.
         let _ = cpu_vendor;
         let (adapters, os_choice) = dxgi::adapters();
-        adapters::sort_adapters(&adapters, os_choice)
+        (adapters::sort_adapters(&adapters, os_choice), adapters::card_name(&adapters, os_choice))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = cpu_vendor;
-        GpuSlots::default()
+        (GpuSlots::default(), None)
     }
 }
 
@@ -433,7 +439,7 @@ mod tests {
         use super::{CpuVendor, GpuVendor, HardwareProfile};
         use crate::runtime_install::RuntimeId::{Cuda, MiGraphX, OpenVino};
         let machine = |dgpu, igpu| HardwareProfile {
-            cpu_vendor: CpuVendor::Intel, cpu_brand: String::new(), dgpu, igpu,
+            cpu_vendor: CpuVendor::Intel, cpu_brand: String::new(), dgpu, dgpu_name: None, igpu,
             suits_directml: false, os: "linux", arch: "x86_64",
         };
         let runs = |p: &HardwareProfile| [OpenVino, Cuda, MiGraphX].map(|rt| p.runs(rt));
@@ -510,6 +516,7 @@ mod tests {
             cpu_vendor: CpuVendor::Intel,
             cpu_brand: "Intel Core i7".into(),
             dgpu: None,
+            dgpu_name: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "linux", arch: "x86_64",
@@ -527,6 +534,7 @@ mod tests {
             cpu_vendor: CpuVendor::Intel,
             cpu_brand: "Intel Core i7".into(),
             dgpu: Some(GpuVendor::Amd),
+            dgpu_name: None,
             igpu: None,
             suits_directml: false,
             os: "linux", arch: "x86_64",
@@ -545,6 +553,7 @@ mod tests {
             cpu_vendor: CpuVendor::Intel,
             cpu_brand: "Intel Core i7".into(),
             dgpu: None,
+            dgpu_name: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "windows", arch: "x86_64",
@@ -572,6 +581,7 @@ mod tests {
             cpu_vendor: CpuVendor::Intel,
             cpu_brand: "Intel Core i7".into(),
             dgpu: Some(GpuVendor::Nvidia),
+            dgpu_name: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "linux", arch: "x86_64",

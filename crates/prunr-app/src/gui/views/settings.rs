@@ -486,9 +486,10 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             });
         };
         kv(ui, "CPU", &crate::hardware::cpu_label(p.cpu_vendor, &p.cpu_brand));
+        let card = |d: hardware::GpuVendor| p.dgpu_name.clone().unwrap_or_else(|| d.to_string());
         let gpu_label = match (p.dgpu, p.igpu) {
-            (Some(d), Some(i)) => format!("{d}, {i} (iGPU)"),
-            (Some(d), None) => format!("{d}"),
+            (Some(d), Some(i)) => format!("{}, {i} (iGPU)", card(d)),
+            (Some(d), None) => card(d),
             (None, Some(i)) => format!("{i} (iGPU)"),
             (None, None) => "none detected".to_string(),
         };
