@@ -529,6 +529,7 @@ pub fn use_cuda_addon(library: PathBuf) {
 /// Register the CUDA add-on with the loaded runtime, once per process:
 /// NVIDIA's libraries first, which it links by name. `false` when none is
 /// installed or it did not register.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn register_cuda_addon() -> bool {
     *CUDA_ADDON_REGISTERED.get_or_init(|| {
         let Some(library) = CUDA_ADDON.get() else { return false };
@@ -556,6 +557,7 @@ pub fn cuda_addon_registered() -> bool {
 }
 
 /// The devices the CUDA add-on offers: one per NVIDIA card it can use.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn cuda_addon_devices() -> Vec<ort::device::Device<'static>> {
     let Some(env) = ENV.get() else { return Vec::new() };
     env.devices().filter(|d| d.ep().is_ok_and(|name| name == CUDA_PLUGIN_EP)).collect()
