@@ -45,7 +45,7 @@ impl Told {
 
 /// The column `id`'s GPU side runs on here, before it runs: a failure the
 /// run records would otherwise hide which provider it was.
-fn column_of(id: ModelId) -> Option<Column> {
+pub(crate) fn column_of(id: ModelId) -> Option<Column> {
     let ladder = prunr_core::engine::gpu_ladder(id);
     prunr_core::engine::column_for(id, super::first_tried(&ladder)?)
 }
