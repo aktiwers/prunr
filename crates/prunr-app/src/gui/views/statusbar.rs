@@ -124,13 +124,8 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(theme::SPACE_SM);
 
-            let backend_display = match app.settings.active_backend.as_str() {
-                _ if app.settings.cpu_only() => "CPU only",
-                "" => "Checking",
-                backend => backend,
-            };
             ui.label(
-                RichText::new(format!("Accelerator: {backend_display}"))
+                RichText::new(format!("Accelerator: {}", model_engine(ui.ctx(), app)))
                     .monospace()
                     .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
@@ -196,8 +191,55 @@ fn downloads_line(app: &PrunrApp) -> Option<String> {
     }
 }
 
+/// What the status bar names as the accelerator: "CPU only" when the user
+/// chose it, "Checking" until the GPU probe has answered, else the engine
+/// the chosen model runs on, which each model picks for itself; read again
+/// only when the model, the probe's answer or what was measured changes.
+fn model_engine<'a>(ctx: &egui::Context, app: &'a PrunrApp) -> &'a str {
+    use std::hash::{Hash, Hasher};
+    let backend = app.settings.active_backend.as_str();
+    if app.settings.cpu_only() {
+        return "CPU only";
+    }
+    if backend.is_empty() {
+        return "Checking";
+    }
+    let Some(model) = app.settings.model.to_model_id() else { return backend };
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    (model, std::sync::Arc::as_ptr(&app.test_results) as usize, backend).hash(&mut key);
+    let key = key.finish();
+    let id = egui::Id::new("statusbar_model_engine");
+    if let Some((_, engine)) = ctx.data(|d| d.get_temp::<(u64, &'static str)>(id)).filter(|(k, _)| *k == key) {
+        return engine;
+    }
+    let engine = prunr_core::memory::provider_now(model, false);
+    ctx.data_mut(|d| d.insert_temp(id, (key, engine)));
+    engine
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::gui::settings::{ComputeMode, SettingsModel};
+
+    /// The status bar names the chosen model's engine: the user's CPU
+    /// only first, the probe's wait, and with no model the runtime's own.
+    #[test]
+    fn the_status_bar_names_the_chosen_models_engine() {
+        let ctx = egui::Context::default();
+        let mut app = crate::gui::app::PrunrApp::new_for_test();
+        app.settings.active_backend = String::new();
+        assert_eq!(super::model_engine(&ctx, &app), "Checking");
+        app.settings.active_backend = "DirectML".into();
+        app.settings.model = SettingsModel::None;
+        assert_eq!(super::model_engine(&ctx, &app), "DirectML", "no model: the runtime's");
+        app.settings.model = SettingsModel::Silueta;
+        app.settings.processor = ComputeMode::CpuOnly;
+        assert_eq!(super::model_engine(&ctx, &app), "CPU only");
+        app.settings.processor = ComputeMode::Auto;
+        let engine = super::model_engine(&ctx, &app);
+        assert_eq!(engine, prunr_core::memory::provider_now(prunr_models::ModelId::Silueta, false), "the model's own");
+    }
+
     use prunr_models::ModelId;
 
     /// A download under way shows in the footer with what waits behind
