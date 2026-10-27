@@ -19,8 +19,8 @@ const DECODER: &str = "decoder";
 /// passes a test run, else on the CPU; with where it landed.
 pub fn encoder(cpu_only: bool) -> Result<(Session, SessionPick), String> {
     let bytes = part_bytes(ENCODER)?;
-    let eps = crate::engine::gpu_eps_for(cpu_only);
-    let landed = crate::engine::walk_ladder("Magic Brush: ", ID, Weights::Fp32, eps, |ep| {
+    let eps = crate::engine::gpu_eps_for(ID, cpu_only);
+    let landed = crate::engine::walk_ladder("Magic Brush: ", ID, Weights::Fp32, &eps, |ep| {
         crate::cache::gc_stale_for_model(ID, ep.as_str());
         let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
         let (builder, graph, draft) = if ep.keeps_optimized_graph() {

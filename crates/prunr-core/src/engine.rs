@@ -250,10 +250,34 @@ fn directml_provider() -> ExecutionProviderDispatch {
     ort::ep::DirectML::default().build().error_on_failure()
 }
 
-/// The GPU providers a session may try: none when the user chose
-/// "CPU only" (Settings › Processor).
-pub(crate) fn gpu_eps_for(cpu_only: bool) -> &'static [EpKind] {
-    if cpu_only { &[] } else { available_gpu_eps() }
+/// The GPU providers a session of `model` may try, fastest first: none
+/// when the user chose "CPU only" (Settings › Processor).
+pub(crate) fn gpu_eps_for(model: prunr_models::ModelId, cpu_only: bool) -> Vec<EpKind> {
+    if cpu_only {
+        return Vec::new();
+    }
+    let places = places_here(model);
+    let (intel_gpu, remeasuring) = (openvino_on_gpu(), remeasuring());
+    fastest_first(available_gpu_eps(), |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
+}
+
+/// `eps` with those measured faster first, quickest first, then the
+/// unmeasured, then those that keep the model on the CPU; each group in
+/// `eps`' own order. Two providers that both run a model can differ
+/// 19-fold: Silueta takes 30 ms on DirectML and 566 ms on CUDA on one
+/// RTX 3060.
+fn fastest_first<T: Copy>(eps: &[T], place_of: impl Fn(T) -> prunr_models::Place) -> Vec<T> {
+    use prunr_models::Place;
+    let mut ranked: Vec<(T, u8, f32)> = eps
+        .iter()
+        .map(|&ep| match place_of(ep) {
+            Place::There(speed) => (ep, 0, speed.ms),
+            Place::Unmeasured => (ep, 1, 0.0),
+            Place::Cpu(_) => (ep, 2, 0.0),
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+    ranked.into_iter().map(|(ep, ..)| ep).collect()
 }
 
 /// Set by `prunr bench --table`: this process tries the places the
@@ -346,10 +370,10 @@ pub fn session_on_ladder(
     cpu_only: bool,
     commit: impl Fn(ort::session::builder::SessionBuilder) -> Result<Session, String>,
 ) -> Result<(Session, SessionPick), CoreError> {
-    let eps = gpu_eps_for(cpu_only);
+    let eps = gpu_eps_for(id, cpu_only);
     let mut failed = Vec::new();
     if !eps.is_empty() {
-        let landed = walk_ladder("", id, Weights::Fp32, eps, |ep| {
+        let landed = walk_ladder("", id, Weights::Fp32, &eps, |ep| {
             let builder = crate::ort_runtime::session_builder().map_err(|e| Miss::Unusable(e.to_string()))?;
             let built = ep.attach(builder, id, EpSite::Engine { threads: num_cpus::get(), part: None })?;
             let mut session = commit(built).map_err(|e| Miss::failed(format!("ORT session creation failed ({ep}): {e}")))?;
@@ -886,13 +910,14 @@ pub fn shrink_cuda_pool() -> Option<&'static ort::session::RunOptions> {
 /// The first GPU provider a session of `model` tries, as the ladder walks
 /// them; `None`: it runs on the CPU.
 pub(crate) fn first_gpu_provider(model: prunr_models::ModelId, cpu_only: bool) -> Option<&'static str> {
-    gpu_eps_for(cpu_only).iter().find(|&&ep| gpu_skip(model, ep).is_none()).map(EpKind::as_str)
+    gpu_eps_for(model, cpu_only).into_iter().find(|&ep| gpu_skip(model, ep).is_none()).map(|ep| ep.as_str())
 }
 
-/// Each GPU provider the loaded runtime offers, in ladder order, with why
-/// a session of `model` would pass it over (`None`: it would try it).
+/// Each GPU provider the loaded runtime offers, in the order a session of
+/// `model` tries them, with why it would pass one over (`None`: it would
+/// try it).
 pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
-    available_gpu_eps().iter().map(|&ep| (ep.as_str(), gpu_skip(model, ep))).collect()
+    gpu_eps_for(model, false).into_iter().map(|ep| (ep.as_str(), gpu_skip(model, ep))).collect()
 }
 
 /// The weights file a session loaded: the model's own (FP32 for
@@ -1096,7 +1121,7 @@ impl OrtEngine {
 
     /// The GPU providers unless `cpu_only`, then the CPU.
     pub fn with_threads(model: ModelKind, intra_threads: usize, cpu_only: bool) -> Result<Self, CoreError> {
-        Self::build_with(model, intra_threads, gpu_eps_for(cpu_only), cpu_only, GraphOptimizationLevel::Level3)
+        Self::build_with(model, intra_threads, &gpu_eps_for(model.into(), cpu_only), cpu_only, GraphOptimizationLevel::Level3)
     }
 
     /// Each weights a session tries in turn (its lighter copy, when on
@@ -1157,7 +1182,7 @@ impl OrtEngine {
             let net = crate::upscale::blocks::NetShape { layout, image_input: input_name };
             return Self::build_parts(kind, net, intra_threads, cpu_only, crate::upscale::pick_optimization_level(descriptor));
         }
-        Self::build_with(kind, intra_threads, gpu_eps_for(cpu_only), cpu_only, crate::upscale::pick_optimization_level(descriptor))
+        Self::build_with(kind, intra_threads, &gpu_eps_for(model, cpu_only), cpu_only, crate::upscale::pick_optimization_level(descriptor))
     }
 
     /// The provider this session runs on, its weights, and what failed
@@ -1278,7 +1303,7 @@ impl OrtEngine {
             }).collect()
         };
         let started = Instant::now();
-        let (sessions, pick) = match walk_ladder("", id, Weights::Fp32, gpu_eps_for(cpu_only), |ep| commit_all(Some(ep))) {
+        let (sessions, pick) = match walk_ladder("", id, Weights::Fp32, &gpu_eps_for(id, cpu_only), |ep| commit_all(Some(ep))) {
             Ok((sessions, ep, failed)) => (sessions, SessionPick { failed, ..SessionPick::on(ep.as_str()) }),
             Err(walk) => {
                 let sessions = commit_all(None).map_err(|miss| CoreError::Inference(miss_text(miss)))?;
@@ -1935,6 +1960,20 @@ mod tests {
         }
     }
 
+    /// A model tries the providers measured faster first, quickest first;
+    /// then the unmeasured, then those that keep it on the CPU, each group
+    /// in the runtime's order.
+    #[test]
+    fn a_model_tries_the_fastest_provider_first() {
+        use prunr_models::{Place, Speed, Why};
+        let on = |ms| Place::There(Speed::on(ms, 600.0, "test"));
+        let order = |places: [Place; 3]| fastest_first(&[0, 1, 2], |i: usize| places[i]);
+        assert_eq!(order([on(394.0), on(36.0), on(120.0)]), [1, 2, 0], "quickest first");
+        assert_eq!(order([Place::Unmeasured, on(36.0), Place::Unmeasured]), [1, 0, 2], "measured before unmeasured, in order");
+        assert_eq!(order([Place::Cpu(Why::Fails("x")), Place::Unmeasured, on(500.0)]), [2, 1, 0], "the CPU's last");
+        assert_eq!(order([Place::Unmeasured; 3]), [0, 1, 2], "nothing measured: the runtime's order");
+    }
+
     /// A place a test measured here stands in for the registry's; one the
     /// registry knows fails is never measured over. A measured failure
     /// stays skipped while places are measured again, the rest are tried.
@@ -2353,7 +2392,7 @@ mod tests {
         let engine = OrtEngine::build_with(
             ModelKind::Silueta,
             1,
-            gpu_eps_for(false),
+            &gpu_eps_for(prunr_models::ModelId::Silueta, false),
             false,
             GraphOptimizationLevel::Level2,
         )
