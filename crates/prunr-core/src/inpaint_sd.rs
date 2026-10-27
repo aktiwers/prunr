@@ -284,9 +284,9 @@ pub(crate) struct SdSessionKey {
 }
 
 impl SdSessionKey {
-    /// The GPU providers this bundle's parts may try.
-    fn gpu_eps(&self) -> &'static [EpKind] {
-        crate::engine::gpu_eps_for(self.cpu_only)
+    /// The GPU providers bundle `id`'s parts may try, fastest first.
+    fn gpu_eps(&self, id: prunr_models::ModelId) -> Vec<EpKind> {
+        crate::engine::gpu_eps_for(id, self.cpu_only)
     }
 
     /// A device override is bench-only (see `SdTuning::ov_device`).
@@ -1620,7 +1620,7 @@ fn build_part_with_ep_ladder(
     let lean = id.sd_spec().is_some_and(|s| s.lean_sessions);
 
     let landed = tracing::info_span!("sd_part", part = key).in_scope(|| {
-        crate::engine::walk_ladder("SD: ", id, Weights::Fp32, session_key.gpu_eps(), |ep| {
+        crate::engine::walk_ladder("SD: ", id, Weights::Fp32, &session_key.gpu_eps(id), |ep| {
             crate::cache::gc_stale_for_model(id, ep.as_str());
             let builder = sd_base_builder(session_key.mem, lean).map_err(Miss::Unusable)?;
             let (builder, load_path, draft) = if ep.keeps_optimized_graph() {
@@ -3729,7 +3729,7 @@ mod tests {
     fn a_cpu_only_bundle_tries_no_gpu_provider_and_has_its_own_key() {
         let auto = plan_tuning(false, 0).session_key();
         let cpu = SdTuning { cpu_only: true, ..plan_tuning(false, 0) }.session_key();
-        assert!(cpu.gpu_eps().is_empty());
+        assert!(cpu.gpu_eps(prunr_models::ModelId::SdV15InpaintFp16).is_empty());
         assert_ne!(auto, cpu);
     }
 

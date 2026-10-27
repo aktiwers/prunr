@@ -629,7 +629,7 @@ fn build_lama_session(
     threads: usize,
     cpu_only: bool,
 ) -> Result<(Session, SessionPick), String> {
-    lama_ladder(id, bytes, crate::engine::gpu_eps_for(cpu_only), threads, || base_builder(threads))
+    lama_ladder(id, bytes, &crate::engine::gpu_eps_for(id, cpu_only), threads, || base_builder(threads))
 }
 
 /// `build_lama_session` over `eps`, each session started from `builder`.
