@@ -637,9 +637,9 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
 /// Install.
 fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults, name: &str, intent: &mut Option<HardwareSectionIntent>) {
     let text = cuda_offer_text(results, name);
-    let size = match RuntimeId::Cuda.addon() {
-        Some(addon) if ctx.installs.nvidia_libraries => super::format_byte_size(addon.size_bytes),
-        _ => "2 GB".to_string(),
+    let size = match ctx.installs.nvidia_libraries {
+        true => RuntimeId::Cuda.download_size(true),
+        false => std::borrow::Cow::Borrowed("2 GB"),
     };
     egui::Frame::NONE.fill(OFFER_FILL).corner_radius(12.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -679,19 +679,22 @@ fn cuda_offer_text(results: &TestResults, name: &str) -> String {
 const OFFER_FILL: Color32 = Color32::from_rgb(0x34, 0x26, 0x3c);
 const TABLE_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 40);
 const TABLE_ROW_HEIGHT: f32 = 38.0;
+/// The model column's width, in time columns.
+const MODEL_COLUMN: f32 = 1.8;
 
 /// The test's times: a row per model, the processor and each engine, and
 /// where Prunr runs it, that engine's time in bright text.
 fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults) {
     egui::Frame::NONE.fill(TABLE_FILL).corner_radius(12.0).inner_margin(egui::Margin { left: 18, right: 18, top: 6, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let width = ui.available_width() / (results.engines.len() + 3) as f32;
+        let width = ui.available_width() / (results.engines.len() as f32 + 2.0 + MODEL_COLUMN);
+        let widths = (width * MODEL_COLUMN, width);
         let plain = |text: &'static str, right| (Cow::Borrowed(text), theme::TEXT_SECONDARY, right, false);
         let header = std::iter::once(plain("Model", false))
             .chain(std::iter::once(plain("Processor", true)))
             .chain(results.engines.iter().map(|e| plain(e.name, true)))
             .chain(std::iter::once(plain("Prunr uses", true)));
-        table_line(ui, width, TABLE_ROW_HEIGHT - 6.0, header);
+        table_line(ui, widths, TABLE_ROW_HEIGHT - 6.0, header);
         for row in &results.rows {
             let runs_on = if ctx.cpu_only { prunr_core::engine::CPU_NAME } else { row.runs_on };
             let cpu = (row.cpu_ms.map_or(Cow::Borrowed("\u{2014}"), |ms| Cow::Owned(super::fmt::seconds(ms))), runs_on == prunr_core::engine::CPU_NAME);
@@ -700,7 +703,7 @@ fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestRes
                 .map(|(text, used)| (text, if used { theme::GLOW } else { theme::TEXT_SECONDARY }, true, used));
             let name = (Cow::Borrowed(prunr_models::display_name(row.model)), theme::TEXT_PRIMARY, false, false);
             let uses = (Cow::Owned(format!("{} {}", ICON_CHECK.codepoint, engine_name(runs_on))), theme::TEXT_PRIMARY, true, false);
-            table_line(ui, width, TABLE_ROW_HEIGHT, std::iter::once(name).chain(times).chain(std::iter::once(uses)));
+            table_line(ui, widths, TABLE_ROW_HEIGHT, std::iter::once(name).chain(times).chain(std::iter::once(uses)));
         }
         ui.add_space(theme::SPACE_SM);
         let left_out = super::fmt::and_list(crate::bench::HEAVY.iter().filter(|&&id| ctx.installs.has_installed(id)).map(|&id| prunr_models::display_name(id)));
@@ -714,11 +717,12 @@ fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestRes
 }
 
 /// One line of the table, a hairline under it: each cell `(text, colour,
-/// right-aligned, strong)` in a column `width` wide.
-fn table_line(ui: &mut egui::Ui, width: f32, height: f32, cells: impl Iterator<Item = (Cow<'static, str>, Color32, bool, bool)>) {
+/// right-aligned, strong)`, the first `widths.0` wide, the rest `widths.1`.
+fn table_line(ui: &mut egui::Ui, widths: (f32, f32), height: f32, cells: impl Iterator<Item = (Cow<'static, str>, Color32, bool, bool)>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for (text, color, right, strong) in cells {
+        for (i, (text, color, right, strong)) in cells.enumerate() {
+            let width = if i == 0 { widths.0 } else { widths.1 };
             let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
             ui.allocate_ui_with_layout(egui::vec2(width, height), layout, |ui| {
                 ui.set_min_size(egui::vec2(width, height));
@@ -758,7 +762,7 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
         None if installed => failure.as_deref().unwrap_or(rt.installed_line()),
-        None => rt.not_installed(recommended),
+        None => &rt.not_installed(recommended, ctx.installs.nvidia_libraries),
     };
     rows.row(rt.display_name(), status, |ui| {
         if installing_this.is_some() {

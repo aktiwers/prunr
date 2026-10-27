@@ -162,19 +162,34 @@ impl RuntimeId {
         }
     }
 
+    /// What installing it downloads, as its texts say it: the add-on
+    /// alone where NVIDIA's libraries are already here (`nvidia_here`).
+    pub fn download_size(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
+        match self {
+            Self::OpenVino => Cow::Borrowed("80 MB"),
+            Self::Cuda => match self.addon() {
+                Some(addon) if nvidia_here => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
+                _ => Cow::Borrowed("about 2 GB with NVIDIA's CUDA and cuDNN libraries"),
+            },
+            Self::MiGraphX => Cow::Borrowed("20 MB"),
+        }
+    }
+
     /// Settings › Hardware's line while this runtime is not installed: its
     /// download, and why to get it when the hardware suits it.
-    pub fn not_installed(self, recommended: bool) -> &'static str {
-        match (self, recommended) {
-            (Self::OpenVino, false) => "Not installed (80 MB).",
-            (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
-            (Self::Cuda, false) if self.is_addon() => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
-            (Self::Cuda, true) if self.is_addon() => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
-            (Self::Cuda, false) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Runs the models on an NVIDIA graphics card.",
-            (Self::Cuda, true) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: runs the models on it.",
-            (Self::MiGraphX, false) => "Not installed (20 MB). Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
-            (Self::MiGraphX, true) => "Not installed (20 MB). Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
-        }
+    pub fn not_installed(self, recommended: bool, nvidia_here: bool) -> String {
+        let why = match (self, recommended) {
+            (Self::OpenVino, false) => "",
+            (Self::OpenVino, true) => " Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
+            (Self::Cuda, false) if self.is_addon() => " Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
+            (Self::Cuda, true) if self.is_addon() => " Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
+            (Self::Cuda, false) => " Runs the models on an NVIDIA graphics card.",
+            (Self::Cuda, true) => " Recommended for your NVIDIA graphics card: runs the models on it.",
+            (Self::MiGraphX, false) => " Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
+            (Self::MiGraphX, true) => " Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
+        };
+        format!("Not installed ({}).{why}", self.download_size(nvidia_here))
     }
 
     /// Settings › Hardware's line once it is installed.
@@ -195,20 +210,20 @@ impl RuntimeId {
     }
 
     /// The first-launch prompt's body.
-    pub fn first_launch_prompt_body(self) -> &'static str {
+    pub fn first_launch_prompt_body(self, nvidia_here: bool) -> String {
+        let size = self.download_size(nvidia_here);
         match self {
-            Self::OpenVino => "We detected Intel hardware that can use OpenVINO Runtime. \
-                Installing it (~80 MB) makes the models run faster, and lets you \
-                try running them on the Intel graphics chip (Settings › Hardware).",
-            Self::Cuda if self.is_addon() => "We detected an NVIDIA graphics card. Installing CUDA \
-                (about 2 GB, with NVIDIA's CUDA and cuDNN libraries) runs more models \
-                on it than DirectML can, and each model on the faster of the two.",
-            Self::Cuda => "We detected an NVIDIA graphics card. Installing CUDA Runtime \
-                (about 2 GB, with NVIDIA's CUDA and cuDNN libraries) runs the models \
-                on it instead of the processor.",
-            Self::MiGraphX => "We detected an AMD graphics card. Installing MIGraphX Runtime \
-                (~20 MB) runs the models on it instead of the processor. It needs \
-                AMD's ROCm 7 with MIGraphX on this computer.",
+            Self::OpenVino => format!("We detected Intel hardware that can use OpenVINO Runtime. \
+                Installing it ({size}) makes the models run faster, and lets you \
+                try running them on the Intel graphics chip (Settings › Hardware)."),
+            Self::Cuda if self.is_addon() => format!("We detected an NVIDIA graphics card. Installing CUDA \
+                ({size}) runs more models on it than DirectML can, and each model \
+                on the faster of the two."),
+            Self::Cuda => format!("We detected an NVIDIA graphics card. Installing CUDA Runtime \
+                ({size}) runs the models on it instead of the processor."),
+            Self::MiGraphX => format!("We detected an AMD graphics card. Installing MIGraphX Runtime \
+                ({size}) runs the models on it instead of the processor. It needs \
+                AMD's ROCm 7 with MIGraphX on this computer."),
         }
     }
 

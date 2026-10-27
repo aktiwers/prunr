@@ -14,7 +14,9 @@ pub enum RuntimePromptAction {
 }
 
 /// Returns `None` while the modal is open with no user response yet.
-pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<RuntimePromptAction> {
+/// `nvidia_here`: NVIDIA's libraries are already installed, so CUDA's
+/// download is smaller.
+pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId, nvidia_here: bool) -> Option<RuntimePromptAction> {
     let mut result: Option<RuntimePromptAction> = None;
 
     let backdrop_closed = theme::standard_modal_window(
@@ -22,7 +24,7 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
         [theme::STANDARD_MODAL_WIDTH, 280.0],
         |ui| {
             ui.label(
-                RichText::new(rt.first_launch_prompt_body())
+                RichText::new(rt.first_launch_prompt_body(nvidia_here))
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_PRIMARY),
             );
