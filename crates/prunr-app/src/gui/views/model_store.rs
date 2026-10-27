@@ -48,13 +48,61 @@ pub(crate) fn card_action(
     }
 }
 
+/// What a click on a card asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Click {
+    Footer(CardAction),
+    Test,
+    CancelTest,
+}
+
+/// Where a card's model stands with a test on this computer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum CardTest {
+    /// Nothing to offer: not installed, not a model the test runs, or no
+    /// accelerator to test.
+    Off,
+    /// Never measured here; `ready` while nothing else uses the machine.
+    Untested { ready: bool },
+    /// Its test runs: on what now, and how far.
+    Testing { on: &'static str, fraction: f32 },
+    /// Measured: the engine it runs on, and its time there.
+    Tested { on: &'static str, ms: Option<f32> },
+}
+
+/// `id`'s test line, from the test under way and what tests measured.
+pub(crate) fn card_test(app: &PrunrApp, id: ModelId) -> CardTest {
+    use crate::gui::hardware_cache::Cell;
+    if let Some(test) = app.machine_test.as_ref().filter(|t| t.only() == Some(id)) {
+        let step = test.step().filter(|s| s.model == id);
+        let on = step.filter(|s| s.on_gpu()).map_or("the processor", |s| s.column.provider());
+        return CardTest::Testing { on, fraction: step.map_or(0.0, |s| s.fraction()) };
+    }
+    if !app.model_testable(id) {
+        return CardTest::Off;
+    }
+    let Some(row) = app.test_results.rows.iter().find(|r| r.model == id) else {
+        return CardTest::Untested { ready: app.can_model_test_intent(id) };
+    };
+    let on = if app.settings.cpu_only() { prunr_core::engine::CPU_NAME } else { row.runs_on };
+    let ms = match on {
+        prunr_core::engine::CPU_NAME => row.cpu_ms,
+        engine => app.test_results.engines.iter().zip(&row.cells).find(|(e, _)| e.name == engine).and_then(|(_, cell)| match cell {
+            Cell::Time(ms) => Some(*ms),
+            _ => None,
+        }),
+    };
+    CardTest::Tested { on, ms }
+}
+
 /// Returns true when the user closed the modal this frame.
 pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let provider = app.settings.effective_backend().to_string();
+    let engines = super::fmt::and_list(std::iter::once("the processor").chain(app.test_results.engines.iter().filter(|e| e.installed).map(|e| e.name)));
 
     let initial_filter = app.model_store.as_ref().and_then(|r| r.filter);
     let mut new_filter = initial_filter;
-    let mut pending_actions: Vec<(ModelId, CardAction)> = Vec::with_capacity(REGISTRY.len());
+    let mut pending_actions: Vec<(ModelId, Click)> = Vec::with_capacity(REGISTRY.len());
 
     let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
         let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(app.hardware_install_cache.models_on_disk));
@@ -77,8 +125,8 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                         let row = i / 3;
                         let state = app.download_manager.state(desc.id);
                         let height = last.get(row).copied().unwrap_or(0.0);
-                        let installed = app.hardware_install_cache.has_installed(desc.id);
-                        let (action, natural) = render_card(ui, desc, installed, &state, &provider, egui::vec2(card_width, height));
+                        let card = Card { desc, installed: app.hardware_install_cache.has_installed(desc.id), state: &state, test: card_test(app, desc.id) };
+                        let (action, natural) = render_card(ui, &card, (&provider, &engines), egui::vec2(card_width, height));
                         heights[row] = heights[row].max(natural);
                         if let Some(action) = action {
                             pending_actions.push((desc.id, action));
@@ -97,6 +145,17 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     });
 
     for (id, action) in pending_actions {
+        let action = match action {
+            Click::Footer(action) => action,
+            Click::Test => {
+                app.handle_model_test_intent(ctx, id);
+                continue;
+            }
+            Click::CancelTest => {
+                app.cancel_machine_test();
+                continue;
+            }
+        };
         match action {
             CardAction::Download | CardAction::Retry => {
                 if requires_license_gate(id, &app.settings) {
@@ -177,17 +236,21 @@ fn category_icon(c: ModelCategory) -> &'static str {
     }
 }
 
-/// One card: icon, name and kind; what it is for; and a footer with its
-/// size and what can be done with it. The name row opens the licence,
-/// author and source in place.
-fn render_card(
-    ui: &mut egui::Ui,
-    desc: &ModelDescriptor,
+/// A card's model and what it shows of it.
+struct Card<'a> {
+    desc: &'a ModelDescriptor,
     installed: bool,
-    state: &DownloadState,
-    provider: &str,
-    size: egui::Vec2,
-) -> (Option<CardAction>, f32) {
+    state: &'a DownloadState,
+    test: CardTest,
+}
+
+/// One card: icon, name and kind; what it is for; where it runs fastest
+/// here, or Test; and a footer with its size and what can be done with
+/// it. The name row opens the licence, author and source in place.
+/// `(provider, engines)`: the runtime's provider, for the hardware
+/// advisory, and what a test tries, for Test's tooltip.
+fn render_card(ui: &mut egui::Ui, card: &Card<'_>, (provider, engines): (&str, &str), size: egui::Vec2) -> (Option<Click>, f32) {
+    let Card { desc, installed, state, test } = *card;
     let action = card_action(desc, installed, state);
     let advisory = desc.hardware_advisory(provider);
     let border = if installed {
@@ -233,6 +296,9 @@ fn render_card(
             if open {
                 card_details(ui, desc, state);
             }
+            if let Some(click) = test_line(ui, desc, test, engines) {
+                clicked = Some(click);
+            }
             let downloading = matches!(state, DownloadState::InProgress { .. });
             let footer = FOOTER_HEIGHT + if downloading { BAR_HEIGHT + ui.spacing().item_spacing.y } else { 0.0 };
             let content = ui.min_rect().height() + theme::SPACE_XS + footer;
@@ -263,7 +329,7 @@ fn render_card(
                         let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
                         let resp = super::chip::named_with(resp, || format!("{label} {}", desc.display_name));
                         if resp.clicked() {
-                            clicked = Some(action);
+                            clicked = Some(Click::Footer(action));
                         }
                     }
                 });
@@ -271,6 +337,57 @@ fn render_card(
             ui.data_mut(|d| d.insert_temp(open_id, open));
         }));
     (clicked, natural)
+}
+
+/// A card's test line: "Not tested on this computer." with Test, the test
+/// under way with Cancel, or where the model runs fastest here.
+fn test_line(ui: &mut egui::Ui, desc: &ModelDescriptor, test: CardTest, engines: &str) -> Option<Click> {
+    let text = |text: &str, color: Color32| RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(color);
+    let mut clicked = None;
+    match test {
+        CardTest::Off => {}
+        CardTest::Untested { ready } => {
+            ui.horizontal(|ui| {
+                ui.label(text("Not tested on this computer.", theme::ADVISORY_TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let reason = (!ready).then_some("Waits until the current work is done.");
+                    let resp = super::chip::gated(ui, reason, |ui| button(ui, ButtonKind::Secondary, "Test"));
+                    let body = format!(
+                        "Times {} on {engines}, checks each gives the same picture, and runs it on the fastest from now on. Takes about a minute.",
+                        desc.display_name,
+                    );
+                    let resp = super::chip::tooltip(resp, "Test", &body, None);
+                    if super::chip::named_with(resp, || format!("Test {}", desc.display_name)).clicked() {
+                        clicked = Some(Click::Test);
+                    }
+                });
+            });
+        }
+        CardTest::Testing { on, fraction } => {
+            ui.horizontal(|ui| {
+                ui.label(text(&format!("Testing on {on}\u{2026}"), theme::TEXT_SECONDARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let resp = button(ui, ButtonKind::Secondary, "Cancel");
+                    if super::chip::named_with(resp, || format!("Cancel the test of {}", desc.display_name)).clicked() {
+                        clicked = Some(Click::CancelTest);
+                    }
+                });
+            });
+            super::chip::progress_bar(ui, fraction, BAR_HEIGHT);
+        }
+        CardTest::Tested { on, ms } => {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ICON_CHECK.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::ACCENT_BRIGHT));
+                let on = if on == prunr_core::engine::CPU_NAME { "the processor" } else { on };
+                let line = match ms {
+                    Some(ms) => format!("Fastest here: {on}, {}", super::fmt::seconds(ms)),
+                    None => format!("Fastest here: {on}"),
+                };
+                ui.label(text(&line, theme::TEXT_SECONDARY));
+            });
+        }
+    }
+    clicked
 }
 
 /// The footer's text: the size, or what the download is doing.

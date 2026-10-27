@@ -716,7 +716,7 @@ impl PrunrApp {
     /// Escape closes the first one up that it can.
     pub(crate) const MODALS: [(&'static str, IsUp, Option<Close>); 11] = [
         // Escape leaves it: a test takes minutes to start over.
-        ("machine_test", |a| a.machine_test.is_some(), None),
+        ("machine_test", |a| a.machine_test.as_ref().is_some_and(|t| t.only().is_none()), None),
         ("discard_prompt", |a| a.pending_discard.is_some(), Some(|a| a.pending_discard = None)),
         ("save_preset", |a| a.save_preset.is_some(), Some(|a| a.save_preset = None)),
         ("license", |a| a.pending_license_request.is_some(), Some(|a| a.pending_license_request = None)),
@@ -1455,7 +1455,8 @@ impl PrunrApp {
             }
         }
         self.render_discard_prompt(ctx);
-        if let Some(test) = &self.machine_test {
+        // A test of one model shows on its Model Store card instead.
+        if let Some(test) = self.machine_test.as_ref().filter(|t| t.only().is_none()) {
             if super::views::machine_test::render(ctx, test, &self.test_results.engines) {
                 self.cancel_machine_test();
             }

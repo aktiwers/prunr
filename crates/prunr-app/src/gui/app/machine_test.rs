@@ -24,6 +24,36 @@ impl PrunrApp {
         self.machine_test_accelerator().is_some() && self.machine_idle()
     }
 
+    /// The Model Store's Test can time `model` here: an accelerator to
+    /// test, its weights installed, and a model the computer test runs
+    /// (not a heavy one, nor one that runs only inside another's run).
+    pub(crate) fn model_testable(&self, model: ModelId) -> bool {
+        self.machine_test_accelerator().is_some()
+            && self.hardware_install_cache.has_installed(model)
+            && crate::bench::Family::of(model).is_some()
+            && !crate::bench::HEAVY.contains(&model)
+    }
+
+    pub(crate) fn can_model_test_intent(&self, model: ModelId) -> bool {
+        self.model_testable(model) && self.machine_idle()
+    }
+
+    /// Test `model` alone, as the computer test would, on every engine.
+    pub(crate) fn handle_model_test_intent(&mut self, ctx: &egui::Context, model: ModelId) {
+        if !self.can_model_test_intent(model) {
+            return;
+        }
+        self.free_sessions_for_new_places();
+        let ctx = ctx.clone();
+        match MachineTest::start_for(model, move || ctx.request_repaint()) {
+            Ok(test) => self.machine_test = Some(test),
+            Err(e) => {
+                tracing::warn!(?model, %e, "the model's test did not start");
+                self.toasts.error(e);
+            }
+        }
+    }
+
     /// Start a test. The sessions the app holds go first: the test needs
     /// their memory, and the ones built after it follow its places.
     pub(crate) fn handle_machine_test_intent(&mut self, ctx: &egui::Context) {
@@ -54,8 +84,14 @@ impl PrunrApp {
     /// Each frame: take in the test's progress, and its end.
     pub(crate) fn pump_machine_test(&mut self, ctx: &egui::Context) {
         let Some(ended) = self.machine_test.as_mut().and_then(MachineTest::pump) else { return };
-        self.machine_test = None;
+        let only = self.machine_test.take().and_then(|test| test.only());
         self.places_changed();
+        if let (Ended::Finished { .. }, Some(model)) = (&ended, only) {
+            let on = prunr_core::memory::provider_now(model, self.settings.cpu_only());
+            let on = if on == prunr_core::engine::CPU_NAME { "the processor" } else { on };
+            self.toasts.success(format!("{} tested: it runs on {on} here.", prunr_models::display_name(model)));
+            return;
+        }
         match ended {
             Ended::Finished { left_out } => {
                 let mut text = "Test done: each model now runs on the fastest that gives the same picture. Settings › Hardware has the times.".to_string();

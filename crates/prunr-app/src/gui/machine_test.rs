@@ -32,6 +32,9 @@ pub(crate) struct MachineTest {
     finished: Option<Vec<ModelId>>,
     /// What it measured so far, a model at a time.
     measured: Vec<Measuring>,
+    /// The one model it tests (the Model Store's Test); `None` for the
+    /// whole computer.
+    only: Option<ModelId>,
 }
 
 /// A model the test measured: its time on the processor, and its fastest
@@ -59,6 +62,14 @@ impl MachineTest {
     /// Start the test's process; `wake` repaints the window as it reports.
     pub(crate) fn start(wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         Self::spawn(&["bench", "--here"], wake)
+    }
+
+    /// Start a test of `model` alone (the Model Store's Test).
+    pub(crate) fn start_for(model: ModelId, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+        Self::spawn(&["bench", "--here", "--models", model.stable_name()], wake).map(|mut test| {
+            test.only = Some(model);
+            test
+        })
     }
 
     /// Start the check of a download's result (`bench::here::check`).
@@ -91,18 +102,31 @@ impl MachineTest {
                 wake();
             })
             .map_err(|e| format!("The test could not start: {e}"))?;
-        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new() })
+        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only: None })
     }
 
     /// A test whose process is `child` and that reports nothing.
     #[cfg(test)]
     pub(crate) fn for_test(child: Child) -> Self {
         let (_, told) = mpsc::channel();
-        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new() }
+        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only: None }
+    }
+
+    /// `for_test`, a test of `model` alone.
+    #[cfg(test)]
+    pub(crate) fn for_test_of(child: Child, model: ModelId) -> Self {
+        let mut test = Self::for_test(child);
+        test.only = Some(model);
+        test
     }
 
     pub(crate) fn step(&self) -> Option<Step> {
         self.step
+    }
+
+    /// The one model it tests; `None` for the whole computer.
+    pub(crate) fn only(&self) -> Option<ModelId> {
+        self.only
     }
 
     /// The models it has finished, in the order it ran them.
