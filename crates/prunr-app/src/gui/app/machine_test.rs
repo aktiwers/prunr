@@ -115,7 +115,7 @@ impl PrunrApp {
         match ended {
             Ended::Finished { .. } => {
                 prunr_core::ep_compat::refresh();
-                if let Some(kind) = prunr_core::ep_compat::measured_for(id)[column.index()] {
+                if let Some(kind) = prunr_core::ep_compat::measured_for(id)[column.index()].and_then(prunr_core::ep_compat::PlaceKind::of) {
                     self.toasts.warning(check_found(name, &accelerator, kind));
                     self.places_changed();
                 }

@@ -57,15 +57,14 @@ impl TestSummary {
     }
 
     pub fn read() -> Self {
-        use prunr_core::ep_compat::PlaceKind;
         prunr_core::ep_compat::refresh();
         let mut summary = Self { tested: prunr_core::ep_compat::tested(), ..Self::default() };
         for model in prunr_models::REGISTRY.iter().map(|d| d.id) {
             let measured = prunr_core::ep_compat::measured_for(model);
-            for (column, kind) in prunr_models::Column::ALL.into_iter().zip(measured) {
-                let Some(kind) = kind.filter(|_| prunr_core::engine::column_for(model, column.provider()) == Some(column)) else { continue };
-                match kind {
-                    PlaceKind::There => summary.there += 1,
+            for (column, place) in prunr_models::Column::ALL.into_iter().zip(measured) {
+                let Some(place) = place.filter(|_| prunr_core::engine::column_for(model, column.provider()) == Some(column)) else { continue };
+                match place {
+                    prunr_models::Place::There(_) => summary.there += 1,
                     _ => summary.off += 1,
                 }
             }

@@ -7,7 +7,6 @@ use prunr_core::ep_compat::{Measured, PlaceKind};
 use prunr_core::memory::Charge;
 use prunr_models::{Column, ModelId, Needs, Priced};
 
-use super::report::fmt_ms;
 use super::stats::steady_pair;
 use super::{Family, Gpu, Row, Side, Verdict};
 
@@ -22,11 +21,21 @@ const FAR_FROM_INPUT: f64 = 16.0;
 
 /// As the registry writes `place`, measured where `label` says.
 fn rust(place: &Measured, label: &str) -> String {
-    let text = format!("{} ({label})", place.text);
-    match place.kind {
-        PlaceKind::There => format!("Place::There({text:?})"),
-        why => format!("Place::Cpu(Why::{why:?}({text:?}))"),
+    match (place.kind, place.times) {
+        (PlaceKind::There, Some([ms, cpu_ms])) => {
+            let speed = format!("Speed::on({:?}, {:?}, {label:?})", hundredths(ms), hundredths(cpu_ms));
+            match place.text.as_str() {
+                "" => format!("Place::There({speed})"),
+                caveat => format!("Place::There({speed}.but({caveat:?}))"),
+            }
+        }
+        (PlaceKind::There, None) => format!("Place::Unmeasured /* faster, but not timed: {place} ({label}) */"),
+        (why, _) => format!("Place::Cpu(Why::{why:?}({:?}))", format!("{place} ({label})")),
     }
+}
+
+fn hundredths(ms: f32) -> f32 {
+    (ms * 100.0).round() / 100.0
 }
 
 /// `row`'s place in `column`; `None` when the row measured nothing there
@@ -49,19 +58,19 @@ fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
         Verdict::Match => {
             let (cpu_ms, gpu_ms) = steady_pair(row.cpu.as_ref()?.timing.as_ref()?, gpu?.timing.as_ref()?);
             let ratio = cpu_ms / gpu_ms;
-            let times = format!("{ratio:.2}x: {} against the CPU's {}", fmt_ms(gpu_ms), fmt_ms(cpu_ms));
+            let timed = |kind, text: String| Some(Measured::timed(kind, gpu_ms as f32, cpu_ms as f32, text));
             if ratio >= EVEN {
-                return Some(Measured::new(PlaceKind::There, times));
+                return timed(PlaceKind::There, String::new());
             }
             if ratio <= 1.0 / EVEN {
-                return Some(Measured::new(PlaceKind::Slower, times));
+                return timed(PlaceKind::Slower, String::new());
             }
-            let within = format!("{times}, within {:.0}%", (EVEN - 1.0) * 100.0);
+            let within = format!("within {:.0}%", (EVEN - 1.0) * 100.0);
             let faster = if ratio >= 1.0 { PlaceKind::There } else { PlaceKind::NoGain };
             // `Needs` has one OpenVINO entry, measured on the processor.
             let measured = column != Column::OpenVinoGpu && matches!(needs.on(column.provider()), Priced::Same(_));
             if !measured {
-                return Some(Measured::new(faster, format!("{within}; its memory there not measured")));
+                return timed(faster, format!("{within}; its memory there not measured"));
             }
             let cpu_mb = Charge::of(needs, prunr_core::engine::CPU_NAME).ram_mb;
             let there_mb = Charge::of(needs, column.provider()).ram_mb;
@@ -70,7 +79,7 @@ fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
                 std::cmp::Ordering::Equal => faster,
                 std::cmp::Ordering::Greater => PlaceKind::NoGain,
             };
-            Some(Measured::new(kind, format!("{within}, in {there_mb} MB of system memory against the CPU's {cpu_mb} MB")))
+            timed(kind, format!("{within}, in {there_mb} MB of system memory against the CPU's {cpu_mb} MB"))
         }
         _ => None,
     }
@@ -219,8 +228,15 @@ mod tests {
         assert!(graphics.text.ends_with("its memory there not measured"), "the OpenVINO figure is the processor's: {}", graphics.text);
 
         let faster = found(&row(300.0, Verdict::Match), &needs(900), Column::OpenVino).expect("placed");
-        assert_eq!(faster, Measured::new(PlaceKind::There, "1.33x: 300 ms against the CPU's 400 ms"));
-        assert_eq!(rust(&faster, "test, 2026-10-25"), r#"Place::There("1.33x: 300 ms against the CPU's 400 ms (test, 2026-10-25)")"#);
+        assert_eq!(faster, Measured::timed(PlaceKind::There, 300.0, 400.0, ""));
+        assert_eq!(rust(&faster, "test, 2026-10-25"), r#"Place::There(Speed::on(300.0, 400.0, "test, 2026-10-25"))"#);
+        let lighter = found(&row(380.0, Verdict::Match), &needs(600), Column::OpenVino).expect("placed");
+        assert_eq!(
+            rust(&lighter, "test"),
+            r#"Place::There(Speed::on(380.0, 400.0, "test").but("within 10%, in 600 MB of system memory against the CPU's 700 MB"))"#,
+        );
+        let slower = found(&row(500.0, Verdict::Match), &needs(500), Column::OpenVino).expect("placed");
+        assert_eq!(rust(&slower, "test"), r#"Place::Cpu(Why::Slower("0.80x: 500 ms against the CPU's 400 ms (test)"))"#);
 
         let mut failed = row(300.0, Verdict::GpuFailed);
         if let Gpu::Ran(side) = &mut failed.gpu {

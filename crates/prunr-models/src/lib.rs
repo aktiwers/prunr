@@ -405,7 +405,7 @@ impl Needs {
 /// memory. A model spells out each accelerator it was measured on and
 /// fills the rest from `UNMEASURED`; `every_model_says_where_it_runs`
 /// counts what is left.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Places {
     pub cuda: Place,
     pub directml: Place,
@@ -419,11 +419,11 @@ pub struct Places {
 }
 
 /// Where a model runs on one accelerator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Place {
     /// On it: its result is the CPU's and it runs faster, or as fast in
     /// less memory. The measurement and where it was taken.
-    There(&'static str),
+    There(Speed),
     /// On the CPU instead.
     Cpu(Why),
     /// Not measured there: it runs there when its session builds.
@@ -455,6 +455,60 @@ impl Place {
             Place::Cpu(_) => !remeasuring,
             Place::There(_) | Place::Unmeasured => false,
         }
+    }
+}
+
+/// A model's steady time on an accelerator against the CPU's, measured
+/// side by side: what tells two accelerators that both run it apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Speed {
+    /// Milliseconds a run takes there.
+    pub ms: f32,
+    /// Milliseconds a run takes on the CPU, in the same measurement.
+    pub cpu_ms: f32,
+    /// What the times leave out ("first runs"), or why a place this close
+    /// to the CPU's keeps it; empty when nothing.
+    pub caveat: &'static str,
+    /// Where and when it was measured.
+    pub on: &'static str,
+}
+
+impl Speed {
+    pub const fn on(ms: f32, cpu_ms: f32, on: &'static str) -> Self {
+        Self { ms, cpu_ms, caveat: "", on }
+    }
+
+    pub const fn but(self, caveat: &'static str) -> Self {
+        Self { caveat, ..self }
+    }
+}
+
+impl std::fmt::Display for Speed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&times_text(self.ms, self.cpu_ms))?;
+        if !self.caveat.is_empty() {
+            write!(f, ", {}", self.caveat)?;
+        }
+        write!(f, " ({})", self.on)
+    }
+}
+
+/// "1.20x: 440 ms against the CPU's 525 ms".
+pub fn times_text(ms: f32, cpu_ms: f32) -> String {
+    format!("{:.2}x: {} against the CPU's {}", cpu_ms / ms, fmt_ms(f64::from(ms)), fmt_ms(f64::from(cpu_ms)))
+}
+
+/// A duration for people: "3.8 ms", "440 ms", "47.11 s", "2m 06s".
+pub fn fmt_ms(ms: f64) -> String {
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else if ms < 60_000.0 {
+        format!("{:.2} s", ms / 1000.0)
+    } else {
+        let secs = (ms / 1000.0).round() as u64;
+        format!("{}m {:02}s", secs / 60, secs % 60)
     }
 }
 
@@ -781,8 +835,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("1.20x: 440 ms against the CPU's 525 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("16.97x: 36 ms against the CPU's 618 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
+            cuda: Place::There(Speed::on(440.0, 525.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(36.42, 618.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::NoGain("0.94x: 255 ms against the CPU's 240 ms, within 10%, in 1300 MB of system memory against the CPU's 750 MB (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
             openvino: Place::Cpu(SILUETA_ON_OPENVINO),
             openvino_gpu: Place::Cpu(SILUETA_ON_OPENVINO),
@@ -825,11 +879,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("11.03x: 26 ms against the CPU's 286 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("11.70x: 26 ms against the CPU's 302 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("1.61x: 221 ms against the CPU's 354 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
+            cuda: Place::There(Speed::on(25.93, 286.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(25.81, 302.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(221.0, 354.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
             openvino: Place::Cpu(Why::NoGain("1.09x: 369 ms against the CPU's 402 ms, within 10%, in 800 MB of system memory against the CPU's 700 MB (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)")),
-            openvino_gpu: Place::There("2.26x: 177 ms against the CPU's 402 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino_gpu: Place::There(Speed::on(177.0, 402.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -864,7 +918,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("22.21x: 397 ms against the CPU's 8.82 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            cuda: Place::There(Speed::on(397.1, 8820.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::Cpu(Why::Fails("its first run fails in a node DirectML fused: \"not enough memory\" (8007000E) with 11 GB free on the card (RTX 3060, Windows ML 1.30 and DirectML 1.24.1, 2026-10-26)")),
             coreml: Place::Cpu(Why::Fails(
                 "its convs without pads do not compile (\"Required param 'pad' is missing\", ORT 1.30); given zero pads it \
@@ -907,11 +961,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("10.77x: 12 ms against the CPU's 127 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("9.71x: 16 ms against the CPU's 153 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
+            cuda: Place::There(Speed::on(11.79, 127.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(15.76, 153.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::Slower("0.59x: 126 ms against the CPU's 74 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There("1.68x: 88 ms against the CPU's 148 ms (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.09x: 130 ms against the CPU's 142 ms, within 10%; its memory there not measured (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino: Place::There(Speed::on(88.1, 148.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(130.3, 142.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25").but("within 10%; its memory there not measured")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -951,10 +1005,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("14.75x: 150 ms against the CPU's 2.21 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            cuda: Place::There(Speed::on(149.8, 2210.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::Cpu(Why::Fails("its first run fails in a MatMul: \"the parameter is incorrect\" (80070057) (RTX 3060, Windows ML 1.30 and DirectML 1.24.1, 2026-10-26)")),
             coreml: Place::Cpu(Why::Fails("CoreML cannot plan it (\"Failed to build the model execution plan\") (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There("1.13x: 2.36 s against the CPU's 2.66 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino: Place::There(Speed::on(2360.0, 2660.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
@@ -995,10 +1049,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("2.11x: 1.30 s against the CPU's 2.74 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            cuda: Place::There(Speed::on(1298.6, 2740.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::Cpu(Why::Fails("its session fails to build: \"the parameter is incorrect\" (80070057) (RTX 3060, Windows ML 1.30 and DirectML 1.24.1, 2026-10-26)")),
             coreml: Place::Cpu(Why::Slower("0.72x: 3.81 s against the CPU's 2.75 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There("1.12x: 3.57 s against the CPU's 4.00 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino: Place::There(Speed::on(3571.4, 4000.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
@@ -1039,9 +1093,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("21.03x: 44 ms against the CPU's 935 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("21.78x: 44 ms against the CPU's 969 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("3.34x: 81 ms against the CPU's 270 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
+            cuda: Place::There(Speed::on(44.46, 935.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(44.5, 969.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(80.8, 270.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
             openvino: Place::Cpu(MIGAN_ON_OPENVINO),
             openvino_gpu: Place::Cpu(MIGAN_ON_OPENVINO),
             ..Places::UNMEASURED
@@ -1371,11 +1425,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("29.71x: 273 ms against the CPU's 8.11 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("34.04x: 240 ms against the CPU's 8.17 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("6.02x: 1.26 s against the CPU's 7.56 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.31x: 7.13 s against the CPU's 9.32 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.55x: 5.98 s against the CPU's 9.24 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            cuda: Place::There(Speed::on(273.0, 8110.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(240.0, 8170.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(1255.8, 7560.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(7130.0, 9320.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(5980.0, 9240.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1430,7 +1484,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                 "compiled for any size it fails to plan (error -14); for a 256 px tile it splits into 253 parts and its \
                  first run passed 80 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)",
             )),
-            openvino: Place::There("2.67x: 47.11 s against the CPU's 2m 06s, first runs (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            openvino: Place::There(Speed::on(47110.0, 126000.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25").but("first runs")),
             openvino_gpu: Place::Cpu(Why::Fails("one 256 px tile ran past 40 minutes and was stopped, against the CPU's 2m 06s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
@@ -1482,14 +1536,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("20.62x: 76 ms against the CPU's 1.57 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("20.47x: 86 ms against the CPU's 1.75 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
+            cuda: Place::There(Speed::on(76.14, 1570.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(85.5, 1750.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::Fails(
                 "its pixel-unshuffle cannot be planned (\"Error in building plan\"), the tile pinned or free (MacBook Air \
                  M1, ORT 1.24 and 1.30)",
             )),
-            openvino: Place::There("1.36x: 1.73 s against the CPU's 2.35 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.41x: 1.65 s against the CPU's 2.33 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino: Place::There(Speed::on(1727.9, 2350.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(1652.5, 2330.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1540,11 +1594,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("29.65x: 272 ms against the CPU's 8.07 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("33.07x: 247 ms against the CPU's 8.16 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("6.27x: 1.26 s against the CPU's 7.88 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.27x: 7.18 s against the CPU's 9.16 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.61x: 5.98 s against the CPU's 9.65 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            cuda: Place::There(Speed::on(272.2, 8070.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(246.75, 8160.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(1256.8, 7880.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(7180.0, 9160.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(5980.0, 9650.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1623,7 +1677,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("3.68x: 1.10 s against the CPU's 4.05 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
+            cuda: Place::There(Speed::on(1100.5, 4050.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::Cpu(Why::Fails("its run fails in a Reshape: \"the parameter is incorrect\" (80070057) (RTX 3060, Windows ML 1.30 and DirectML 1.24.1, 2026-10-26)")),
             coreml: Place::Cpu(Why::Fails(
                 "its tail's upsampler is rejected (\"axis 4 is not in valid range\") after 10 s building the other parts \
@@ -1684,11 +1738,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("29.48x: 272 ms against the CPU's 8.03 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("34.18x: 240 ms against the CPU's 8.22 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("5.42x: 1.39 s against the CPU's 7.53 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.29x: 7.37 s against the CPU's 9.51 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.51x: 6.11 s against the CPU's 9.24 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            cuda: Place::There(Speed::on(272.4, 8030.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(240.5, 8220.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(1389.3, 7530.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(7372.1, 9510.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(6110.0, 9240.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1734,8 +1788,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
         places: Places {
-            cuda: Place::There("14.92x: 75 ms against the CPU's 1.12 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("6.57x: 176 ms against the CPU's 1.16 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
+            cuda: Place::There(Speed::on(75.07, 1120.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(176.0, 1160.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::Differs("its colours vary between runs: 4.8%, 14.5% and 9.5% of values more than 2/255 from the CPU's in three runs, against a 10% tolerance (MacBook Air M1, ORT 1.30, 2026-10-23 and 2026-10-25)")),
             openvino: Place::Cpu(DDCOLOR_ON_OPENVINO),
             openvino_gpu: Place::Cpu(DDCOLOR_ON_OPENVINO),
@@ -1779,10 +1833,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("17.60x: 28 ms against the CPU's 499 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("8.10x: 66 ms against the CPU's 531 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("3.36x: 122 ms against the CPU's 409 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.27x: 382 ms against the CPU's 487 ms (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            cuda: Place::There(Speed::on(28.35, 499.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(65.56, 531.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(121.7, 409.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(382.0, 487.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(Why::Slower("0.65x: 770 ms against the CPU's 497 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
@@ -1832,9 +1886,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("6.61x: 379 ms against the CPU's 2.51 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("5.15x: 383 ms against the CPU's 1.97 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("2.34x: 718 ms against the CPU's 1.68 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
+            cuda: Place::There(Speed::on(379.0, 2510.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(382.52, 1970.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(717.9, 1680.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
             openvino: Place::Cpu(SAM_ON_OPENVINO),
             openvino_gpu: Place::Cpu(SAM_ON_OPENVINO),
             ..Places::UNMEASURED
@@ -1888,10 +1942,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("14.75x: 68 ms against the CPU's 1.01 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("16.46x: 69 ms against the CPU's 1.14 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("4.23x: 325 ms against the CPU's 1.38 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.14x: 1.28 s against the CPU's 1.46 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
+            cuda: Place::There(Speed::on(68.47, 1010.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(69.26, 1140.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(325.0, 1380.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(1280.7, 1460.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(Why::Slower("0.43x: 3.33 s against the CPU's 1.43 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
@@ -1938,11 +1992,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.1",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("19.04x: 128 ms against the CPU's 2.43 s (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("20.20x: 128 ms against the CPU's 2.58 s (RTX 3060, Windows ML 1.30, 2026-10-26)"),
-            coreml: Place::There("5.59x: 458 ms against the CPU's 2.56 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)"),
-            openvino: Place::There("1.17x: 2.46 s against the CPU's 2.88 s (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("3.15x: 976 ms against the CPU's 3.08 s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            cuda: Place::There(Speed::on(127.6, 2430.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(127.7, 2580.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            coreml: Place::There(Speed::on(458.0, 2560.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            openvino: Place::There(Speed::on(2461.5, 2880.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino_gpu: Place::There(Speed::on(976.0, 3080.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25")),
             ..Places::UNMEASURED
         },
         needs: Needs {
@@ -1980,11 +2034,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "2026may",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There("1.38x: 2.8 ms against the CPU's 3.8 ms (RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25)"),
-            directml: Place::There("1.46x: 3.8 ms against the CPU's 5.5 ms (RTX 3060, Windows ML 1.30, 2026-10-26)"),
+            cuda: Place::There(Speed::on(2.75, 3.8, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            directml: Place::There(Speed::on(3.77, 5.5, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::Slower("0.87x: 7.2 ms against the CPU's 6.2 ms (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There("1.07x: 5.0 ms against the CPU's 5.3 ms, within 10%; its memory there not measured (i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25)"),
-            openvino_gpu: Place::There("1.01x: 6.9 ms against the CPU's 7.0 ms, within 10%; its memory there not measured (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)"),
+            openvino: Place::There(Speed::on(4.95, 5.3, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25").but("within 10%; its memory there not measured")),
+            openvino_gpu: Place::There(Speed::on(6.9, 7.0, "HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25").but("within 10%; its memory there not measured")),
             ..Places::UNMEASURED
         },
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
@@ -2897,7 +2951,7 @@ mod tests {
     fn a_cpu_place_keeps_the_model_off_unless_measured_again() {
         for (place, kept, kept_while_measuring) in [
             (Place::Unmeasured, false, false),
-            (Place::There("1.3x"), false, false),
+            (Place::There(Speed::on(300.0, 400.0, "test")), false, false),
             (Place::Cpu(Why::Slower("0.8x")), true, false),
             (Place::Cpu(Why::Differs("black")), true, false),
             (Place::Cpu(Why::NoGain("1.05x, heavier")), true, false),
@@ -2905,6 +2959,18 @@ mod tests {
         ] {
             assert_eq!((place.kept_off(false), place.kept_off(true)), (kept, kept_while_measuring), "{place:?}");
         }
+    }
+
+    /// A speed reads as the bench wrote it: the ratio and both times, what
+    /// they leave out, then where.
+    #[test]
+    fn a_speed_reads_as_its_times_then_where() {
+        assert_eq!(Speed::on(36.42, 618.0, "RTX 3060").to_string(), "16.97x: 36 ms against the CPU's 618 ms (RTX 3060)");
+        assert_eq!(
+            Speed::on(47110.0, 126000.0, "i7-6700").but("first runs").to_string(),
+            "2.67x: 47.11 s against the CPU's 2m 06s, first runs (i7-6700)",
+        );
+        assert_eq!(fmt_ms(3.84), "3.8 ms");
     }
 
     /// Each column is found by its name and by its provider, and sits at
@@ -2966,7 +3032,7 @@ mod tests {
                 let place = desc.places.get(Column::ALL[i]);
                 match place {
                     Place::Unmeasured => unmeasured.push(desc.id),
-                    Place::There(text) => assert!(!text.trim().is_empty(), "{:?} on {column}: say where it was measured", desc.id),
+                    Place::There(speed) => assert!(!speed.on.trim().is_empty(), "{:?} on {column}: say where it was measured", desc.id),
                     Place::Cpu(why) => assert!(!why.text().trim().is_empty(), "{:?} on {column}: say why", desc.id),
                 }
             }
