@@ -324,13 +324,18 @@ pub struct EngineSpec {
 }
 
 impl EngineSpec {
-    /// Whether a worker built for `self` can run `next` on `provider`: the
-    /// same model on the same processor, with a pool at least as large (two
-    /// job counts can make the same pool: BiRefNet on the CPU builds one
-    /// either way).
+    /// Whether a worker built for `self` can run `next` on `provider`, the
+    /// one its model runs on (`for_its_model`): the same model on the same
+    /// processor, with a pool at least as large (two job counts can make
+    /// the same pool: BiRefNet on the CPU builds one either way).
     pub fn reusable_by(&self, next: &EngineSpec, provider: &str) -> bool {
         let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, e.cpu_only, provider);
         self.model == next.model && self.cpu_only == next.cpu_only && engines(self) >= engines(next)
+    }
+
+    /// The provider this spec's model runs on.
+    fn provider(&self) -> &'static str {
+        prunr_core::memory::provider_for(self.model.into(), self.cpu_only)
     }
 }
 
@@ -477,7 +482,7 @@ pub(crate) fn spawn_worker(
                         }
                     }
                     WorkerMessage::Warm(spec) => {
-                        if warm.as_ref().is_some_and(|w| w.spec.reusable_by(&spec, &prunr_core::OrtEngine::detect_active_provider())) {
+                        if warm.as_ref().is_some_and(|w| w.spec.reusable_by(&spec, spec.provider())) {
                             continue;
                         }
                         if let Some(w) = warm.take() {
@@ -496,7 +501,7 @@ pub(crate) fn spawn_worker(
                             Some(mut w) => {
                                 if !w.sub.is_alive() {
                                     Some("warm_worker_dead")
-                                } else if w.spec.reusable_by(&needed, &prunr_core::OrtEngine::detect_active_provider()) {
+                                } else if w.spec.reusable_by(&needed, needed.provider()) {
                                     reuse = Some((w.sub, w.spec));
                                     None
                                 } else {

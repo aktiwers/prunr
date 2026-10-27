@@ -740,12 +740,14 @@ impl PrunrApp {
         // A stable completion signal for debug logs and external observers.
         tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
-        // A model the accelerator does not run used the CPU by design; the
-        // app's accelerator, and the job count derived from it, stay.
+        // A result from where its model was expected to run says nothing new:
+        // the CPU for a model no accelerator runs, by design, or one of two
+        // accelerators (DirectML for Silueta while BiRefNet-lite takes
+        // CUDA). Only another provider is noted, with the job count
+        // derived from it.
         if let Some(provider) = backend_update.filter(|p| !p.is_empty() && *p != self.settings.active_backend) {
-            let runs_on_accelerator = self.settings.model.to_model_id()
-                .is_none_or(|m| prunr_core::engine::model_runs_on(m, &self.settings.active_backend));
-            if runs_on_accelerator {
+            let expected = self.settings.model.to_model_kind().map(|m| self.settings.model_backend(m));
+            if reports_another_backend(&provider, expected) {
                 self.settings.note_backend(provider);
             }
         }
@@ -1094,6 +1096,12 @@ impl PrunrApp {
         }
         landed
     }
+}
+
+/// Whether a result from `reported` changes the app's accelerator: not
+/// when it came from where its model was `expected` to run.
+fn reports_another_backend(reported: &str, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| expected != reported)
 }
 
 #[cfg(test)]
@@ -2517,6 +2525,18 @@ mod timeline_contract_tests {
         app.answer_for_test(&ctx, 1, Ok(cpu));
         assert_eq!(app.settings.active_backend, "OpenVINO");
         assert_eq!(app.settings.parallel_jobs, 3);
+    }
+
+    /// Two accelerators each run their own models: a result from the one
+    /// its model runs on is no news, so the app's accelerator and the job
+    /// count stay; the CPU in place of an accelerator is.
+    #[test]
+    fn a_result_from_its_models_own_accelerator_changes_nothing() {
+        use super::reports_another_backend;
+        assert!(!reports_another_backend("DirectML", Some("DirectML")), "Silueta on DirectML while CUDA is first");
+        assert!(!reports_another_backend("CPU", Some("CPU")), "a model no accelerator runs");
+        assert!(reports_another_backend("CPU", Some("CUDA")), "the accelerator stopped");
+        assert!(reports_another_backend("CUDA", None), "no model to expect anything of");
     }
 
     #[test]
