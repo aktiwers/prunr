@@ -315,36 +315,37 @@ pub(crate) fn gpu_eps_for(model: prunr_models::ModelId, cpu_only: bool) -> Vec<E
     if cpu_only {
         return Vec::new();
     }
-    let available = available_gpu_eps();
-    let eps = the_only(&available, ONLY.load(std::sync::atomic::Ordering::Relaxed));
+    let mut eps = available_gpu_eps().to_vec();
+    keep_only(&mut eps, *ONLY.read().unwrap_or_else(std::sync::PoisonError::into_inner), |ep: &EpKind| ep.as_str());
     let places = places_here(model);
     let (intel_gpu, remeasuring) = (openvino_on_gpu(), remeasuring());
-    fastest_first(eps, |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
+    fastest_first(&eps, |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
 }
 
-/// Set by `prunr bench --here` for each pass: the index, among the
-/// providers this process offers, of the one GPU provider its sessions
-/// may try, so that each is measured on its own; `ANY` otherwise.
-static ONLY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(ANY);
-const ANY: usize = usize::MAX;
+/// The one GPU provider sessions may try while a test measures it alone.
+/// Process-wide: only the test process (`prunr bench --here`) sets it.
+static ONLY: std::sync::RwLock<Option<&'static str>> = std::sync::RwLock::new(None);
 
-/// The provider at `only` in `eps` alone (none when it is past them), or
-/// all of them for `ANY`.
-fn the_only<T>(eps: &[T], only: usize) -> &[T] {
-    match only {
-        ANY => eps,
-        index => eps.get(index..=index).unwrap_or_default(),
+/// Sessions try only `provider` (ORT's name) of the GPU providers until
+/// the guard drops; one this process does not offer leaves none.
+#[must_use = "the pin lasts while the guard lives"]
+pub fn try_only(provider: &'static str) -> TryingOnly {
+    *ONLY.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider);
+    TryingOnly(())
+}
+
+pub struct TryingOnly(());
+
+fn keep_only<T>(eps: &mut Vec<T>, only: Option<&str>, name: impl Fn(&T) -> &str) {
+    if let Some(only) = only {
+        eps.retain(|ep| name(ep).eq_ignore_ascii_case(only));
     }
 }
 
-/// Let sessions try only `provider` (ORT's name) of the GPU providers, or
-/// any with `None`. A provider this process does not offer leaves none.
-pub fn try_only(provider: Option<&str>) {
-    let index = match provider {
-        None => ANY,
-        Some(provider) => available_gpu_eps().iter().position(|ep| ep.as_str().eq_ignore_ascii_case(provider)).unwrap_or(ANY - 1),
-    };
-    ONLY.store(index, std::sync::atomic::Ordering::Relaxed);
+impl Drop for TryingOnly {
+    fn drop(&mut self) {
+        *ONLY.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 /// `eps` with those measured faster first, quickest first, then the
@@ -2224,11 +2225,15 @@ mod tests {
     /// provider the process lacks leaves none.
     #[test]
     fn a_test_pass_lets_a_model_try_one_provider() {
-        let eps = [10, 20, 30];
-        assert_eq!(the_only(&eps, ANY), [10, 20, 30]);
-        assert_eq!(the_only(&eps, 1), [20]);
-        assert!(the_only(&eps, 3).is_empty(), "not offered here");
-        assert!(the_only(&eps, ANY - 1).is_empty(), "named but missing");
+        let all = vec!["CUDAExecutionProvider", "DmlExecutionProvider"];
+        let only = |name| {
+            let mut eps = all.clone();
+            keep_only(&mut eps, name, |ep| ep);
+            eps
+        };
+        assert_eq!(only(None), all);
+        assert_eq!(only(Some("DMLExecutionProvider")), ["DmlExecutionProvider"]);
+        assert!(only(Some("NoSuchExecutionProvider")).is_empty(), "named but missing");
     }
 
     /// A model tries the providers measured faster first, quickest first;

@@ -70,7 +70,7 @@ pub(crate) fn column_of(id: ModelId) -> Option<Column> {
 
 /// The GPU providers `id`'s sessions may try here, in their order.
 fn tried_here(id: ModelId) -> Vec<&'static str> {
-    prunr_core::engine::gpu_ladder(id).into_iter().filter(|(_, skip)| skip.is_none()).map(|(provider, _)| provider).collect()
+    super::tried(&prunr_core::engine::gpu_ladder(id))
 }
 
 /// Run the test: every installed model the accelerator would try (a place
@@ -87,12 +87,10 @@ pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     // every one, so the fastest can be told apart.
     let passes = |id| tried_here(id).into_iter().map(Some).collect();
     super::run_passes(&models, &inputs, RUNS, passes, &mut |event| match event {
-        Event::Stage { index, total, provider, .. } => {
+        Event::Stage { index, total, side, sides, provider, .. } => {
             let model = models[index - 1];
-            let tried = tried_here(model);
-            let side = provider.and_then(|p| tried.iter().position(|&q| q == p)).map_or(0, |i| i + 1);
             let column = provider.and_then(|p| prunr_core::engine::column_for(model, p)).unwrap_or(columns[index - 1]);
-            on(Told::Step(Step { index, total, model, side, sides: tried.len() + 1, column }));
+            on(Told::Step(Step { index, total, model, side, sides, column }));
         }
         Event::Done { row, provider, .. } => {
             let Some(id) = models.iter().copied().find(|id| id.stable_name() == row.name) else { return };
