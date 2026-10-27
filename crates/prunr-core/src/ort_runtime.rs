@@ -531,8 +531,7 @@ pub fn use_cuda_addon(library: PathBuf) {
 /// installed or it did not register.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn register_cuda_addon() -> bool {
-    *CUDA_ADDON_REGISTERED.get_or_init(|| {
-        let Some(library) = CUDA_ADDON.get() else { return false };
+    register_once(&CUDA_ADDON_REGISTERED, CUDA_ADDON.get().map(PathBuf::as_path), |library| {
         let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return false };
         let started = std::time::Instant::now();
         if let Some(dir) = library.parent() {
@@ -549,6 +548,14 @@ pub(crate) fn register_cuda_addon() -> bool {
             }
         }
     })
+}
+
+/// `register` the add-on at `library` once, its answer kept in `slot`.
+/// With none installed nothing is kept: one installed later registers.
+#[cfg(not(target_os = "macos"))]
+fn register_once(slot: &OnceLock<bool>, library: Option<&Path>, register: impl FnOnce(&Path) -> bool) -> bool {
+    let Some(library) = library else { return false };
+    *slot.get_or_init(|| register(library))
 }
 
 /// Whether sessions reach CUDA through the add-on in this process.
@@ -694,6 +701,19 @@ fn bundled_dylib() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A process that probed its providers before the CUDA add-on was
+    /// installed still registers it once installed: the probe found no
+    /// add-on, which is no answer to keep.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_add_on_installed_after_the_probe_still_registers() {
+        let slot = std::sync::OnceLock::new();
+        assert!(!super::register_once(&slot, None, |_| unreachable!("nothing to register")), "none installed");
+        let library = std::path::Path::new("onnxruntime_providers_cuda.dll");
+        assert!(super::register_once(&slot, Some(library), |_| true), "installed since: it registers");
+        assert!(super::register_once(&slot, Some(library), |_| unreachable!("once per process")), "kept");
+    }
 
     /// The runtime starts with telemetry off where its API switch is the
     /// one there is: Windows, whose build reports through event tracing.
