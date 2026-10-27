@@ -1458,7 +1458,7 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
         return run_needs_one(one, args.image.as_deref());
     }
     if args.here {
-        bench::here::run(&mut |told| println!("{}", told.line()));
+        bench::here::run(&args.models, &mut |told| println!("{}", told.line()));
         return 0;
     }
     if let Some(name) = &args.check {

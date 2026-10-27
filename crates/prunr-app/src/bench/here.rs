@@ -57,10 +57,12 @@ fn tried_here(id: ModelId) -> Vec<&'static str> {
 
 /// Run the test: every installed model the accelerator would try (a place
 /// the registry keeps on the CPU for a slower, different or no-gain result
-/// is tried again: `remeasure_places`), but the heavy ones.
-pub fn run(on: &mut dyn FnMut(Told)) {
+/// is tried again: `remeasure_places`), but the heavy ones; or only the
+/// models `only` names (Settings' test of one model), which leaves the
+/// whole computer's test date alone.
+pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     prunr_core::engine::remeasure_places();
-    let installed = super::select(&[], true, prunr_models::is_available).unwrap_or_default();
+    let installed = super::select(only, true, prunr_models::is_available).unwrap_or_default().into_iter().filter(|&id| prunr_models::is_available(id)).collect();
     let Plan { models, columns, left_out } = plan(installed, column_of);
     let inputs = Inputs::built_in();
     // Each model once on each accelerator it may try here: a place for
@@ -81,7 +83,9 @@ pub fn run(on: &mut dyn FnMut(Told)) {
             }
         }
     });
-    prunr_core::ep_compat::set_tested();
+    if only.is_empty() {
+        prunr_core::ep_compat::set_tested();
+    }
     on(Told::Finished { left_out });
 }
 
@@ -149,6 +153,17 @@ mod tests {
             columns: vec![Column::Cuda, Column::Cuda],
             left_out: vec![ModelId::Nomos8kSchatL],
         });
+    }
+
+    /// A test of chosen models leaves the whole computer's test date alone:
+    /// Settings still says the computer was not tested.
+    #[test]
+    fn a_test_of_chosen_models_leaves_the_computer_untested() {
+        let before = prunr_core::ep_compat::tested();
+        let mut finished = false;
+        run(&["silueta".to_string()], &mut |told| finished |= matches!(told, Told::Finished { .. }));
+        assert!(finished);
+        assert_eq!(prunr_core::ep_compat::tested(), before);
     }
 
     /// Each event survives the line it travels on.
