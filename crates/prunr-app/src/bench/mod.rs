@@ -233,9 +233,14 @@ fn gpu_passed_over(ladder: &[(&str, Option<Skip>)]) -> Option<Gpu> {
     })
 }
 
+/// The providers the ladder tries, in its order.
+fn tried<'a>(ladder: &[(&'a str, Option<Skip>)]) -> Vec<&'a str> {
+    ladder.iter().filter(|(_, skip)| skip.is_none()).map(|&(provider, _)| provider).collect()
+}
+
 /// The provider the ladder tries first.
 fn first_tried<'a>(ladder: &[(&'a str, Option<Skip>)]) -> Option<&'a str> {
-    ladder.iter().find(|(_, skip)| skip.is_none()).map(|&(provider, _)| provider)
+    tried(ladder).first().copied()
 }
 
 /// One side of a model's run: where its session landed and how long it took.
@@ -381,9 +386,9 @@ impl Row {
 /// What the runner is doing, for the terminal and the report written as
 /// the bench goes.
 pub enum Event {
-    /// `provider`: the one GPU provider a pass lets the model try
-    /// (`run_passes`), during its GPU side.
-    Stage { index: usize, total: usize, model: &'static str, stage: &'static str, provider: Option<&'static str> },
+    /// `side` of `sides`: 0 the CPU, then each pass in turn; `provider`
+    /// the one GPU provider that pass lets the model try (`run_passes`).
+    Stage { index: usize, total: usize, model: &'static str, stage: &'static str, side: usize, sides: usize, provider: Option<&'static str> },
     /// A model's row for one pass, and its pictures when they are worth a
     /// look.
     Done { row: Box<Row>, pictures: Option<Pictures>, provider: Option<&'static str> },
@@ -434,7 +439,8 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, passes: &[Option<&'stati
         on(Event::Done { row: Box::new(row), pictures: None, provider: first_pass });
         return;
     };
-    on(Event::Stage { index, total, model, stage: "reading weights", provider: None });
+    let sides = passes.len() + 1;
+    on(Event::Stage { index, total, model, stage: "reading weights", side: 0, sides, provider: None });
     warm_weights(id);
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
@@ -442,7 +448,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, passes: &[Option<&'stati
     let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs };
     // A side that needs more memory than is free is not run: the bench
     // must not run the machine out of memory either.
-    let (mut cpu, mut cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
+    let (mut cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
         (false, _) => {
             row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
             (None, None)
@@ -452,15 +458,20 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, passes: &[Option<&'stati
             (None, None)
         }
         (true, Ok(())) => {
-            let (side, output) = measure(family, id, inputs, true, cpu_runs, &mut |stage| on(Event::Stage { index, total, model, stage, provider: None }));
+            let (side, output) = measure(family, id, inputs, true, cpu_runs, &mut |stage| on(Event::Stage { index, total, model, stage, side: 0, sides, provider: None }));
             (Some(side), output)
         }
     };
     let cpu_samples = judged(family, inputs, cpu.as_mut(), cpu_output.as_ref());
-    let mut landed: Vec<(Row, Option<Output>, Option<&'static str>)> = Vec::with_capacity(passes.len());
-    for &pass in passes {
-        prunr_core::engine::try_only(pass);
-        let (mut gpu, gpu_output) = gpu_side(family, id, inputs, runs, &mut |stage| on(Event::Stage { index, total, model, stage, provider: pass }));
+    let picture = |output: Option<Output>| match output {
+        Some(Output::Picture(picture)) => Some(picture),
+        _ => None,
+    };
+    let mut cpu_picture_shown = false;
+    for (turn, &pass) in (1..).zip(passes) {
+        let only = pass.map(prunr_core::engine::try_only);
+        let (mut gpu, gpu_output) = gpu_side(family, id, inputs, runs, &mut |stage| on(Event::Stage { index, total, model, stage, side: turn, sides, provider: pass }));
+        drop(only);
         let gpu_ran = match &mut gpu {
             Gpu::Ran(side) => Some(side),
             _ => None,
@@ -479,19 +490,13 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, passes: &[Option<&'stati
         drop(gpu_samples);
         pass_row.verdict = verdict(Some(family), cpu.as_ref(), &gpu, pass_row.agreement.as_ref(), sizes_differ);
         pass_row.gpu = gpu;
-        landed.push((pass_row, gpu_output.filter(|_| on_gpu), pass));
-    }
-    prunr_core::engine::try_only(None);
-    drop(cpu_samples);
-    let picture = |output: Option<Output>| match output {
-        Some(Output::Picture(picture)) => Some(picture),
-        _ => None,
-    };
-    for (pass_row, gpu_output, pass) in landed {
-        // Only the first pass worth a look keeps the CPU's picture beside it.
+        // Only the first pass worth a look shows the CPU's picture beside it.
         let pictures = pass_row.worth_a_look().then(|| Pictures {
-            cpu: picture(cpu_output.take()),
-            gpu: picture(gpu_output),
+            cpu: match &cpu_output {
+                Some(Output::Picture(cpu)) if !std::mem::replace(&mut cpu_picture_shown, true) => Some(cpu.clone()),
+                _ => None,
+            },
+            gpu: picture(gpu_output.filter(|_| on_gpu)),
         });
         on(Event::Done { row: Box::new(pass_row), pictures, provider: pass });
     }
@@ -1022,6 +1027,33 @@ mod tests {
         );
         let ladder = [("OpenVINO", Some(Skip::KeptOff(WHY))), ("DirectML", None), ("CUDA", None)];
         assert_eq!(first_tried(&ladder), Some("DirectML"), "the GPU side's memory is checked where it lands first");
+    }
+
+    /// Every stage counts the sides its model's passes give, the GPU ones
+    /// included: a pass pins one provider, so the engine's own list then
+    /// holds that one alone. Each pass ends in its own row. The extra pass
+    /// repeats a provider this machine has, so concurrent tests keep theirs.
+    #[test]
+    fn every_stage_counts_the_sides_its_passes_give() {
+        let model = ModelId::Silueta;
+        let mut passes: Vec<Option<&'static str>> = tried(&prunr_core::engine::gpu_ladder(model)).into_iter().map(Some).collect();
+        passes.push(passes.first().copied().unwrap_or(Some("NoSuchExecutionProvider")));
+        let sides = passes.len() + 1;
+        let (mut stages, mut rows) = (Vec::new(), Vec::new());
+        run_passes(&[model], &Inputs::built_in(), 0, |_| passes.clone(), &mut |event| match event {
+            Event::Stage { side, sides, provider, .. } => stages.push((side, sides, provider)),
+            Event::Done { provider, .. } => rows.push(provider),
+        });
+        assert!(!stages.is_empty());
+        for &(side, counted, provider) in &stages {
+            assert_eq!(counted, sides);
+            assert!(side < sides && (side == 0) == provider.is_none(), "{side} of {sides} on {provider:?}");
+        }
+        let gpu_turns: std::collections::BTreeSet<usize> = stages.iter().filter(|s| s.2.is_some()).map(|s| s.0).collect();
+        if !gpu_turns.is_empty() {
+            assert_eq!(gpu_turns, (1..sides).collect(), "each pass its own turn");
+        }
+        assert_eq!(rows, passes);
     }
 
     fn side(provider: &str) -> Side {
