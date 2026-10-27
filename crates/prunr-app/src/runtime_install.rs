@@ -126,7 +126,17 @@ impl RuntimeId {
     }
 
     pub fn is_installed(self) -> bool {
-        self.library().is_some_and(|p| p.is_file())
+        self.library().is_some_and(|p| p.is_file()) && !self.removal_pending()
+    }
+
+    /// An add-on uninstalled while loaded leaves this mark beside its
+    /// install, and goes at the next start (`finish_uninstalls`).
+    fn removal_mark(self) -> Option<PathBuf> {
+        self.install_dir().and_then(|dir| beside(&dir, "remove").ok())
+    }
+
+    fn removal_pending(self) -> bool {
+        self.removal_mark().is_some_and(|mark| mark.is_file())
     }
 
     /// The library its install holds: the runtime's, or the add-on's.
@@ -374,13 +384,27 @@ pub fn start_install(target: InstallTarget) -> InstallHandle {
     InstallHandle { events: rx, cancel }
 }
 
-/// Remove an installed runtime. Refuses when this is the only ORT source
-/// (uninstalling would brick startup) and when the subdir name could
-/// escape `<data>/runtimes/`.
-pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
+/// When an uninstall takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Uninstalled {
+    Now,
+    /// The add-on is loaded in this process, and Windows deletes no
+    /// library in use: it goes at the next start.
+    AtNextStart,
+}
+
+/// Remove an installed runtime or add-on. Refuses when this is the only
+/// ORT source (uninstalling would brick startup) and when the subdir name
+/// could escape `<data>/runtimes/`.
+pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     let dir = runtime.checked_install_dir()?;
     if !dir.exists() {
-        return Ok(()); // already absent — nothing to do
+        return Ok(Uninstalled::Now); // already absent — nothing to do
+    }
+    if runtime.is_addon() && prunr_core::ort_runtime::cuda_addon_registered() {
+        let mark = runtime.removal_mark().ok_or("could not resolve user data dir")?;
+        std::fs::write(&mark, b"").map_err(|e| format!("mark {} for removal: {e}", dir.display()))?;
+        return Ok(Uninstalled::AtNextStart);
     }
     if !runtime.is_addon() && !prunr_core::ort_runtime::has_fallback_excluding(&dir) {
         return Err(
@@ -392,7 +416,34 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
     prunr_core::ort_runtime::forget_preferred_runtime(&runtime.install_subdir());
-    Ok(())
+    Ok(Uninstalled::Now)
+}
+
+/// Remove the add-ons uninstalled while they were loaded, before this
+/// process loads them.
+pub fn finish_uninstalls() {
+    if let Some(store) = prunr_models::runtime_store_dir() {
+        remove_marked(&store, RuntimeId::OFFERED.iter().filter(|rt| rt.is_addon()).map(|rt| rt.install_subdir()));
+    }
+}
+
+/// Remove each of `subdirs` in `store` that has its removal mark beside
+/// it, then the mark; nothing else in `store`.
+fn remove_marked(store: &Path, subdirs: impl IntoIterator<Item = String>) {
+    for subdir in subdirs.into_iter().filter(|subdir| ri::validate_subdir(subdir).is_ok()) {
+        let dir = store.join(&subdir);
+        let Ok(mark) = beside(&dir, "remove") else { continue };
+        if !mark.is_file() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&mark);
+                tracing::info!(dir = %dir.display(), "removed an add-on uninstalled while it was loaded");
+            }
+            Err(e) => tracing::warn!(dir = %dir.display(), %e, "could not remove an uninstalled add-on; trying at the next start"),
+        }
+    }
 }
 
 /// The CUDA runtime or add-on brings NVIDIA's libraries in the same
@@ -404,6 +455,15 @@ fn run_install(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
+    // Uninstalled while loaded and still here: installing keeps it.
+    if rt.removal_pending() {
+        if let Some(mark) = rt.removal_mark() {
+            std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
+        }
+        let install_dir = rt.checked_install_dir()?;
+        let _ = tx.send(InstallEvent::Done { install_dir, started: Some(start_addon()) });
+        return Ok(());
+    }
     let wheel = match rt.addon() {
         Some(addon) => addon.download(),
         None => query_pypi(rt, &cancel)?,
@@ -449,7 +509,7 @@ fn run_install(
 /// session: each one registers when the providers are probed.
 pub fn use_installed_addons() {
     let cuda = RuntimeId::Cuda;
-    if let Some(library) = cuda.library().filter(|library| cuda.is_addon() && library.is_file()) {
+    if let Some(library) = cuda.library().filter(|_| cuda.is_addon() && cuda.is_installed()) {
         prunr_core::ort_runtime::use_cuda_addon(library);
     }
 }
@@ -761,6 +821,23 @@ mod tests {
         };
         assert_eq!(RuntimeId::OFFERED, expected);
         assert_eq!(RuntimeId::Cuda.is_addon(), cfg!(all(windows, target_arch = "x86_64")), "CUDA joins DirectML on Windows");
+    }
+
+    /// At the next start only the add-on marked for removal goes, with its
+    /// mark: not one without a mark, not a marked folder no add-on names.
+    #[test]
+    fn only_a_marked_add_on_is_removed_at_the_next_start() {
+        let store = tempfile::tempdir().unwrap();
+        for name in ["cuda-addon-0.2.0-windows-x64", "cuda-1.24.1-windows-x64", "other"] {
+            std::fs::create_dir_all(store.path().join(name).join("nvidia")).unwrap();
+        }
+        std::fs::write(store.path().join(".cuda-addon-0.2.0-windows-x64.remove"), b"").unwrap();
+        std::fs::write(store.path().join(".other.remove"), b"").unwrap();
+        remove_marked(store.path(), ["cuda-addon-0.2.0-windows-x64".to_string(), "cuda-1.24.1-windows-x64".to_string(), "../escape".to_string()]);
+        assert!(!store.path().join("cuda-addon-0.2.0-windows-x64").exists(), "marked: removed");
+        assert!(!store.path().join(".cuda-addon-0.2.0-windows-x64.remove").exists(), "its mark too");
+        assert!(store.path().join("cuda-1.24.1-windows-x64").exists(), "not marked: kept");
+        assert!(store.path().join("other").exists() && store.path().join(".other.remove").exists(), "not an add-on: kept");
     }
 
     /// An add-on's download leaves its library in the install, beside the
