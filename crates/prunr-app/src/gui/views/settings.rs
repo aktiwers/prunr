@@ -598,7 +598,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
 /// and after a test the table of times and the engine each model runs on.
 fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
     let results = &*ctx.test;
-    let (status, note): (String, Option<&str>) = match (results.tested, results.any()) {
+    let (status, note): (String, Option<Cow<'static, str>>) = match (results.tested, results.any()) {
         (Some(when), _) => {
             let now = u64::try_from(crate::gui::settings::now_unix_secs()).unwrap_or(0);
             (format!("Tested {}. Every model runs on the fastest that gives the same picture as the processor, chosen from this test.", super::fmt::days_ago(when, now)), None)
@@ -606,14 +606,18 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
         (None, true) => ("Partly tested. Every model it reached runs on the fastest that gives the same picture as the processor.".to_string(), None),
         (None, false) => {
             let engines = super::fmt::and_list(std::iter::once("the processor").chain(results.engines.iter().filter(|e| e.installed).map(|e| e.name)));
+            let note = match results.what_changed() {
+                Some(what) => Cow::Owned(format!("Not tested since {what} changed: until then Prunr goes by our tests on similar hardware.")),
+                None => Cow::Borrowed("Not tested yet: until then Prunr goes by our tests on similar hardware."),
+            };
             (
                 format!("Times each installed model on everything this computer can use ({engines}) and checks each gives the same picture. Prunr then runs every model on the fastest of them, automatically. Takes a few minutes; close other busy apps first."),
-                Some("Not tested yet: until then Prunr goes by our tests on similar hardware."),
+                Some(note),
             )
         }
     };
-    let note = if ctx.test_waits { Some("Waits until the current work is done.") } else { note };
-    rows.row_noted("Test this computer", &status, note, |ui| {
+    let note = if ctx.test_waits { Some(Cow::Borrowed("Waits until the current work is done.")) } else { note };
+    rows.row_noted("Test this computer", &status, note.as_deref(), |ui| {
         if results.any() && super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget the test").clicked() {
             *intent = Some(HardwareSectionIntent::ForgetTest);
         }

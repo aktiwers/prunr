@@ -127,16 +127,20 @@ fn the_computer_test_is_offered_with_an_accelerator() {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: true }],
         rows: vec![row(ModelId::Silueta, vec![Cell::Time(40.0), Cell::Time(57.0)], "DirectML"), row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::Time(450.0)], "CUDA")],
+        changed: Vec::new(),
     });
     let cancelled = Arc::new(TestResults { tested: None, ..(*tested).clone() });
     let without_cuda = Arc::new(TestResults {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: false }],
         rows: vec![row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::NotInstalled], "CPU")],
+        changed: Vec::new(),
     });
     let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
+    let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec!["drivers".into()], ..Default::default() });
     let shapes = [
         ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", "Install CUDA (2 GB)"]),
+        ("not tested since the driver changed", driver_changed, true, vec!["Test this computer"], vec!["Forget the test"]),
         ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec!["Install CUDA (2 GB)"]),
         ("cancelled after two models", cancelled, true, vec!["Test this computer", "Forget the test"], vec![]),
         ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", "Install CUDA (2 GB)"], vec![]),

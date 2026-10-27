@@ -46,6 +46,9 @@ pub(crate) struct TestResults {
     /// The engines beside the processor, in the order sessions try them.
     pub engines: Vec<Engine>,
     pub rows: Vec<TestRow>,
+    /// What changed since this computer was tested and dropped what it
+    /// measured (`ep_compat::SCOPE_PARTS` labels); empty when nothing did.
+    pub changed: Vec<String>,
 }
 
 /// An engine of this computer's: one this process runs models on, or
@@ -96,6 +99,20 @@ impl Cell {
 }
 
 impl TestResults {
+    /// "the graphics driver", "CUDA and the graphics driver": what changed
+    /// since the last test, as people say it; `None` when nothing did.
+    pub fn what_changed(&self) -> Option<String> {
+        let said = |label: &str| match label {
+            "drivers" => "the graphics driver",
+            "addons" => "an accelerator add-on",
+            "ort" => "Prunr's runtime",
+            _ => "how Prunr sets models up",
+        };
+        let mut words: Vec<&str> = self.changed.iter().map(|label| said(label)).collect();
+        words.dedup();
+        (!words.is_empty()).then(|| crate::gui::views::fmt::and_list(words))
+    }
+
     /// Some place is measured here: a test ran, or one was cancelled after
     /// its first models.
     pub fn any(&self) -> bool {
@@ -125,7 +142,7 @@ impl TestResults {
                 test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))
             })
             .collect();
-        Self { tested: prunr_core::ep_compat::tested(), engines, rows }
+        Self { tested: prunr_core::ep_compat::tested(), engines, rows, changed: prunr_core::ep_compat::changed_since_test() }
     }
 }
 
@@ -333,6 +350,15 @@ mod tests {
         assert_eq!((row.cells[0], row.cpu_ms), (Cell::Time(900.0), Some(670.0)), "a slower engine still shows its time");
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Differs, "mean 3/255"));
         assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0]), Some(Cell::Differs));
+    }
+
+    /// What changed since the test is said in people's words, each once.
+    #[test]
+    fn what_changed_is_said_in_words() {
+        let results = |changed: &[&str]| super::TestResults { changed: changed.iter().map(|c| c.to_string()).collect(), ..Default::default() };
+        assert_eq!(results(&[]).what_changed(), None);
+        assert_eq!(results(&["drivers"]).what_changed().as_deref(), Some("the graphics driver"));
+        assert_eq!(results(&["addons", "drivers"]).what_changed().as_deref(), Some("an accelerator add-on and the graphics driver"));
     }
 
     /// A card reads installed weights from the cache, not the disk:
