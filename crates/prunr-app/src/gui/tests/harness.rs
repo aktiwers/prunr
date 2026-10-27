@@ -73,6 +73,32 @@ pub(super) fn settle_until_shown(harness: &mut Harness<'_, PrunrApp>) {
     settle(harness);
 }
 
+/// Runs frames until the selection changes queued off the UI thread have
+/// landed (Escape folding a selection into a cut-out). In a busy test run
+/// that takes longer than `settle`'s frames. The first frame takes in the
+/// input that queues them.
+pub(super) fn settle_until_selection_lands(harness: &mut Harness<'_, PrunrApp>) {
+    settle_while(harness, |app| app.batch.selection_queue.any_pending());
+}
+
+/// Runs frames until no work a thread owes the window is still to land
+/// (decodes, thumbnails, textures, renders).
+pub(super) fn settle_until_quiet(harness: &mut Harness<'_, PrunrApp>) {
+    settle_while(harness, |app| app.quiet_background_work().is_some());
+}
+
+/// A frame, then frames while `busy` holds, up to ten seconds, then
+/// `settle`.
+fn settle_while(harness: &mut Harness<'_, PrunrApp>, busy: impl Fn(&PrunrApp) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    harness.step();
+    while busy(harness.state()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        harness.step();
+    }
+    settle(harness);
+}
+
 /// Clicks the control whose readable name is `name`, then lets it settle.
 pub(super) fn click(harness: &mut Harness<'_, PrunrApp>, name: &str) {
     harness

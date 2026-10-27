@@ -132,7 +132,7 @@ fn escape_closes_the_flyout_and_keeps_the_selection() {
     assert!(!egui::Popup::is_any_open(&h.ctx), "Escape closed the flyout");
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and did not clear the selection");
     h.key_press(egui::Key::Escape);
-    settle(&mut h);
+    super::harness::settle_until_selection_lands(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
 
@@ -561,7 +561,7 @@ fn escape_closes_a_modal_before_touching_the_selection() {
     assert!(h.state().model_store.is_none(), "Escape closed the Model Store");
     assert!(h.state().batch.items[0].selection_mask.is_some(), "the selection survived");
     h.key_press(egui::Key::Escape);
-    settle(&mut h);
+    super::harness::settle_until_selection_lands(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
 
@@ -839,6 +839,9 @@ fn an_unchanging_window_stops_drawing() {
     for (case, setup) in cases {
         let mut h = paced_harness();
         setup(&mut h);
+        // A thumbnail or texture a busy test run makes late animates its
+        // spinner until it lands: the window is unchanging only then.
+        super::harness::settle_until_quiet(&mut h);
         // A second for what ends by itself (a tooltip's delay), then a
         // tip's whole cycle and more; work landing off the UI thread asks
         // for the odd frame.

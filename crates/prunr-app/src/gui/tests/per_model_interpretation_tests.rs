@@ -790,7 +790,7 @@ fn a_model_switch_keeps_the_shown_cutout_correctable() {
     let item = &h.state().batch.items[0];
     assert!(item.corrects_cutout(SettingsModel::BiRefNetLite), "the Silueta cut-out is still on screen");
     h.key_press(egui::Key::Escape);
-    settle(&mut h);
+    crate::gui::tests::harness::settle_until_selection_lands(&mut h);
     let item = &h.state().batch.items[0];
     assert!(item.selection_mask.is_none(), "Escape folded the selection");
     assert!(item.edits.is_some(), "into the edits the next run re-applies");
