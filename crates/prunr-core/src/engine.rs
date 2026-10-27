@@ -37,6 +37,9 @@ pub(crate) const OPENVINO_NAME: &str = "OpenVINO";
 /// CUDA's provider name, defined on every platform like OpenVINO's.
 pub const CUDA_NAME: &str = "CUDA";
 
+/// DirectML's provider name, defined on every platform like CUDA's.
+pub const DIRECTML_NAME: &str = "DirectML";
+
 /// CoreML's provider name, defined on every platform like CUDA's.
 pub(crate) const COREML_NAME: &str = "CoreML";
 
@@ -57,7 +60,7 @@ impl EpKind {
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => COREML_NAME,
             #[cfg(windows)]
-            EpKind::DirectMl => "DirectML",
+            EpKind::DirectMl => DIRECTML_NAME,
         }
     }
 }
@@ -1155,6 +1158,10 @@ pub struct OrtEngine {
     sessions: Sessions,
     pick: SessionPick,
     model_kind: ModelKind,
+    /// The tile an upscale on it last ran whole on (0: none yet): the next
+    /// starts there, so a card that ran out at the model's own tile is not
+    /// tried at it again for every image.
+    upscale_tile: std::sync::atomic::AtomicU32,
 }
 
 /// One session, one per input size, or a model cut into parts that run
@@ -1411,6 +1418,7 @@ impl OrtEngine {
                 sessions: Sessions::One(Mutex::new(session)),
                 pick: SessionPick { weights, ..SessionPick::on(CPU_NAME) },
                 model_kind: model,
+                upscale_tile: Default::default(),
             });
         }
 
@@ -1453,6 +1461,7 @@ impl OrtEngine {
             sessions,
             pick: SessionPick { weights, failed, ..SessionPick::on(ep.as_str()) },
             model_kind: model,
+            upscale_tile: Default::default(),
         })
     }
 
@@ -1495,7 +1504,7 @@ impl OrtEngine {
         tracing::info!(?model, parts = sessions.len(), provider = %pick.provider, elapsed_ms = started.elapsed().as_millis() as u64, "part sessions committed");
         let resident_mb = rss_before.zip(crate::sysmem::process_rss_mb()).map_or(0, |(before, after)| after.saturating_sub(before));
         let net = crate::upscale::blocks::BlockNet::new(sessions, norms, net, resident_mb * 1024 * 1024)?;
-        Ok(Self { sessions: Sessions::Parts(Box::new(net)), pick, model_kind: model })
+        Ok(Self { sessions: Sessions::Parts(Box::new(net)), pick, model_kind: model, upscale_tile: Default::default() })
     }
 
     /// The model's parts, when it runs part by part.
@@ -1690,6 +1699,15 @@ impl OrtEngine {
     /// The active execution provider's name ("CUDA", "CoreML", "CPU").
     pub fn active_provider(&self) -> &str {
         &self.pick.provider
+    }
+
+    /// The tile an upscale on this engine last ran whole on.
+    pub(crate) fn upscale_tile(&self) -> Option<u32> {
+        Some(self.upscale_tile.load(std::sync::atomic::Ordering::Relaxed)).filter(|&tile| tile > 0)
+    }
+
+    pub(crate) fn set_upscale_tile(&self, tile: u32) {
+        self.upscale_tile.store(tile, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

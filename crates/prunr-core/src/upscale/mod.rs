@@ -133,13 +133,14 @@ pub fn upscale_rgba_with_engine(
         }
         return Ok(fit_to_scale(native, input, scale));
     }
-    let tile_size = descriptor
+    let own_tile = descriptor
         .recommended_tile
         .map(|tile| tile_for_provider(tile, engine.active_provider()))
         .ok_or_else(|| CoreError::Inference(format!(
             "model {:?} has no recommended_tile -- upscale cannot dispatch",
             descriptor.id
         )))?;
+    let tile_size = engine.upscale_tile().map_or(own_tile, |tile| tile.min(own_tile));
 
     let tile_multiple = descriptor.tile_size_multiple;
     let overlap = knobs.tile_overlap();
@@ -188,7 +189,8 @@ pub fn upscale_rgba_with_engine(
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
     let on_gpu = !crate::engine::runs_on_host_cpu(engine.active_provider());
-    let native = tiling::upscale_tiled_in_less_memory(input, ns, cfg, on_gpu, run_tile, progress)?;
+    let (native, tile) = tiling::upscale_tiled_in_less_memory(input, ns, cfg, on_gpu, run_tile, progress)?;
+    engine.set_upscale_tile(tile);
     Ok(fit_to_scale(native, input, scale))
 }
 

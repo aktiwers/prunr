@@ -130,7 +130,7 @@ pub fn smaller_tile(tile: u32, multiple: Option<u32>) -> Option<u32> {
 
 /// `upscale_tiled` at `cfg`'s tile, and when a tile runs out of memory on
 /// a graphics card (`on_gpu`), again at each smaller tile that splits the
-/// image further, until one fits or none is left.
+/// image further, until one fits or none is left; with the tile it ran on.
 pub fn upscale_tiled_in_less_memory<F>(
     input: &RgbaImage,
     scale: u32,
@@ -138,7 +138,7 @@ pub fn upscale_tiled_in_less_memory<F>(
     on_gpu: bool,
     run_tile: F,
     progress: &Progress,
-) -> Result<RgbaImage, CoreError>
+) -> Result<(RgbaImage, u32), CoreError>
 where
     F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
 {
@@ -146,6 +146,7 @@ where
     let mut step = Step::Upscaling;
     loop {
         match upscale_tiled_as(step, input, scale, cfg, &run_tile, progress) {
+            Ok(out) => return Ok((out, cfg.tile_size)),
             Err(e) if on_gpu && e.is_out_of_memory() => {
                 let tiles = plan_upscale_tiles(w, h, cfg).len();
                 let Some(smaller) = smaller_tile(cfg.tile_size, cfg.tile_multiple)
@@ -158,7 +159,7 @@ where
                 cfg = smaller;
                 step = Step::UpscalingInLessMemory;
             }
-            other => return other,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -434,7 +435,8 @@ mod tests {
         };
         let cfg = TilingConfig { tile_size: 512, tile_multiple: Some(16), overlap: 16 };
         let sink = Arc::new(crate::progress::RecordingSink::default());
-        let retried = upscale_tiled_in_less_memory(&input, scale, cfg, true, fits_256, &Progress::new(sink.clone())).expect("fits in 256 px tiles");
+        let (retried, tile) = upscale_tiled_in_less_memory(&input, scale, cfg, true, fits_256, &Progress::new(sink.clone())).expect("fits in 256 px tiles");
+        assert_eq!(tile, 256, "the tile it ran on, for the next image to start at");
         let direct = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, ..cfg }, |t, w, h| Ok(upscale(t, w, h)), &Progress::none()).unwrap();
         assert!(retried == direct, "the same picture as 256 px tiles from the start");
         crate::progress::check_contract(&sink.updates()).expect("the retry is counted afresh");
