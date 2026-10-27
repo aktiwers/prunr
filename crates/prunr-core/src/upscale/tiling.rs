@@ -43,6 +43,10 @@ pub struct TilingConfig {
     pub tile_multiple: Option<u32>,
     /// In input pixels; smoothstep-blended.
     pub overlap: u32,
+    /// Tile starts land on a multiple of this (1: anywhere): a model that
+    /// packs each 2 x 2 block of pixels into one (Real-ESRGAN x2) must see
+    /// the photo's own blocks in every tile, or the seams show.
+    pub align: u32,
 }
 
 /// One tile in input space, plus the padded size the model sees.
@@ -70,8 +74,8 @@ pub fn plan_upscale_tiles(
     height: u32,
     cfg: TilingConfig,
 ) -> Vec<UpscaleTilePlacement> {
-    let TilingConfig { tile_size, tile_multiple, overlap } = cfg;
-    let ((xs, w), (ys, h)) = (axis_tiles(width, tile_size, overlap), axis_tiles(height, tile_size, overlap));
+    let TilingConfig { tile_size, tile_multiple, overlap, align } = cfg;
+    let ((xs, w), (ys, h)) = (axis_tiles(width, tile_size, overlap, align), axis_tiles(height, tile_size, overlap, align));
     let (padded_w, padded_h) = match tile_multiple {
         Some(m) if m > 0 => (w.div_ceil(m) * m, h.div_ceil(m) * m),
         _ => (w, h),
@@ -81,8 +85,9 @@ pub fn plan_upscale_tiles(
         .collect()
 }
 
-/// One axis of length `len`: the tiles' starts and their common length.
-fn axis_tiles(len: u32, tile_size: u32, overlap: u32) -> (Vec<u32>, u32) {
+/// One axis of length `len`: the tiles' starts, each a multiple of
+/// `align`, and their common length.
+fn axis_tiles(len: u32, tile_size: u32, overlap: u32, align: u32) -> (Vec<u32>, u32) {
     if len <= tile_size {
         return (vec![0], len);
     }
@@ -93,7 +98,12 @@ fn axis_tiles(len: u32, tile_size: u32, overlap: u32) -> (Vec<u32>, u32) {
     // by at least `overlap` and size ≤ tile_size.
     let size = (len + (count - 1) * overlap).div_ceil(count);
     let span = len - size;
-    ((0..count).map(|i| i * span / (count - 1)).collect(), size)
+    let align = align.max(1);
+    let starts: Vec<u32> = (0..count).map(|i| i * span / (count - 1) / align * align).collect();
+    // Starts only move back, so neighbours overlap at least as much; the
+    // last tile grows by what its start gave up, to reach the edge.
+    let size = len - starts[starts.len() - 1];
+    (starts, size)
 }
 
 /// Upscale tile by tile, smoothstep-blending overlaps to hide seams; alpha
@@ -338,7 +348,7 @@ mod tests {
     fn plan_upscale_tiles_covers_input_with_overlap() {
         let width = 1024u32;
         let height = 768u32;
-        let tiles = plan_upscale_tiles(width, height, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 });
+        let tiles = plan_upscale_tiles(width, height, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16, align: 1 });
 
         let mut covered = vec![false; (width * height) as usize];
         for tile in &tiles {
@@ -361,12 +371,12 @@ mod tests {
     /// the overlaps need.
     #[test]
     fn tiles_are_equal_and_few() {
-        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 };
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16, align: 1 };
         assert_eq!(plan_upscale_tiles(256, 256, cfg).len(), 1, "a picture one tile big is one tile");
-        assert_eq!(axis_tiles(1000, 256, 16), (vec![0, 196, 393, 590, 787], 213));
-        assert_eq!(axis_tiles(4000, 512, 16), (vec![0, 442, 885, 1327, 1770, 2213, 2655, 3098, 3541], 459));
+        assert_eq!(axis_tiles(1000, 256, 16, 1), (vec![0, 196, 393, 590, 787], 213));
+        assert_eq!(axis_tiles(4000, 512, 16, 1), (vec![0, 442, 885, 1327, 1770, 2213, 2655, 3098, 3541], 459));
         for len in [257, 496, 497, 700, 1000, 1024, 3000, 4000, 4032, 6000] {
-            let (starts, size) = axis_tiles(len, 256, 16);
+            let (starts, size) = axis_tiles(len, 256, 16, 1);
             assert!(size <= 256, "{len}: {size}");
             assert_eq!((starts[0], starts.last().map(|s| s + size)), (0, Some(len)), "{len}: from edge to edge");
             assert!(starts.windows(2).all(|p| p[1] > p[0] && p[0] + size >= p[1] + 16), "{len}: {starts:?} × {size}");
@@ -381,7 +391,7 @@ mod tests {
     /// 1000×800 (250*4 × 200*4) must produce exactly the expected dimensions.
     #[test]
     fn pad_to_multiple_roundtrip_preserves_dimensions() {
-        let tiles = plan_upscale_tiles(250, 200, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0 });
+        let tiles = plan_upscale_tiles(250, 200, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0, align: 1 });
         assert_eq!(tiles.len(), 1, "expected single tile");
         let tile = tiles[0];
         assert_eq!(tile.w, 250);
@@ -399,11 +409,24 @@ mod tests {
         };
 
         let input = RgbaImage::from_pixel(250, 200, image::Rgba([128, 64, 32, 255]));
-        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0 }, run_tile, &Progress::none())
+        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 0, align: 1 }, run_tile, &Progress::none())
             .expect("upscale_tiled failed");
 
         assert_eq!(result.width(), 250 * scale);
         assert_eq!(result.height(), 200 * scale);
+    }
+
+    /// Aligned tiles start on the multiple, still reach the far edge, and
+    /// still overlap by at least the overlap asked.
+    #[test]
+    fn aligned_tiles_start_on_the_multiple_and_cover_the_axis() {
+        for (len, tile, overlap, align) in [(1024, 512, 16, 2), (1000, 512, 64, 2), (777, 256, 32, 2), (1500, 512, 96, 4), (300, 512, 16, 2)] {
+            let (starts, size) = axis_tiles(len, tile, overlap, align);
+            assert!(starts.iter().all(|s| s % align == 0), "{len}/{tile}/{overlap}: {starts:?}");
+            assert_eq!(starts.last().copied().unwrap_or(0) + size, len, "{len}/{tile}/{overlap}: reaches the edge");
+            assert!(starts.windows(2).all(|w| w[0] + size >= w[1] + overlap), "{len}/{tile}/{overlap}: overlap kept");
+            assert!(size < tile + align, "{len}/{tile}/{overlap}: {size}");
+        }
     }
 
     /// Tiles go down by halves on a multiple of the model's window, and
@@ -433,7 +456,7 @@ mod tests {
             }
             Ok(upscale(rgb, pw, ph))
         };
-        let cfg = TilingConfig { tile_size: 512, tile_multiple: Some(16), overlap: 16 };
+        let cfg = TilingConfig { tile_size: 512, tile_multiple: Some(16), overlap: 16, align: 1 };
         let sink = Arc::new(crate::progress::RecordingSink::default());
         let (retried, tile) = upscale_tiled_in_less_memory(&input, scale, cfg, true, fits_256, &Progress::new(sink.clone())).expect("fits in 256 px tiles");
         assert_eq!(tile, 256, "the tile it ran on, for the next image to start at");
@@ -466,7 +489,7 @@ mod tests {
             Ok(out)
         };
 
-        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 }, run_tile, &Progress::none())
+        let result = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16, align: 1 }, run_tile, &Progress::none())
             .expect("upscale_tiled failed");
 
         assert_eq!(result.width(), 512 * scale);
@@ -502,7 +525,7 @@ mod tests {
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
         let scale = 4u32;
         let input = RgbaImage::from_pixel(512, 512, image::Rgba([0, 0, 0, 255]));
-        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16 };
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: None, overlap: 16, align: 1 };
         let expected_total = plan_upscale_tiles(512, 512, cfg).len() as u32;
         let run_tile = |rgb: &RgbImage, pw: u32, ph: u32| -> Result<RgbImage, CoreError> {
             Ok(RgbImage::from_fn(scale * pw, scale * ph, |x, y| *rgb.get_pixel(x / scale, y / scale)))
@@ -528,7 +551,7 @@ mod tests {
         use crate::progress::{check_contract, ProgressUpdate, RecordingSink};
         let scale = 4u32;
         let input = RgbaImage::from_pixel(600, 300, image::Rgba([0, 0, 0, 128]));
-        let cfg = TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 16 };
+        let cfg = TilingConfig { tile_size: 256, tile_multiple: Some(16), overlap: 16, align: 1 };
         let tiles = plan_upscale_tiles(600, 300, cfg).len();
         let run_tile = |_: &RgbImage, pw: u32, ph: u32| -> Result<RgbImage, CoreError> {
             Ok(RgbImage::from_pixel(scale * pw, scale * ph, image::Rgb([10, 200, 30])))
@@ -594,7 +617,7 @@ mod tests {
     fn the_banded_accumulator_matches_the_whole_image_one() {
         let (w, h, scale) = (300u32, 700u32, 2u32);
         let input = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7 + y) as u8, (y * 3) as u8, (x ^ y) as u8, (x + y * 5) as u8]));
-        let cfg = TilingConfig { tile_size: 128, tile_multiple: Some(16), overlap: 16 };
+        let cfg = TilingConfig { tile_size: 128, tile_multiple: Some(16), overlap: 16, align: 1 };
         // Each tile shifts its colours by its first pixel, so overlaps blend.
         let run = |rgb: &RgbImage, pw: u32, ph: u32| {
             let shift = rgb.get_pixel(0, 0)[0] / 8;
@@ -609,7 +632,7 @@ mod tests {
     /// would land one low there.
     #[test]
     fn overlaps_give_back_a_flat_colour_exactly() {
-        let cfg = TilingConfig { tile_size: 64, tile_multiple: None, overlap: 24 };
+        let cfg = TilingConfig { tile_size: 64, tile_multiple: None, overlap: 24, align: 1 };
         let run = |rgb: &RgbImage, pw: u32, ph: u32| Ok(RgbImage::from_fn(2 * pw, 2 * ph, |x, y| *rgb.get_pixel(x / 2, y / 2)));
         for v in [1u8, 3, 77, 101, 199, 254] {
             let input = RgbaImage::from_pixel(150, 150, image::Rgba([v, v, v, 255]));
@@ -624,7 +647,7 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ran = std::cell::Cell::new(false);
         let run_tile = |rgb: &RgbImage, _: u32, _: u32| { ran.set(true); Ok(rgb.clone()) };
-        let result = upscale_tiled(&input, 1, TilingConfig { tile_size: 32, tile_multiple: None, overlap: 0 }, run_tile, &Progress::none().with_cancel(flag));
+        let result = upscale_tiled(&input, 1, TilingConfig { tile_size: 32, tile_multiple: None, overlap: 0, align: 1 }, run_tile, &Progress::none().with_cancel(flag));
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
     }
 }

@@ -142,10 +142,20 @@ pub fn upscale_rgba_with_engine(
         )))?;
     let tile_size = engine.upscale_tile().map_or(own_tile, |tile| tile.min(own_tile));
 
-    let cfg = TilingConfig { tile_size, tile_multiple: descriptor.tile_size_multiple, overlap: knobs.tile_overlap() };
+    let cfg = TilingConfig { tile_size, tile_multiple: descriptor.tile_size_multiple, overlap: knobs.tile_overlap(), align: tile_align(descriptor) };
     let (native, tile) = upscale_native_tiled(input, engine, knobs, cfg, progress, terminate)?;
     engine.set_upscale_tile(tile);
     Ok(fit_to_scale(native, input, scale))
+}
+
+/// Where a model's tiles may start: on its padding multiple for a model
+/// that packs pixel blocks, anywhere for window attention, whose windows
+/// follow each tile.
+fn tile_align(descriptor: &prunr_models::ModelDescriptor) -> u32 {
+    match (descriptor.upscale, descriptor.tile_size_multiple) {
+        (Some(knobs), Some(multiple)) if !knobs.uses_window_attention => multiple,
+        _ => 1,
+    }
 }
 
 /// `input` at the model's own scale, upscaled in tiles of `cfg` on
@@ -365,7 +375,7 @@ mod tests {
         let multiple = prunr_models::descriptor(id).and_then(|d| d.tile_size_multiple);
         let tiles = [(side, 16), (side / 2, 16), (side / 4, 16), (side / 2, 32), (side / 2, 64), (side / 2, 96), (side / 2, 128)];
         for (tile_size, overlap) in tiles.into_iter().filter(|&(tile, overlap)| !on_cpu || (tile != side / 4 && overlap < tile / 4)) {
-            let cfg = TilingConfig { tile_size, tile_multiple: multiple, overlap };
+            let cfg = TilingConfig { tile_size, tile_multiple: multiple, overlap, align: prunr_models::descriptor(id).map_or(1, tile_align) };
             if !on_cpu {
                 let _ = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
             }
