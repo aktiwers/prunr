@@ -33,50 +33,124 @@ pub(crate) struct HardwareInstallCache {
     registry: u128,
     /// Bytes the downloaded models take, multi-part bundles included.
     pub models_on_disk: u64,
-    /// What the last test of this computer found (Settings › Hardware).
-    pub test: TestSummary,
 }
 
-/// What the last test of this computer found, for the places this
-/// process reads (`engine::column_for`).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TestSummary {
-    /// When it finished, in seconds since 1970; `None`: never, or reset.
+/// What the tests of this computer measured, as Settings › Hardware shows
+/// it: a row per installed model measured here, a cell per engine. Read
+/// with the install cache, never per frame.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct TestResults {
+    /// When a whole test finished, in seconds since 1970; `None`: never,
+    /// or forgotten.
     pub tested: Option<u64>,
-    /// Models it placed on the accelerator.
-    pub there: usize,
-    /// Models it left on the CPU.
-    pub off: usize,
+    /// The engines beside the processor, in the order sessions try them.
+    pub engines: Vec<Engine>,
+    pub rows: Vec<TestRow>,
 }
 
-impl TestSummary {
+/// An engine of this computer's: one this process runs models on, or
+/// CUDA where an NVIDIA card could use it and it is not installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Engine {
+    /// Its provider's name.
+    pub name: &'static str,
+    pub installed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TestRow {
+    pub model: prunr_models::ModelId,
+    /// Milliseconds a run took on the processor.
+    pub cpu_ms: Option<f32>,
+    /// One per engine of `TestResults::engines`.
+    pub cells: Vec<Cell>,
+    /// The provider it runs on while the accelerators are on.
+    pub runs_on: &'static str,
+}
+
+/// What a test found for one model on one engine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Cell {
+    /// Milliseconds a run took there.
+    Time(f32),
+    Fails,
+    /// A different picture from the processor's.
+    Differs,
+    /// Not measured there.
+    Untested,
+    NotInstalled,
+}
+
+impl Cell {
+    pub fn of(measured: Option<&prunr_core::ep_compat::Measured>) -> Self {
+        use prunr_core::ep_compat::PlaceKind;
+        match measured {
+            None => Self::Untested,
+            Some(m) => match m.kind {
+                PlaceKind::Fails => Self::Fails,
+                PlaceKind::Differs => Self::Differs,
+                PlaceKind::There | PlaceKind::Slower | PlaceKind::NoGain => m.ms.map_or(Self::Untested, Self::Time),
+            },
+        }
+    }
+}
+
+impl TestResults {
     /// Some place is measured here: a test ran, or one was cancelled after
     /// its first models.
     pub fn any(&self) -> bool {
-        self.tested.is_some() || self.there + self.off > 0
+        self.tested.is_some() || !self.rows.is_empty()
     }
 
-    pub fn read() -> Self {
+    /// The store's measurements for the models installed here, on the
+    /// engines this process runs (none until its probe has answered).
+    /// `cuda_offered`: CUDA could run on this computer's card and is not
+    /// installed, so its column says so.
+    pub fn read(cuda_offered: bool) -> Self {
         prunr_core::ep_compat::refresh();
-        let mut summary = Self { tested: prunr_core::ep_compat::tested(), ..Self::default() };
-        for model in prunr_models::REGISTRY.iter().map(|d| d.id) {
-            let measured = prunr_core::ep_compat::measured_for(model);
-            for (column, place) in prunr_models::Column::ALL.into_iter().zip(measured) {
-                let Some(place) = place.filter(|_| prunr_core::engine::column_for(model, column.provider()) == Some(column)) else { continue };
-                match place {
-                    prunr_models::Place::There(_) => summary.there += 1,
-                    _ => summary.off += 1,
-                }
-            }
+        let mut engines: Vec<Engine> = prunr_core::engine::gpu_providers_now()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| Engine { name, installed: true })
+            .collect();
+        if cuda_offered && !engines.iter().any(|e| e.name == prunr_core::engine::CUDA_NAME) {
+            engines.push(Engine { name: prunr_core::engine::CUDA_NAME, installed: false });
         }
-        summary
+        let rows = prunr_models::REGISTRY
+            .iter()
+            .map(|d| d.id)
+            .filter(|&id| prunr_models::is_available(id))
+            .filter_map(|id| {
+                let measured = prunr_core::ep_compat::measurements(id);
+                test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))
+            })
+            .collect();
+        Self { tested: prunr_core::ep_compat::tested(), engines, rows }
     }
+}
 
-    /// "9 models with CUDA, 3 models without it."
-    pub fn found(&self, accelerator: &str) -> String {
-        use crate::gui::views::fmt::count;
-        format!("{} with {accelerator}, {} without it.", count(self.there, "model", "models"), count(self.off, "model", "models"))
+/// `model`'s row from what was measured in each column; `column_of` names
+/// the column a provider's session of it reads. `None` when no engine
+/// measured it.
+fn test_row(
+    model: prunr_models::ModelId,
+    engines: &[Engine],
+    measured: &[Option<prunr_core::ep_compat::Measured>],
+    column_of: impl Fn(&str) -> Option<prunr_models::Column>,
+    runs_on: &'static str,
+) -> Option<TestRow> {
+    let cells: Vec<Cell> = engines
+        .iter()
+        .map(|e| match e.installed {
+            true => Cell::of(column_of(e.name).and_then(|c| measured[c.index()].as_ref())),
+            false => Cell::NotInstalled,
+        })
+        .collect();
+    if cells.iter().all(|c| matches!(c, Cell::Untested | Cell::NotInstalled)) {
+        return None;
     }
+    let cpu_ms = measured.iter().flatten().find_map(|m| m.cpu_ms);
+    Some(TestRow { model, cpu_ms, cells, runs_on })
 }
 
 /// Bytes the downloaded models take in `dir`, multi-part bundles included.
@@ -120,7 +194,6 @@ impl HardwareInstallCache {
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
             registry: registry_bits(),
             models_on_disk: prunr_models::on_demand_dir().map_or(0, |dir| disk_usage_in(&dir)),
-            test: TestSummary::read(),
         }
     }
 
@@ -150,7 +223,6 @@ impl HardwareInstallCache {
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
             registry: u128::MAX,
             models_on_disk: 0,
-            test: TestSummary::default(),
         }
     }
 
@@ -158,6 +230,12 @@ impl HardwareInstallCache {
     #[cfg(test)]
     pub(crate) fn with_models(models: &[crate::gui::settings::SettingsModel]) -> Self {
         Self { models: model_bits(models), ..Self::default() }
+    }
+
+    /// CUDA could run on this computer's NVIDIA card beside the built-in
+    /// runtime, and is not installed.
+    pub fn cuda_offered(&self) -> bool {
+        !self.cuda && RuntimeId::Cuda.is_addon() && crate::hardware::profile().runs(RuntimeId::Cuda)
     }
 
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {
@@ -232,6 +310,29 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(subdir)).unwrap();
         std::fs::write(dir.path().join(subdir).join(part), [0u8; 32]).unwrap();
         assert_eq!(super::disk_usage_in(dir.path()), 42);
+    }
+
+    /// A row holds what each installed engine measured, the processor's
+    /// time from any of them, and says which engine is not installed; a
+    /// model no engine measured has no row.
+    #[test]
+    fn a_row_shows_each_engine_and_the_processor() {
+        use super::{Cell, Engine};
+        use prunr_core::ep_compat::{Measured, PlaceKind};
+        use prunr_models::{Column, ModelId};
+        let engines = [Engine { name: "DirectML", installed: true }, Engine { name: "CUDA", installed: false }];
+        let column_of = |p: &str| Column::of(p);
+        let mut measured: [Option<Measured>; Column::ALL.len()] = Default::default();
+        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU"), None, "nothing measured");
+        measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Fails, "E_OUTOFMEMORY").with_times(None, Some(10_100.0)));
+        let row = super::test_row(ModelId::BiRefNetLite, &engines, &measured, column_of, "CPU").expect("a row");
+        assert_eq!(row.cells, [Cell::Fails, Cell::NotInstalled]);
+        assert_eq!(row.cpu_ms, Some(10_100.0));
+        measured[Column::DirectMl.index()] = Some(Measured::timed(PlaceKind::Slower, 900.0, 670.0, ""));
+        let row = super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").expect("a row");
+        assert_eq!((row.cells[0], row.cpu_ms), (Cell::Time(900.0), Some(670.0)), "a slower engine still shows its time");
+        measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Differs, "mean 3/255"));
+        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0]), Some(Cell::Differs));
     }
 
     /// A card reads installed weights from the cache, not the disk:

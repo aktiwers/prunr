@@ -91,9 +91,9 @@ fn the_hardware_page_names_every_runtime_control() {
             offered: RuntimeId::OFFERED,
             installs,
             installing,
-            active_provider: "DirectML".into(),
             sd_margin_mb: 2048,
-            sd_cpu_only: false,
+            cpu_only: false,
+            test: Default::default(),
             gpu_failure: None,
             testable: true,
             test_waits: false,
@@ -112,32 +112,46 @@ fn the_hardware_page_names_every_runtime_control() {
 
 /// Test this computer: offered with an accelerator, Test before a test
 /// and Test again with Forget after one; without an accelerator (or on
-/// CPU only) the row is not there. Every control is named.
+/// CPU only) the row is not there. After a test on an NVIDIA card without
+/// CUDA, the table offers it. Every control is named.
 #[test]
 fn the_computer_test_is_offered_with_an_accelerator() {
-    use crate::gui::hardware_cache::{HardwareInstallCache, TestSummary};
+    use crate::gui::hardware_cache::{Cell, Engine, HardwareInstallCache, TestResults, TestRow};
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::RuntimeId;
-    let mut tested = HardwareInstallCache::default();
-    tested.test = TestSummary { tested: Some(1), there: 9, off: 3 };
-    let mut cancelled = HardwareInstallCache::default();
-    cancelled.test = TestSummary { tested: None, there: 2, off: 0 };
+    use prunr_models::ModelId;
+    use std::sync::Arc;
+    let directml = Engine { name: "DirectML", installed: true };
+    let row = |model, cells: Vec<Cell>, runs_on| TestRow { model, cpu_ms: Some(670.0), cells, runs_on };
+    let tested = Arc::new(TestResults {
+        tested: Some(1),
+        engines: vec![directml, Engine { name: "CUDA", installed: true }],
+        rows: vec![row(ModelId::Silueta, vec![Cell::Time(40.0), Cell::Time(57.0)], "DirectML"), row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::Time(450.0)], "CUDA")],
+    });
+    let cancelled = Arc::new(TestResults { tested: None, ..(*tested).clone() });
+    let without_cuda = Arc::new(TestResults {
+        tested: Some(1),
+        engines: vec![directml, Engine { name: "CUDA", installed: false }],
+        rows: vec![row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::NotInstalled], "CPU")],
+    });
+    let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
     let shapes = [
-        ("never tested", HardwareInstallCache::default(), Some("CUDA"), vec!["Test this computer"], vec!["Forget the test"]),
-        ("tested", tested, Some("CUDA"), vec!["Test this computer", "Forget the test"], vec![]),
-        ("cancelled after two models", cancelled, Some("CUDA"), vec!["Test this computer", "Forget the test"], vec![]),
-        ("no accelerator", tested, None, vec![], vec!["Test this computer", "Forget the test"]),
+        ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", "Install CUDA (2 GB)"]),
+        ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec!["Install CUDA (2 GB)"]),
+        ("cancelled after two models", cancelled, true, vec!["Test this computer", "Forget the test"], vec![]),
+        ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", "Install CUDA (2 GB)"], vec![]),
+        ("no accelerator", tested, false, vec![], vec!["Test this computer", "Forget the test"]),
     ];
-    for (shape, installs, accelerator, present_names, absent_names) in shapes {
+    for (shape, test, testable, present_names, absent_names) in shapes {
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
-            installs,
+            installs: HardwareInstallCache::default(),
+            test,
             installing: None,
-            active_provider: accelerator.unwrap_or("CPU").into(),
             sd_margin_mb: 2048,
-            sd_cpu_only: false,
+            cpu_only: false,
             gpu_failure: None,
-            testable: accelerator.is_some(),
+            testable,
             test_waits: false,
         };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
@@ -184,9 +198,9 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
             offered: RuntimeId::OFFERED,
             installs,
             installing,
-            active_provider: "CPU".into(),
             sd_margin_mb: 2048,
-            sd_cpu_only: false,
+            cpu_only: false,
+            test: Default::default(),
             gpu_failure: failure,
             testable: false,
             test_waits: false,

@@ -77,7 +77,7 @@ impl RuntimeId {
         self.addon().is_some()
     }
 
-    fn addon(self) -> Option<&'static ri::AddOn> {
+    pub(crate) fn addon(self) -> Option<&'static ri::AddOn> {
         match self {
             Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
             _ => None,
@@ -174,6 +174,14 @@ impl RuntimeId {
             (Self::Cuda, true) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: runs the models on it.",
             (Self::MiGraphX, false) => "Not installed (20 MB). Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
             (Self::MiGraphX, true) => "Not installed (20 MB). Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
+        }
+    }
+
+    /// Settings › Hardware's line once it is installed.
+    pub fn installed_line(self) -> &'static str {
+        match self {
+            Self::Cuda if self.is_addon() => "Installed. Runs beside DirectML on your NVIDIA graphics card.",
+            _ => "Installed.",
         }
     }
 

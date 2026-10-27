@@ -97,10 +97,13 @@ pub struct Measured {
     pub kind: PlaceKind,
     /// The reason, or what the times leave out; empty when nothing.
     pub text: String,
-    /// Milliseconds a run took there and on the CPU, when the test timed
-    /// both.
+    /// Milliseconds a run took there, when it ran to the end and was timed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub times: Option<[f32; 2]>,
+    pub ms: Option<f32>,
+    /// Milliseconds the same run took on the CPU, when the test timed it:
+    /// kept for a model that fails there too, so the CPU's time is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<f32>,
 }
 
 /// `Place::There`, or the `Why` of `Place::Cpu`, by name.
@@ -119,13 +122,18 @@ pub const MEASURED_HERE: &str = "measured on this computer (Settings › Hardwar
 
 impl Measured {
     pub fn new(kind: PlaceKind, text: impl Into<String>) -> Self {
-        Self { kind, text: text.into(), times: None }
+        Self { kind, text: text.into(), ms: None, cpu_ms: None }
     }
 
     /// A place found by timing it against the CPU: `ms` there, `cpu_ms`
     /// on the CPU.
     pub fn timed(kind: PlaceKind, ms: f32, cpu_ms: f32, text: impl Into<String>) -> Self {
-        Self { kind, text: text.into(), times: Some([ms, cpu_ms]) }
+        Self { kind, text: text.into(), ms: Some(ms), cpu_ms: Some(cpu_ms) }
+    }
+
+    /// With the times the test took, where it took them.
+    pub fn with_times(self, ms: Option<f32>, cpu_ms: Option<f32>) -> Self {
+        Self { ms, cpu_ms, ..self }
     }
 
     /// As the registry's `Place` says it. A faster place needs its times,
@@ -134,8 +142,7 @@ impl Measured {
         use prunr_models::{Place, Speed, Why};
         Some(match self.kind {
             PlaceKind::There => {
-                let [ms, cpu_ms] = self.times?;
-                Place::There(Speed::on(ms, cpu_ms, MEASURED_HERE))
+                Place::There(Speed::on(self.ms?, self.cpu_ms?, MEASURED_HERE))
             }
             PlaceKind::Fails => Place::Cpu(Why::Fails(MEASURED_HERE)),
             PlaceKind::Differs => Place::Cpu(Why::Differs(MEASURED_HERE)),
@@ -147,7 +154,7 @@ impl Measured {
 
 impl std::fmt::Display for Measured {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let times = self.times.map(|[ms, cpu_ms]| prunr_models::times_text(ms, cpu_ms));
+        let times = self.ms.zip(self.cpu_ms).map(|(ms, cpu_ms)| prunr_models::times_text(ms, cpu_ms));
         match (times, self.text.is_empty()) {
             (Some(times), true) => f.write_str(&times),
             (Some(times), false) => write!(f, "{times}, {}", self.text),
@@ -335,6 +342,17 @@ pub fn measured_for(model: prunr_models::ModelId) -> [Option<prunr_models::Place
     }
     let files = prunr_models::files_id(model);
     prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).and_then(Measured::place))
+}
+
+/// What a test measured for `model` in each column, times included, for
+/// its files on disk now.
+pub fn measurements(model: prunr_models::ModelId) -> [Option<Measured>; prunr_models::Column::ALL.len()] {
+    let store = locked();
+    if store.learned.measured.is_empty() {
+        return Default::default();
+    }
+    let files = prunr_models::files_id(model);
+    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).cloned())
 }
 
 /// When the last test finished, in seconds since 1970.

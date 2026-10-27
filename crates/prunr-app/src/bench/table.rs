@@ -21,8 +21,8 @@ const FAR_FROM_INPUT: f64 = 16.0;
 
 /// As the registry writes `place`, measured where `label` says.
 fn rust(place: &Measured, label: &str) -> String {
-    match (place.kind, place.times) {
-        (PlaceKind::There, Some([ms, cpu_ms])) => {
+    match (place.kind, place.ms.zip(place.cpu_ms)) {
+        (PlaceKind::There, Some((ms, cpu_ms))) => {
             let speed = format!("Speed::on({:?}, {:?}, {label:?})", hundredths(ms), hundredths(cpu_ms));
             match place.text.as_str() {
                 "" => format!("Place::There({speed})"),
@@ -43,9 +43,10 @@ fn hundredths(ms: f32) -> f32 {
 /// lasting about the model there). `needs` prices the memory tie-break.
 fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
     let gpu = row.gpu.on_gpu();
+    let cpu_ms = row.cpu.as_ref().and_then(|c| c.timing.as_ref()).map(|t| t.median_ms() as f32);
     match row.verdict {
         Verdict::GpuFailed | Verdict::FellBack => match &row.gpu {
-            Gpu::Ran(side) => lasting_failure(side),
+            Gpu::Ran(side) => lasting_failure(side).map(|m| m.with_times(None, cpu_ms)),
             _ => None,
         },
         Verdict::Mismatch => {
@@ -53,7 +54,8 @@ fn found(row: &Row, needs: &Needs, column: Column) -> Option<Measured> {
                 || "a different size".to_string(),
                 |a| format!("mean {:.2}/255, {:.1}% of values more than 2/255 apart", a.mean_abs, a.over_2 * 100.0),
             );
-            Some(Measured::new(PlaceKind::Differs, off))
+            let ms = gpu.and_then(|g| g.timing.as_ref()).map(|t| t.median_ms() as f32);
+            Some(Measured::new(PlaceKind::Differs, off).with_times(ms, cpu_ms))
         }
         Verdict::Match => {
             let (cpu_ms, gpu_ms) = steady_pair(row.cpu.as_ref()?.timing.as_ref()?, gpu?.timing.as_ref()?);
@@ -221,6 +223,8 @@ mod tests {
         assert_eq!(at(380.0, Verdict::Match, 800), Some(PlaceKind::NoGain), "1.05x and heavier");
         assert_eq!(at(420.0, Verdict::Match, 600), Some(PlaceKind::There), "0.95x and lighter");
         assert_eq!(at(300.0, Verdict::Mismatch, 600), Some(PlaceKind::Differs), "faster but not the CPU's result");
+        let differs = found(&row(300.0, Verdict::Mismatch), &needs(600), Column::OpenVino).expect("placed");
+        assert_eq!((differs.ms, differs.cpu_ms), (Some(300.0), Some(400.0)), "a different picture keeps both times");
         assert_eq!(at(300.0, Verdict::NoRoom, 600), None, "nothing measured");
         let unpriced = found(&row(420.0, Verdict::Match), &needs(600), Column::Cuda).expect("placed");
         assert_eq!((unpriced.kind, unpriced.text.ends_with("its memory there not measured")), (PlaceKind::NoGain, true), "0.95x, its memory unknown: the faster");
@@ -265,7 +269,11 @@ mod tests {
                 "FP32 weights: Output names mismatch".into(),
             ];
         }
-        assert_eq!(found(&fell_back, &needs(600), Column::OpenVino), Some(Measured::new(PlaceKind::Fails, "FP32 weights: Output names mismatch")));
+        assert_eq!(
+            found(&fell_back, &needs(600), Column::OpenVino),
+            Some(Measured::new(PlaceKind::Fails, "FP32 weights: Output names mismatch").with_times(None, Some(400.0))),
+            "a lasting failure keeps the CPU's time",
+        );
     }
 
     /// A GPU run judged alone keeps the model off only when it failed for

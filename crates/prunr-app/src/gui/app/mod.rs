@@ -143,6 +143,9 @@ pub struct PrunrApp {
     /// while the Settings → Hardware tab is open. Refreshed on settings open,
     /// install completion, and uninstall.
     pub(crate) hardware_install_cache: super::hardware_cache::HardwareInstallCache,
+    /// What the tests of this computer measured, read with the install
+    /// cache; apart from it, as that is copied into the toolbar each frame.
+    pub(crate) test_results: std::sync::Arc<super::hardware_cache::TestResults>,
 
     pub(crate) runtime_prompt: Option<crate::runtime_install::RuntimeId>,
     /// Once-per-session guard so we don't re-evaluate hardware + snooze
@@ -462,6 +465,7 @@ impl PrunrApp {
             runtime_install: None,
             machine_test: None,
             hardware_install_cache: Default::default(),
+            test_results: Default::default(),
             runtime_prompt: None,
             runtime_prompt_evaluated: false,
             popup_open_at_frame_start: false,
@@ -1109,6 +1113,7 @@ impl PrunrApp {
     /// download is gone.
     pub(crate) fn refresh_install_cache(&mut self) {
         self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
+        self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(self.hardware_install_cache.cuda_offered()));
         self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
     }
 
@@ -1447,8 +1452,7 @@ impl PrunrApp {
         }
         self.render_discard_prompt(ctx);
         if let Some(test) = &self.machine_test {
-            let accelerator = self.settings.active_backend.as_str();
-            if super::views::machine_test::render(ctx, test.step(), accelerator) {
+            if super::views::machine_test::render(ctx, test, &self.test_results.engines) {
                 self.cancel_machine_test();
             }
         }
@@ -1737,6 +1741,7 @@ mod field_list_tests {
             runtime_install: _,
             machine_test: _,
             hardware_install_cache: _,
+            test_results: _,
             runtime_prompt: _,
             runtime_prompt_evaluated: _,
             popup_open_at_frame_start: _,
