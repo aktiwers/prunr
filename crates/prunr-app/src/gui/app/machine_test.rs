@@ -56,17 +56,16 @@ impl PrunrApp {
         let Some(ended) = self.machine_test.as_mut().and_then(MachineTest::pump) else { return };
         self.machine_test = None;
         self.places_changed();
-        let accelerator = self.settings.active_backend.clone();
         match ended {
             Ended::Finished { left_out } => {
-                let mut text = format!("Test done: {}", self.hardware_install_cache.test.found(&accelerator));
+                let mut text = "Test done: each model now runs on the fastest that gives the same picture. Settings › Hardware has the times.".to_string();
                 if !left_out.is_empty() {
                     let names: Vec<&str> = left_out.iter().map(|&id| prunr_models::display_name(id)).collect();
                     text += &format!(" Not tested, as each takes many minutes: {}.", names.join(", "));
                 }
                 self.toasts.success(text);
             }
-            Ended::Stopped { during: Some(step) } if step.on_gpu => {
+            Ended::Stopped { during: Some(step) } if step.on_gpu() => {
                 tracing::warn!(model = ?step.model, column = ?step.column, "the computer test stopped while a model ran on the accelerator");
                 let text = format!(
                     "The test stopped while {} ran with {}, so it runs without it. Test again to finish the rest.",

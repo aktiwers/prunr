@@ -9,13 +9,14 @@
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use egui::{Color32, RichText};
 use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
-use crate::gui::hardware_cache::HardwareInstallCache;
+use crate::gui::hardware_cache::{Cell, HardwareInstallCache, TestResults};
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 use crate::runtime_install::{InstallTarget, RuntimeChoice, RuntimeId};
@@ -72,12 +73,14 @@ pub(crate) struct HardwareSectionContext {
     /// The runtimes this platform offers to download.
     pub offered: &'static [RuntimeId],
     pub installs: HardwareInstallCache,
+    /// What the tests of this computer measured.
+    pub test: Arc<TestResults>,
     /// What is being installed, with its progress line.
     pub installing: Option<(InstallTarget, String)>,
-    pub active_provider: String,
     pub sd_margin_mb: u64,
-    /// Settings › Processor is CPU only: no SD part goes to a card.
-    pub sd_cpu_only: bool,
+    /// Settings › Processor is CPU only: every model, and every part of
+    /// a Stable Diffusion erase, runs on the processor.
+    pub cpu_only: bool,
     /// Why the loaded runtime's GPU provider does not run, when it does not.
     pub gpu_failure: Option<&'static prunr_core::engine::GpuStartFailure>,
     /// There is an accelerator to test: not on CPU only.
@@ -217,10 +220,10 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
             let hw_ctx = HardwareSectionContext {
                 offered: RuntimeId::OFFERED,
                 installs: app.hardware_install_cache,
+                test: Arc::clone(&app.test_results),
                 installing: app.runtime_install.as_ref().map(|p| (p.target, p.last_event.status_text())),
-                active_provider: app.settings.active_backend.clone(),
                 sd_margin_mb: app.settings.sd_memory.margin_mb(),
-                sd_cpu_only: app.settings.cpu_only(),
+                cpu_only: app.settings.cpu_only(),
                 gpu_failure: prunr_core::engine::gpu_start_failure(),
                 testable: app.machine_test_accelerator().is_some(),
                 test_waits: app.machine_test_accelerator().is_some() && !app.can_machine_test_intent(),
@@ -335,6 +338,11 @@ impl Rows<'_> {
     /// A row: its title over a one-line description on the left, the
     /// control `control` draws on the right.
     fn row<R>(&mut self, title: &str, description: &str, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        self.row_noted(title, description, None, control)
+    }
+
+    /// A row with a `note` under its description, in the advisory colour.
+    fn row_noted<R>(&mut self, title: &str, description: &str, note: Option<&str>, control: impl FnOnce(&mut egui::Ui) -> R) -> R {
         let ui = &mut *self.ui;
         if !std::mem::replace(&mut self.first, false) {
             let y = ui.cursor().top();
@@ -354,6 +362,9 @@ impl Rows<'_> {
                     ui.label(RichText::new(title).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
                     if !description.is_empty() {
                         ui.add(egui::Label::new(RichText::new(description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
+                    }
+                    if let Some(note) = note {
+                        ui.add(egui::Label::new(RichText::new(note).size(theme::FONT_SIZE_SECONDARY).color(theme::ADVISORY_TEXT)).wrap());
                     }
                     ui.add_space(6.0);
                 });
@@ -411,13 +422,7 @@ fn jobs_hint(on_cpu: bool, max_jobs: usize) -> String {
 /// jobs on the CPU, built once.
 fn models_running_several_on_cpu() -> &'static str {
     static NAMES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        let names: Vec<_> = prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu).map(|d| d.display_name).collect();
-        match names.split_last() {
-            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-            _ => names.concat(),
-        }
-    })
+    NAMES.get_or_init(|| super::fmt::and_list(prunr_models::REGISTRY.iter().filter(|d| d.parallel_jobs_pay_on_cpu).map(|d| d.display_name)))
 }
 
 fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_installed: bool) {
@@ -488,14 +493,16 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             (None, None) => "none detected".to_string(),
         };
         kv(ui, "Graphics card", &gpu_label);
-        kv(ui, "Accelerator", &ctx.active_provider);
+        let engines = || ctx.test.engines.iter().filter(|e| e.installed).map(|e| e.name);
+        let key = if engines().count() > 1 { "Accelerators" } else { "Accelerator" };
+        kv(ui, key, &if engines().next().is_none() { "None".to_string() } else { super::fmt::and_list(engines()) });
         let total_ram = hardware::total_ram_bytes();
         kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
 
         // The same rule as the gate an erase passes, with the user's margin.
         use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
         for (name, id) in ctx.installs.sd_erasers() {
-            let Some((bundle, room)) = hardware::charge_and_room(id, ctx.sd_cpu_only) else { continue };
+            let Some((bundle, room)) = hardware::charge_and_room(id, ctx.cpu_only) else { continue };
             let (color, fit) = match sd_ram_fit(id, room, ctx.sd_margin_mb, bundle) {
                 SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
                 SdRamFit::TilesOnly => (
@@ -525,7 +532,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
     let recommended = p.recommended_runtime();
     group(ui, |rows| {
         if ctx.installs.built_in_gpu {
-            rows.row("DirectML runtime", "Built in. Runs the models on any DirectX 12 graphics card, and on the CPU without one.", |_| {});
+            rows.row("DirectML", "Built in. Runs models on any DirectX 12 graphics card.", |_| {});
         }
         // A runtime for hardware this computer lacks would install and
         // never start; one installed anyway stays, to uninstall.
@@ -586,32 +593,158 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
     intent
 }
 
-/// Test this computer: what the last test found, and Test or Forget.
+/// Test this computer: what it does or what it found, Test or Forget,
+/// and after a test the table of times and the engine each model runs on.
 fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Option<HardwareSectionIntent>) {
-    use std::borrow::Cow;
-    let (summary, accelerator) = (ctx.installs.test, ctx.active_provider.as_str());
-    let status: Cow<'static, str> = if ctx.test_waits {
-        Cow::Borrowed("Waits until the current work is done.")
-    } else {
-        match summary.tested {
-            Some(when) => {
-                let now = u64::try_from(crate::gui::settings::now_unix_secs()).unwrap_or(0);
-                format!("Tested {}: {}", super::fmt::days_ago(when, now), summary.found(accelerator)).into()
-            }
-            None if summary.any() => format!("Partly tested: {}", summary.found(accelerator)).into(),
-            None => format!("Runs each installed model with {accelerator} and without it, and keeps the faster way that gives the same result. Takes a few minutes; close other busy apps first.").into(),
+    let results = &*ctx.test;
+    let (status, note): (String, Option<&str>) = match (results.tested, results.any()) {
+        (Some(when), _) => {
+            let now = u64::try_from(crate::gui::settings::now_unix_secs()).unwrap_or(0);
+            (format!("Tested {}. Every model runs on the fastest that gives the same picture as the processor, chosen from this test.", super::fmt::days_ago(when, now)), None)
+        }
+        (None, true) => ("Partly tested. Every model it reached runs on the fastest that gives the same picture as the processor.".to_string(), None),
+        (None, false) => {
+            let engines = super::fmt::and_list(std::iter::once("the processor").chain(results.engines.iter().filter(|e| e.installed).map(|e| e.name)));
+            (
+                format!("Times each installed model on everything this computer can use ({engines}) and checks each gives the same picture. Prunr then runs every model on the fastest of them, automatically. Takes a few minutes; close other busy apps first."),
+                Some("Not tested yet: until then Prunr goes by our tests on similar hardware."),
+            )
         }
     };
-    rows.row("Test this computer", &status, |ui| {
-        if summary.any() && super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget the test").clicked() {
+    let note = if ctx.test_waits { Some("Waits until the current work is done.") } else { note };
+    rows.row_noted("Test this computer", &status, note, |ui| {
+        if results.any() && super::chip::named(button(ui, ButtonKind::Secondary, "Forget"), "Forget the test").clicked() {
             *intent = Some(HardwareSectionIntent::ForgetTest);
         }
-        let label = if summary.any() { "Test again" } else { "Test" };
-        let resp = ui.add_enabled_ui(!ctx.test_waits, |ui| button(ui, ButtonKind::Secondary, label)).inner;
+        let (label, kind) = if results.any() { ("Test again", ButtonKind::Secondary) } else { ("Test", ButtonKind::Primary) };
+        let resp = ui.add_enabled_ui(!ctx.test_waits, |ui| button(ui, kind, label)).inner;
         if super::chip::named(resp, "Test this computer").clicked() {
             *intent = Some(HardwareSectionIntent::TestThisComputer);
         }
     });
+    if results.rows.is_empty() {
+        return;
+    }
+    let ui = rows.ui();
+    if let Some(offer) = results.engines.iter().find(|e| !e.installed) {
+        cuda_offer(ui, ctx, results, offer.name, intent);
+    }
+    test_table(ui, ctx, results);
+    ui.add_space(theme::SPACE_SM);
+}
+
+/// After a test on an NVIDIA card without CUDA: what CUDA would add, and
+/// Install.
+fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults, name: &str, intent: &mut Option<HardwareSectionIntent>) {
+    let text = cuda_offer_text(results, name);
+    let size = match RuntimeId::Cuda.addon() {
+        Some(addon) if ctx.installs.nvidia_libraries => super::format_byte_size(addon.size_bytes),
+        _ => "2 GB".to_string(),
+    };
+    egui::Frame::NONE.fill(OFFER_FILL).corner_radius(12.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let label = format!("Install {name} ({size})");
+            let button_width = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY).size().x + 48.0;
+            ui.vertical(|ui| {
+                ui.set_width((ui.available_width() - button_width - theme::SPACE_MD).max(120.0));
+                ui.add(egui::Label::new(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY)).wrap());
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, &label)).inner.clicked() {
+                    *intent = Some(HardwareSectionIntent::StartInstall(RuntimeId::Cuda));
+                }
+            });
+        });
+    });
+    ui.add_space(theme::SPACE_SM);
+}
+
+/// "Your NVIDIA graphics card can also use CUDA. It runs BiRefNet-lite on
+/// the card, which DirectML cannot, and …": the tested models left on the
+/// processor that CUDA runs, by Prunr's own tests.
+fn cuda_offer_text(results: &TestResults, name: &str) -> String {
+    let gains = super::fmt::and_list(results.rows.iter()
+        .filter(|r| r.runs_on == prunr_core::engine::CPU_NAME)
+        .filter(|r| matches!(prunr_models::registry_places(r.model).get(prunr_models::Column::Cuda), prunr_models::Place::There(_)))
+        .map(|r| prunr_models::display_name(r.model)));
+    let others = super::fmt::and_list(results.engines.iter().filter(|e| e.installed).map(|e| e.name));
+    match (gains.is_empty(), others.is_empty()) {
+        (false, false) => format!("Your NVIDIA graphics card can also use {name}. It runs {gains} on the card, which {others} cannot, and Prunr then picks the fastest for every model."),
+        (false, true) => format!("Your NVIDIA graphics card can also use {name}. It runs {gains} on the card, and Prunr then picks the fastest for every model."),
+        (true, _) => format!("Your NVIDIA graphics card can also use {name}, and Prunr then picks the fastest for every model."),
+    }
+}
+
+const OFFER_FILL: Color32 = Color32::from_rgb(0x34, 0x26, 0x3c);
+const TABLE_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 40);
+const TABLE_ROW_HEIGHT: f32 = 38.0;
+
+/// The test's times: a row per model, the processor and each engine, and
+/// where Prunr runs it, that engine's time in bright text.
+fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults) {
+    egui::Frame::NONE.fill(TABLE_FILL).corner_radius(12.0).inner_margin(egui::Margin { left: 18, right: 18, top: 6, bottom: 10 }).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let width = ui.available_width() / (results.engines.len() + 3) as f32;
+        let plain = |text: &'static str, right| (Cow::Borrowed(text), theme::TEXT_SECONDARY, right, false);
+        let header = std::iter::once(plain("Model", false))
+            .chain(std::iter::once(plain("Processor", true)))
+            .chain(results.engines.iter().map(|e| plain(e.name, true)))
+            .chain(std::iter::once(plain("Prunr uses", true)));
+        table_line(ui, width, TABLE_ROW_HEIGHT - 6.0, header);
+        for row in &results.rows {
+            let runs_on = if ctx.cpu_only { prunr_core::engine::CPU_NAME } else { row.runs_on };
+            let cpu = (row.cpu_ms.map_or(Cow::Borrowed("\u{2014}"), |ms| Cow::Owned(super::fmt::seconds(ms))), runs_on == prunr_core::engine::CPU_NAME);
+            let times = std::iter::once(cpu)
+                .chain(results.engines.iter().zip(&row.cells).map(|(e, &cell)| (cell_text(cell), e.name == runs_on)))
+                .map(|(text, used)| (text, if used { theme::GLOW } else { theme::TEXT_SECONDARY }, true, used));
+            let name = (Cow::Borrowed(prunr_models::display_name(row.model)), theme::TEXT_PRIMARY, false, false);
+            let uses = (Cow::Owned(format!("{} {}", ICON_CHECK.codepoint, engine_name(runs_on))), theme::TEXT_PRIMARY, true, false);
+            table_line(ui, width, TABLE_ROW_HEIGHT, std::iter::once(name).chain(times).chain(std::iter::once(uses)));
+        }
+        ui.add_space(theme::SPACE_SM);
+        let left_out = super::fmt::and_list(crate::bench::HEAVY.iter().filter(|&&id| ctx.installs.has_installed(id)).map(|&id| prunr_models::display_name(id)));
+        let foot: Cow<'static, str> = if left_out.is_empty() {
+            Cow::Borrowed("Time per picture.")
+        } else {
+            Cow::Owned(format!("Time per picture. Left out: {left_out}, which take many minutes each; they go by our tests on similar hardware."))
+        };
+        ui.add(egui::Label::new(RichText::new(foot).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
+    });
+}
+
+/// One line of the table, a hairline under it: each cell `(text, colour,
+/// right-aligned, strong)` in a column `width` wide.
+fn table_line(ui: &mut egui::Ui, width: f32, height: f32, cells: impl Iterator<Item = (Cow<'static, str>, Color32, bool, bool)>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (text, color, right, strong) in cells {
+            let layout = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+            ui.allocate_ui_with_layout(egui::vec2(width, height), layout, |ui| {
+                ui.set_min_size(egui::vec2(width, height));
+                let text = RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(color);
+                ui.add(egui::Label::new(if strong { text.strong() } else { text }).truncate());
+            });
+        }
+    });
+    let y = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, theme::CARD_EDGE));
+}
+
+/// What a test found for a model on an engine, as the table says it.
+fn cell_text(cell: Cell) -> Cow<'static, str> {
+    match cell {
+        Cell::Time(ms) => Cow::Owned(super::fmt::seconds(ms)),
+        Cell::Fails => Cow::Borrowed("does not run"),
+        Cell::Differs => Cow::Borrowed("different picture"),
+        Cell::Untested => Cow::Borrowed("\u{2014}"),
+        Cell::NotInstalled => Cow::Borrowed("not installed"),
+    }
+}
+
+/// "Processor" for the CPU provider, else the provider's own name.
+fn engine_name(provider: &str) -> &str {
+    if provider == prunr_core::engine::CPU_NAME { "Processor" } else { provider }
 }
 
 /// One runtime: its state, and Install, Uninstall or Cancel. One install
@@ -624,7 +757,7 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let failure = ctx.gpu_failure.filter(|_| in_use).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
-        None if installed => failure.as_deref().unwrap_or("Installed."),
+        None if installed => failure.as_deref().unwrap_or(rt.installed_line()),
         None => rt.not_installed(recommended),
     };
     rows.row(rt.display_name(), status, |ui| {
@@ -655,7 +788,7 @@ fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, inten
     }
     let status = match installing {
         Some((_, progress)) => progress.clone(),
-        None if ctx.installs.nvidia_libraries => "Installed beside CUDA Runtime.".to_string(),
+        None if ctx.installs.nvidia_libraries => format!("Installed beside {}.", RuntimeId::Cuda.display_name()),
         None => format!("CUDA Runtime runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
     };
     rows.row("NVIDIA libraries", &status, |ui| {

@@ -18,6 +18,28 @@ pub fn days_ago(then: u64, now: u64) -> String {
     }
 }
 
+/// A run's time per picture: "0.04 s" under a second, "10.1 s" above,
+/// "2m 06s" past a minute.
+pub fn seconds(ms: f32) -> String {
+    match ms {
+        ms if ms < 1000.0 => format!("{:.2} s", ms / 1000.0),
+        ms if ms < 60_000.0 => format!("{:.1} s", ms / 1000.0),
+        ms => {
+            let secs = (ms / 1000.0).round() as u64;
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        }
+    }
+}
+
+/// "CUDA", "DirectML and CUDA", "the processor, DirectML and CUDA".
+pub fn and_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
+    let items: Vec<&str> = items.into_iter().collect();
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.concat(),
+    }
+}
+
 /// "Off" below `off_below`, otherwise `f(v)`.
 pub fn off_or(v: f32, off_below: f32, f: impl FnOnce(f32) -> String) -> String {
     if v.abs() < off_below { "Off".to_string() } else { f(v) }
@@ -73,6 +95,22 @@ mod tests {
         assert_eq!(days_ago(now - 86_400, now), "yesterday");
         assert_eq!(days_ago(now - 3 * 86_400 - 5, now), "3 days ago");
         assert_eq!(days_ago(now + 60, now), "today", "a clock set back is not the future");
+    }
+
+    #[test]
+    fn seconds_keep_two_figures_under_a_second() {
+        assert_eq!(seconds(40.0), "0.04 s");
+        assert_eq!(seconds(450.0), "0.45 s");
+        assert_eq!(seconds(10_100.0), "10.1 s");
+        assert_eq!(seconds(126_000.0), "2m 06s");
+    }
+
+    #[test]
+    fn and_list_joins_the_last_with_and() {
+        assert_eq!(and_list([]), "");
+        assert_eq!(and_list(["CUDA"]), "CUDA");
+        assert_eq!(and_list(["DirectML", "CUDA"]), "DirectML and CUDA");
+        assert_eq!(and_list(["the processor", "DirectML", "CUDA"]), "the processor, DirectML and CUDA");
     }
 
     #[test]

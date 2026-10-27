@@ -1003,6 +1003,13 @@ pub fn gpu_provider_names() -> Vec<String> {
     }).collect()
 }
 
+/// The GPU providers this process runs models on, by their names, once
+/// the probe has answered; `None` before, as the UI thread must not wait
+/// for a GPU driver.
+pub fn gpu_providers_now() -> Option<Vec<&'static str>> {
+    OrtEngine::probed().then(|| available_gpu_eps().iter().map(|ep| ep.as_str()).collect())
+}
+
 /// The lighter copy of `id`'s weights a session tries before its own,
 /// when one is on disk: FP16 on a GPU in `eps` that gains from it, INT8
 /// on the CPU. Never on macOS, where CoreML converts to FP16 itself.
