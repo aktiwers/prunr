@@ -140,18 +140,43 @@ struct Plan {
     left_out: Vec<ModelId>,
 }
 
-/// A model no accelerator would try (`column_of` is `None`) has nothing
-/// to measure: its CPU run alone could take minutes for nothing. Heavy
-/// models take many minutes on the CPU, so the test leaves them out.
+/// What a test does with one model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Turn {
+    /// Times it, its accelerator side in this column.
+    Runs(Column),
+    /// Leaves it out: a heavy model takes many minutes on the CPU.
+    LeftOut,
+    /// Nothing to measure: no accelerator would try it (`column`, from
+    /// `column_of`, is `None`), so its CPU run could take minutes for
+    /// nothing; or it runs only inside another model's run.
+    Passed,
+}
+
+fn turn(id: ModelId, column: Option<Column>) -> Turn {
+    match column {
+        Some(_) if !super::in_catalog(id) => Turn::Passed,
+        Some(_) if super::HEAVY.contains(&id) => Turn::LeftOut,
+        Some(column) => Turn::Runs(column),
+        None => Turn::Passed,
+    }
+}
+
+/// A test would time `id` here: what the Model Store's Test offers.
+pub(crate) fn times(id: ModelId) -> bool {
+    matches!(turn(id, column_of(id)), Turn::Runs(_))
+}
+
 fn plan(installed: Vec<ModelId>, column_of: impl Fn(ModelId) -> Option<Column>) -> Plan {
     let mut plan = Plan { models: Vec::new(), columns: Vec::new(), left_out: Vec::new() };
     for id in installed {
-        let Some(column) = column_of(id) else { continue };
-        if super::HEAVY.contains(&id) {
-            plan.left_out.push(id);
-        } else {
-            plan.models.push(id);
-            plan.columns.push(column);
+        match turn(id, column_of(id)) {
+            Turn::Runs(column) => {
+                plan.models.push(id);
+                plan.columns.push(column);
+            }
+            Turn::LeftOut => plan.left_out.push(id),
+            Turn::Passed => {}
         }
     }
     plan
@@ -162,10 +187,11 @@ mod tests {
     use super::*;
 
     /// The test runs each model an accelerator would try, but the heavy
-    /// ones, which it names as left out.
+    /// ones, which it names as left out, and TAESD, which runs only inside
+    /// a Stable Diffusion erase.
     #[test]
     fn a_test_runs_what_an_accelerator_would_try_but_the_heavy_models() {
-        let installed = vec![ModelId::Silueta, ModelId::BiRefNetLite, ModelId::Nomos8kSchatL, ModelId::SdV15InpaintFp16, ModelId::U2net];
+        let installed = vec![ModelId::Silueta, ModelId::BiRefNetLite, ModelId::Nomos8kSchatL, ModelId::SdV15InpaintFp16, ModelId::TaesdFp16, ModelId::U2net];
         let column_of = |id| (id != ModelId::BiRefNetLite && id != ModelId::SdV15InpaintFp16).then_some(Column::Cuda);
         assert_eq!(plan(installed, column_of), Plan {
             models: vec![ModelId::Silueta, ModelId::U2net],

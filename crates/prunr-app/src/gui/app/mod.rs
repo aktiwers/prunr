@@ -992,10 +992,12 @@ impl PrunrApp {
     /// new chord (Escape cancels, Backspace clears the slot), never a
     /// command. Returns true while capture is active.
     /// The accelerator the startup probe found, once it has answered.
+    /// The engines the test results name come with it.
     pub(crate) fn take_probed_backend(&mut self) {
         if self.settings.active_backend.is_empty() {
             if let Some(provider) = prunr_core::OrtEngine::detected_provider() {
                 self.settings.active_backend = provider;
+                self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(&self.hardware_install_cache));
             }
         }
     }
@@ -1112,7 +1114,7 @@ impl PrunrApp {
     /// download is gone.
     pub(crate) fn refresh_install_cache(&mut self) {
         self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
-        self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(self.hardware_install_cache.cuda_offered()));
+        self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(&self.hardware_install_cache));
         if prunr_core::ep_compat::take_untold_change() {
             if let Some(what) = self.test_results.what_changed() {
                 self.pending_first_toasts.push(format!("{} changed since this computer was tested, so Prunr goes by its own tests until you test again (Settings › Hardware).", super::views::fmt::capitalized(&what)));

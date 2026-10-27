@@ -25,13 +25,9 @@ impl PrunrApp {
     }
 
     /// The Model Store's Test can time `model` here: an accelerator to
-    /// test, its weights installed, and a model the computer test runs
-    /// (not a heavy one, nor one that runs only inside another's run).
+    /// test, and a model the computer test would time.
     pub(crate) fn model_testable(&self, model: ModelId) -> bool {
-        self.machine_test_accelerator().is_some()
-            && self.hardware_install_cache.has_installed(model)
-            && crate::bench::Family::of(model).is_some()
-            && !crate::bench::HEAVY.contains(&model)
+        self.machine_test_accelerator().is_some() && self.test_results.testable(model)
     }
 
     pub(crate) fn can_model_test_intent(&self, model: ModelId) -> bool {

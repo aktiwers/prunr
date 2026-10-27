@@ -49,6 +49,8 @@ pub(crate) struct TestResults {
     /// What changed since this computer was tested and dropped what it
     /// measured (`ep_compat::SCOPE_PARTS` labels); empty when nothing did.
     pub changed: Vec<String>,
+    /// The installed models a test would time here (`bench::here::times`).
+    pub testable: Vec<prunr_models::ModelId>,
 }
 
 /// An engine of this computer's: one this process runs models on, or
@@ -119,30 +121,39 @@ impl TestResults {
         self.tested.is_some() || !self.rows.is_empty()
     }
 
-    /// The store's measurements for the models installed here, on the
-    /// engines this process runs (none until its probe has answered).
-    /// `cuda_offered`: CUDA could run on this computer's card and is not
-    /// installed, so its column says so.
-    pub fn read(cuda_offered: bool) -> Self {
+    /// Whether the Model Store's Test may time `id` here.
+    pub fn testable(&self, id: prunr_models::ModelId) -> bool {
+        self.testable.contains(&id)
+    }
+
+    /// The store's measurements for the models `installs` holds, on the
+    /// engines this process runs (none until its probe has answered); CUDA
+    /// where it could run on this computer's card and is not installed,
+    /// so its column says so.
+    pub fn read(installs: &HardwareInstallCache) -> Self {
         prunr_core::ep_compat::refresh();
         let mut engines: Vec<Engine> = prunr_core::engine::gpu_providers_now()
             .unwrap_or_default()
             .into_iter()
             .map(|name| Engine { name, installed: true })
             .collect();
-        if cuda_offered && !engines.iter().any(|e| e.name == prunr_core::engine::CUDA_NAME) {
+        if installs.cuda_offered() && !engines.iter().any(|e| e.name == prunr_core::engine::CUDA_NAME) {
             engines.push(Engine { name: prunr_core::engine::CUDA_NAME, installed: false });
         }
-        let rows = prunr_models::REGISTRY
-            .iter()
-            .map(|d| d.id)
-            .filter(|&id| prunr_models::is_available(id))
+        let installed = || prunr_models::REGISTRY.iter().map(|d| d.id).filter(|&id| installs.has_installed(id));
+        let rows = installed()
             .filter_map(|id| {
                 let measured = prunr_core::ep_compat::measurements(id);
                 test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))
             })
             .collect();
-        Self { tested: prunr_core::ep_compat::tested(), engines, rows, changed: prunr_core::ep_compat::changed_since_test() }
+        Self {
+            tested: prunr_core::ep_compat::tested(),
+            engines,
+            rows,
+            changed: prunr_core::ep_compat::changed_since_test(),
+            testable: installed().filter(|&id| crate::bench::here::times(id)).collect(),
+        }
     }
 }
 
