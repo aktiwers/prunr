@@ -41,7 +41,7 @@ on Ubuntu 22.04+ / Fedora 40+ / openSUSE Tumbleweed.
 | Installer | [prunr-windows-x86_64-setup.exe](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64-setup.exe) |
 | Portable | [zip](https://github.com/aktiwers/prunr/releases/latest/download/prunr-windows-x86_64.zip) |
 
-GPU acceleration is built in: both downloads ship Microsoft's Windows ML build of ONNX Runtime (1.30, with DirectML), which runs the models on any DirectX 12 graphics card (NVIDIA, AMD, Intel) and on the processor when there is none. With an NVIDIA card, Prunr offers the CUDA Runtime on first launch (a 1.8 GB download with NVIDIA's libraries), which also runs on the card the few models DirectML gets wrong. Windows 10 1903 or later.
+GPU acceleration is built in: both downloads ship Microsoft's Windows ML build of ONNX Runtime (1.30, with DirectML), which runs the models on any DirectX 12 graphics card (NVIDIA, AMD, Intel) and on the processor when there is none. With an NVIDIA card, Prunr offers CUDA on first launch (about 2 GB with NVIDIA's libraries). It runs beside DirectML: each model uses whichever is faster for it, and CUDA runs the few models DirectML cannot. Windows 10 1903 or later.
 
 All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/prunr/releases)
 
@@ -154,7 +154,7 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 
 | Backend | Hardware | Bundled? | Notes |
 |---|---|---|---|
-| CUDA | NVIDIA GPU | on-demand (Linux, Windows) | Settings → Hardware → Install (a 1.8 GB download with NVIDIA's CUDA and cuDNN libraries); offered on first launch with an NVIDIA card |
+| CUDA | NVIDIA GPU | on-demand (Linux, Windows) | Settings → Hardware → Install (about 2 GB with NVIDIA's CUDA and cuDNN libraries); offered on first launch with an NVIDIA card. On Windows it joins the built-in DirectML, and each model runs on the faster |
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
 | DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download (the Windows ML build of ONNX Runtime 1.30); falls back to the CPU without a GPU |
 | **OpenVINO** | **Intel CPU/iGPU/NPU** | **on-demand** | Settings → Hardware → Install (~80 MB) |
