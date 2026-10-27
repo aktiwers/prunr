@@ -579,6 +579,17 @@ impl EpKind {
         }
     }
 
+    /// Whether this provider's sessions build one at a time in a process,
+    /// whichever model or thread builds them: DirectML's
+    /// `commit_from_memory` races in AbiCustomRegistry when two run at once.
+    fn builds_one_at_a_time(self) -> bool {
+        match self {
+            #[cfg(windows)]
+            EpKind::DirectMl => true,
+            _ => false,
+        }
+    }
+
     /// Whether a session this provider took can still fail its first run:
     /// CUDA loads cuDNN's parts on first use, DirectML builds its fused
     /// nodes then, and MIGraphX compiles a free size when it first meets
@@ -819,14 +830,18 @@ pub(crate) fn walk_ladder<S>(
         }
         let drafted = crate::cache::drafts_attached();
         let started = std::time::SystemTime::now();
-        let mut committed = commit(ep);
-        // A build that failed while writing its optimized graph (the disk
-        // filled meanwhile) says nothing about the provider until it fails
-        // without one too.
-        if matches!(committed, Err(Miss::Failed { suspect_cache: None, .. })) && crate::cache::drafts_attached() > drafted {
-            tracing::warn!(?model, ep = %ep, "{prefix}session failed while writing its optimized graph; building it without");
-            committed = crate::cache::without_drafts(|| commit(ep));
-        }
+        let committed = {
+            let _turn = ep.builds_one_at_a_time().then(|| ONE_BUILD_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            let mut committed = commit(ep);
+            // A build that failed while writing its optimized graph (the
+            // disk filled meanwhile) says nothing about the provider until
+            // it fails without one too.
+            if matches!(committed, Err(Miss::Failed { suspect_cache: None, .. })) && crate::cache::drafts_attached() > drafted {
+                tracing::warn!(?model, ep = %ep, "{prefix}session failed while writing its optimized graph; building it without");
+                committed = crate::cache::without_drafts(|| commit(ep));
+            }
+            committed
+        };
         match committed {
             Ok(session) => return Ok((session, ep, walk.failed)),
             Err(Miss::Unusable(error)) => {
@@ -1393,27 +1408,15 @@ pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
     }
 }
 
-/// Engines of one model build one after another: DirectML's session
-/// creation is not thread-safe, and CoreML compiles each engine into the
-/// model's one cache folder, where two at once left a half-written cache
-/// that was then recorded as CoreML failing the model.
-pub(crate) fn engines_build_one_at_a_time() -> bool {
-    directml_active() || OrtEngine::detect_active_provider().eq_ignore_ascii_case(COREML_NAME)
-}
+/// Held while a provider that `builds_one_at_a_time` builds a session
+/// (and runs its test): the ladder takes it, so every builder does.
+static ONE_BUILD_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Whether DirectML is the active GPU provider. Parallel session builds
-/// go sequential under it: its `commit_from_memory` races in
-/// AbiCustomRegistry on concurrent calls.
-pub(crate) fn directml_active() -> bool {
-    #[cfg(windows)]
-    {
-        OrtEngine::detect_active_provider()
-            .eq_ignore_ascii_case(EpKind::DirectMl.as_str())
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+/// Engines of one model build one after another under CoreML: it compiles
+/// each engine into the model's one cache folder, where two at once left a
+/// half-written cache that was then recorded as CoreML failing the model.
+pub(crate) fn engines_build_one_at_a_time() -> bool {
+    OrtEngine::detect_active_provider().eq_ignore_ascii_case(COREML_NAME)
 }
 
 impl OrtEngine {
@@ -1958,6 +1961,28 @@ mod tests {
             assert_eq!(matches!(skip_reason(d.id, Weights::Fp32, EpKind::MiGraphX), Some(Skip::KeptOff(_))), kept, "{:?}", d.id);
             assert!(!compiles_per_shape(d.id, EpKind::Cuda));
         }
+    }
+
+    /// DirectML sessions of any model, built from several threads at once,
+    /// commit one at a time.
+    #[cfg(windows)]
+    #[test]
+    fn directml_sessions_build_one_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static BUILDING: AtomicUsize = AtomicUsize::new(0);
+        static MOST: AtomicUsize = AtomicUsize::new(0);
+        let walk = || {
+            walk_ladder("", prunr_models::ModelId::U2net, Weights::Fp32, &[EpKind::DirectMl], |_| {
+                MOST.fetch_max(BUILDING.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                BUILDING.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .is_ok()
+        };
+        let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(walk)).collect();
+        assert!(threads.into_iter().all(|t| t.join().expect("no panic")), "each built");
+        assert_eq!(MOST.load(Ordering::SeqCst), 1);
     }
 
     /// A model tries the providers measured faster first, quickest first;

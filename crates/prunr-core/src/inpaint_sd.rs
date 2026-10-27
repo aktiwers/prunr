@@ -1549,13 +1549,11 @@ impl SdSession {
         let wanted: Vec<(&'static str, SmokeFn)> = PARTS.iter().copied()
             .filter(|(key, _)| *key != "text_encoder" || has_text)
             .collect();
-        let mut parts: Vec<(&'static str, Session, SessionPick)> =
-            if crate::engine::directml_active() {
-                wanted.iter().map(build).collect::<Result<_, _>>()?
-            } else {
-                use rayon::prelude::*;
-                wanted.par_iter().map(build).collect::<Result<_, _>>()?
-            };
+        // DirectML's parts build one at a time inside the ladder.
+        let mut parts: Vec<(&'static str, Session, SessionPick)> = {
+            use rayon::prelude::*;
+            wanted.par_iter().map(build).collect::<Result<_, _>>()?
+        };
 
         let picks: Vec<(&'static str, SessionPick)> = parts.iter().map(|(k, _, pick)| (*k, pick.clone())).collect();
         let unet_on_cuda = picks.iter().any(|(k, pick)| *k == "unet" && pick.provider == crate::engine::CUDA_NAME);
