@@ -36,8 +36,12 @@ impl PrunrApp {
 
     pub(crate) fn uninstall_runtime(&mut self, rt: crate::runtime_install::RuntimeId, ctx: &egui::Context) {
         self.off_thread(ctx, move || {
+            use crate::runtime_install::Uninstalled;
             crate::runtime_install::uninstall(rt)
-                .map(|()| format!("{} uninstalled", rt.display_name()))
+                .map(|when| match when {
+                    Uninstalled::Now => format!("{} uninstalled", rt.display_name()),
+                    Uninstalled::AtNextStart => format!("{} is removed when Prunr next starts", rt.display_name()),
+                })
                 .map_err(|e| format!("Could not uninstall {}: {e}", rt.display_name()))
         });
     }

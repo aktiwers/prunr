@@ -64,6 +64,7 @@ fn main() {
     }
 
     prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
+    prunr_app::runtime_install::finish_uninstalls();
     prunr_app::runtime_install::use_installed_addons();
 
     if cli.clear_ep_cache {
