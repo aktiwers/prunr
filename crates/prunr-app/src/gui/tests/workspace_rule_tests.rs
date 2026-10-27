@@ -499,8 +499,8 @@ const EXERCISED_THROUGH: [&[&str]; 8] = [
     &["infer_only", "infer_after_first_look"],
     &["first_look", "infer_after_first_look"],
     &["process_lama", "tile_compose"],
-    &["upscale_rgba_with_engine", "upscale_tiled_in_less_memory"],
-    &["upscale_rgba", "upscale_rgba_with_engine", "upscale_tiled_in_less_memory"],
+    &["upscale_rgba_with_engine", "upscale_native_tiled", "upscale_tiled_in_less_memory"],
+    &["upscale_rgba", "upscale_rgba_with_engine", "upscale_native_tiled", "upscale_tiled_in_less_memory"],
 ];
 
 /// A function in the source: whether it is `pub`, its signature, its body.

@@ -142,9 +142,23 @@ pub fn upscale_rgba_with_engine(
         )))?;
     let tile_size = engine.upscale_tile().map_or(own_tile, |tile| tile.min(own_tile));
 
-    let tile_multiple = descriptor.tile_size_multiple;
-    let overlap = knobs.tile_overlap();
+    let cfg = TilingConfig { tile_size, tile_multiple: descriptor.tile_size_multiple, overlap: knobs.tile_overlap() };
+    let (native, tile) = upscale_native_tiled(input, engine, knobs, cfg, progress, terminate)?;
+    engine.set_upscale_tile(tile);
+    Ok(fit_to_scale(native, input, scale))
+}
 
+/// `input` at the model's own scale, upscaled in tiles of `cfg` on
+/// `engine` (smaller ones when a tile runs out of graphics memory), and
+/// the tile it ran on.
+fn upscale_native_tiled(
+    input: &RgbaImage,
+    engine: &OrtEngine,
+    knobs: &prunr_models::UpscaleModelKnobs,
+    cfg: TilingConfig,
+    progress: &Progress,
+    terminate: Option<&Arc<UpscaleRunOptions>>,
+) -> Result<(RgbaImage, u32), CoreError> {
     let input_name = knobs.input_name;
     // Probe the loaded session, not `knobs.is_fp16`: the engine may have
     // loaded the fp16 sibling on a GPU, and fp32 tensors into an fp16
@@ -187,11 +201,8 @@ pub fn upscale_rgba_with_engine(
         })
     };
 
-    let cfg = TilingConfig { tile_size, tile_multiple, overlap };
     let on_gpu = !crate::engine::runs_on_host_cpu(engine.active_provider());
-    let (native, tile) = tiling::upscale_tiled_in_less_memory(input, ns, cfg, on_gpu, run_tile, progress)?;
-    engine.set_upscale_tile(tile);
-    Ok(fit_to_scale(native, input, scale))
+    tiling::upscale_tiled_in_less_memory(input, ns, cfg, on_gpu, run_tile, progress)
 }
 
 /// `rgb` as a planar CHW tensor of `shape`, each channel value mapped
@@ -326,6 +337,50 @@ pub(crate) fn ripple_picture(w: u32, h: u32) -> RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How far an upscale in smaller tiles lands from one in the model's
+    /// own: a real photo (`PRUNR_TILE_PHOTO`, its middle 512 x 384, one
+    /// tile at 512 so no seam; `PRUNR_TILE_SIDE` for another) through
+    /// `PRUNR_TILE_MODEL` (default Real-ESRGAN x4) on the engine the model
+    /// gets here, at a half and a quarter of that, then at a half with
+    /// wider overlaps; each run twice and the second timed (a provider
+    /// compiles each new size once). Reports; asserts nothing.
+    #[test]
+    #[ignore = "a real upscaler three times over a photo"]
+    fn smaller_tiles_against_the_models_own() {
+        let Some(path) = std::env::var_os("PRUNR_TILE_PHOTO") else { return };
+        crate::ort_runtime::runtime_for_tests().expect("a runtime");
+        let id = std::env::var("PRUNR_TILE_MODEL").ok()
+            .and_then(|name| prunr_models::ModelId::ALL.iter().copied().find(|id| id.stable_name() == name))
+            .unwrap_or(prunr_models::ModelId::RealEsrganX4Plus);
+        let engine = crate::OrtEngine::for_model(id, 4, false).expect("the model loads");
+        let photo = crate::load_image_from_path(std::path::Path::new(&path)).expect("the photo").to_rgba8();
+        let side: u32 = std::env::var("PRUNR_TILE_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
+        let (w, h) = (side.min(photo.width()), (side * 3 / 4).min(photo.height()));
+        let photo = image::imageops::crop_imm(&photo, (photo.width() - w) / 2, (photo.height() - h) / 2, w, h).to_image();
+        let scale = prunr_models::descriptor(id).and_then(|d| d.upscale).map_or(4, |u| u.native_scale);
+        let mut runs: Vec<(String, RgbaImage, std::time::Duration)> = Vec::new();
+        let knobs = prunr_models::descriptor(id).and_then(|d| d.upscale).expect("an upscaler");
+        let multiple = prunr_models::descriptor(id).and_then(|d| d.tile_size_multiple);
+        let tiles = [(side, 16), (side / 2, 16), (side / 4, 16), (side / 2, 32), (side / 2, 64)];
+        for (tile_size, overlap) in tiles {
+            let cfg = TilingConfig { tile_size, tile_multiple: multiple, overlap };
+            let _ = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
+            let started = std::time::Instant::now();
+            let (out, _) = upscale_native_tiled(&photo, &engine, &knobs, cfg, &Progress::none(), None).expect("upscaled");
+            runs.push((format!("{tile_size} px tiles, overlap {overlap}"), fit_to_scale(out, &photo, scale), started.elapsed()));
+        }
+        let own = &runs[0].1;
+        for (label, out, took) in &runs {
+            let diffs: Vec<u8> = own.as_raw().iter().zip(out.as_raw()).map(|(a, b)| a.abs_diff(*b)).collect();
+            let over = |d: u8| diffs.iter().filter(|&&x| x > d).count() as f64 / diffs.len() as f64 * 100.0;
+            let mean = diffs.iter().map(|&d| f64::from(d)).sum::<f64>() / diffs.len() as f64;
+            eprintln!(
+                "{id:?} on {}, {label}: {took:.2?}; against no seam: max {}/255, mean {mean:.3}, {:.3}% of values over 2, {:.4}% over 8",
+                engine.active_provider(), diffs.iter().max().copied().unwrap_or(0), over(2), over(8),
+            );
+        }
+    }
 
     /// The peak counts the model's own scale: a 2x from a 4x model holds
     /// the 4x image before it is brought down.
