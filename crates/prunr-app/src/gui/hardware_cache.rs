@@ -47,8 +47,8 @@ pub(crate) struct TestResults {
     pub engines: Vec<Engine>,
     pub rows: Vec<TestRow>,
     /// What changed since this computer was tested and dropped what it
-    /// measured (`ep_compat::SCOPE_PARTS` labels); empty when nothing did.
-    pub changed: Vec<String>,
+    /// measured; empty when nothing did.
+    pub changed: Vec<prunr_core::ep_compat::ScopePart>,
     /// The installed models a test would time here (`bench::here::times`).
     pub testable: Vec<prunr_models::ModelId>,
 }
@@ -104,15 +104,14 @@ impl TestResults {
     /// "the graphics driver", "CUDA and the graphics driver": what changed
     /// since the last test, as people say it; `None` when nothing did.
     pub fn what_changed(&self) -> Option<String> {
-        let said = |label: &str| match label {
-            "drivers" => "the graphics driver",
-            "addons" => "an accelerator add-on",
-            "ort" => "Prunr's runtime",
-            _ => "how Prunr sets models up",
+        use prunr_core::ep_compat::ScopePart;
+        let said = |part| match part {
+            ScopePart::Drivers => "the graphics driver",
+            ScopePart::Addons => "an accelerator add-on",
+            ScopePart::Ort => "Prunr's runtime",
+            ScopePart::Setup => "how Prunr sets models up",
         };
-        let mut words: Vec<&str> = self.changed.iter().map(|label| said(label)).collect();
-        words.dedup();
-        (!words.is_empty()).then(|| crate::gui::views::fmt::and_list(words))
+        (!self.changed.is_empty()).then(|| crate::gui::views::fmt::and_list(self.changed.iter().map(|&part| said(part))))
     }
 
     /// Some place is measured here: a test ran, or one was cancelled after
@@ -373,13 +372,14 @@ mod tests {
         assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0]), Some(Cell::Differs));
     }
 
-    /// What changed since the test is said in people's words, each once.
+    /// What changed since the test is said in people's words.
     #[test]
     fn what_changed_is_said_in_words() {
-        let results = |changed: &[&str]| super::TestResults { changed: changed.iter().map(|c| c.to_string()).collect(), ..Default::default() };
+        use prunr_core::ep_compat::ScopePart;
+        let results = |changed: &[ScopePart]| super::TestResults { changed: changed.to_vec(), ..Default::default() };
         assert_eq!(results(&[]).what_changed(), None);
-        assert_eq!(results(&["drivers"]).what_changed().as_deref(), Some("the graphics driver"));
-        assert_eq!(results(&["addons", "drivers"]).what_changed().as_deref(), Some("an accelerator add-on and the graphics driver"));
+        assert_eq!(results(&[ScopePart::Drivers]).what_changed().as_deref(), Some("the graphics driver"));
+        assert_eq!(results(&[ScopePart::Addons, ScopePart::Drivers]).what_changed().as_deref(), Some("an accelerator add-on and the graphics driver"));
     }
 
     /// A card reads installed weights from the cache, not the disk:

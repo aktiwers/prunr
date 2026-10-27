@@ -47,23 +47,50 @@ fn scope() -> String {
 }
 
 fn scope_of(runtime: Option<&str>, drivers: Option<&str>, addons: Option<&str>) -> String {
-    format!("setup {SESSION_SETUP} ort {} drivers {} addons {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""), addons.unwrap_or(""))
+    let values = [&SESSION_SETUP.to_string(), runtime.unwrap_or("unknown"), drivers.unwrap_or(""), addons.unwrap_or("")];
+    let parts: Vec<String> = ScopePart::ALL.iter().zip(values).map(|(part, value)| format!("{} {value}", part.label())).collect();
+    parts.join(" ")
 }
 
-/// The parts a scope is made of, in its order: each label opens its part.
-pub const SCOPE_PARTS: [&str; 4] = ["setup", "ort", "drivers", "addons"];
+/// A part of what a recorded failure or measurement holds for, in the
+/// order a scope is written; each opens with its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopePart {
+    /// How Prunr sets sessions up (`SESSION_SETUP`).
+    Setup,
+    /// The runtime build.
+    Ort,
+    /// The graphics drivers.
+    Drivers,
+    /// The provider add-ons registered beside the runtime.
+    Addons,
+}
+
+impl ScopePart {
+    const ALL: [Self; 4] = [Self::Setup, Self::Ort, Self::Drivers, Self::Addons];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Ort => "ort",
+            Self::Drivers => "drivers",
+            Self::Addons => "addons",
+        }
+    }
+}
 
 /// Each part's value in `scope`; a part a scope was written without (one
 /// from before it existed) reads empty.
-fn parts_of(scope: &str) -> [&str; SCOPE_PARTS.len()] {
+fn parts_of(scope: &str) -> [&str; ScopePart::ALL.len()] {
     let start = |i: usize| -> Option<(usize, usize)> {
-        let label = SCOPE_PARTS[i];
+        let label = ScopePart::ALL[i].label();
         if i == 0 {
             return scope.starts_with(&format!("{label} ")).then_some((0, label.len() + 1));
         }
         scope.find(&format!(" {label} ")).map(|at| (at, label.len() + 2))
     };
-    let starts: Vec<Option<(usize, usize)>> = (0..SCOPE_PARTS.len()).map(start).collect();
+    let starts: Vec<Option<(usize, usize)>> = (0..ScopePart::ALL.len()).map(start).collect();
     std::array::from_fn(|i| {
         let Some((at, marker)) = starts[i] else { return "" };
         let end = starts[i + 1..].iter().flatten().map(|&(next, _)| next).find(|&next| next >= at + marker).unwrap_or(scope.len());
@@ -71,17 +98,17 @@ fn parts_of(scope: &str) -> [&str; SCOPE_PARTS.len()] {
     })
 }
 
-/// The parts that differ between scopes `old` and `new`, by label. An
-/// add-on installed or removed is no change: nothing measured ran on it
-/// before, and what ran on it holds again if it comes back; only another
-/// version of one is.
-fn changed_parts(old: &str, new: &str) -> Vec<&'static str> {
+/// The parts that differ between scopes `old` and `new`. An add-on
+/// installed or removed is no change: nothing measured ran on it before,
+/// and what ran on it holds again if it comes back; only another version
+/// of one is.
+fn changed_parts(old: &str, new: &str) -> Vec<ScopePart> {
     let (old, new) = (parts_of(old), parts_of(new));
-    SCOPE_PARTS
+    ScopePart::ALL
         .into_iter()
         .zip(old.into_iter().zip(new))
-        .filter(|&(label, (a, b))| a != b && !(label == "addons" && (a.is_empty() || b.is_empty())))
-        .map(|(label, _)| label)
+        .filter(|&(part, (a, b))| a != b && !(part == ScopePart::Addons && (a.is_empty() || b.is_empty())))
+        .map(|(part, _)| part)
         .collect()
 }
 
@@ -130,11 +157,11 @@ struct Learned {
     /// When the last test finished, in seconds since 1970.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tested: Option<u64>,
-    /// What changed since this computer was tested (`SCOPE_PARTS`
-    /// labels), when that change dropped what a test measured; cleared by
-    /// the next test of the whole computer, or Forget.
+    /// What changed since this computer was tested, when that change
+    /// dropped what a test measured; cleared by the next test of the
+    /// whole computer, or Forget.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    changed: Vec<String>,
+    changed: Vec<ScopePart>,
     /// The app said what `changed` holds; a part not yet in it is said
     /// when it changes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -298,9 +325,9 @@ fn load_from(path: &Path, scope: &str) -> Option<(Learned, bool)> {
     let was_tested = old.tested.is_some() || !old.measured.is_empty() || !old.changed.is_empty();
     let (mut kept, mut told) = (old.changed, old.change_told);
     if was_tested {
-        for label in changed {
-            if !kept.iter().any(|k| k == label) {
-                kept.push(label.to_string());
+        for part in changed {
+            if !kept.contains(&part) {
+                kept.push(part);
                 told = false;
             }
         }
@@ -323,9 +350,9 @@ pub fn take_untold_change() -> bool {
     })
 }
 
-/// What changed since this computer was tested, by `SCOPE_PARTS` label;
-/// empty when nothing did or it was tested since.
-pub fn changed_since_test() -> Vec<String> {
+/// What changed since this computer was tested; empty when nothing did
+/// or it was tested since.
+pub fn changed_since_test() -> Vec<ScopePart> {
     locked().learned.changed.clone()
 }
 
@@ -627,30 +654,41 @@ mod tests {
             change_told: false,
         };
         save_to(&path, &then, &learned);
-        let afresh = |changed: &[&str]| Some((Learned { changed: changed.iter().map(|c| c.to_string()).collect(), ..Learned::default() }, true));
+        let afresh = |changed: &[ScopePart]| Some((Learned { changed: changed.to_vec(), ..Learned::default() }, true));
         assert_eq!(load_from(&path, &then), Some((learned.clone(), false)));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"), None)), afresh(&["drivers"]));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"), None)), afresh(&["ort"]));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"), None)), afresh(&[ScopePart::Drivers]));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"), None)), afresh(&[ScopePart::Ort]));
         let with_addon = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234"));
         assert_eq!(load_from(&path, &with_addon), Some((learned.clone(), false)), "an add-on installed keeps what was measured");
         save_to(&path, &with_addon, &learned);
         assert_eq!(load_from(&path, &then), Some((learned.clone(), false)), "and removed too");
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.3.0-5678"))), afresh(&["addons"]), "another version of it is a change");
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.3.0-5678"))), afresh(&[ScopePart::Addons]), "another version of it is a change");
         save_to(&path, &then, &learned);
         // A list written before the add-ons part existed is the same setup.
         save_to(&path, "setup 1 ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", &learned);
         assert_eq!(load_from(&path, &then), Some((learned, false)));
         // What was said stays said; a part not yet said is said.
-        let said = Learned { changed: vec!["drivers".into()], change_told: true, ..Learned::default() };
+        let said = Learned { changed: vec![ScopePart::Drivers], change_told: true, ..Learned::default() };
         save_to(&path, &then, &said);
         let again = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.9999"), None);
-        assert_eq!(load_from(&path, &again).map(|(l, _)| (l.changed, l.change_told)), Some((vec!["drivers".to_string()], true)));
+        assert_eq!(load_from(&path, &again).map(|(l, _)| (l.changed, l.change_told)), Some((vec![ScopePart::Drivers], true)));
         let more = scope_of(Some("1.24.1-cccc"), Some("10de:2684:32.0.15.9999"), None);
-        assert_eq!(load_from(&path, &more).map(|(l, _)| (l.changed, l.change_told)), Some((vec!["drivers".to_string(), "ort".to_string()], false)));
+        assert_eq!(load_from(&path, &more).map(|(l, _)| (l.changed, l.change_told)), Some((vec![ScopePart::Drivers, ScopePart::Ort], false)));
         // An untested computer has nothing to say changed.
         save_to(&path, &then, &Learned { failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]), ..Learned::default() });
         assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), None, None)), afresh(&[]));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
+    }
+
+    /// What changed is kept by its scope label, as files already on disk
+    /// hold it.
+    #[test]
+    fn what_changed_is_kept_by_its_label() {
+        for part in ScopePart::ALL {
+            assert_eq!(serde_json::to_string(&part).unwrap(), format!("\"{}\"", part.label()));
+        }
+        let learned: Learned = serde_json::from_str(r#"{"failures":{},"changed":["drivers","addons"]}"#).unwrap();
+        assert_eq!(learned.changed, [ScopePart::Drivers, ScopePart::Addons]);
     }
 
     /// The list Settings resets in the GUI process reaches a worker that

@@ -137,7 +137,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
         ..Default::default()
     });
     let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
-    let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec!["drivers".into()], ..Default::default() });
+    let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec![prunr_core::ep_compat::ScopePart::Drivers], ..Default::default() });
     let shapes = [
         ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", "Install CUDA (2 GB)"]),
         ("not tested since the driver changed", driver_changed, true, vec!["Test this computer"], vec!["Forget the test"]),
