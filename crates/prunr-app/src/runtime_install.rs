@@ -419,11 +419,14 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     Ok(Uninstalled::Now)
 }
 
-/// Remove the add-ons uninstalled while they were loaded, before this
-/// process loads them.
+/// Remove the add-ons uninstalled while they were loaded. Off the main
+/// thread: an add-on is about 2 GB, and nothing loads it meanwhile, as
+/// its mark stays until it is gone (`is_installed`).
 pub fn finish_uninstalls() {
-    if let Some(store) = prunr_models::runtime_store_dir() {
-        remove_marked(&store, RuntimeId::OFFERED.iter().filter(|rt| rt.is_addon()).map(|rt| rt.install_subdir()));
+    let Some(store) = prunr_models::runtime_store_dir() else { return };
+    let marked: Vec<String> = RuntimeId::OFFERED.iter().filter(|rt| rt.is_addon() && rt.removal_pending()).map(|rt| rt.install_subdir()).collect();
+    if !marked.is_empty() {
+        std::thread::spawn(move || remove_marked(&store, marked));
     }
 }
 
@@ -456,10 +459,8 @@ fn run_install(
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
     // Uninstalled while loaded and still here: installing keeps it.
-    if rt.removal_pending() {
-        if let Some(mark) = rt.removal_mark() {
-            std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
-        }
+    if let Some(mark) = rt.removal_mark().filter(|mark| mark.is_file()) {
+        std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
         let install_dir = rt.checked_install_dir()?;
         let _ = tx.send(InstallEvent::Done { install_dir, started: Some(start_addon()) });
         return Ok(());

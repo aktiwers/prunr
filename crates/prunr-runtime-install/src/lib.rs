@@ -518,25 +518,24 @@ fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&s
 /// Extract an `onnxruntime-*` wheel into `target_dir`, applying
 /// `repackage_target_filename`; the runtime library it holds.
 pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<PathBuf, String> {
-    extract_flat(archive, target_dir, repackage_target_filename)?;
-    let dylib = target_dir.join(DYLIB_NAME);
-    if !dylib.is_file() {
-        return Err(format!(
-            "{DYLIB_NAME} missing after extract — wheel layout may have changed",
-        ));
-    }
-    Ok(dylib)
+    extract_library(archive, target_dir, repackage_target_filename, DYLIB_NAME)
 }
 
 /// Extract `addon`'s library from its release `archive` into
 /// `target_dir`; the library's path.
 pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn) -> Result<PathBuf, String> {
-    extract_flat(archive, target_dir, |name| (name == addon.library).then(|| name.to_string()))?;
-    let library = target_dir.join(addon.library);
-    if !library.is_file() {
-        return Err(format!("{} missing from the download: its layout may have changed", addon.library));
+    extract_library(archive, target_dir, |name| (name == addon.library).then(|| name.to_string()), addon.library)
+}
+
+/// `archive`'s files that `rename` keeps, flat in `target_dir`; the path
+/// of `library` among them, which an archive must hold.
+fn extract_library(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>, library: &str) -> Result<PathBuf, String> {
+    extract_flat(archive, target_dir, rename)?;
+    let path = target_dir.join(library);
+    if !path.is_file() {
+        return Err(format!("{library} missing from the download: its layout may have changed"));
     }
-    Ok(library)
+    Ok(path)
 }
 
 /// Filter + flatten for files extracted from an NVIDIA library wheel
@@ -914,20 +913,22 @@ mod tests {
         }
     }
 
+    /// A zip of `files`, each (name, body).
+    fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
     /// An add-on's archive gives up its library and nothing else.
     #[test]
     fn an_addon_archive_gives_up_only_its_library() {
-        let mut zipped = std::io::Cursor::new(Vec::new());
-        {
-            let mut zip = zip::ZipWriter::new(&mut zipped);
-            for (name, body) in [("onnxruntime_providers_cuda.dll", "dll"), ("version.json", "{}"), ("sub/onnxruntime_providers_cuda.dll", "no")] {
-                zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-                zip.write_all(body.as_bytes()).unwrap();
-            }
-            zip.finish().unwrap();
-        }
+        let zipped = zip_of(&[("onnxruntime_providers_cuda.dll", "dll"), ("version.json", "{}"), ("sub/onnxruntime_providers_cuda.dll", "no")]);
         let dir = tempfile::tempdir().unwrap();
-        let library = extract_addon(std::io::Cursor::new(zipped.into_inner()), dir.path(), &CUDA_ADDON_WINDOWS).unwrap();
+        let library = extract_addon(std::io::Cursor::new(zipped), dir.path(), &CUDA_ADDON_WINDOWS).unwrap();
         assert_eq!(std::fs::read_to_string(library).unwrap(), "dll");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the library");
     }
@@ -972,15 +973,7 @@ mod tests {
     /// Extraction writes the libraries flat and refuses a wheel without any.
     #[test]
     fn an_nvidia_wheel_extracts_flat_and_one_without_libraries_fails() {
-        use std::io::Write;
-        let wheel = |files: &[&str]| {
-            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            for f in files {
-                zip.start_file(*f, zip::write::SimpleFileOptions::default()).unwrap();
-                zip.write_all(b"elf").unwrap();
-            }
-            zip.finish().unwrap().into_inner()
-        };
+        let wheel = |files: &[&str]| zip_of(&files.iter().map(|f| (*f, "elf")).collect::<Vec<_>>());
         let dir = tempfile::tempdir().unwrap();
         let n = extract_nvidia_wheel(std::io::Cursor::new(wheel(&["nvidia/curand/lib/libcurand.so.10", "nvidia/curand/include/curand.h"])), dir.path()).unwrap();
         assert_eq!(n, 1);

@@ -64,7 +64,10 @@ fn main() {
     }
 
     prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
-    prunr_app::runtime_install::finish_uninstalls();
+    // Workers skip a marked add-on too, and leave its removal to the app.
+    if !cli.worker {
+        prunr_app::runtime_install::finish_uninstalls();
+    }
     prunr_app::runtime_install::use_installed_addons();
 
     if cli.clear_ep_cache {

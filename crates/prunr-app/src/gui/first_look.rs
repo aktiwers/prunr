@@ -18,7 +18,7 @@ pub(crate) fn first_look_for(
     expected: impl FnOnce(ModelKind) -> Option<Duration>,
 ) -> Option<u64> {
     let model = model.filter(|_| animations && line_mode != LineMode::EdgesOnly)?;
-    shown.filter(|_| prunr_core::subject::first_look_pays(model, expected(model)))
+    shown.filter(|_| prunr_core::subject::first_look_pays(model, || expected(model)))
 }
 
 /// How long each cut-out model took per image this session, by the

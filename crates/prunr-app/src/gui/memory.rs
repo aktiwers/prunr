@@ -129,7 +129,7 @@ pub fn under_memory_pressure() -> bool {
 /// CPU's figure.
 fn per_engine_cost(model: ModelKind, cpu_only: bool) -> usize {
     let id: prunr_models::ModelId = model.into();
-    let provider = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
+    let provider = prunr_core::memory::provider_now(id, cpu_only);
     engine_cost_on(model, provider)
 }
 
@@ -149,8 +149,8 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     // Not waiting on the accelerator probe here (the UI thread): until it
     // answers the engines are counted as on the CPU, the larger figure.
     let id: prunr_models::ModelId = model.into();
-    let on = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
-    let engines = prunr_core::batch::engine_pool_size(model, jobs, cpu_only, on);
+    let on = prunr_core::memory::provider_now(id, cpu_only);
+    let engines = prunr_core::batch::engine_pool_size(model, jobs, on);
     engine_cost_on(model, on) * prunr_core::memory::engines_that_fit(id, on, engines, crate::hardware::card_free_mb_throttled(on))
 }
 

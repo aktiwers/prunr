@@ -28,9 +28,10 @@ pub fn may_take_first_look(model: ModelKind) -> bool {
 /// Whether a run of `model` expected to take `expected` per image
 /// (`None`: not timed yet on this provider) shows a first look. A fast
 /// accelerator's own result lands before a first look would; a weak one,
-/// or the CPU, takes seconds.
-pub fn first_look_pays(model: ModelKind, expected: Option<Duration>) -> bool {
-    may_take_first_look(model) && expected.is_none_or(|t| t > FIRST_LOOK_AFTER)
+/// or the CPU, takes seconds. `expected` is asked only for a model that
+/// may take one: the window asks every frame a batch runs.
+pub fn first_look_pays(model: ModelKind, expected: impl FnOnce() -> Option<Duration>) -> bool {
+    may_take_first_look(model) && expected().is_none_or(|t| t > FIRST_LOOK_AFTER)
 }
 
 /// The first-look model's engine, on the CPU beside a pool of `pool_size`
@@ -134,7 +135,7 @@ mod tests {
             (ModelKind::Silueta, over, false),
             (ModelKind::DdcolorTiny, None, false),
         ] {
-            assert_eq!(first_look_pays(model, expected), pays, "{model:?} expected {expected:?}");
+            assert_eq!(first_look_pays(model, || expected), pays, "{model:?} expected {expected:?}");
         }
         assert!(!may_take_first_look(FIRST_LOOK_MODEL));
     }

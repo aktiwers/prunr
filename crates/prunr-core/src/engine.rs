@@ -74,7 +74,7 @@ static AVAILABLE: std::sync::RwLock<Option<std::sync::Arc<[EpKind]>>> = std::syn
 
 /// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
 /// runtime may lack EPs (the OpenVINO wheel has CPU + OpenVINO only).
-/// Probed once per process.
+/// Probed once per process; an add-on installed later joins it.
 ///
 /// OpenVINO goes before CUDA so Intel users get it; an NVIDIA machine
 /// has no OpenVINO runtime, so it still reaches CUDA.
@@ -1493,18 +1493,6 @@ pub fn openvino_on_gpu() -> bool {
 pub(crate) fn on_host_cpu(provider: &str, openvino_on_gpu: bool) -> bool {
     provider.eq_ignore_ascii_case(CPU_NAME)
         || (provider.eq_ignore_ascii_case(OPENVINO_NAME) && !openvino_on_gpu)
-}
-
-/// Whether `model` runs on the accelerator `provider`: the registry does
-/// not place it on the CPU there, and some weights the ladder would load
-/// there (FP16 first where a copy exists, then the model's own) have not
-/// failed there on an earlier run. A model it does not run falls back to
-/// the CPU by design.
-pub fn model_runs_on(model: prunr_models::ModelId, provider: &str) -> bool {
-    match available_gpu_eps().iter().find(|ep| ep.as_str().eq_ignore_ascii_case(provider)) {
-        Some(&ep) => gpu_skip(model, ep).is_none(),
-        None => !place_here(model, provider, openvino_on_gpu(), false).kept_off(false),
-    }
 }
 
 /// Held while a provider that `builds_one_at_a_time` builds a session

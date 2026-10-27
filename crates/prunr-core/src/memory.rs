@@ -110,7 +110,6 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
     crate::engine::first_gpu_provider(id, cpu_only).unwrap_or(crate::engine::CPU_NAME)
 }
 
-/// `provider_for` without waiting for the GPU probe, for the UI thread:
 /// Whether `id` on `provider` fits the memory free now. No figure for
 /// it, or no reading, lets it through.
 pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
@@ -118,9 +117,10 @@ pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
     room_now(charge, provider).map_or(Ok(()), |room| fit(charge, room))
 }
 
-/// `None` until the probe has answered.
-pub fn provider_once_probed(id: ModelId, cpu_only: bool) -> Option<&'static str> {
-    crate::engine::OrtEngine::probed().then(|| provider_for(id, cpu_only))
+/// `provider_for` without waiting for the GPU probe, for the UI thread:
+/// the CPU until the probe has answered.
+pub fn provider_now(id: ModelId, cpu_only: bool) -> &'static str {
+    if crate::engine::OrtEngine::probed() { provider_for(id, cpu_only) } else { crate::engine::CPU_NAME }
 }
 
 /// What is free now for a run charged `charge`: the card is read only

@@ -355,7 +355,7 @@ pub fn run_worker() -> ! {
 
     // Build rayon pool for parallel inference, sized for the engines a
     // later `Configure` may still build.
-    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, on_cpu, prunr_core::memory::provider_for(model.into(), on_cpu)) };
+    let pool_size = if inpaint_only { 1 } else { prunr_core::batch::engine_pool_size(model, jobs, prunr_core::memory::provider_for(model.into(), on_cpu)) };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(pool_size)
         .build()
