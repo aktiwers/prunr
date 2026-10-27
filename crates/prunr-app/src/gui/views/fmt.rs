@@ -18,16 +18,14 @@ pub fn days_ago(then: u64, now: u64) -> String {
     }
 }
 
-/// A run's time per picture: "0.04 s" under a second, "10.1 s" above,
+/// A run's time per picture: "0.04 s" under a second, "10.1 s" above;
+/// "3.8 ms" where two decimals of a second would read nothing, and
 /// "2m 06s" past a minute.
 pub fn seconds(ms: f32) -> String {
     match ms {
+        ms if !(10.0..60_000.0).contains(&ms) => prunr_models::fmt_ms(f64::from(ms)),
         ms if ms < 1000.0 => format!("{:.2} s", ms / 1000.0),
-        ms if ms < 60_000.0 => format!("{:.1} s", ms / 1000.0),
-        ms => {
-            let secs = (ms / 1000.0).round() as u64;
-            format!("{}m {:02}s", secs / 60, secs % 60)
-        }
+        ms => format!("{:.1} s", ms / 1000.0),
     }
 }
 
@@ -109,6 +107,7 @@ mod tests {
         assert_eq!(seconds(450.0), "0.45 s");
         assert_eq!(seconds(10_100.0), "10.1 s");
         assert_eq!(seconds(126_000.0), "2m 06s");
+        assert_eq!(seconds(3.84), "3.8 ms", "the face finder's time is not nothing");
     }
 
     #[test]
