@@ -292,15 +292,15 @@ pub fn places_here(model: prunr_models::ModelId) -> prunr_models::Places {
 
 fn with_measured(
     mut places: prunr_models::Places,
-    measured: [Option<crate::ep_compat::PlaceKind>; prunr_models::Column::ALL.len()],
+    measured: [Option<prunr_models::Place>; prunr_models::Column::ALL.len()],
 ) -> prunr_models::Places {
     use prunr_models::{Place, Why};
     for column in prunr_models::Column::ALL {
         if matches!(places.get(column), Place::Cpu(Why::Fails(_))) {
             continue;
         }
-        if let Some(kind) = measured[column.index()] {
-            places.set(column, kind.place());
+        if let Some(place) = measured[column.index()] {
+            places.set(column, place);
         }
     }
     places
@@ -738,7 +738,7 @@ pub(crate) fn kept_after_a_run(model: prunr_models::ModelId, ep: EpKind, session
 
 /// Whether this machine's test ran `model` on `ep` and kept it there.
 fn ran_here(model: prunr_models::ModelId, ep: EpKind) -> bool {
-    column_for(model, ep.as_str()).is_some_and(|column| crate::ep_compat::measured_for(model)[column.index()] == Some(crate::ep_compat::PlaceKind::There))
+    column_for(model, ep.as_str()).is_some_and(|column| matches!(crate::ep_compat::measured_for(model)[column.index()], Some(prunr_models::Place::There(_))))
 }
 
 /// One run of `session` on zeros. An input it cannot fill (not a float
@@ -1940,17 +1940,17 @@ mod tests {
     /// stays skipped while places are measured again, the rest are tried.
     #[test]
     fn a_place_measured_here_stands_in_for_the_registrys() {
-        use crate::ep_compat::{PlaceKind, MEASURED_HERE};
-        use prunr_models::{Column, Place, Places, Why};
-        let registry = Places { openvino: Place::Cpu(Why::Fails("hangs")), cuda: Place::There("2x"), ..Places::UNMEASURED };
-        let slower = Column::ALL.map(|column| (column != Column::CoreMl).then_some(PlaceKind::Slower));
+        use crate::ep_compat::MEASURED_HERE;
+        use prunr_models::{Column, Place, Places, Speed, Why};
+        let registry = Places { openvino: Place::Cpu(Why::Fails("hangs")), cuda: Place::There(Speed::on(100.0, 200.0, "test")), ..Places::UNMEASURED };
+        let slower = Column::ALL.map(|column| (column != Column::CoreMl).then_some(Place::Cpu(Why::Slower(MEASURED_HERE))));
         let here = with_measured(registry, slower);
         assert_eq!(here.cuda, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured over the registry's place");
         assert_eq!(here.directml, Place::Cpu(Why::Slower(MEASURED_HERE)), "measured where the registry has none");
         assert_eq!(here.coreml, Place::Unmeasured, "not measured: the registry's");
         assert_eq!(here.openvino, Place::Cpu(Why::Fails("hangs")), "never over a known failure");
         assert!(here.cuda.kept_off(false) && !here.cuda.kept_off(true), "tried again when measuring");
-        let failed = with_measured(Places::UNMEASURED, [Some(PlaceKind::Fails); Column::ALL.len()]);
+        let failed = with_measured(Places::UNMEASURED, [Some(Place::Cpu(Why::Fails(MEASURED_HERE))); Column::ALL.len()]);
         assert!(failed.cuda.kept_off(true), "a measured failure stays off");
     }
 

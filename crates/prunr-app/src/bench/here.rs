@@ -67,7 +67,7 @@ pub fn run(on: &mut dyn FnMut(Told)) {
             let Some(i) = models.iter().position(|id| id.stable_name() == row.name) else { return };
             let (id, column) = (models[i], columns[i]);
             if let Some(place) = super::table::found_here(&row, id, column) {
-                tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place.text, "test placed the model");
+                tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place, "test placed the model");
                 prunr_core::ep_compat::set_measured(id, column, place);
             }
         }
@@ -83,7 +83,7 @@ pub fn run(on: &mut dyn FnMut(Told)) {
 /// what the accelerator compiles, so the first real run starts sooner.
 pub fn check(id: ModelId, on: &mut dyn FnMut(Told)) {
     if let Some((column, place)) = checked(id) {
-        tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place.text, "the check keeps the model off the accelerator");
+        tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place, "the check keeps the model off the accelerator");
         prunr_core::ep_compat::set_measured(id, column, place);
     }
     on(Told::Finished { left_out: Vec::new() });

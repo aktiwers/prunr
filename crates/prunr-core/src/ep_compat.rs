@@ -92,10 +92,15 @@ struct Learned {
 
 /// Where a test found a model runs on one accelerator, as the registry's
 /// `Place` says it, and the measurement behind it.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Measured {
     pub kind: PlaceKind,
+    /// The reason, or what the times leave out; empty when nothing.
     pub text: String,
+    /// Milliseconds a run took there and on the CPU, when the test timed
+    /// both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub times: Option<[f32; 2]>,
 }
 
 /// `Place::There`, or the `Why` of `Place::Cpu`, by name.
@@ -114,20 +119,55 @@ pub const MEASURED_HERE: &str = "measured on this computer (Settings › Hardwar
 
 impl Measured {
     pub fn new(kind: PlaceKind, text: impl Into<String>) -> Self {
-        Self { kind, text: text.into() }
+        Self { kind, text: text.into(), times: None }
+    }
+
+    /// A place found by timing it against the CPU: `ms` there, `cpu_ms`
+    /// on the CPU.
+    pub fn timed(kind: PlaceKind, ms: f32, cpu_ms: f32, text: impl Into<String>) -> Self {
+        Self { kind, text: text.into(), times: Some([ms, cpu_ms]) }
+    }
+
+    /// As the registry's `Place` says it. A faster place needs its times,
+    /// which are what set it against another accelerator's.
+    pub fn place(&self) -> Option<prunr_models::Place> {
+        use prunr_models::{Place, Speed, Why};
+        Some(match self.kind {
+            PlaceKind::There => {
+                let [ms, cpu_ms] = self.times?;
+                Place::There(Speed::on(ms, cpu_ms, MEASURED_HERE))
+            }
+            PlaceKind::Fails => Place::Cpu(Why::Fails(MEASURED_HERE)),
+            PlaceKind::Differs => Place::Cpu(Why::Differs(MEASURED_HERE)),
+            PlaceKind::Slower => Place::Cpu(Why::Slower(MEASURED_HERE)),
+            PlaceKind::NoGain => Place::Cpu(Why::NoGain(MEASURED_HERE)),
+        })
+    }
+}
+
+impl std::fmt::Display for Measured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let times = self.times.map(|[ms, cpu_ms]| prunr_models::times_text(ms, cpu_ms));
+        match (times, self.text.is_empty()) {
+            (Some(times), true) => f.write_str(&times),
+            (Some(times), false) => write!(f, "{times}, {}", self.text),
+            (None, _) => f.write_str(&self.text),
+        }
     }
 }
 
 impl PlaceKind {
-    pub fn place(self) -> prunr_models::Place {
+    /// The kind of `place`; `None` for an unmeasured one.
+    pub fn of(place: prunr_models::Place) -> Option<Self> {
         use prunr_models::{Place, Why};
-        match self {
-            Self::There => Place::There(MEASURED_HERE),
-            Self::Fails => Place::Cpu(Why::Fails(MEASURED_HERE)),
-            Self::Differs => Place::Cpu(Why::Differs(MEASURED_HERE)),
-            Self::Slower => Place::Cpu(Why::Slower(MEASURED_HERE)),
-            Self::NoGain => Place::Cpu(Why::NoGain(MEASURED_HERE)),
-        }
+        Some(match place {
+            Place::There(_) => Self::There,
+            Place::Cpu(Why::Fails(_)) => Self::Fails,
+            Place::Cpu(Why::Differs(_)) => Self::Differs,
+            Place::Cpu(Why::Slower(_)) => Self::Slower,
+            Place::Cpu(Why::NoGain(_)) => Self::NoGain,
+            Place::Unmeasured => return None,
+        })
     }
 }
 
@@ -302,13 +342,13 @@ pub fn clear() -> usize {
 /// Where a test measured `model` runs, per column in `Column::ALL` order,
 /// for its files on disk now. The engine asks every frame while a batch
 /// runs: one lock, and no key built when nothing was measured.
-pub fn measured_for(model: prunr_models::ModelId) -> [Option<PlaceKind>; prunr_models::Column::ALL.len()] {
+pub fn measured_for(model: prunr_models::ModelId) -> [Option<prunr_models::Place>; prunr_models::Column::ALL.len()] {
     let store = locked();
     if store.learned.measured.is_empty() {
         return [None; prunr_models::Column::ALL.len()];
     }
     let files = prunr_models::files_id(model);
-    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).map(|m| m.kind))
+    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).and_then(Measured::place))
 }
 
 /// When the last test finished, in seconds since 1970.
@@ -453,7 +493,7 @@ mod tests {
         assert_eq!(then, format!("setup {SESSION_SETUP} ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094"), "no app version in it: an update keeps the list");
         let learned = Learned {
             failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]),
-            measured: HashMap::from([("directml::Silueta@app1".to_string(), Measured { kind: PlaceKind::Slower, text: "0.8x".into() })]),
+            measured: HashMap::from([("directml::Silueta@app1".to_string(), Measured::new(PlaceKind::Slower, "0.8x"))]),
             tested: Some(1),
         };
         save_to(&path, &then, &learned);
@@ -481,18 +521,31 @@ mod tests {
     }
 
     /// A place written for a model's files reads back in its column, and
-    /// only there; a test's finish is stamped.
+    /// only there, a faster one with its times; a test's finish is stamped.
     #[test]
     fn a_measured_place_reads_back_in_its_column() {
-        use prunr_models::{Column, ModelId};
+        use prunr_models::{Column, ModelId, Place, Speed, Why};
         let model = ModelId::Teed;
         set_measured(model, Column::MiGraphX, Measured::new(PlaceKind::Slower, "0.8x"));
+        set_measured(model, Column::Cuda, Measured::timed(PlaceKind::There, 12.0, 150.0, ""));
         set_tested();
         let found = measured_for(model);
-        assert_eq!(found[Column::MiGraphX.index()], Some(PlaceKind::Slower));
-        assert_eq!(found.iter().flatten().count(), 1, "{found:?}");
+        assert_eq!(found[Column::MiGraphX.index()], Some(Place::Cpu(Why::Slower(MEASURED_HERE))));
+        assert_eq!(found[Column::Cuda.index()], Some(Place::There(Speed::on(12.0, 150.0, MEASURED_HERE))));
+        assert_eq!(found.iter().flatten().count(), 2, "{found:?}");
         assert!(tested().is_some());
         assert_eq!(measured_for(ModelId::U2net), [None; Column::ALL.len()], "another model has none");
+    }
+
+    /// A faster place without its times has nothing to set against
+    /// another accelerator's, so it reads as unmeasured; shown, the times
+    /// come first.
+    #[test]
+    fn a_faster_place_needs_its_times() {
+        assert_eq!(Measured::new(PlaceKind::There, "").place(), None);
+        let timed = Measured::timed(PlaceKind::There, 300.0, 400.0, "within 10%");
+        assert_eq!(timed.to_string(), "1.33x: 300 ms against the CPU's 400 ms, within 10%");
+        assert_eq!(Measured::new(PlaceKind::Fails, "no kernel").to_string(), "no kernel");
     }
 
     #[test]

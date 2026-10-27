@@ -1,6 +1,7 @@
 //! What the bench found, as a table for the terminal and as Markdown and
 //! JSON for the user to send back.
 
+use prunr_models::fmt_ms;
 use serde::Serialize;
 
 use super::stats::{speedup, Timing};
@@ -155,20 +156,6 @@ fn provider_and_weights(side: &Side) -> String {
     match side.weights {
         Some(weights) => format!("{} · {weights}", side.provider),
         None => side.provider.clone(),
-    }
-}
-
-/// A duration as people read it: "4.2 ms", "380 ms", "2.41 s", "3m 05s".
-pub fn fmt_ms(ms: f64) -> String {
-    if ms < 10.0 {
-        format!("{ms:.1} ms")
-    } else if ms < 1000.0 {
-        format!("{ms:.0} ms")
-    } else if ms < 60_000.0 {
-        format!("{:.2} s", ms / 1000.0)
-    } else {
-        let secs = (ms / 1000.0).round() as u64;
-        format!("{}m {:02}s", secs / 60, secs % 60)
     }
 }
 
