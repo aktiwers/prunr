@@ -297,10 +297,12 @@ fn paint_item_background(ui: &egui::Ui, item_rect: Rect, is_selected: bool) {
     }
 }
 
-fn draw_loading_spinner(ui: &mut egui::Ui, item_rect: Rect) {
+/// Painted, not placed: `ui.put` moves the list's layout to under the
+/// spinner, so the next row would start inside this one.
+fn draw_loading_spinner(ui: &egui::Ui, item_rect: Rect) {
     const SPINNER: f32 = 20.0;
     let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(SPINNER));
-    ui.put(spinner_rect, egui::Spinner::new().size(SPINNER).color(theme::ACCENT));
+    egui::Spinner::new().size(SPINNER).color(theme::ACCENT).paint_at(ui, spinner_rect);
 }
 
 fn paint_thumbnail(

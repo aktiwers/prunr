@@ -214,3 +214,24 @@ fn the_brush_strip_stays_on_the_canvas_at_every_width() {
     }
     assert!(clashes.is_empty(), "{clashes:#?}");
 }
+
+/// The batch list's rows keep their places while their thumbnails load:
+/// a row's loading spinner once moved the list's layout to just under
+/// itself, so the next row overlapped it and jumped down when the
+/// thumbnail landed; a click aimed between the two missed.
+#[test]
+fn list_rows_hold_their_places_while_thumbnails_load() {
+    let mut harness = super::harness::harness();
+    {
+        let app = harness.state_mut();
+        push_test_item(app, 1);
+        push_test_item(app, 2);
+    }
+    // The frame that asks for the thumbnails draws both spinners.
+    harness.step();
+    assert!(harness.state().batch.items.iter().all(|i| i.thumb.is_pending()), "the thumbnails are still on their way");
+    let rows = controls(&harness, |_| true);
+    let rect = |name: &str| rows.iter().find(|(n, _)| n == name).map(|(_, r)| *r).unwrap_or_else(|| panic!("{name} in the list: {rows:?}"));
+    let (first, second) = (rect("test1.png"), rect("test2.png"));
+    assert!(second[1] >= first[3], "the second row starts below the first: {first:?} then {second:?}");
+}

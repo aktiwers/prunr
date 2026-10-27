@@ -672,10 +672,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         None
     } else {
         let center = canvas_rect.center();
-        ui.put(
-            Rect::from_center_size(center, Vec2::splat(40.0)),
-            egui::Spinner::new().size(40.0).color(theme::ACCENT),
-        );
+        egui::Spinner::new().size(40.0).color(theme::ACCENT).paint_at(ui, Rect::from_center_size(center, Vec2::splat(40.0)));
         ui.ctx().request_repaint();
         None
     }
