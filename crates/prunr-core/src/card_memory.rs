@@ -31,6 +31,19 @@ pub fn cuda_card_memory() -> Option<CardMemory> {
     }
 }
 
+/// The name of the card CUDA's device 0 is ("NVIDIA GeForce RTX 3060");
+/// `None` with no NVIDIA driver.
+pub fn cuda_card_name() -> Option<String> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        nvml::card_name()
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
+}
+
 /// What process `pid` holds on CUDA's card, MB; `None` with no NVIDIA
 /// driver, or when the driver does not say (Windows' display model).
 pub fn process_card_mb(pid: u32) -> Option<u64> {
@@ -109,6 +122,8 @@ mod nvml {
         by_pci_bus_id: unsafe extern "C" fn(*const c_char, *mut Device) -> c_int,
         memory: unsafe extern "C" fn(Device, *mut Memory) -> c_int,
         processes: unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfo) -> c_int,
+        /// `None` on a driver without it: the rest still works.
+        name: Option<unsafe extern "C" fn(Device, *mut c_char, c_uint) -> c_int>,
     }
 
     // SAFETY: the handles are NVML's, which is thread-safe once initialised.
@@ -132,7 +147,8 @@ mod nvml {
                     let by_pci_bus_id = *lib.get(b"nvmlDeviceGetHandleByPciBusId_v2").ok()?;
                     let memory = *lib.get(b"nvmlDeviceGetMemoryInfo").ok()?;
                     let processes = *lib.get(b"nvmlDeviceGetComputeRunningProcesses_v3").ok()?;
-                    Some(Nvml { _lib: lib, count, by_index, by_pci_bus_id, memory, processes })
+                    let name = lib.get(b"nvmlDeviceGetName").ok().map(|f| *f);
+                    Some(Nvml { _lib: lib, count, by_index, by_pci_bus_id, memory, processes, name })
                 }
             })
             .as_ref()
@@ -191,6 +207,19 @@ mod nvml {
             return None;
         }
         Some(CardMemory { free_mb: memory.free / MB, total_mb: memory.total / MB })
+    }
+
+    pub(super) fn card_name() -> Option<String> {
+        let nvml = nvml()?;
+        let device = device(nvml)?;
+        let mut name = [0 as c_char; 96];
+        // SAFETY: a handle NVML gave; it writes a NUL-terminated name of
+        // at most `name.len()` bytes.
+        if unsafe { (nvml.name?)(device, name.as_mut_ptr(), name.len() as c_uint) } != SUCCESS {
+            return None;
+        }
+        let bytes: Vec<u8> = name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        Some(String::from_utf8_lossy(&bytes).into_owned()).filter(|n| !n.is_empty())
     }
 
     pub(super) fn process_card_mb(pid: u32) -> Option<u64> {

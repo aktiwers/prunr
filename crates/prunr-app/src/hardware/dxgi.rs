@@ -51,13 +51,14 @@ pub(super) fn adapters() -> (Vec<AdapterFacts>, Option<usize>) {
     for (index, (_, desc)) in listed.iter().enumerate() {
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         let facts = AdapterFacts {
+            name: String::from_utf16_lossy(&desc.Description[..name_len]),
             vendor_id: desc.VendorId,
             dedicated_mb: (desc.DedicatedVideoMemory / (1024 * 1024)) as u64,
             is_software: is_software(desc),
         };
         tracing::info!(
             index,
-            name = %String::from_utf16_lossy(&desc.Description[..name_len]),
+            name = %facts.name,
             vendor_id = format_args!("{:#06x}", facts.vendor_id),
             device_id = format_args!("{:#06x}", desc.DeviceId),
             dedicated_mb = facts.dedicated_mb,

@@ -7,6 +7,7 @@ use super::{gpu_vendor, GpuSlots, GpuVendor};
 /// One display adapter as DXGI reports it, read without creating a device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AdapterFacts {
+    pub(super) name: String,
     pub(super) vendor_id: u32,
     pub(super) dedicated_mb: u64,
     pub(super) is_software: bool,
@@ -72,6 +73,18 @@ fn strong_card(adapters: &[AdapterFacts], os_choice: Option<usize>) -> Option<us
     })
 }
 
+/// The graphics card's name, of the adapter `sort_adapters` puts in the
+/// card's slot.
+pub(super) fn card_name(adapters: &[AdapterFacts], os_choice: Option<usize>) -> Option<String> {
+    let strong = strong_card(adapters, os_choice);
+    adapters
+        .iter()
+        .enumerate()
+        .find(|&(i, a)| classify_adapter(a, strong == Some(i)).is_some_and(|c| c.kind == GpuKind::Discrete))
+        .map(|(_, a)| a.name.clone())
+        .filter(|name| !name.is_empty())
+}
+
 pub(super) fn sort_adapters(adapters: &[AdapterFacts], os_choice: Option<usize>) -> GpuSlots {
     let strong = strong_card(adapters, os_choice);
     let mut slots = GpuSlots::default();
@@ -92,12 +105,23 @@ mod tests {
     use super::*;
 
     fn adapter(vendor_id: u32, dedicated_mb: u64) -> AdapterFacts {
-        AdapterFacts { vendor_id, dedicated_mb, is_software: false }
+        AdapterFacts { name: String::new(), vendor_id, dedicated_mb, is_software: false }
     }
 
     /// Microsoft Basic Render Driver.
     fn basic_render() -> AdapterFacts {
-        AdapterFacts { vendor_id: 0x1414, dedicated_mb: 0, is_software: true }
+        AdapterFacts { name: "Microsoft Basic Render Driver".into(), vendor_id: 0x1414, dedicated_mb: 0, is_software: true }
+    }
+
+    /// The card's name is the adapter in the card's slot: not the iGPU
+    /// beside it, nor the software adapter a VM shows.
+    #[test]
+    fn the_card_named_is_the_one_in_the_cards_slot() {
+        let named = |name: &str, vendor_id, dedicated_mb| AdapterFacts { name: name.into(), ..adapter(vendor_id, dedicated_mb) };
+        let hybrid = [named("Intel(R) UHD Graphics 630", 0x8086, 128), named("NVIDIA GeForce RTX 3060 Laptop GPU", 0x10de, 6144)];
+        assert_eq!(card_name(&hybrid, Some(1)).as_deref(), Some("NVIDIA GeForce RTX 3060 Laptop GPU"));
+        assert_eq!(card_name(&hybrid[..1], Some(0)), None, "an iGPU alone is no card");
+        assert_eq!(card_name(&[basic_render()], Some(0)), None);
     }
 
     /// One row per machine shape the Windows detection meets.
