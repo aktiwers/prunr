@@ -34,6 +34,8 @@ pub enum Step {
     RestoringFaces,
     Colorizing,
     EstimatingDepth,
+    /// The graphics card ran out of memory; the run goes on on the CPU.
+    OnTheProcessor,
 }
 
 impl Step {
@@ -57,6 +59,7 @@ impl Step {
             Step::RestoringFaces => "Restoring faces",
             Step::Colorizing => "Adding color",
             Step::EstimatingDepth => "Measuring depth",
+            Step::OnTheProcessor => "Out of graphics memory: on the processor",
         }
     }
 }
@@ -384,9 +387,9 @@ impl ProgressSink for RecordingSink {
 /// What every pipeline's reports for a finished run must satisfy, so the
 /// pill can follow any pipeline without knowing it: at least one named
 /// step; counts within their totals, never going backwards while the total
-/// stands (an outer report starts the inner count afresh), and ending
-/// complete; tile updates naming a tile of the last
-/// layout, inside the image.
+/// stands (an outer report starts the inner count afresh, a run going on
+/// on the processor every count), and ending complete; tile updates
+/// naming a tile of the last layout, inside the image.
 #[cfg(any(test, feature = "test-utils"))]
 pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
     if !updates.iter().any(|u| matches!(u, ProgressUpdate::Step(_))) {
@@ -429,6 +432,7 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
                     return Err(format!("preview tile {}×{} at {},{} outside its {}×{} image", t.width, t.height, t.x, t.y, t.full_width, t.full_height));
                 }
             }
+            ProgressUpdate::Step(Step::OnTheProcessor) => last = [None, None],
             ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) => {}
         }
     }
@@ -443,6 +447,17 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run that goes on on the processor counts its tiles again from
+    /// the start; any other step does not restart a count.
+    #[test]
+    fn a_run_going_on_on_the_processor_counts_afresh() {
+        let tile = |done| ProgressUpdate::Inner { done, total: 4, unit: Unit::Tile };
+        let restarted = [ProgressUpdate::Step(Step::Erasing), tile(2), ProgressUpdate::Step(Step::OnTheProcessor), tile(0), tile(4)];
+        assert_eq!(check_contract(&restarted), Ok(()));
+        let went_back = [ProgressUpdate::Step(Step::Erasing), tile(2), ProgressUpdate::Step(Step::Finishing), tile(0), tile(4)];
+        assert!(check_contract(&went_back).is_err());
+    }
 
     #[test]
     fn reports_reach_the_sink_and_cancel_rides_along() {

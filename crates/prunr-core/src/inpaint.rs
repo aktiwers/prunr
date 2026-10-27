@@ -339,12 +339,23 @@ pub fn process_lama(
     }
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
-    fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, _, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
-        session.run_tile(tile_rgba, tile_mask).inspect_err(|e| {
-            tracing::error!(%e, ?id, "LaMa tile inference failed; its session is dropped");
-            LamaSession::forget(id, cpu_only, &session);
-        })
-    }))
+    let fill = |session: &Arc<LamaSession>, on_cpu: bool| {
+        fill_at_scale(image, mask, scale, LAMA_FIT, progress, |rgba, m, _, progress| tile_compose(rgba, m, progress, |tile_rgba, tile_mask| {
+            session.run_tile(tile_rgba, tile_mask).inspect_err(|e| {
+                tracing::error!(%e, ?id, "LaMa tile inference failed; its session is dropped");
+                LamaSession::forget(id, on_cpu, session);
+            })
+        }))
+    };
+    // Its tiles are one fixed size, so a card short of memory for them
+    // leaves the fill to the processor.
+    let on_gpu = !crate::engine::runs_on_host_cpu(&session.pick.provider);
+    crate::engine::retry_on_cpu(on_gpu, progress, || fill(&session, cpu_only), |e| {
+        if crate::memory::fits_now(id, crate::engine::CPU_NAME).is_err() {
+            return Err(e);
+        }
+        fill(&LamaSession::get(id, true)?, true)
+    })
 }
 
 /// Fill `mask` through `fill` at `scale`, region by region: each region

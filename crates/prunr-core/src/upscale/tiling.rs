@@ -112,6 +112,68 @@ pub fn upscale_tiled<F>(
 where
     F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
 {
+    upscale_tiled_as(Step::Upscaling, input, scale, cfg, run_tile, progress)
+}
+
+/// The smallest tile a run that ran out of memory tries: below it the
+/// overlap is most of each tile.
+const MIN_RETRY_TILE: u32 = 128;
+
+/// The next tile down a ladder of halves, a multiple of `multiple`, no
+/// smaller than `MIN_RETRY_TILE`: halves, so the sizes a provider compiles
+/// for repeat from run to run.
+pub fn smaller_tile(tile: u32, multiple: Option<u32>) -> Option<u32> {
+    let m = multiple.unwrap_or(1).max(1);
+    let half = tile / 2 / m * m;
+    (half >= MIN_RETRY_TILE).then_some(half)
+}
+
+/// `upscale_tiled` at `cfg`'s tile, and when a tile runs out of memory on
+/// a graphics card (`on_gpu`), again at each smaller tile that splits the
+/// image further, until one fits or none is left.
+pub fn upscale_tiled_in_less_memory<F>(
+    input: &RgbaImage,
+    scale: u32,
+    mut cfg: TilingConfig,
+    on_gpu: bool,
+    run_tile: F,
+    progress: &Progress,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
+{
+    let (w, h) = input.dimensions();
+    let mut step = Step::Upscaling;
+    loop {
+        match upscale_tiled_as(step, input, scale, cfg, &run_tile, progress) {
+            Err(e) if on_gpu && e.is_out_of_memory() => {
+                let tiles = plan_upscale_tiles(w, h, cfg).len();
+                let Some(smaller) = smaller_tile(cfg.tile_size, cfg.tile_multiple)
+                    .map(|tile_size| TilingConfig { tile_size, ..cfg })
+                    .filter(|c| plan_upscale_tiles(w, h, *c).len() > tiles)
+                else {
+                    return Err(e);
+                };
+                tracing::warn!(%e, from = cfg.tile_size, to = smaller.tile_size, "upscale ran out of graphics memory; smaller tiles");
+                cfg = smaller;
+                step = Step::UpscalingInLessMemory;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn upscale_tiled_as<F>(
+    step: Step,
+    input: &RgbaImage,
+    scale: u32,
+    cfg: TilingConfig,
+    run_tile: F,
+    progress: &Progress,
+) -> Result<RgbaImage, CoreError>
+where
+    F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
+{
     let TilingConfig { tile_size, overlap, .. } = cfg;
     let (in_w, in_h) = input.dimensions();
     let out_w = in_w * scale;
@@ -119,7 +181,7 @@ where
 
     let tiles = plan_upscale_tiles(in_w, in_h, cfg);
     let total = tiles.len() as u32;
-    progress.step(Step::Upscaling);
+    progress.step(step);
     progress.tiles(tiles.iter().map(|t| TileRect::of_pixels(t.x, t.y, t.w, t.h, in_w, in_h)).collect());
     progress.inner(0, total, Unit::Tile);
 
@@ -341,6 +403,48 @@ mod tests {
 
         assert_eq!(result.width(), 250 * scale);
         assert_eq!(result.height(), 200 * scale);
+    }
+
+    /// Tiles go down by halves on a multiple of the model's window, and
+    /// stop above the smallest worth running.
+    #[test]
+    fn a_smaller_tile_is_half_on_the_models_multiple() {
+        assert_eq!(smaller_tile(512, Some(16)), Some(256));
+        assert_eq!(smaller_tile(256, Some(16)), Some(128));
+        assert_eq!(smaller_tile(128, Some(16)), None);
+        assert_eq!(smaller_tile(500, Some(16)), Some(240));
+        assert_eq!(smaller_tile(300, None), Some(150));
+    }
+
+    /// A card short of memory for a 512 px tile gets the image again in
+    /// 256 px tiles, the same picture, its progress counted afresh for
+    /// the new layout; on the processor, or with no smaller tile that
+    /// splits the image further, the error stands.
+    #[test]
+    fn a_tile_out_of_memory_on_a_card_runs_again_in_smaller_tiles() {
+        use std::sync::Arc;
+        let scale = 2;
+        let input = RgbaImage::from_fn(600, 400, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 7, 255]));
+        let upscale = |rgb: &RgbImage, pw: u32, ph: u32| RgbImage::from_fn(scale * pw, scale * ph, |x, y| *rgb.get_pixel(x / scale, y / scale));
+        let fits_256 = |rgb: &RgbImage, pw: u32, ph: u32| -> Result<RgbImage, CoreError> {
+            if pw.max(ph) > 256 {
+                return Err(CoreError::Inference("upscale: inference failed: CUDA error: out of memory".into()));
+            }
+            Ok(upscale(rgb, pw, ph))
+        };
+        let cfg = TilingConfig { tile_size: 512, tile_multiple: Some(16), overlap: 16 };
+        let sink = Arc::new(crate::progress::RecordingSink::default());
+        let retried = upscale_tiled_in_less_memory(&input, scale, cfg, true, fits_256, &Progress::new(sink.clone())).expect("fits in 256 px tiles");
+        let direct = upscale_tiled(&input, scale, TilingConfig { tile_size: 256, ..cfg }, |t, w, h| Ok(upscale(t, w, h)), &Progress::none()).unwrap();
+        assert!(retried == direct, "the same picture as 256 px tiles from the start");
+        crate::progress::check_contract(&sink.updates()).expect("the retry is counted afresh");
+        assert!(sink.updates().contains(&crate::ProgressUpdate::Step(Step::UpscalingInLessMemory)), "and says so");
+
+        let on_cpu = upscale_tiled_in_less_memory(&input, scale, cfg, false, fits_256, &Progress::none());
+        assert!(on_cpu.is_err_and(|e| e.is_out_of_memory()), "the processor's memory is not a card's");
+        let small = RgbaImage::new(100, 100);
+        let never = |_: &RgbImage, _: u32, _: u32| -> Result<RgbImage, CoreError> { Err(CoreError::Inference("out of memory".into())) };
+        assert!(upscale_tiled_in_less_memory(&small, scale, cfg, true, never, &Progress::none()).is_err(), "one tile at any size: nothing smaller to try");
     }
 
     /// On a uniform-color input, overlap-blend must not introduce drift.

@@ -25,6 +25,15 @@ impl CoreError {
             other => other.to_string(),
         }
     }
+
+    /// A run or session that ran out of memory: a smaller piece of work,
+    /// or the processor, may fit.
+    pub fn is_out_of_memory(&self) -> bool {
+        match self {
+            CoreError::Model(m) | CoreError::Inference(m) => crate::ep_compat::is_out_of_memory(m),
+            _ => false,
+        }
+    }
 }
 
 impl From<image::ImageError> for CoreError {

@@ -1723,14 +1723,24 @@ impl Processor {
                     &engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only }, intra_threads,
                 )
                 .inspect_err(|err| tracing::error!(model = ?model_id, %err, "upscale dispatch: engine construction failed"))?;
-                prunr_core::upscale::upscale_rgba_with_engine(
+                let upscale = |engine: &prunr_core::engine::OrtEngine| prunr_core::upscale::upscale_rgba_with_engine(
                     &input_for_inference,
-                    &engine_for_thread,
+                    engine,
                     model_id,
                     scale_factor,
                     &progress,
                     Some(&run_options_for_thread),
-                )
+                );
+                // Smaller tiles on the card first (`upscale_rgba_with_engine`),
+                // then the processor, when it has the room.
+                let on_gpu = !prunr_core::engine::runs_on_host_cpu(engine_for_thread.active_provider());
+                prunr_core::engine::retry_on_cpu(on_gpu, &progress, || upscale(&engine_for_thread), |e| {
+                    if prunr_core::memory::fits_now(model_id, prunr_core::engine::CPU_NAME).is_err() {
+                        return Err(e);
+                    }
+                    let on_cpu = ensure_warm_engine(&engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only: true }, intra_threads)?;
+                    upscale(&on_cpu)
+                })
                 .map(|raw| {
                     let raw = Arc::new(raw);
                     let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
