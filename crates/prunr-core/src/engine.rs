@@ -538,6 +538,12 @@ struct CudaTuning {
     pool_as_asked: bool,
     heuristic_search: bool,
     tf32: bool,
+    /// ORT's memory pattern off. On, it reserves one block of a run's peak
+    /// from the second run on, on top of the pool the first run filled:
+    /// BiRefNet-lite at 1024 went from 7.6 to 12.0 GB on a 12 GB RTX 3060
+    /// and spilled into system memory. Off, it and six other models held
+    /// their first run's memory at the same speed.
+    no_memory_pattern: bool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -548,15 +554,18 @@ impl CudaTuning {
             // addresses, and tiles and photos change both. Heuristic conv
             // search for the same reason: exhaustive benchmarks every new
             // shape, the fixed default algorithm is often the slowest.
-            EpSite::Engine { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: true },
+            EpSite::Engine { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: true, no_memory_pattern: true },
             // The pool and search of the engines, for the same reasons,
             // without TF32's lower precision: SD 1.5 on a 12 GB RTX 3060
             // took 7.1 GB for 512 px tiles instead of 9.4, at the same
             // 4.0 s, and its pixels differ from the defaults' no more than
             // two default runs do. The Magic Brush's masks on it match the
             // CPU's (same pick on 20 of 20 clicks, IoU 0.9998).
-            EpSite::SdPart { .. } | EpSite::Selection { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false },
-            EpSite::Fill { .. } => Self { pool_as_asked: false, heuristic_search: false, tf32: false },
+            // A Stable Diffusion part sets its memory pattern by its own
+            // plan (`SdMemPlan`).
+            EpSite::SdPart { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false, no_memory_pattern: false },
+            EpSite::Selection { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false, no_memory_pattern: true },
+            EpSite::Fill { .. } => Self { pool_as_asked: false, heuristic_search: false, tf32: false, no_memory_pattern: true },
         }
     }
 
@@ -598,6 +607,11 @@ impl EpKind {
     /// session options it needs.
     pub(crate) fn attach(self, builder: ort::session::builder::SessionBuilder, model: prunr_models::ModelId, site: EpSite<'_>) -> Result<ort::session::builder::SessionBuilder, Miss> {
         let builder = crate::ort_runtime::without_optimizers(builder, self.disabled_optimizers()).map_err(|e| Miss::Unusable(e.to_string()))?;
+        let builder = match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda if CudaTuning::for_site(site).no_memory_pattern => builder.with_memory_pattern(false).map_err(|e| Miss::Unusable(e.to_string()))?,
+            _ => builder,
+        };
         let registered = match self {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda if crate::ort_runtime::cuda_addon_registered() => {
@@ -2014,6 +2028,38 @@ mod tests {
             assert!(graph.exists(), "its graph is written each time");
         }
         assert!(crate::cache::graph_not_read(&graph), "and no longer read");
+    }
+
+    /// A CUDA session holds the card memory its first run took: ORT's
+    /// memory pattern, on by default, reserves one block of the run's
+    /// peak from the second run on, on top of the pool the first run
+    /// filled. BiRefNet-lite at 1024 went from 7.7 to 12.0 GB on a 12 GB
+    /// RTX 3060 and spilled into system memory. `PRUNR_CUDA_ADDON` names
+    /// the add-on's library where the runtime has no CUDA of its own.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[ignore = "BiRefNet-lite twice at 1024 on a CUDA card"]
+    fn a_cuda_session_takes_no_more_card_memory_from_its_second_run() {
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        if let Some(addon) = std::env::var_os("PRUNR_CUDA_ADDON") {
+            crate::ort_runtime::use_cuda_addon(addon.into());
+        }
+        let engine = OrtEngine::for_model(prunr_models::ModelId::BiRefNetLite, 4, false).expect("BiRefNet-lite loads");
+        if engine.active_provider() != CUDA_NAME {
+            eprintln!("SKIP: it runs on {}", engine.active_provider());
+            return;
+        }
+        let used = || crate::card_memory::cuda_card_memory().map(|c| c.total_mb - c.free_mb).expect("the card's memory");
+        let photo = image::DynamicImage::new_rgb8(1024, 1024);
+        let progress = crate::Progress::none();
+        crate::pipeline::infer_only(&photo, &engine, &progress).expect("run 1");
+        let after_one = used();
+        crate::pipeline::infer_only(&photo, &engine, &progress).expect("run 2");
+        let after_two = used();
+        assert!(after_two <= after_one + 256, "run 2 took {} MB more than run 1's {after_one} MB", after_two.saturating_sub(after_one));
     }
 
     /// A cached CPU graph the session cannot load (one written elsewhere)
