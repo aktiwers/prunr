@@ -755,10 +755,13 @@ pub const PART_NORMS: &str = "norms";
 
 impl UpscaleModelKnobs {
     /// Tile overlap in pixels: 32 for window-attention transformers
-    /// (two window widths hide attention-window seams), 16 for CNN /
-    /// RRDB (covers receptive field).
+    /// (two window widths hide attention-window seams), 64 for CNN /
+    /// RRDB. Against one seamless tile, 512 px tiles of a 1024 x 768 photo
+    /// with 16 px left values up to 25/255 off along the seams (x4; 27 for
+    /// x2), with 64 px 12 (x4; 18 for x2), for 17% more time on the CPU
+    /// and about 8% on a graphics card.
     pub const fn tile_overlap(&self) -> u32 {
-        if self.uses_window_attention { 32 } else { 16 }
+        if self.uses_window_attention { 32 } else { 64 }
     }
 }
 
@@ -3122,19 +3125,19 @@ mod tests {
 
     /// Each upscaler's dispatch knobs, as its export needs them: the
     /// input tensor's name and type, its native scale, the 32 px overlap
-    /// a window-attention transformer needs (16 px for a CNN), and the
+    /// a window-attention transformer needs (64 px for a CNN), and the
     /// tile multiple HAT's windows and RRDB's pixel_unshuffle demand.
     #[test]
     fn every_upscaler_carries_the_knobs_its_export_needs() {
         // (id, input, fp16, native scale, window attention, tile multiple, overlap, tile)
         let table = [
-            (ModelId::RealEsrganX4Plus, "data", false, 4, false, None, 16, Some(512)),
-            (ModelId::RealEsrganX2Plus, "data", false, 2, false, Some(2), 16, Some(512)),
+            (ModelId::RealEsrganX4Plus, "data", false, 4, false, None, 64, Some(512)),
+            (ModelId::RealEsrganX2Plus, "data", false, 2, false, Some(2), 64, Some(512)),
             (ModelId::Nomos8kSchatL, "input", true, 4, true, Some(16), 32, Some(256)),
-            (ModelId::FourXNmkdSiaxCx, "data", false, 4, false, None, 16, Some(512)),
-            (ModelId::FourXNmkdSuperscale, "data", false, 4, false, None, 16, Some(512)),
+            (ModelId::FourXNmkdSiaxCx, "data", false, 4, false, None, 64, Some(512)),
+            (ModelId::FourXNmkdSuperscale, "data", false, 4, false, None, 64, Some(512)),
             // Run in parts, never tiled.
-            (ModelId::FourXNomos2RealPlksr, "input", false, 4, false, None, 16, None),
+            (ModelId::FourXNomos2RealPlksr, "input", false, 4, false, None, 64, None),
         ];
         assert_eq!(table.len(), ids_in(ModelCategory::Upscale).len(), "a row for every upscaler");
         for (id, input, fp16, scale, window, multiple, overlap, tile) in table {
