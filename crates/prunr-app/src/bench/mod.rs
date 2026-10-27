@@ -381,21 +381,27 @@ impl Row {
 /// What the runner is doing, for the terminal and the report written as
 /// the bench goes.
 pub enum Event {
-    Stage { index: usize, total: usize, model: &'static str, stage: &'static str },
-    /// A model's row, and its pictures when they are worth a look.
-    Done(Box<Row>, Option<Pictures>),
+    /// `provider`: the one GPU provider a pass lets the model try
+    /// (`run_passes`), during its GPU side.
+    Stage { index: usize, total: usize, model: &'static str, stage: &'static str, provider: Option<&'static str> },
+    /// A model's row for one pass, and its pictures when they are worth a
+    /// look.
+    Done { row: Box<Row>, pictures: Option<Pictures>, provider: Option<&'static str> },
 }
 
 /// Run `models` one after the other on `inputs`, each side once untimed
 /// and `runs` times timed.
 pub fn run(models: &[ModelId], inputs: &Inputs, runs: u32, on: &mut dyn FnMut(Event)) {
+    run_passes(models, inputs, runs, |_| vec![None], on);
+}
+
+/// `run`, with each model's GPU side once per provider `passes` names for
+/// it (`None`: whichever its ladder takes), all against one CPU side: a
+/// `Done` per pass.
+pub fn run_passes(models: &[ModelId], inputs: &Inputs, runs: u32, passes: impl Fn(ModelId) -> Vec<Option<&'static str>>, on: &mut dyn FnMut(Event)) {
     let total = models.len();
     for (i, &id) in models.iter().enumerate() {
-        let model = display_name(id);
-        let (row, pictures) = bench_model(id, inputs, runs, &mut |stage| {
-            on(Event::Stage { index: i + 1, total, model, stage });
-        });
-        on(Event::Done(Box::new(row), pictures));
+        bench_model(id, inputs, runs, &passes(id), (i + 1, total), on);
     }
 }
 
@@ -403,10 +409,11 @@ fn display_name(id: ModelId) -> &'static str {
     prunr_models::descriptor(id).map_or(id.stable_name(), |d| d.display_name)
 }
 
-fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'static str)) -> (Row, Option<Pictures>) {
+fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, passes: &[Option<&'static str>], (index, total): (usize, usize), on: &mut dyn FnMut(Event)) {
+    let model = display_name(id);
     let family = Family::of(id);
     let mut row = Row {
-        model: display_name(id),
+        model,
         name: id.stable_name(),
         family,
         cpu: None,
@@ -416,15 +423,18 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
         verdict: Verdict::NotInstalled,
         saved: Vec::new(),
     };
+    let first_pass = passes.first().copied().flatten();
     if !prunr_models::is_available(id) {
-        return (row, None);
+        on(Event::Done { row: Box::new(row), pictures: None, provider: first_pass });
+        return;
     }
     let Some(family) = family else {
         row.gpu = Gpu::ByDesign { reason: "its sessions run on the CPU provider only".into() };
         row.verdict = Verdict::CpuByDesign;
-        return (row, None);
+        on(Event::Done { row: Box::new(row), pictures: None, provider: first_pass });
+        return;
     };
-    stage("reading weights");
+    on(Event::Stage { index, total, model, stage: "reading weights", provider: None });
     warm_weights(id);
 
     let cpu_reference = family != Family::Diffusion || id.sd_spec().is_some_and(|s| s.cpu_output_correct);
@@ -432,7 +442,7 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
     let cpu_runs = if HEAVY.contains(&id) { 0 } else { runs };
     // A side that needs more memory than is free is not run: the bench
     // must not run the machine out of memory either.
-    let (mut cpu, cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
+    let (mut cpu, mut cpu_output) = match (cpu_reference, memory::fits_now(id, CPU)) {
         (false, _) => {
             row.note = Some("no CPU reference: this model's output on the CPU provider is wrong by design".into());
             (None, None)
@@ -442,39 +452,49 @@ fn bench_model(id: ModelId, inputs: &Inputs, runs: u32, stage: &mut dyn FnMut(&'
             (None, None)
         }
         (true, Ok(())) => {
-            let (side, output) = measure(family, id, inputs, true, cpu_runs, stage);
+            let (side, output) = measure(family, id, inputs, true, cpu_runs, &mut |stage| on(Event::Stage { index, total, model, stage, provider: None }));
             (Some(side), output)
         }
     };
-    let (mut gpu, gpu_output) = gpu_side(family, id, inputs, runs, stage);
-    let gpu_side = match &mut gpu {
-        Gpu::Ran(side) => Some(side),
-        _ => None,
-    };
     let cpu_samples = judged(family, inputs, cpu.as_mut(), cpu_output.as_ref());
-    let gpu_samples = judged(family, inputs, gpu_side, gpu_output.as_ref());
-    let on_gpu = gpu.on_gpu().is_some();
-    let mut sizes_differ = false;
-    if let (true, Some(a), Some(b)) = (on_gpu, &cpu_samples, &gpu_samples) {
-        row.agreement = Agreement::of(a, b);
-        sizes_differ = a.len() != b.len();
-        if sizes_differ {
-            row.note = Some(format!("outputs differ in size: {} values on the CPU, {} on the GPU path", a.len(), b.len()));
+    let mut landed: Vec<(Row, Option<Output>, Option<&'static str>)> = Vec::with_capacity(passes.len());
+    for &pass in passes {
+        prunr_core::engine::try_only(pass);
+        let (mut gpu, gpu_output) = gpu_side(family, id, inputs, runs, &mut |stage| on(Event::Stage { index, total, model, stage, provider: pass }));
+        let gpu_ran = match &mut gpu {
+            Gpu::Ran(side) => Some(side),
+            _ => None,
+        };
+        let gpu_samples = judged(family, inputs, gpu_ran, gpu_output.as_ref());
+        let on_gpu = gpu.on_gpu().is_some();
+        let mut pass_row = Row { cpu: cpu.clone(), ..row.clone() };
+        let mut sizes_differ = false;
+        if let (true, Some(a), Some(b)) = (on_gpu, &cpu_samples, &gpu_samples) {
+            pass_row.agreement = Agreement::of(a, b);
+            sizes_differ = a.len() != b.len();
+            if sizes_differ {
+                pass_row.note = Some(format!("outputs differ in size: {} values on the CPU, {} on the GPU path", a.len(), b.len()));
+            }
         }
+        drop(gpu_samples);
+        pass_row.verdict = verdict(Some(family), cpu.as_ref(), &gpu, pass_row.agreement.as_ref(), sizes_differ);
+        pass_row.gpu = gpu;
+        landed.push((pass_row, gpu_output.filter(|_| on_gpu), pass));
     }
-    drop((cpu_samples, gpu_samples));
-    row.verdict = verdict(Some(family), cpu.as_ref(), &gpu, row.agreement.as_ref(), sizes_differ);
-    row.cpu = cpu;
-    row.gpu = gpu;
+    prunr_core::engine::try_only(None);
+    drop(cpu_samples);
     let picture = |output: Option<Output>| match output {
         Some(Output::Picture(picture)) => Some(picture),
         _ => None,
     };
-    let pictures = row.worth_a_look().then(|| Pictures {
-        cpu: picture(cpu_output),
-        gpu: picture(gpu_output.filter(|_| on_gpu)),
-    });
-    (row, pictures)
+    for (pass_row, gpu_output, pass) in landed {
+        // Only the first pass worth a look keeps the CPU's picture beside it.
+        let pictures = pass_row.worth_a_look().then(|| Pictures {
+            cpu: picture(cpu_output.take()),
+            gpu: picture(gpu_output),
+        });
+        on(Event::Done { row: Box::new(pass_row), pictures, provider: pass });
+    }
 }
 
 /// `id`'s GPU side: passed over (no provider would take it, or it needs

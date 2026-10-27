@@ -306,14 +306,42 @@ fn directml_provider() -> ExecutionProviderDispatch {
 }
 
 /// The GPU providers a session of `model` may try, fastest first: none
-/// when the user chose "CPU only" (Settings › Processor).
+/// when the user chose "CPU only" (Settings › Processor); the one
+/// `try_only` names while a test measures it.
 pub(crate) fn gpu_eps_for(model: prunr_models::ModelId, cpu_only: bool) -> Vec<EpKind> {
     if cpu_only {
         return Vec::new();
     }
+    let available = available_gpu_eps();
+    let eps = the_only(&available, ONLY.load(std::sync::atomic::Ordering::Relaxed));
     let places = places_here(model);
     let (intel_gpu, remeasuring) = (openvino_on_gpu(), remeasuring());
-    fastest_first(&available_gpu_eps(), |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
+    fastest_first(eps, |ep| prunr_models::place_in(&places, model, ep.as_str(), intel_gpu, remeasuring))
+}
+
+/// Set by `prunr bench --here` for each pass: the index, among the
+/// providers this process offers, of the one GPU provider its sessions
+/// may try, so that each is measured on its own; `ANY` otherwise.
+static ONLY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(ANY);
+const ANY: usize = usize::MAX;
+
+/// The provider at `only` in `eps` alone (none when it is past them), or
+/// all of them for `ANY`.
+fn the_only<T>(eps: &[T], only: usize) -> &[T] {
+    match only {
+        ANY => eps,
+        index => eps.get(index..=index).unwrap_or_default(),
+    }
+}
+
+/// Let sessions try only `provider` (ORT's name) of the GPU providers, or
+/// any with `None`. A provider this process does not offer leaves none.
+pub fn try_only(provider: Option<&str>) {
+    let index = match provider {
+        None => ANY,
+        Some(provider) => available_gpu_eps().iter().position(|ep| ep.as_str().eq_ignore_ascii_case(provider)).unwrap_or(ANY - 1),
+    };
+    ONLY.store(index, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// `eps` with those measured faster first, quickest first, then the
@@ -2083,6 +2111,17 @@ mod tests {
         assert_eq!(cuda_position(&[EpKind::DirectMl]), 0, "before DirectML");
         #[cfg(target_os = "linux")]
         assert_eq!(cuda_position(&[EpKind::OpenVino, EpKind::MiGraphX]), 1, "between OpenVINO and MIGraphX");
+    }
+
+    /// While a test measures one provider, a model tries that one alone; a
+    /// provider the process lacks leaves none.
+    #[test]
+    fn a_test_pass_lets_a_model_try_one_provider() {
+        let eps = [10, 20, 30];
+        assert_eq!(the_only(&eps, ANY), [10, 20, 30]);
+        assert_eq!(the_only(&eps, 1), [20]);
+        assert!(the_only(&eps, 3).is_empty(), "not offered here");
+        assert!(the_only(&eps, ANY - 1).is_empty(), "named but missing");
     }
 
     /// A model tries the providers measured faster first, quickest first;

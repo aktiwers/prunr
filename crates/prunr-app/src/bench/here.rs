@@ -50,6 +50,11 @@ pub(crate) fn column_of(id: ModelId) -> Option<Column> {
     prunr_core::engine::column_for(id, super::first_tried(&ladder)?)
 }
 
+/// The GPU providers `id`'s sessions may try here, in their order.
+fn tried_here(id: ModelId) -> Vec<&'static str> {
+    prunr_core::engine::gpu_ladder(id).into_iter().filter(|(_, skip)| skip.is_none()).map(|(provider, _)| provider).collect()
+}
+
 /// Run the test: every installed model the accelerator would try (a place
 /// the registry keeps on the CPU for a slower, different or no-gain result
 /// is tried again: `remeasure_places`), but the heavy ones.
@@ -58,14 +63,18 @@ pub fn run(on: &mut dyn FnMut(Told)) {
     let installed = super::select(&[], true, prunr_models::is_available).unwrap_or_default();
     let Plan { models, columns, left_out } = plan(installed, column_of);
     let inputs = Inputs::built_in();
-    super::run(&models, &inputs, RUNS, &mut |event| match event {
-        Event::Stage { index, total, stage, .. } => {
-            let (model, column) = (models[index - 1], columns[index - 1]);
+    // Each model once on each accelerator it may try here: a place for
+    // every one, so the fastest can be told apart.
+    let passes = |id| tried_here(id).into_iter().map(Some).collect();
+    super::run_passes(&models, &inputs, RUNS, passes, &mut |event| match event {
+        Event::Stage { index, total, stage, provider, .. } => {
+            let model = models[index - 1];
+            let column = provider.and_then(|p| prunr_core::engine::column_for(model, p)).unwrap_or(columns[index - 1]);
             on(Told::Step(Step { index, total, model, on_gpu: stage.starts_with("GPU"), column }));
         }
-        Event::Done(row, _) => {
-            let Some(i) = models.iter().position(|id| id.stable_name() == row.name) else { return };
-            let (id, column) = (models[i], columns[i]);
+        Event::Done { row, provider, .. } => {
+            let Some(id) = models.iter().copied().find(|id| id.stable_name() == row.name) else { return };
+            let Some(column) = provider.and_then(|p| prunr_core::engine::column_for(id, p)) else { return };
             if let Some(place) = super::table::found_here(&row, id, column) {
                 tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place, "test placed the model");
                 prunr_core::ep_compat::set_measured(id, column, place);

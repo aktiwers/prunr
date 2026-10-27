@@ -1499,12 +1499,12 @@ pub fn run_bench(args: &BenchArgs) -> i32 {
     files.write(&report);
     let outputs = files.outputs_dir();
     bench::run(&models, &inputs, args.runs, &mut |event| match event {
-        bench::Event::Stage { index, total, model, stage } => {
+        bench::Event::Stage { index, total, model, stage, .. } => {
             eprintln!("[{index}/{total}] {model}: {stage}");
             report.running = Some(format!("{model}: {stage}"));
             files.write(&report);
         }
-        bench::Event::Done(mut row, pictures) => {
+        bench::Event::Done { mut row, pictures, .. } => {
             if let Some(pictures) = pictures {
                 match bench::triage::save(&outputs, row.name, &pictures) {
                     Ok(saved) => row.saved = saved,
