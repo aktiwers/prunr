@@ -84,11 +84,18 @@ fn changed_parts(old: &str, new: &str) -> Vec<&'static str> {
 /// session may well succeed.
 pub fn is_transient(error: &str) -> bool {
     const MARKS: &[&str] = &[
-        "out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate",
         "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
         "has been suspended", "will not respond to more commands",
         "error copying compiled model to cache path",
     ];
+    let lower = error.to_ascii_lowercase();
+    is_out_of_memory(error) || MARKS.iter().any(|m| lower.contains(m))
+}
+
+/// Error text of a run or session that ran out of memory, the card's or
+/// the system's: a smaller piece of work, or the processor, may fit.
+pub fn is_out_of_memory(error: &str) -> bool {
+    const MARKS: &[&str] = &["out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate"];
     let error = error.to_ascii_lowercase();
     MARKS.iter().any(|m| error.contains(m))
 }
@@ -574,6 +581,24 @@ mod tests {
             "DirectML test run failed: output is NaN",
         ] {
             assert!(!is_transient(lasting), "{lasting}");
+        }
+    }
+
+    /// Running out of memory, as CUDA, ORT's pool and DirectML word it,
+    /// is told apart from a lost device, which a smaller tile would not
+    /// help.
+    #[test]
+    fn out_of_memory_is_told_apart_from_a_lost_device() {
+        for oom in [
+            "Non-zero status code returned while running Gather node. Status Message: CUDA error: out of memory",
+            "bfc_arena.cc:360 Failed to allocate memory for requested buffer of size 268435456",
+            "ORT session creation failed (DirectML): HRESULT 0x8007000E",
+            "Exception during initialization: bad allocation",
+        ] {
+            assert!(is_out_of_memory(oom) && is_transient(oom), "{oom}");
+        }
+        for other in ["887A0005 The GPU device instance has been suspended.", "Graph contains cycles"] {
+            assert!(!is_out_of_memory(other), "{other}");
         }
     }
 

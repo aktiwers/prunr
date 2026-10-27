@@ -135,6 +135,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- **An upscale or erase that runs out of graphics memory finishes.** An upscale tries again in smaller tiles on the graphics card, then on the processor; LaMa and MI-GAN go on on the processor. Each says so while it runs. Before, the run stopped with an error.
 - The image list's rows no longer overlap and jump while their thumbnails load.
 - **BiRefNet-lite no longer runs out of graphics memory with CUDA.** From its second run, ONNX Runtime reserved a second copy of the model's working memory: 12 GB instead of 7.6 GB, on a 12 GB card, so the run failed or spilled into system memory. CUDA sessions now keep the first run's memory; every other model also holds less, at the same speed.
 - **Prunr sends nothing to Microsoft.** Since 1.29, ONNX Runtime (the library Prunr runs models with) starts an uploader on Linux and macOS that reports to Microsoft: a device ID it saves, the OS, processor, memory and network type, and which models ran and how fast. Its usual off switch leaves that running, so Prunr now stops it before the library loads and will not load the library otherwise. No released version shipped it. On a Mac the uploader could also crash Prunr as it quit. On Windows, DirectML (the graphics-card library) can add which graphics features it could use to Windows' own diagnostic reports, which Windows sends only when "Send optional diagnostic data" is on.

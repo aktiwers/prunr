@@ -187,7 +187,8 @@ pub fn upscale_rgba_with_engine(
     };
 
     let cfg = TilingConfig { tile_size, tile_multiple, overlap };
-    let native = upscale_tiled(input, ns, cfg, run_tile, progress)?;
+    let on_gpu = !crate::engine::runs_on_host_cpu(engine.active_provider());
+    let native = tiling::upscale_tiled_in_less_memory(input, ns, cfg, on_gpu, run_tile, progress)?;
     Ok(fit_to_scale(native, input, scale))
 }
 

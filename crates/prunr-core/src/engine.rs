@@ -1017,6 +1017,25 @@ pub fn gpu_provider_names() -> Vec<String> {
     }).collect()
 }
 
+/// `on_engine`, and when it ran out of memory on a graphics card
+/// (`on_gpu`), `on_cpu` with that error: a run the card has no room for
+/// still finishes, on the processor, which may also give the error back.
+pub fn retry_on_cpu<T>(
+    on_gpu: bool,
+    progress: &crate::Progress,
+    on_engine: impl FnOnce() -> Result<T, CoreError>,
+    on_cpu: impl FnOnce(CoreError) -> Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    match on_engine() {
+        Err(e) if on_gpu && e.is_out_of_memory() => {
+            tracing::warn!(%e, "out of graphics memory; the run goes on on the processor");
+            progress.step(crate::progress::Step::OnTheProcessor);
+            on_cpu(e)
+        }
+        other => other,
+    }
+}
+
 /// The GPU providers this process runs models on, by their names, once
 /// the probe has answered; `None` before, as the UI thread must not wait
 /// for a GPU driver.
@@ -1799,6 +1818,23 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 
 #[cfg(test)]
 mod tests {
+    /// A run a card ran out of memory for goes on on the processor and
+    /// says so; any other failure, or a run already on the processor,
+    /// keeps its error.
+    #[test]
+    fn a_card_out_of_memory_goes_on_on_the_processor() {
+        use crate::types::CoreError;
+        use std::sync::Arc;
+        let oom = || Err::<u8, _>(CoreError::Inference("CUDA error: out of memory".into()));
+        let sink = Arc::new(crate::progress::RecordingSink::default());
+        assert_eq!(super::retry_on_cpu(true, &crate::Progress::new(sink.clone()), oom, |_| Ok(7)).ok(), Some(7));
+        assert!(sink.updates().contains(&crate::ProgressUpdate::Step(crate::Step::OnTheProcessor)));
+        crate::progress::check_contract(&sink.updates()).expect("it names its step");
+        assert!(super::retry_on_cpu(false, &crate::Progress::none(), oom, |_| Ok(7)).is_err(), "already on the processor");
+        let broken = || Err::<u8, _>(CoreError::Inference("Graph contains cycles".into()));
+        assert!(super::retry_on_cpu(true, &crate::Progress::none(), broken, |_| Ok(7)).is_err(), "not a memory failure");
+        assert!(super::retry_on_cpu(true, &crate::Progress::none(), oom, Err).is_err_and(|e| e.is_out_of_memory()), "no room on the processor either");
+    }
     use super::*;
 
     /// A model reshaping its one input `x` ([batch, 3, h, w], each free)
