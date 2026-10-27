@@ -91,15 +91,19 @@ pub(crate) fn available_gpu_eps() -> &'static [EpKind] {
         #[cfg(not(target_os = "macos"))]
         {
             if ort::ep::OpenVINO::is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
-            if ort::ep::CUDA::is_available().unwrap_or(false) {
+            let cuda = if ort::ep::CUDA::is_available().unwrap_or(false) {
                 crate::ort_runtime::preload_nvidia_libraries();
-                match provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()) {
-                    Ok(()) => eps.push(EpKind::Cuda),
-                    Err(e) => {
-                        tracing::info!(%e, "CUDA cannot start; sessions run on the CPU");
-                        let _ = GPU_START_FAILURE.set(GpuStartFailure::of(GpuStack::Cuda, &e));
-                    }
+                Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
+            } else {
+                crate::ort_runtime::register_cuda_addon().then(cuda_addon_starts)
+            };
+            match cuda {
+                Some(Ok(())) => eps.push(EpKind::Cuda),
+                Some(Err(failure)) => {
+                    tracing::info!(?failure, "CUDA cannot start; sessions run on the CPU");
+                    let _ = GPU_START_FAILURE.set(failure);
                 }
+                None => {}
             }
             #[cfg(target_os = "linux")]
             if ort::ep::MIGraphX::is_available().unwrap_or(false) {
@@ -227,6 +231,21 @@ fn provider_starts(provider: ExecutionProviderDispatch) -> Result<(), String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| e.to_string())
         .and_then(|b| b.with_execution_providers([provider]).map(drop).map_err(|e| e.to_string()))
+}
+
+/// Whether the CUDA add-on can start here: it lists a device only for an
+/// NVIDIA card its CUDA runs on (none without one, or with a driver too
+/// old for CUDA 12), and a session takes that device.
+#[cfg(not(target_os = "macos"))]
+fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
+    let devices = crate::ort_runtime::cuda_addon_devices();
+    if devices.is_empty() {
+        return Err(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDevice });
+    }
+    crate::ort_runtime::session_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|b| b.with_devices(devices, None).map(drop).map_err(|e| e.to_string()))
+        .map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e))
 }
 
 /// Whether DirectML can start a device here. The DirectML runtime, which
@@ -445,14 +464,84 @@ impl EpSite<'_> {
     }
 }
 
+/// How a CUDA session is set up for its site, whether the loaded runtime
+/// carries CUDA or the CUDA add-on brings it. Each `true` sets an option;
+/// the rest keep CUDA's defaults.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CudaTuning {
+    /// The pool grows by what is asked, not to the next power of two.
+    pool_as_asked: bool,
+    heuristic_search: bool,
+    tf32: bool,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl CudaTuning {
+    fn for_site(site: EpSite<'_>) -> Self {
+        match site {
+            // No CUDA graph: it replays the first run's shapes and buffer
+            // addresses, and tiles and photos change both. Heuristic conv
+            // search for the same reason: exhaustive benchmarks every new
+            // shape, the fixed default algorithm is often the slowest.
+            EpSite::Engine { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: true },
+            // The pool and search of the engines, for the same reasons,
+            // without TF32's lower precision: SD 1.5 on a 12 GB RTX 3060
+            // took 7.1 GB for 512 px tiles instead of 9.4, at the same
+            // 4.0 s, and its pixels differ from the defaults' no more than
+            // two default runs do. The Magic Brush's masks on it match the
+            // CPU's (same pick on 20 of 20 clicks, IoU 0.9998).
+            EpSite::SdPart { .. } | EpSite::Selection { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false },
+            EpSite::Fill { .. } => Self { pool_as_asked: false, heuristic_search: false, tf32: false },
+        }
+    }
+
+    /// The loaded runtime's own CUDA provider, so tuned.
+    fn provider(self) -> ExecutionProviderDispatch {
+        let mut p = ort::ep::CUDA::default().with_device_id(0);
+        if self.pool_as_asked {
+            p = p.with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
+        }
+        if self.heuristic_search {
+            p = p.with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic);
+        }
+        if self.tf32 {
+            p = p.with_tf32(true);
+        }
+        p.build()
+    }
+
+    /// The same for the add-on, as `with_devices` takes it: each key
+    /// prefixed with the provider's name; the pool's under `arena.`, the
+    /// only spelling ORT 1.30 hands a plugin's pool (an unknown key is
+    /// ignored without a word, and the default power-of-two growth took
+    /// a 12 GB card for BiRefNet-lite).
+    fn addon_options(self) -> Vec<(String, String)> {
+        [
+            (self.pool_as_asked, "arena.extend_strategy", "1"),
+            (self.heuristic_search, "cudnn_conv_algo_search", "HEURISTIC"),
+            (self.tf32, "use_tf32", "1"),
+        ]
+        .into_iter()
+        .filter(|&(set, ..)| set)
+        .map(|(_, key, value)| (format!("{}.{key}", crate::ort_runtime::CUDA_PLUGIN_EP), value.to_string()))
+        .collect()
+    }
+}
+
 impl EpKind {
     /// `builder` with this provider tuned for `site` (`provider`) and the
     /// session options it needs.
     pub(crate) fn attach(self, builder: ort::session::builder::SessionBuilder, model: prunr_models::ModelId, site: EpSite<'_>) -> Result<ort::session::builder::SessionBuilder, Miss> {
-        crate::ort_runtime::without_optimizers(builder, self.disabled_optimizers())
-            .map_err(|e| Miss::Unusable(e.to_string()))?
-            .with_execution_providers([self.provider(model, site)])
-            .map_err(|e| Miss::Unusable(format!("ORT register {self} EP failed: {e}")))
+        let builder = crate::ort_runtime::without_optimizers(builder, self.disabled_optimizers()).map_err(|e| Miss::Unusable(e.to_string()))?;
+        let registered = match self {
+            #[cfg(not(target_os = "macos"))]
+            EpKind::Cuda if crate::ort_runtime::cuda_addon_registered() => {
+                builder.with_devices(crate::ort_runtime::cuda_addon_devices(), Some(&CudaTuning::for_site(site).addon_options()))
+            }
+            _ => builder.with_execution_providers([self.provider(model, site)]),
+        };
+        registered.map_err(|e| Miss::Unusable(format!("ORT register {self} EP failed: {e}")))
     }
 
     /// ORT optimizers this provider's sessions go without. CoreML: with
@@ -474,33 +563,7 @@ impl EpKind {
     pub(crate) fn provider(self, model: prunr_models::ModelId, site: EpSite<'_>) -> ExecutionProviderDispatch {
         let dispatch = match self {
             #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda => {
-                let p = ort::ep::CUDA::default().with_device_id(0);
-                match site {
-                    // No CUDA graph: it replays the first run's shapes and
-                    // buffer addresses, and tiles and photos change both.
-                    // Heuristic conv search for the same reason: exhaustive
-                    // benchmarks every new shape, the fixed default
-                    // algorithm is often the slowest.
-                    EpSite::Engine { .. } => p
-                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
-                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
-                        .with_tf32(true)
-                        .build(),
-                    // The pool and search of the engines, for the same
-                    // reasons, without TF32's lower precision: SD 1.5 on a
-                    // 12 GB RTX 3060 took 7.1 GB for 512 px tiles instead
-                    // of 9.4, at the same 4.0 s, and its pixels differ from
-                    // the defaults' no more than two default runs do. The
-                    // Magic Brush's masks on it match the CPU's (same pick
-                    // on 20 of 20 clicks, IoU 0.9998).
-                    EpSite::SdPart { .. } | EpSite::Selection { .. } => p
-                        .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
-                        .with_conv_algorithm_search(ort::ep::cuda::ConvAlgorithmSearch::Heuristic)
-                        .build(),
-                    EpSite::Fill { .. } => p.build(),
-                }
-            }
+            EpKind::Cuda => CudaTuning::for_site(site).provider(),
             // One device, as for CUDA: the first card ROCm lists.
             #[cfg(target_os = "linux")]
             EpKind::MiGraphX => ort::ep::MIGraphX::default().with_device_id(0).build(),

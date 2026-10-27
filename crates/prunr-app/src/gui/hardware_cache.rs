@@ -173,7 +173,7 @@ impl HardwareInstallCache {
     pub fn can_load(&self, choice: RuntimeChoice) -> bool {
         match choice {
             RuntimeChoice::BuiltIn => self.built_in_gpu,
-            RuntimeChoice::Store(rt) => self.has_runtime(rt),
+            RuntimeChoice::Store(rt) => !rt.is_addon() && self.has_runtime(rt),
         }
     }
 

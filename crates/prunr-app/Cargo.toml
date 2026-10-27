@@ -59,6 +59,7 @@ prunr-core = { path = "../prunr-core", features = ["test-utils"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 egui_kittest = { workspace = true }
+zip = { workspace = true }
 
 # OS drag-out: supported on Windows and macOS. On Linux the crate requires a
 # GTK window (winit/eframe cannot supply one), and pulls in gtk/gdk native
