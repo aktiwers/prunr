@@ -147,8 +147,9 @@ impl TestResults {
 }
 
 /// `model`'s row from what was measured in each column; `column_of` names
-/// the column a provider's session of it reads. `None` when no engine
-/// measured it.
+/// the column a provider's session of it reads. A column the test does
+/// not try, as Prunr's own tests found it fails there, says so. `None`
+/// when no engine measured it.
 fn test_row(
     model: prunr_models::ModelId,
     engines: &[Engine],
@@ -156,14 +157,18 @@ fn test_row(
     column_of: impl Fn(&str) -> Option<prunr_models::Column>,
     runs_on: &'static str,
 ) -> Option<TestRow> {
+    let fails_by_registry = |column: prunr_models::Column| {
+        matches!(prunr_models::registry_places(model).get(column), prunr_models::Place::Cpu(prunr_models::Why::Fails(_)))
+    };
     let cells: Vec<Cell> = engines
         .iter()
-        .map(|e| match e.installed {
-            true => Cell::of(column_of(e.name).and_then(|c| measured[c.index()].as_ref())),
-            false => Cell::NotInstalled,
+        .map(|e| match (e.installed, column_of(e.name)) {
+            (false, _) => Cell::NotInstalled,
+            (true, Some(column)) if measured[column.index()].is_none() && fails_by_registry(column) => Cell::Fails,
+            (true, column) => Cell::of(column.and_then(|c| measured[c.index()].as_ref())),
         })
         .collect();
-    if cells.iter().all(|c| matches!(c, Cell::Untested | Cell::NotInstalled)) {
+    if measured.iter().all(Option::is_none) {
         return None;
     }
     let cpu_ms = measured.iter().flatten().find_map(|m| m.cpu_ms);
@@ -341,6 +346,11 @@ mod tests {
         let column_of = |p: &str| Column::of(p);
         let mut measured: [Option<Measured>; Column::ALL.len()] = Default::default();
         assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU"), None, "nothing measured");
+        measured[Column::Cuda.index()] = Some(Measured::timed(PlaceKind::There, 440.0, 9_000.0, ""));
+        let all = [Engine { name: "DirectML", installed: true }, Engine { name: "CUDA", installed: true }];
+        let row = super::test_row(ModelId::BiRefNetLite, &all, &measured, column_of, "CUDA").expect("a row");
+        assert_eq!(row.cells, [Cell::Fails, Cell::Time(440.0)], "DirectML, never tried as Prunr's tests found it fails, says so");
+        measured[Column::Cuda.index()] = None;
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Fails, "E_OUTOFMEMORY").with_times(None, Some(10_100.0)));
         let row = super::test_row(ModelId::BiRefNetLite, &engines, &measured, column_of, "CPU").expect("a row");
         assert_eq!(row.cells, [Cell::Fails, Cell::NotInstalled]);
