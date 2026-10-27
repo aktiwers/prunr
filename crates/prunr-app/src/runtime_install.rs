@@ -16,7 +16,9 @@ pub enum InstallEvent {
     Preparing,
     Downloading { bytes_so_far: u64, total_bytes: u64 },
     Extracting,
-    Done { install_dir: PathBuf },
+    /// `started`: an add-on starts in this process as it installs, or says
+    /// why it could not; a runtime loads from the next start (`None`).
+    Done { install_dir: PathBuf, started: Option<Result<(), String>> },
     Failed { error: String },
 }
 
@@ -428,14 +430,18 @@ fn run_install(
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
     }
     // The runtime just installed is the one the user wants next start;
-    // an add-on loads into whichever runtime that is.
-    if !rt.is_addon() {
+    // an add-on starts now, in the runtime already loaded.
+    let started = if rt.is_addon() {
+        use_installed_addons();
+        Some(start_addon())
+    } else {
         if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
             tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
         }
-    }
+        None
+    };
 
-    let _ = tx.send(InstallEvent::Done { install_dir });
+    let _ = tx.send(InstallEvent::Done { install_dir, started });
     Ok(())
 }
 
@@ -445,6 +451,18 @@ pub fn use_installed_addons() {
     let cuda = RuntimeId::Cuda;
     if let Some(library) = cuda.library().filter(|library| cuda.is_addon() && library.is_file()) {
         prunr_core::ort_runtime::use_cuda_addon(library);
+    }
+}
+
+/// Start the installed add-on in this process.
+fn start_addon() -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        prunr_core::engine::start_cuda_addon()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err("no add-on runs on macOS".to_string())
     }
 }
 
@@ -460,7 +478,7 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
     let wheels = nvidia_wheels(&cancel)?;
     let total = wheels.iter().map(|w| w.size_bytes).sum();
     fetch_nvidia_libraries(&wheels, &target, tx, &cancel, (0, total))?;
-    let _ = tx.send(InstallEvent::Done { install_dir: target });
+    let _ = tx.send(InstallEvent::Done { install_dir: target, started: None });
     Ok(())
 }
 

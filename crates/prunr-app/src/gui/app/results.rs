@@ -286,7 +286,15 @@ impl PrunrApp {
             progress.last_event = event.clone();
             let name = progress.target.display_name();
             let outcome = match event {
-                InstallEvent::Done { .. } => Ok(format!("{name} installed. Restart Prunr to apply")),
+                InstallEvent::Done { started: None, .. } => Ok(format!("{name} installed. Restart Prunr to apply")),
+                InstallEvent::Done { started: Some(started), .. } => {
+                    // The next session of each model is built where it now
+                    // runs fastest.
+                    self.free_sessions_for_new_places();
+                    started
+                        .map(|()| format!("{name} installed: models it runs faster use it now"))
+                        .map_err(|e| format!("{name} installed, but it could not start: {e}"))
+                }
                 InstallEvent::Failed { error } => {
                     tracing::warn!(target = name, %error, "install failed");
                     Err(format!("Could not install {name}: {error}"))
@@ -3012,6 +3020,42 @@ mod spare_scales_tests {
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
             let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), style, action);
             assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some() || i.packed.primary == Some(Fine)), "{kind:?} renders with Fine once it lands");
+        }
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use crate::runtime_install::{InstallEvent, InstallTarget, RuntimeId};
+
+    /// Every way an install ends is told once and closes the install: a
+    /// runtime loads from the next start, an add-on is in use at once or
+    /// says why it is not.
+    #[test]
+    fn every_install_end_is_told_once() {
+        let ctx = egui::Context::default();
+        let path = std::path::PathBuf::from("runtimes/cuda");
+        for (event, kind, says) in [
+            (InstallEvent::Done { install_dir: path.clone(), started: None }, "success", "installed. Restart Prunr to apply"),
+            (InstallEvent::Done { install_dir: path.clone(), started: Some(Ok(())) }, "success", "installed: models it runs faster use it now"),
+            (InstallEvent::Done { install_dir: path.clone(), started: Some(Err("no card".into())) }, "error", "installed, but it could not start: no card"),
+            (InstallEvent::Failed { error: "offline".into() }, "error", "Could not install"),
+        ] {
+            let mut app = crate::gui::app::PrunrApp::new_for_test();
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(event).unwrap();
+            app.runtime_install = Some(crate::gui::app::RuntimeInstallProgress {
+                target: InstallTarget::Runtime(RuntimeId::Cuda),
+                rx,
+                last_event: InstallEvent::Preparing,
+                cancel: Default::default(),
+            });
+            let before = app.toasts.len_for_test();
+            app.pump_runtime_install(&ctx);
+            let (level, text) = app.toasts.last_for_test().expect("a toast");
+            assert_eq!((level, text.contains(says)), (kind, true), "{text}");
+            assert_eq!(app.toasts.len_for_test(), before + 1, "once");
+            assert!(app.runtime_install.is_none(), "the install closes");
         }
     }
 }

@@ -146,7 +146,7 @@ impl PrunrApp {
 
     /// Drop every session, the Magic Brush's too: the next one of each
     /// model is built where the places now say.
-    fn free_sessions_for_new_places(&mut self) {
+    pub(super) fn free_sessions_for_new_places(&mut self) {
         self.processor.release_all_sessions();
         self.processor.release_sam_sessions();
     }
