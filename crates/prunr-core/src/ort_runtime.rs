@@ -92,6 +92,16 @@ pub fn runtime_tag() -> Option<&'static str> {
     }).as_deref()
 }
 
+/// Names the add-on registered beside the runtime ("cuda-2a1b3c4d"): a
+/// fingerprint of its library file, which a new add-on version changes.
+/// `None` with none installed.
+pub fn addon_tag() -> Option<String> {
+    let library = CUDA_ADDON.get()?;
+    let meta = std::fs::metadata(library).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(tag_for(Some("cuda"), meta.len(), modified))
+}
+
 /// The loaded runtime's version ("1.24.1"), as the library reports it.
 /// Its build info names it only on some builds: PyPI's say
 /// `git-branch=HEAD`.

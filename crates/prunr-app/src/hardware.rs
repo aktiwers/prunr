@@ -111,8 +111,10 @@ impl HardwareProfile {
 }
 
 /// The graphics drivers a GPU provider runs on, as one string that a
-/// driver update changes: each DXGI adapter on Windows, the NVIDIA
-/// kernel driver on Linux. Empty where none is read.
+/// driver update changes: each DXGI adapter on Windows; on Linux the
+/// NVIDIA driver, ROCm, and the kernel's Intel graphics driver while
+/// OpenVINO may use the Intel graphics; the macOS version, which CoreML
+/// comes with. Empty where none is read.
 pub fn driver_identity() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -120,11 +122,23 @@ pub fn driver_identity() -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_to_string("/sys/module/nvidia/version")
-            .map(|v| format!("nvidia {}", v.trim()))
-            .unwrap_or_default()
+        let read = |path: &str| std::fs::read_to_string(path).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+        let intel_gpu = prunr_core::ort_runtime::intel_gpu_chosen();
+        [
+            read("/sys/module/nvidia/version").map(|v| format!("nvidia {v}")),
+            read("/opt/rocm/.info/version").map(|v| format!("rocm {v}")),
+            intel_gpu.then(|| read("/sys/module/i915/srcversion").or_else(|| read("/sys/module/xe/srcversion"))).flatten().map(|v| format!("intel {v}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ")
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        sysinfo::System::os_version().map(|v| format!("macos {v}")).unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         String::new()
     }

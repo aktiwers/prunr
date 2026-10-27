@@ -281,10 +281,9 @@ impl PrunrApp {
         // The saved model's tools, as a switch to it would set them: an
         // eraser starts with its brush on, a cut-out warms Magic Brush.
         app.fit_brush_models_to_model();
-        app.pending_first_toasts = onboarding_toast.into_iter()
+        app.pending_first_toasts.extend(onboarding_toast.into_iter()
             .chain(prunr_core::ort_runtime::fallback_note().map(str::to_string))
-            .chain(settings_note.map(str::to_string))
-            .collect();
+            .chain(settings_note.map(str::to_string)));
         app.automation = super::env_overrides::control_port()
             .and_then(|port| super::automation::Automation::start(&cc.egui_ctx, port));
         app.batch.selection_queue.wake(&cc.egui_ctx);
@@ -1114,6 +1113,11 @@ impl PrunrApp {
     pub(crate) fn refresh_install_cache(&mut self) {
         self.hardware_install_cache = super::hardware_cache::HardwareInstallCache::refresh();
         self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(self.hardware_install_cache.cuda_offered()));
+        if prunr_core::ep_compat::take_untold_change() {
+            if let Some(what) = self.test_results.what_changed() {
+                self.pending_first_toasts.push(format!("{} changed since this computer was tested, so Prunr goes by its own tests until you test again (Settings › Hardware).", super::views::fmt::capitalized(&what)));
+            }
+        }
         self.settings.fit_sd_quality_to_install(self.hardware_install_cache.lcm_bundle);
     }
 

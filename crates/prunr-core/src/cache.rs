@@ -107,21 +107,28 @@ pub fn remove_retired_root() -> u64 {
 /// creates the directory.
 pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
     let root = cache_root()?;
-    let key = cache_key(id, ep_name, crate::ort_runtime::runtime_tag())?;
+    let key = cache_key(id, ep_name, crate::ort_runtime::runtime_tag(), provider_tag(ep_name).as_deref())?;
     Some(root.join(ep_name.to_ascii_lowercase()).join(key))
 }
 
-/// `<model>-<version>-<files>-ort<runtime tag>-v<format>`, then on the CPU
-/// `-<vector extension>`: an optimized graph is tied to the model files it
-/// was built from, the ORT build that wrote it and, on the CPU, the vector
-/// width its layout was chosen for. A download's files are told apart by
-/// their checksums (a re-export may keep its version string); a built-in
-/// model changes only with the app.
-fn cache_key(id: ModelId, ep_name: &str, runtime: Option<&str>) -> Option<String> {
+/// The add-on `ep_name` comes from, when it is one: its graphs are its own.
+fn provider_tag(ep_name: &str) -> Option<String> {
+    ep_name.eq_ignore_ascii_case(crate::engine::CUDA_NAME).then(crate::ort_runtime::addon_tag).flatten()
+}
+
+/// `<model>-<version>-<files>-ort<runtime tag>[+<add-on tag>]-v<format>`,
+/// then on the CPU `-<vector extension>`: an optimized graph is tied to the
+/// model files it was built from, the ORT build (and the add-on provider)
+/// that wrote it and, on the CPU, the vector width its layout was chosen
+/// for. A download's files are told apart by their checksums (a re-export
+/// may keep its version string); a built-in model changes only with the
+/// app.
+fn cache_key(id: ModelId, ep_name: &str, runtime: Option<&str>, addon: Option<&str>) -> Option<String> {
     let descriptor = prunr_models::descriptor(id)?;
     let files = prunr_models::files_id(id);
+    let addon = addon.map(|tag| format!("+{tag}")).unwrap_or_default();
     let mut key = format!(
-        "{}-{}-{files}-ort{}-v{}",
+        "{}-{}-{files}-ort{}{addon}-v{}",
         id.stable_name(), descriptor.version, runtime.unwrap_or("unknown"), CACHE_FORMAT_VERSION,
     );
     if ep_name.eq_ignore_ascii_case(crate::engine::CPU_NAME) {
@@ -753,7 +760,7 @@ mod tests {
         let old = tag_for(Some("1.24.1"), 30_000_000, 1_700_000_000);
         let same_name_new_file = tag_for(None, 31_000_000, 1_760_000_000);
         let other_build = tag_for(None, 30_000_000, 1_760_000_000);
-        assert_ne!(cache_key(ModelId::Silueta, "CPU", Some(&old)), cache_key(ModelId::Silueta, "CPU", Some(&same_name_new_file)));
+        assert_ne!(cache_key(ModelId::Silueta, "CPU", Some(&old), None), cache_key(ModelId::Silueta, "CPU", Some(&same_name_new_file), None));
         assert_ne!(same_name_new_file, other_build, "a build whose info names no version still differs");
         assert!(old.starts_with("1.24.1-"), "{old}");
     }
@@ -765,11 +772,12 @@ mod tests {
     #[test]
     fn the_cache_key_names_the_files_and_the_cpu_it_was_built_for() {
         let tag = prunr_models::content_tag(ModelId::LaMaFp32).expect("a download");
-        assert!(cache_key(ModelId::LaMaFp32, "OpenVINO", None).unwrap().contains(&format!("-{tag:016x}-")));
-        let built_in = cache_key(ModelId::Silueta, "OpenVINO", None).unwrap();
+        assert!(cache_key(ModelId::LaMaFp32, "OpenVINO", None, None).unwrap().contains(&format!("-{tag:016x}-")));
+        let built_in = cache_key(ModelId::Silueta, "OpenVINO", None, None).unwrap();
         assert!(built_in.contains(&format!("-app{}-", prunr_models::BUILT_IN_VERSION)), "{built_in}");
         let isa = cpu_vector_isa();
-        assert!(cache_key(ModelId::Silueta, "CPU", None).unwrap().ends_with(&format!("-{isa}")));
+        assert!(cache_key(ModelId::Silueta, "CPU", None, None).unwrap().ends_with(&format!("-{isa}")));
+        assert_ne!(cache_key(ModelId::Silueta, "CUDA", Some("1.30.0-aaaa"), Some("cuda-1111")), cache_key(ModelId::Silueta, "CUDA", Some("1.30.0-aaaa"), Some("cuda-2222")), "a new add-on writes its own graphs");
         assert!(!built_in.ends_with(&format!("-{isa}")), "a GPU graph is not laid out for the CPU");
     }
 

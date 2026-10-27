@@ -41,13 +41,40 @@ pub fn set_drivers(identity: String) {
 const SESSION_SETUP: u32 = 1;
 
 /// What a recorded failure holds for: this way of setting sessions up,
-/// runtime build and drivers.
+/// runtime build, drivers and the add-ons registered beside the runtime.
 fn scope() -> String {
-    scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str))
+    scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str), crate::ort_runtime::addon_tag().as_deref())
 }
 
-fn scope_of(runtime: Option<&str>, drivers: Option<&str>) -> String {
-    format!("setup {SESSION_SETUP} ort {} drivers {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""))
+fn scope_of(runtime: Option<&str>, drivers: Option<&str>, addons: Option<&str>) -> String {
+    format!("setup {SESSION_SETUP} ort {} drivers {} addons {}", runtime.unwrap_or("unknown"), drivers.unwrap_or(""), addons.unwrap_or(""))
+}
+
+/// The parts a scope is made of, in its order: each label opens its part.
+pub const SCOPE_PARTS: [&str; 4] = ["setup", "ort", "drivers", "addons"];
+
+/// Each part's value in `scope`; a part a scope was written without (one
+/// from before it existed) reads empty.
+fn parts_of(scope: &str) -> [&str; SCOPE_PARTS.len()] {
+    let start = |i: usize| -> Option<(usize, usize)> {
+        let label = SCOPE_PARTS[i];
+        if i == 0 {
+            return scope.starts_with(&format!("{label} ")).then_some((0, label.len() + 1));
+        }
+        scope.find(&format!(" {label} ")).map(|at| (at, label.len() + 2))
+    };
+    let starts: Vec<Option<(usize, usize)>> = (0..SCOPE_PARTS.len()).map(start).collect();
+    std::array::from_fn(|i| {
+        let Some((at, marker)) = starts[i] else { return "" };
+        let end = starts[i + 1..].iter().flatten().map(|&(next, _)| next).find(|&next| next >= at + marker).unwrap_or(scope.len());
+        scope[at + marker..end].trim()
+    })
+}
+
+/// The parts that differ between scopes `old` and `new`, by label.
+fn changed_parts(old: &str, new: &str) -> Vec<&'static str> {
+    let (old, new) = (parts_of(old), parts_of(new));
+    SCOPE_PARTS.into_iter().zip(old.into_iter().zip(new)).filter(|(_, (a, b))| a != b).map(|(label, _)| label).collect()
 }
 
 /// Error text of a failure the device had rather than the model: memory
@@ -88,6 +115,15 @@ struct Learned {
     /// When the last test finished, in seconds since 1970.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tested: Option<u64>,
+    /// What changed since this computer was tested (`SCOPE_PARTS`
+    /// labels), when that change dropped what a test measured; cleared by
+    /// the next test of the whole computer, or Forget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    changed: Vec<String>,
+    /// The app said what `changed` holds; a part not yet in it is said
+    /// when it changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    change_told: bool,
 }
 
 /// Where a test found a model runs on one accelerator, as the registry's
@@ -221,7 +257,7 @@ fn cache() -> &'static Mutex<Store> {
         let mut store = Store::default();
         if let Some(path) = cache_path() {
             store.stamp = stamp(&path);
-            store.learned = load_from(&path, &scope()).unwrap_or_default();
+            store.learned = store.load(&path, &scope()).unwrap_or_default();
         }
         Mutex::new(store)
     })
@@ -232,11 +268,50 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// What the file at `path` holds under `scope`; nothing for another
-/// scope, `None` when the file cannot be read.
-fn load_from(path: &Path, scope: &str) -> Option<Learned> {
+/// What the file at `path` holds under `scope`, and whether it was
+/// written under another setup and so dropped. A dropped file that held
+/// a test's measurements leaves what changed since (`Learned::changed`).
+/// A scope differing only in how it is written (a part added since) is
+/// the same setup. `None` when the file cannot be read.
+fn load_from(path: &Path, scope: &str) -> Option<(Learned, bool)> {
     let file = serde_json::from_str::<CacheFile>(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(if file.scope == scope { file.learned } else { Learned::default() })
+    let changed = changed_parts(&file.scope, scope);
+    if changed.is_empty() {
+        return Some((file.learned, false));
+    }
+    let old = file.learned;
+    let was_tested = old.tested.is_some() || !old.measured.is_empty() || !old.changed.is_empty();
+    let (mut kept, mut told) = (old.changed, old.change_told);
+    if was_tested {
+        for label in changed {
+            if !kept.iter().any(|k| k == label) {
+                kept.push(label.to_string());
+                told = false;
+            }
+        }
+    }
+    tracing::info!(from = %file.scope, to = %scope, "the setup changed since the EP list was written; it starts afresh");
+    Some((Learned { changed: kept, change_told: told, ..Learned::default() }, true))
+}
+
+/// Whether a change since this computer was tested is yet to be said;
+/// `true` once, whichever process found it.
+pub fn take_untold_change() -> bool {
+    let untold = |learned: &Learned| !learned.changed.is_empty() && !learned.change_told;
+    if !untold(&locked().learned) {
+        return false;
+    }
+    change(|learned| {
+        let now = untold(learned);
+        learned.change_told = true;
+        now
+    })
+}
+
+/// What changed since this computer was tested, by `SCOPE_PARTS` label;
+/// empty when nothing did or it was tested since.
+pub fn changed_since_test() -> Vec<String> {
+    locked().learned.changed.clone()
 }
 
 /// Written whole and renamed into place, so another process reading it
@@ -292,10 +367,20 @@ impl Store {
         if now.is_none() || now == self.stamp {
             return;
         }
-        if let Some(learned) = load_from(path, scope) {
+        if let Some(learned) = self.load(path, scope) {
             self.learned = learned;
-            self.stamp = now;
         }
+    }
+
+    /// `load_from`, and a drop written back at once under this scope, so
+    /// what changed is said once and kept until the next test.
+    fn load(&mut self, path: &Path, scope: &str) -> Option<Learned> {
+        let (learned, dropped) = load_from(path, scope)?;
+        if dropped {
+            save_to(path, scope, &learned);
+        }
+        self.stamp = stamp(path);
+        Some(learned)
     }
 }
 
@@ -368,7 +453,11 @@ pub fn set_measured(model: prunr_models::ModelId, column: prunr_models::Column, 
 /// A test finished now.
 pub fn set_tested() {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    change(|learned| learned.tested = Some(now));
+    change(|learned| {
+        learned.tested = Some(now);
+        learned.changed.clear();
+        learned.change_told = false;
+    });
 }
 
 /// Forget every place a test measured: the registry's apply again.
@@ -376,6 +465,8 @@ pub fn set_tested() {
 pub fn clear_measured() -> usize {
     change(|learned| {
         learned.tested = None;
+        learned.changed.clear();
+        learned.change_told = false;
         std::mem::take(&mut learned.measured).len()
     })
 }
@@ -493,17 +584,34 @@ mod tests {
     fn a_failure_is_forgotten_under_other_drivers_or_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ep_compat.json");
-        let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"));
-        assert_eq!(then, format!("setup {SESSION_SETUP} ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094"), "no app version in it: an update keeps the list");
+        let then = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), None);
+        assert_eq!(then, format!("setup {SESSION_SETUP} ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094 addons "), "no app version in it: an update keeps the list");
         let learned = Learned {
             failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]),
             measured: HashMap::from([("directml::Silueta@app1".to_string(), Measured::new(PlaceKind::Slower, "0.8x"))]),
             tested: Some(1),
+            changed: Vec::new(),
+            change_told: false,
         };
         save_to(&path, &then, &learned);
-        assert_eq!(load_from(&path, &then), Some(learned));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"))), Some(Learned::default()));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"))), Some(Learned::default()));
+        let afresh = |changed: &[&str]| Some((Learned { changed: changed.iter().map(|c| c.to_string()).collect(), ..Learned::default() }, true));
+        assert_eq!(load_from(&path, &then), Some((learned.clone(), false)));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"), None)), afresh(&["drivers"]));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"), None)), afresh(&["ort"]));
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234"))), afresh(&["addons"]));
+        // A list written before the add-ons part existed is the same setup.
+        save_to(&path, "setup 1 ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", &learned);
+        assert_eq!(load_from(&path, &then), Some((learned, false)));
+        // What was said stays said; a part not yet said is said.
+        let said = Learned { changed: vec!["drivers".into()], change_told: true, ..Learned::default() };
+        save_to(&path, &then, &said);
+        let again = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.9999"), None);
+        assert_eq!(load_from(&path, &again).map(|(l, _)| (l.changed, l.change_told)), Some((vec!["drivers".to_string()], true)));
+        let more = scope_of(Some("1.24.1-cccc"), Some("10de:2684:32.0.15.9999"), None);
+        assert_eq!(load_from(&path, &more).map(|(l, _)| (l.changed, l.change_told)), Some((vec!["drivers".to_string(), "ort".to_string()], false)));
+        // An untested computer has nothing to say changed.
+        save_to(&path, &then, &Learned { failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]), ..Learned::default() });
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), None, None)), afresh(&[]));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "the save leaves no draft");
     }
 

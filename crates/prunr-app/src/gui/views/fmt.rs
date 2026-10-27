@@ -31,6 +31,12 @@ pub fn seconds(ms: f32) -> String {
     }
 }
 
+/// `text` with its first letter capitalized: a phrase opening a sentence.
+pub fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 /// "CUDA", "DirectML and CUDA", "the processor, DirectML and CUDA".
 pub fn and_list<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
     let items: Vec<&str> = items.into_iter().collect();
@@ -103,6 +109,12 @@ mod tests {
         assert_eq!(seconds(450.0), "0.45 s");
         assert_eq!(seconds(10_100.0), "10.1 s");
         assert_eq!(seconds(126_000.0), "2m 06s");
+    }
+
+    #[test]
+    fn capitalized_opens_a_sentence() {
+        assert_eq!(capitalized("the graphics driver"), "The graphics driver");
+        assert_eq!(capitalized(""), "");
     }
 
     #[test]
