@@ -71,10 +71,18 @@ fn parts_of(scope: &str) -> [&str; SCOPE_PARTS.len()] {
     })
 }
 
-/// The parts that differ between scopes `old` and `new`, by label.
+/// The parts that differ between scopes `old` and `new`, by label. An
+/// add-on installed or removed is no change: nothing measured ran on it
+/// before, and what ran on it holds again if it comes back; only another
+/// version of one is.
 fn changed_parts(old: &str, new: &str) -> Vec<&'static str> {
     let (old, new) = (parts_of(old), parts_of(new));
-    SCOPE_PARTS.into_iter().zip(old.into_iter().zip(new)).filter(|(_, (a, b))| a != b).map(|(label, _)| label).collect()
+    SCOPE_PARTS
+        .into_iter()
+        .zip(old.into_iter().zip(new))
+        .filter(|&(label, (a, b))| a != b && !(label == "addons" && (a.is_empty() || b.is_empty())))
+        .map(|(label, _)| label)
+        .collect()
 }
 
 /// Error text of a failure the device had rather than the model: memory
@@ -623,7 +631,12 @@ mod tests {
         assert_eq!(load_from(&path, &then), Some((learned.clone(), false)));
         assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.7000"), None)), afresh(&["drivers"]));
         assert_eq!(load_from(&path, &scope_of(Some("1.24.1-bbbb"), Some("10de:2684:32.0.15.6094"), None)), afresh(&["ort"]));
-        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234"))), afresh(&["addons"]));
+        let with_addon = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234"));
+        assert_eq!(load_from(&path, &with_addon), Some((learned.clone(), false)), "an add-on installed keeps what was measured");
+        save_to(&path, &with_addon, &learned);
+        assert_eq!(load_from(&path, &then), Some((learned.clone(), false)), "and removed too");
+        assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.3.0-5678"))), afresh(&["addons"]), "another version of it is a change");
+        save_to(&path, &then, &learned);
         // A list written before the add-ons part existed is the same setup.
         save_to(&path, "setup 1 ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", &learned);
         assert_eq!(load_from(&path, &then), Some((learned, false)));
