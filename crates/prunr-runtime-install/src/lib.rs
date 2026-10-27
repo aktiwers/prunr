@@ -40,6 +40,37 @@ pub const PLAIN_ORT_VERSION: &str = "1.30.0";
 /// gives a wrong result on DirectML, and runs right on this 1.30 build.
 pub const WINDOWS_ML_VERSION: &str = "1.30.0.202609102321";
 
+/// A provider library that loads into the runtime the app ships (an ORT
+/// plugin execution provider), as its release publishes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddOn {
+    pub version: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_bytes: u64,
+    /// The library inside the archive, at its root.
+    pub library: &'static str,
+}
+
+impl AddOn {
+    /// Its download, checked as a wheel's is.
+    pub fn download(&self) -> WheelInfo {
+        WheelInfo { url: self.url.to_string(), sha256: self.sha256.to_string(), size_bytes: self.size_bytes }
+    }
+}
+
+/// Microsoft's CUDA provider as a plugin (CUDA 12, cuDNN 9), the release
+/// matched to ONNX Runtime 1.30, which the Windows ML build is. It brings
+/// no NVIDIA libraries; the app downloads those beside it. 0.3.0 is
+/// matched to 1.31 and CUDA 13 only.
+pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
+    version: "0.2.0",
+    url: "https://github.com/microsoft/onnxruntime/releases/download/plugin-ep-cuda/v0.2.0/cuda_ep_cuda12_0.2.0_win-x64.zip",
+    sha256: "ba698427418129d0215c1d51367a1a97995cc1eed56056479288e3245d19947c",
+    size_bytes: 238_621_368,
+    library: "onnxruntime_providers_cuda.dll",
+};
+
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
@@ -497,6 +528,17 @@ pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<Pat
     Ok(dylib)
 }
 
+/// Extract `addon`'s library from its release `archive` into
+/// `target_dir`; the library's path.
+pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn) -> Result<PathBuf, String> {
+    extract_flat(archive, target_dir, |name| (name == addon.library).then(|| name.to_string()))?;
+    let library = target_dir.join(addon.library);
+    if !library.is_file() {
+        return Err(format!("{} missing from the download: its layout may have changed", addon.library));
+    }
+    Ok(library)
+}
+
 /// Filter + flatten for files extracted from an NVIDIA library wheel
 /// (`nvidia/<package>/lib/libX.so.N` on Linux, `nvidia/<package>/bin/
 /// X64_N.dll` on Windows): its shared libraries, by file name. The same
@@ -870,6 +912,24 @@ mod tests {
         ] {
             assert!(yml.contains(line), "release.yml no longer has `{line}`");
         }
+    }
+
+    /// An add-on's archive gives up its library and nothing else.
+    #[test]
+    fn an_addon_archive_gives_up_only_its_library() {
+        let mut zipped = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut zipped);
+            for (name, body) in [("onnxruntime_providers_cuda.dll", "dll"), ("version.json", "{}"), ("sub/onnxruntime_providers_cuda.dll", "no")] {
+                zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let library = extract_addon(std::io::Cursor::new(zipped.into_inner()), dir.path(), &CUDA_ADDON_WINDOWS).unwrap();
+        assert_eq!(std::fs::read_to_string(library).unwrap(), "dll");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the library");
     }
 
     /// An NVIDIA wheel gives up its shared libraries by file name, and

@@ -54,9 +54,9 @@ impl RuntimeId {
     /// DLL without `openvino.dll` (Python loads that from the separate
     /// `openvino` package), so the provider never registers and every
     /// session would run on the CPU, where DirectML runs the same iGPU.
-    /// CUDA is offered on Windows too: the built-in DirectML fails models
-    /// on an NVIDIA card that CUDA runs (the registry's DirectML places).
-    /// MIGraphX has a Linux wheel only.
+    /// CUDA is offered on Windows too, as an add-on beside the built-in
+    /// DirectML (`is_addon`): DirectML fails models on an NVIDIA card that
+    /// CUDA runs, and is faster for others. MIGraphX has a Linux wheel only.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
         &[Self::Cuda]
     } else if cfg!(windows) {
@@ -66,6 +66,21 @@ impl RuntimeId {
     } else {
         &[Self::OpenVino]
     };
+
+    /// Whether it loads into the runtime the app ships, as a provider
+    /// add-on, rather than replacing it: CUDA on Windows, where the
+    /// built-in runtime keeps DirectML beside it and each model takes the
+    /// faster.
+    pub fn is_addon(self) -> bool {
+        self.addon().is_some()
+    }
+
+    fn addon(self) -> Option<&'static ri::AddOn> {
+        match self {
+            Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
+            _ => None,
+        }
+    }
 
     fn pypi_package(self) -> &'static str {
         match self {
@@ -85,7 +100,10 @@ impl RuntimeId {
     }
 
     pub fn install_subdir(self) -> String {
-        ri::install_subdir(self.short_name(), self.ort_version())
+        match self.addon() {
+            Some(addon) => ri::install_subdir(&format!("{}-addon", self.short_name()), addon.version),
+            None => ri::install_subdir(self.short_name(), self.ort_version()),
+        }
     }
 
     /// The offered runtime installed under `subdir` of the runtime store.
@@ -106,9 +124,13 @@ impl RuntimeId {
     }
 
     pub fn is_installed(self) -> bool {
-        self.install_dir()
-            .map(|d| d.join(prunr_core::ort_runtime::DYLIB_NAME))
-            .is_some_and(|p| p.is_file())
+        self.library().is_some_and(|p| p.is_file())
+    }
+
+    /// The library its install holds: the runtime's, or the add-on's.
+    fn library(self) -> Option<PathBuf> {
+        let name = self.addon().map_or(prunr_core::ort_runtime::DYLIB_NAME, |addon| addon.library);
+        self.install_dir().map(|d| d.join(name))
     }
 
     fn short_name(self) -> &'static str {
@@ -122,6 +144,7 @@ impl RuntimeId {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::OpenVino => "OpenVINO Runtime",
+            Self::Cuda if self.is_addon() => "CUDA",
             Self::Cuda => "CUDA Runtime",
             Self::MiGraphX => "MIGraphX Runtime",
         }
@@ -133,6 +156,8 @@ impl RuntimeId {
         match (self, recommended) {
             (Self::OpenVino, false) => "Not installed (80 MB).",
             (Self::OpenVino, true) => "Not installed (80 MB). Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
+            (Self::Cuda, false) if self.is_addon() => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
+            (Self::Cuda, true) if self.is_addon() => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
             (Self::Cuda, false) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Runs the models on an NVIDIA graphics card.",
             (Self::Cuda, true) => "Not installed (about 2 GB with NVIDIA's CUDA and cuDNN libraries). Recommended for your NVIDIA graphics card: runs the models on it.",
             (Self::MiGraphX, false) => "Not installed (20 MB). Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
@@ -143,6 +168,7 @@ impl RuntimeId {
     pub fn uninstall_label(self) -> &'static str {
         match self {
             Self::OpenVino => "Uninstall OpenVINO Runtime",
+            Self::Cuda if self.is_addon() => "Uninstall CUDA",
             Self::Cuda => "Uninstall CUDA Runtime",
             Self::MiGraphX => "Uninstall MIGraphX Runtime",
         }
@@ -154,6 +180,9 @@ impl RuntimeId {
             Self::OpenVino => "We detected Intel hardware that can use OpenVINO Runtime. \
                 Installing it (~80 MB) makes the models run faster, and lets you \
                 try running them on the Intel graphics chip (Settings › Hardware).",
+            Self::Cuda if self.is_addon() => "We detected an NVIDIA graphics card. Installing CUDA \
+                (about 2 GB, with NVIDIA's CUDA and cuDNN libraries) runs more models \
+                on it than DirectML can, and each model on the faster of the two.",
             Self::Cuda => "We detected an NVIDIA graphics card. Installing CUDA Runtime \
                 (about 2 GB, with NVIDIA's CUDA and cuDNN libraries) runs the models \
                 on it instead of the processor.",
@@ -167,6 +196,7 @@ impl RuntimeId {
     pub fn install_button_label(self) -> &'static str {
         match self {
             Self::OpenVino => "Install OpenVINO Runtime",
+            Self::Cuda if self.is_addon() => "Install CUDA",
             Self::Cuda => "Install CUDA Runtime",
             Self::MiGraphX => "Install MIGraphX Runtime",
         }
@@ -209,8 +239,8 @@ pub const NVIDIA_LICENSE_URLS: [&str; 2] = [
     "https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html",
 ];
 
-/// Where the NVIDIA libraries go: inside the CUDA runtime's install, so
-/// uninstalling it removes them too.
+/// Where the NVIDIA libraries go: inside the CUDA install (the runtime or
+/// the add-on), so uninstalling it removes them too.
 pub fn nvidia_libraries_dir() -> Option<PathBuf> {
     RuntimeId::Cuda.install_dir().map(|d| d.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR))
 }
@@ -350,7 +380,7 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     if !dir.exists() {
         return Ok(()); // already absent — nothing to do
     }
-    if !prunr_core::ort_runtime::has_fallback_excluding(&dir) {
+    if !runtime.is_addon() && !prunr_core::ort_runtime::has_fallback_excluding(&dir) {
         return Err(
             "this is the only ONNX Runtime installed — uninstalling would leave \
              the app unable to start. Install another runtime first, or set \
@@ -363,15 +393,19 @@ pub fn uninstall(runtime: RuntimeId) -> Result<(), String> {
     Ok(())
 }
 
-/// The CUDA runtime brings NVIDIA's libraries in the same install, never
-/// the system's; a reinstall keeps the ones already in place.
+/// The CUDA runtime or add-on brings NVIDIA's libraries in the same
+/// install, never the system's; a reinstall keeps the ones already in
+/// place.
 fn run_install(
     rt: RuntimeId,
     tx: &mpsc::Sender<InstallEvent>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
-    let wheel = query_pypi(rt, &cancel)?;
+    let wheel = match rt.addon() {
+        Some(addon) => addon.download(),
+        None => query_pypi(rt, &cancel)?,
+    };
     let nvidia = if rt == RuntimeId::Cuda && !nvidia_libraries_installed() { nvidia_wheels(&cancel)? } else { Vec::new() };
     let total = wheel.size_bytes + nvidia.iter().map(|w| w.size_bytes).sum::<u64>();
 
@@ -385,7 +419,7 @@ fn run_install(
     // Already SHA-verified inside the retry loop.
     let installed = ri::download_wheel(&wheel, &mut hooks, &spool).and_then(|file| {
         let _ = tx.send(InstallEvent::Extracting);
-        extract_into_place(file, &target)
+        extract_into_place(file, &target, rt.addon())
     });
     let _ = std::fs::remove_file(&spool);
     let install_dir = installed?;
@@ -393,13 +427,25 @@ fn run_install(
         let target = rt.checked_install_dir()?.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
     }
-    // The runtime just installed is the one the user wants next start.
-    if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
-        tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
+    // The runtime just installed is the one the user wants next start;
+    // an add-on loads into whichever runtime that is.
+    if !rt.is_addon() {
+        if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
+            tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
+        }
     }
 
     let _ = tx.send(InstallEvent::Done { install_dir });
     Ok(())
+}
+
+/// Tell this process where the installed add-ons are, before it loads any
+/// session: each one registers when the providers are probed.
+pub fn use_installed_addons() {
+    let cuda = RuntimeId::Cuda;
+    if let Some(library) = cuda.library().filter(|library| cuda.is_addon() && library.is_file()) {
+        prunr_core::ort_runtime::use_cuda_addon(library);
+    }
 }
 
 /// Download each NVIDIA wheel in turn (one in memory at a time, the
@@ -488,10 +534,15 @@ fn query_pypi_package(package: &str, version: &str, cancel: &Arc<AtomicBool>) ->
 
 /// Extract into a hidden folder beside the install and move it into place
 /// once whole: an install cut short (a full disk, the app closed) leaves
-/// the runtime that was there, or none, never half of one to load.
-fn extract_into_place(wheel: impl std::io::Read + std::io::Seek, target_dir: &Path) -> Result<PathBuf, String> {
+/// the runtime that was there, or none, never half of one to load. An
+/// add-on's archive gives up its library; a wheel, its runtime's.
+fn extract_into_place(archive: impl std::io::Read + std::io::Seek, target_dir: &Path, addon: Option<&ri::AddOn>) -> Result<PathBuf, String> {
     let staging = fresh_staging(target_dir)?;
-    let library = ri::extract_wheel(wheel, &staging).inspect_err(|_| {
+    let extracted = match addon {
+        Some(addon) => ri::extract_addon(archive, &staging, addon),
+        None => ri::extract_wheel(archive, &staging),
+    };
+    let library = extracted.inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&staging);
     })?;
     // The NVIDIA libraries live inside the CUDA install and come from
@@ -639,7 +690,7 @@ mod tests {
         let target = store.path().join("openvino-1.24.1-linux-x64");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("libonnxruntime.so"), b"the working one").unwrap();
-        assert!(extract_into_place(std::io::Cursor::new(b"not a zip"), &target).is_err());
+        assert!(extract_into_place(std::io::Cursor::new(b"not a zip"), &target, None).is_err());
         assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"the working one");
         let left: Vec<_> = std::fs::read_dir(store.path()).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
@@ -691,5 +742,31 @@ mod tests {
             &[RuntimeId::OpenVino]
         };
         assert_eq!(RuntimeId::OFFERED, expected);
+        assert_eq!(RuntimeId::Cuda.is_addon(), cfg!(all(windows, target_arch = "x86_64")), "CUDA joins DirectML on Windows");
+    }
+
+    /// An add-on's download leaves its library in the install, beside the
+    /// NVIDIA libraries a reinstall keeps, and no runtime of its own.
+    #[test]
+    fn an_addon_install_holds_its_library_beside_the_nvidia_ones() {
+        use std::io::Write;
+        let mut zipped = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut zipped);
+            for (name, body) in [(ri::CUDA_ADDON_WINDOWS.library, "plugin"), ("version.json", "{}")] {
+                zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let store = tempfile::tempdir().unwrap();
+        let target = store.path().join("cuda-addon-0.2.0-windows-x64");
+        let nvidia = prunr_core::ort_runtime::NVIDIA_LIBS_DIR;
+        std::fs::create_dir_all(target.join(nvidia)).unwrap();
+        std::fs::write(target.join(nvidia).join("cudnn64_9.dll"), b"downloaded").unwrap();
+        let library = extract_into_place(std::io::Cursor::new(zipped.into_inner()), &target, Some(&ri::CUDA_ADDON_WINDOWS)).unwrap();
+        assert_eq!(library, target.join(ri::CUDA_ADDON_WINDOWS.library));
+        assert_eq!(std::fs::read(target.join(nvidia).join("cudnn64_9.dll")).unwrap(), b"downloaded");
+        assert!(!target.join(prunr_core::ort_runtime::DYLIB_NAME).exists(), "no runtime of its own");
     }
 }

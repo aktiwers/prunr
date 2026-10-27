@@ -443,9 +443,17 @@ pub const CUDNN_LIBRARY: &str = if cfg!(windows) { "cudnn64_9.dll" } else { "lib
 /// search path of its own, and the loader reuses a library already loaded
 /// under that name. Once per process; the libraries stay loaded.
 pub fn preload_nvidia_libraries() {
+    if let Some(dir) = loaded_dylib().and_then(Path::parent) {
+        preload_nvidia_libraries_beside(dir);
+    }
+}
+
+/// `preload_nvidia_libraries` from `NVIDIA_LIBS_DIR` in `dir`. Once per
+/// process, whichever folder asks first.
+fn preload_nvidia_libraries_beside(dir: &Path) {
     static PRELOADED: OnceLock<()> = OnceLock::new();
     PRELOADED.get_or_init(|| {
-        let Some(dir) = loaded_dylib().and_then(Path::parent).map(|d| d.join(NVIDIA_LIBS_DIR)) else { return };
+        let dir = dir.join(NVIDIA_LIBS_DIR);
         if !dir.is_dir() {
             return;
         }
@@ -500,6 +508,57 @@ fn load_global(path: &Path) -> Result<(), String> {
         let _ = path;
         Err("NVIDIA libraries are preloaded on Linux and Windows only".to_string())
     }
+}
+
+/// The ORT name of the CUDA provider, as a plugin lists its devices.
+pub const CUDA_PLUGIN_EP: &str = "CUDAExecutionProvider";
+
+/// The installed CUDA add-on's library (NVIDIA's libraries in
+/// `NVIDIA_LIBS_DIR` beside it), for this process to register when it
+/// probes its providers. Set at startup, before any session.
+static CUDA_ADDON: OnceLock<PathBuf> = OnceLock::new();
+
+/// Whether this process registered the CUDA add-on, once it tried.
+static CUDA_ADDON_REGISTERED: OnceLock<bool> = OnceLock::new();
+
+/// Use the CUDA add-on at `library` in this process.
+pub fn use_cuda_addon(library: PathBuf) {
+    let _ = CUDA_ADDON.set(library);
+}
+
+/// Register the CUDA add-on with the loaded runtime, once per process:
+/// NVIDIA's libraries first, which it links by name. `false` when none is
+/// installed or it did not register.
+pub(crate) fn register_cuda_addon() -> bool {
+    *CUDA_ADDON_REGISTERED.get_or_init(|| {
+        let Some(library) = CUDA_ADDON.get() else { return false };
+        let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return false };
+        let started = std::time::Instant::now();
+        if let Some(dir) = library.parent() {
+            preload_nvidia_libraries_beside(dir);
+        }
+        match env.register_ep_library("CUDA", library) {
+            Ok(()) => {
+                tracing::info!(library = %library.display(), elapsed_ms = started.elapsed().as_millis() as u64, "CUDA add-on registered");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(library = %library.display(), %e, "CUDA add-on did not register");
+                false
+            }
+        }
+    })
+}
+
+/// Whether sessions reach CUDA through the add-on in this process.
+pub fn cuda_addon_registered() -> bool {
+    CUDA_ADDON_REGISTERED.get().copied().unwrap_or(false)
+}
+
+/// The devices the CUDA add-on offers: one per NVIDIA card it can use.
+pub(crate) fn cuda_addon_devices() -> Vec<ort::device::Device<'static>> {
+    let Some(env) = ENV.get() else { return Vec::new() };
+    env.devices().filter(|d| d.ep().is_ok_and(|name| name == CUDA_PLUGIN_EP)).collect()
 }
 
 fn read_preferred(root: &Path) -> Option<String> {

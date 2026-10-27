@@ -619,7 +619,9 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
 fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId, recommended: bool, intent: &mut Option<HardwareSectionIntent>) {
     let installed = ctx.installs.has_runtime(rt);
     let installing_this = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::Runtime(rt));
-    let failure = ctx.gpu_failure.filter(|_| ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt))).map(|f| f.text());
+    // An add-on is in use wherever it is installed; a runtime, once loaded.
+    let in_use = rt.is_addon() || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
+    let failure = ctx.gpu_failure.filter(|_| in_use).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
         None if installed => failure.as_deref().unwrap_or("Installed."),
