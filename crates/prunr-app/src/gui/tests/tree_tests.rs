@@ -127,14 +127,14 @@ fn the_computer_test_is_offered_with_an_accelerator() {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: true }],
         rows: vec![row(ModelId::Silueta, vec![Cell::Time(40.0), Cell::Time(57.0)], "DirectML"), row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::Time(450.0)], "CUDA")],
-        changed: Vec::new(),
+        ..Default::default()
     });
     let cancelled = Arc::new(TestResults { tested: None, ..(*tested).clone() });
     let without_cuda = Arc::new(TestResults {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: false }],
         rows: vec![row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::NotInstalled], "CPU")],
-        changed: Vec::new(),
+        ..Default::default()
     });
     let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
     let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec!["drivers".into()], ..Default::default() });
@@ -418,9 +418,9 @@ fn a_store_card_s_details_open_in_place() {
 }
 
 /// The Model Store offers Test on an installed model this computer never
-/// measured, and none on a measured one; while a model's own test runs,
-/// its card has Cancel and no window covers the store. Every control is
-/// named.
+/// measured, and none on a measured one, nor on one a test would not time
+/// here; while a model's own test runs, its card has Cancel and no window
+/// covers the store. Every control is named.
 #[test]
 fn a_store_card_tests_its_own_model() {
     use crate::gui::hardware_cache::{Cell, Engine, TestResults, TestRow};
@@ -434,6 +434,7 @@ fn a_store_card_tests_its_own_model() {
             engines: vec![Engine { name: "CUDA", installed: true }],
             rows: vec![TestRow { model: ModelId::Silueta, cpu_ms: Some(620.0), cells: vec![Cell::Time(40.0)], runs_on: "CUDA" }],
             changed: Vec::new(),
+            testable: vec![ModelId::Silueta, ModelId::U2net],
         });
         app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
     }
@@ -442,6 +443,7 @@ fn a_store_card_tests_its_own_model() {
     let present = names(&h);
     assert!(present.iter().any(|n| n == "Test U2Net"), "an installed model never measured here: {present:?}");
     assert!(!present.iter().any(|n| n == "Test Silueta"), "a measured one has nothing to test");
+    assert!(!present.iter().any(|n| n == "Test BiRefNet-lite"), "installed, but no accelerator here would try it");
 
     #[cfg(unix)]
     let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
