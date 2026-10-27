@@ -300,15 +300,10 @@ impl Settings {
     }
 
     /// The provider a session of `model` lands on: its fastest accelerator
-    /// once the probe has answered (two can run, CUDA beside DirectML), the
-    /// detected one before that, or the CPU when none runs this model.
-    pub fn model_backend(&self, model: prunr_core::ModelKind) -> &str {
-        let backend = self.effective_backend();
-        if !is_accelerator(backend) {
-            return "CPU";
-        }
-        prunr_core::memory::provider_once_probed(model.model_id(), false)
-            .unwrap_or(if prunr_core::engine::model_runs_on(model.model_id(), backend) { backend } else { "CPU" })
+    /// (two can run, CUDA beside DirectML), or the CPU when none runs this
+    /// model, under "CPU only", or until the probe has answered.
+    pub fn model_backend(&self, model: prunr_core::ModelKind) -> &'static str {
+        if is_accelerator(self.effective_backend()) { prunr_core::memory::provider_now(model.model_id(), false) } else { "CPU" }
     }
 
     /// With no model the pipeline is pure CPU on decoded pixels, so the

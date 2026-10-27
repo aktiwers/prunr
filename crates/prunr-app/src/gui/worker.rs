@@ -325,11 +325,11 @@ pub struct EngineSpec {
 
 impl EngineSpec {
     /// Whether a worker built for `self` can run `next` on `provider`, the
-    /// one its model runs on (`for_its_model`): the same model on the same
-    /// processor, with a pool at least as large (two job counts can make
-    /// the same pool: BiRefNet on the CPU builds one either way).
+    /// one their model runs on: the same model on the same processor, with
+    /// a pool at least as large (two job counts can make the same pool:
+    /// BiRefNet on the CPU builds one either way).
     pub fn reusable_by(&self, next: &EngineSpec, provider: &str) -> bool {
-        let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, e.cpu_only, provider);
+        let engines = |e: &EngineSpec| prunr_core::batch::engine_pool_size(e.model, e.jobs, provider);
         self.model == next.model && self.cpu_only == next.cpu_only && engines(self) >= engines(next)
     }
 

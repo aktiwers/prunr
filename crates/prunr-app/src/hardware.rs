@@ -176,7 +176,7 @@ pub fn card_free_mb_throttled(provider: &str) -> Option<u64> {
 /// (readings at most a second old); until the GPU probe answers, the
 /// CPU's charge.
 pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(prunr_core::memory::Charge, prunr_core::memory::Room)> {
-    let provider = prunr_core::memory::provider_once_probed(id, cpu_only).unwrap_or(prunr_core::engine::CPU_NAME);
+    let provider = prunr_core::memory::provider_now(id, cpu_only);
     let charge = prunr_core::memory::charge_on(id, provider)?;
     let card_mb = charge.on_card().then(|| card_free_mb_throttled(provider)).flatten();
     Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
