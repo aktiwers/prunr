@@ -59,25 +59,20 @@ impl Measuring {
 }
 
 impl MachineTest {
-    /// Start the test's process; `wake` repaints the window as it reports.
-    pub(crate) fn start(wake: impl Fn() + Send + 'static) -> Result<Self, String> {
-        Self::spawn(&["bench", "--here"], wake)
-    }
-
-    /// Start a test of `model` alone (the Model Store's Test).
-    pub(crate) fn start_for(model: ModelId, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
-        Self::spawn(&["bench", "--here", "--models", model.stable_name()], wake).map(|mut test| {
-            test.only = Some(model);
-            test
-        })
+    /// Start the test's process, of `only` alone when it names a model;
+    /// `wake` repaints the window as it reports.
+    pub(crate) fn start(only: Option<ModelId>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+        let models = only.map(|model| ["--models", model.stable_name()]);
+        let args: Vec<&str> = ["bench", "--here"].into_iter().chain(models.into_iter().flatten()).collect();
+        Self::spawn(&args, only, wake)
     }
 
     /// Start the check of a download's result (`bench::here::check`).
     pub(crate) fn check(model: ModelId, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
-        Self::spawn(&["bench", "--check", model.stable_name()], wake)
+        Self::spawn(&["bench", "--check", model.stable_name()], None, wake)
     }
 
-    fn spawn(args: &[&str], wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+    fn spawn(args: &[&str], only: Option<ModelId>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         let exe = crate::subprocess::manager::worker_exe()?;
         let mut child = Command::new(exe)
             .args(args)
@@ -102,31 +97,28 @@ impl MachineTest {
                 wake();
             })
             .map_err(|e| format!("The test could not start: {e}"))?;
-        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only: None })
+        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only })
     }
 
-    /// A test whose process is `child` and that reports nothing.
+    /// A test of `only` (or the whole computer) whose process is `child`
+    /// and that reports nothing.
     #[cfg(test)]
-    pub(crate) fn for_test(child: Child) -> Self {
+    pub(crate) fn for_test(child: Child, only: Option<ModelId>) -> Self {
         let (_, told) = mpsc::channel();
-        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only: None }
-    }
-
-    /// `for_test`, a test of `model` alone.
-    #[cfg(test)]
-    pub(crate) fn for_test_of(child: Child, model: ModelId) -> Self {
-        let mut test = Self::for_test(child);
-        test.only = Some(model);
-        test
+        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only }
     }
 
     pub(crate) fn step(&self) -> Option<Step> {
         self.step
     }
 
-    /// The one model it tests; `None` for the whole computer.
     pub(crate) fn only(&self) -> Option<ModelId> {
         self.only
+    }
+
+    /// It tests the whole computer, under a window of its own.
+    pub(crate) fn whole_computer(&self) -> bool {
+        self.only.is_none()
     }
 
     /// The models it has finished, in the order it ran them.
@@ -156,9 +148,7 @@ impl MachineTest {
             None => Ended::Stopped { during: self.step },
         })
     }
-}
 
-impl MachineTest {
     fn place(&mut self, model: ModelId, column: Column, measured: &Measured) {
         let at = match self.measured.iter().position(|m| m.model == model) {
             Some(at) => at,

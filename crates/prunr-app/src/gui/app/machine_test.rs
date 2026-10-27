@@ -36,32 +36,26 @@ impl PrunrApp {
 
     /// Test `model` alone, as the computer test would, on every engine.
     pub(crate) fn handle_model_test_intent(&mut self, ctx: &egui::Context, model: ModelId) {
-        if !self.can_model_test_intent(model) {
-            return;
-        }
-        self.free_sessions_for_new_places();
-        let ctx = ctx.clone();
-        match MachineTest::start_for(model, move || ctx.request_repaint()) {
-            Ok(test) => self.machine_test = Some(test),
-            Err(e) => {
-                tracing::warn!(?model, %e, "the model's test did not start");
-                self.toasts.error(e);
-            }
+        if self.can_model_test_intent(model) {
+            self.start_machine_test(ctx, Some(model));
         }
     }
 
-    /// Start a test. The sessions the app holds go first: the test needs
-    /// their memory, and the ones built after it follow its places.
     pub(crate) fn handle_machine_test_intent(&mut self, ctx: &egui::Context) {
-        if !self.can_machine_test_intent() {
-            return;
+        if self.can_machine_test_intent() {
+            self.start_machine_test(ctx, None);
         }
+    }
+
+    /// The sessions the app holds go first: the test needs their memory,
+    /// and the ones built after it follow its places.
+    fn start_machine_test(&mut self, ctx: &egui::Context, only: Option<ModelId>) {
         self.free_sessions_for_new_places();
         let ctx = ctx.clone();
-        match MachineTest::start(move || ctx.request_repaint()) {
+        match MachineTest::start(only, move || ctx.request_repaint()) {
             Ok(test) => self.machine_test = Some(test),
             Err(e) => {
-                tracing::warn!(%e, "the computer test did not start");
+                tracing::warn!(model = ?only, %e, "the test did not start");
                 self.toasts.error(e);
             }
         }

@@ -482,7 +482,7 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     let pid = child.id();
     let mut h = loaded();
     h.state_mut().show_settings = true;
-    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child));
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child, None));
     settle(&mut h);
     assert!(h.state().open_modals().contains(&"machine_test"));
     assert_all_controls_named(&h, "computer test");
