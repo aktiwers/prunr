@@ -787,17 +787,21 @@ mod tests {
     }
 
     /// A model's runs are timed by the provider its session lands on: the
-    /// CPU under CPU only, with no accelerator, or when the accelerator
-    /// does not run the model (Silueta on OpenVINO).
+    /// CPU under CPU only or with no accelerator, else the model's own
+    /// (the CPU where no accelerator runs it, as Silueta on OpenVINO), on
+    /// whatever this machine offers.
     #[test]
-    fn a_model_the_accelerator_does_not_run_lands_on_the_cpu() {
+    fn a_model_lands_on_its_own_provider_or_the_cpu() {
         use prunr_core::ModelKind;
         let mut s = Settings::default();
-        for (backend, cpu_only, model) in [("CPU", false, ModelKind::BiRefNetLite), ("", false, ModelKind::U2net), ("CUDA", true, ModelKind::BiRefNetLite), ("OpenVINO", false, ModelKind::Silueta)] {
+        for (backend, cpu_only, model) in [("CPU", false, ModelKind::BiRefNetLite), ("", false, ModelKind::U2net), ("CUDA", true, ModelKind::BiRefNetLite)] {
             s.active_backend = backend.into();
             s.processor = if cpu_only { ComputeMode::CpuOnly } else { ComputeMode::Auto };
             assert_eq!(s.model_backend(model), "CPU", "{model:?} on {backend} cpu_only={cpu_only}");
         }
+        s.active_backend = "OpenVINO".into();
+        s.processor = ComputeMode::Auto;
+        assert_eq!(s.model_backend(ModelKind::Silueta), prunr_core::memory::provider_now(prunr_models::ModelId::Silueta, false));
     }
 
     #[test]
