@@ -156,20 +156,6 @@ impl std::fmt::Display for Measured {
     }
 }
 
-impl PlaceKind {
-    /// The kind of `place`; `None` for an unmeasured one.
-    pub fn of(place: prunr_models::Place) -> Option<Self> {
-        use prunr_models::{Place, Why};
-        Some(match place {
-            Place::There(_) => Self::There,
-            Place::Cpu(Why::Fails(_)) => Self::Fails,
-            Place::Cpu(Why::Differs(_)) => Self::Differs,
-            Place::Cpu(Why::Slower(_)) => Self::Slower,
-            Place::Cpu(Why::NoGain(_)) => Self::NoGain,
-            Place::Unmeasured => return None,
-        })
-    }
-}
 
 fn cache_path() -> Option<PathBuf> {
     #[cfg(test)]

@@ -69,8 +69,9 @@ impl PrunrApp {
             Ended::Stopped { during: Some(step) } if step.on_gpu => {
                 tracing::warn!(model = ?step.model, column = ?step.column, "the computer test stopped while a model ran on the accelerator");
                 let text = format!(
-                    "The test stopped while {} ran with {accelerator}, so it runs without it. Test again to finish the rest.",
+                    "The test stopped while {} ran with {}, so it runs without it. Test again to finish the rest.",
                     prunr_models::display_name(step.model),
+                    step.column.name(),
                 );
                 self.keep_off_after_stop(ctx, step.model, step.column, text);
             }
@@ -90,15 +91,11 @@ impl PrunrApp {
         }
     }
 
-    /// Whether a download of `id` ends with a check of its result: it runs
-    /// on an accelerator here no one measured it on. Not a heavy model: its
-    /// run alone takes minutes and gigabytes.
-    pub(crate) fn download_needs_check(&self, id: ModelId) -> bool {
-        let Some(accelerator) = self.machine_test_accelerator() else { return false };
-        let unmeasured = |column| prunr_core::engine::places_here(id).get(column) == prunr_models::Place::Unmeasured;
-        !crate::bench::HEAVY.contains(&id)
-            && crate::bench::Family::of(id).is_some()
-            && prunr_core::engine::column_for(id, accelerator).is_some_and(unmeasured)
+    /// The column a download of `id` is checked in: the accelerator it
+    /// runs on first here, when no one measured it there (`needs_check`).
+    pub(crate) fn download_check_column(&self, id: ModelId) -> Option<Column> {
+        self.machine_test_accelerator()?;
+        crate::bench::here::column_of(id).filter(|&column| needs_check(id, column))
     }
 
     /// Each frame: a download's check, started while nothing else uses the
@@ -108,15 +105,14 @@ impl PrunrApp {
             return;
         }
         let idle = self.machine_idle();
-        let Some((id, ended)) = self.download_manager.pump_checks(idle) else { return };
+        let Some((id, column, ended)) = self.download_manager.pump_checks(idle) else { return };
         let name = prunr_models::display_name(id);
-        let accelerator = self.settings.active_backend.clone();
-        let Some(column) = prunr_core::engine::column_for(id, &accelerator) else { return };
+        let accelerator = column.name();
         match ended {
             Ended::Finished { .. } => {
                 prunr_core::ep_compat::refresh();
-                if let Some(kind) = prunr_core::ep_compat::measured_for(id)[column.index()].and_then(prunr_core::ep_compat::PlaceKind::of) {
-                    self.toasts.warning(check_found(name, &accelerator, kind));
+                if let Some(place) = prunr_core::ep_compat::measured_for(id)[column.index()] {
+                    self.toasts.warning(check_found(name, accelerator, place));
                     self.places_changed();
                 }
             }
@@ -139,23 +135,32 @@ impl PrunrApp {
 
     /// Where models run may have changed: Settings shows it, and sessions
     /// are built afresh.
-    fn places_changed(&mut self) {
+    pub(super) fn places_changed(&mut self) {
         self.refresh_install_cache();
         self.free_sessions_for_new_places();
     }
 
     /// Drop every session, the Magic Brush's too: the next one of each
     /// model is built where the places now say.
-    pub(super) fn free_sessions_for_new_places(&mut self) {
+    fn free_sessions_for_new_places(&mut self) {
         self.processor.release_all_sessions();
         self.processor.release_sam_sessions();
     }
 }
 
+/// Whether a download of `id` is checked in `column`: no one measured it
+/// there. Not a heavy model (its run alone takes minutes and gigabytes),
+/// nor one that runs only inside another's run.
+fn needs_check(id: ModelId, column: Column) -> bool {
+    !crate::bench::HEAVY.contains(&id)
+        && crate::bench::Family::of(id).is_some()
+        && prunr_core::engine::places_here(id).get(column) == prunr_models::Place::Unmeasured
+}
+
 /// What a download's check found that keeps the model off `accelerator`.
-fn check_found(name: &str, accelerator: &str, kind: prunr_core::ep_compat::PlaceKind) -> String {
-    match kind {
-        prunr_core::ep_compat::PlaceKind::Fails => format!("{name} does not run with {accelerator} on this computer, so it runs without it."),
+fn check_found(name: &str, accelerator: &str, place: prunr_models::Place) -> String {
+    match place {
+        prunr_models::Place::Cpu(prunr_models::Why::Fails(_)) => format!("{name} does not run with {accelerator} on this computer, so it runs without it."),
         _ => format!("{name} gave a wrong result with {accelerator} on this computer, so it runs without it."),
     }
 }
@@ -168,9 +173,9 @@ mod tests {
     /// wrong result: four on DirectML were, and none had run.
     #[test]
     fn a_check_says_what_it_found() {
-        use prunr_core::ep_compat::PlaceKind;
-        assert_eq!(super::check_found("LaMa", "DirectML", PlaceKind::Fails), "LaMa does not run with DirectML on this computer, so it runs without it.");
-        assert_eq!(super::check_found("Nomos8k", "CUDA", PlaceKind::Differs), "Nomos8k gave a wrong result with CUDA on this computer, so it runs without it.");
+        use prunr_models::{Place, Why};
+        assert_eq!(super::check_found("LaMa", "DirectML", Place::Cpu(Why::Fails("x"))), "LaMa does not run with DirectML on this computer, so it runs without it.");
+        assert_eq!(super::check_found("Nomos8k", "CUDA", Place::Cpu(Why::Differs("x"))), "Nomos8k gave a wrong result with CUDA on this computer, so it runs without it.");
     }
 
     /// A download is checked only where it runs on an accelerator no one
@@ -178,16 +183,15 @@ mod tests {
     /// heavy model or one that runs inside another's run.
     #[test]
     fn a_download_is_checked_only_on_an_unmeasured_accelerator() {
+        use prunr_models::Column;
+        assert!(super::needs_check(ModelId::U2net, Column::MiGraphX), "unmeasured there");
+        assert!(!super::needs_check(ModelId::SdV15InpaintFp16, Column::MiGraphX), "a heavy model");
+        assert!(!super::needs_check(ModelId::TaesdFp16, Column::MiGraphX), "runs inside a Stable Diffusion erase");
+        assert!(!super::needs_check(ModelId::U2net, Column::Cuda), "measured on CUDA");
         let mut app = super::PrunrApp::new_for_test();
         app.settings.active_backend = "MIGraphX".into();
-        assert!(app.download_needs_check(ModelId::U2net), "unmeasured there");
-        assert!(!app.download_needs_check(ModelId::SdV15InpaintFp16), "a heavy model");
-        assert!(!app.download_needs_check(ModelId::TaesdFp16), "runs inside a Stable Diffusion erase");
-        app.settings.active_backend = "CUDA".into();
-        assert!(!app.download_needs_check(ModelId::U2net), "measured on CUDA");
-        app.settings.active_backend = "MIGraphX".into();
         app.settings.processor = crate::gui::settings::ComputeMode::CpuOnly;
-        assert!(!app.download_needs_check(ModelId::U2net), "CPU only");
+        assert_eq!(app.download_check_column(ModelId::U2net), None, "CPU only");
     }
 
     /// A test starts only with an accelerator and nothing else under way.

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 
 use prunr_runtime_install::DlError;
-use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource, OnDemandVariant};
+use prunr_models::{descriptor, on_demand_dir, Column, ModelId, ModelPart, ModelSource, OnDemandVariant};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,9 +44,11 @@ pub(crate) struct DownloadManager {
     progress_tx: Waking,
     progress_rx: mpsc::Receiver<DownloadEvent>,
     active: Option<ModelId>,
-    /// Downloads waiting for their check, and the one being checked.
-    checks: VecDeque<ModelId>,
-    checking: Option<(ModelId, crate::gui::machine_test::MachineTest)>,
+    /// Downloads waiting for their check, and the one being checked, each
+    /// with the column it runs in: the check's own finding can move the
+    /// model to another accelerator.
+    checks: VecDeque<(ModelId, Column)>,
+    checking: Option<(ModelId, Column, crate::gui::machine_test::MachineTest)>,
 }
 
 /// The download threads' end of the channel: each event wakes the window
@@ -114,29 +116,29 @@ impl DownloadManager {
         self.checking.is_some()
     }
 
-    /// Check `id`'s result once the app is idle.
-    pub(crate) fn queue_check(&mut self, id: ModelId) {
-        let checking = self.checking.as_ref().is_some_and(|(m, _)| *m == id);
-        if !checking && !self.checks.contains(&id) {
-            self.checks.push_back(id);
+    /// Check `id`'s result in `column` once the app is idle.
+    pub(crate) fn queue_check(&mut self, id: ModelId, column: Column) {
+        let checking = self.checking.as_ref().is_some_and(|(m, ..)| *m == id);
+        if !checking && !self.checks.iter().any(|(m, _)| *m == id) {
+            self.checks.push_back((id, column));
         }
     }
 
     /// Each frame: follow the check under way, or start the next while the
     /// app is `idle`. The model whose check just ended, and how.
-    pub(crate) fn pump_checks(&mut self, idle: bool) -> Option<(ModelId, crate::gui::machine_test::Ended)> {
-        if let Some((id, check)) = &mut self.checking {
-            let (id, ended) = (*id, check.pump()?);
+    pub(crate) fn pump_checks(&mut self, idle: bool) -> Option<(ModelId, Column, crate::gui::machine_test::Ended)> {
+        if let Some((id, column, check)) = &mut self.checking {
+            let (id, column, ended) = (*id, *column, check.pump()?);
             self.checking = None;
-            return Some((id, ended));
+            return Some((id, column, ended));
         }
         if !idle {
             return None;
         }
-        let id = self.checks.pop_front()?;
+        let (id, column) = self.checks.pop_front()?;
         let waking = self.progress_tx.clone();
         match crate::gui::machine_test::MachineTest::check(id, move || waking.wake()) {
-            Ok(check) => self.checking = Some((id, check)),
+            Ok(check) => self.checking = Some((id, column, check)),
             Err(e) => tracing::warn!(?id, %e, "a download's check did not start"),
         }
         None

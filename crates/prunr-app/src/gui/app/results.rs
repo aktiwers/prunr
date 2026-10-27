@@ -285,25 +285,24 @@ impl PrunrApp {
         while let Ok(event) = progress.rx.try_recv() {
             progress.last_event = event.clone();
             let name = progress.target.display_name();
-            let outcome = match event {
-                InstallEvent::Done { started: None, .. } => Ok(format!("{name} installed. Restart Prunr to apply")),
-                InstallEvent::Done { started: Some(started), .. } => {
-                    // The next session of each model is built where it now
-                    // runs fastest.
-                    self.free_sessions_for_new_places();
-                    started
-                        .map(|()| format!("{name} installed: models it runs faster use it now"))
-                        .map_err(|e| format!("{name} installed, but it could not start: {e}"))
-                }
+            // An add-on that started changes where models run fastest.
+            let (outcome, places_changed) = match event {
+                InstallEvent::Done { started: None, .. } => (Ok(format!("{name} installed. Restart Prunr to apply")), false),
+                InstallEvent::Done { started: Some(Ok(())), .. } => (Ok(format!("{name} installed: models it runs faster use it now")), true),
+                InstallEvent::Done { started: Some(Err(e)), .. } => (Err(format!("{name} installed, but it could not start: {e}")), false),
                 InstallEvent::Failed { error } => {
                     tracing::warn!(target = name, %error, "install failed");
-                    Err(format!("Could not install {name}: {error}"))
+                    (Err(format!("Could not install {name}: {error}")), false)
                 }
                 _ => continue,
             };
             self.toasts.outcome(outcome);
             self.runtime_install = None;
-            self.refresh_install_cache();
+            if places_changed {
+                self.places_changed();
+            } else {
+                self.refresh_install_cache();
+            }
             return;
         }
         ctx.request_repaint_after(crate::gui::theme::ANIM_FRAME);
@@ -330,8 +329,8 @@ impl PrunrApp {
                         self.toasts.info(note);
                     }
                     self.refresh_install_cache();
-                    if self.download_needs_check(id) {
-                        self.download_manager.queue_check(id);
+                    if let Some(column) = self.download_check_column(id) {
+                        self.download_manager.queue_check(id, column);
                     }
                 }
                 DownloadEvent::Failed { id, error } => {
@@ -748,11 +747,6 @@ impl PrunrApp {
         // A stable completion signal for debug logs and external observers.
         tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
-        // A result from where its model was expected to run says nothing new:
-        // the CPU for a model no accelerator runs, by design, or one of two
-        // accelerators (DirectML for Silueta while BiRefNet-lite takes
-        // CUDA). Only another provider is noted, with the job count
-        // derived from it.
         if let Some(provider) = backend_update.filter(|p| !p.is_empty() && *p != self.settings.active_backend) {
             let expected = self.settings.model.to_model_kind().map(|m| self.settings.model_backend(m));
             if reports_another_backend(&provider, expected) {
@@ -1106,8 +1100,11 @@ impl PrunrApp {
     }
 }
 
-/// Whether a result from `reported` changes the app's accelerator: not
-/// when it came from where its model was `expected` to run.
+/// Whether a result from `reported` changes the app's accelerator (and
+/// the job count derived from it): not when it came from where its model
+/// was `expected` to run, the CPU for a model no accelerator runs or one
+/// of two accelerators (DirectML for Silueta while BiRefNet-lite takes
+/// CUDA).
 fn reports_another_backend(reported: &str, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| expected != reported)
 }
