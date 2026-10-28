@@ -98,18 +98,30 @@ fn parts_of(scope: &str) -> [&str; ScopePart::ALL.len()] {
     })
 }
 
-/// The parts that differ between scopes `old` and `new`. An add-on
-/// installed or removed is no change: nothing measured ran on it before,
-/// and what ran on it holds again if it comes back; only another version
-/// of one is.
+/// The parts that differ between scopes `old` and `new`.
 fn changed_parts(old: &str, new: &str) -> Vec<ScopePart> {
     let (old, new) = (parts_of(old), parts_of(new));
     ScopePart::ALL
         .into_iter()
         .zip(old.into_iter().zip(new))
-        .filter(|&(part, (a, b))| a != b && !(part == ScopePart::Addons && (a.is_empty() || b.is_empty())))
+        .filter(|&(part, (a, b))| match part {
+            ScopePart::Addons => addons_changed(a, b),
+            _ => a != b,
+        })
         .map(|(part, _)| part)
         .collect()
+}
+
+/// Whether an add-on in both lists of tags ("cuda-…, openvino-…") is
+/// another version in `new`. One installed or removed is no change:
+/// nothing measured ran on it before, and what ran on it holds again if
+/// it comes back.
+fn addons_changed(old: &str, new: &str) -> bool {
+    fn tags(list: &str) -> Vec<(&str, &str)> {
+        list.split(',').filter_map(|tag| tag.trim().split_once('-')).collect()
+    }
+    let new = tags(new);
+    tags(old).into_iter().any(|(addon, version)| new.iter().any(|&(other, again)| other == addon && again != version))
 }
 
 /// Error text of a failure the device had rather than the model: memory
@@ -683,6 +695,12 @@ mod tests {
         save_to(&path, &with_addon, &learned);
         assert_eq!(load_from(&path, &then), Some((learned.clone(), false)), "and removed too");
         assert_eq!(load_from(&path, &scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.3.0-5678"))), afresh(&[ScopePart::Addons]), "another version of it is a change");
+        let both = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234, openvino-1.8.1-9abc"));
+        assert_eq!(load_from(&path, &both), Some((learned.clone(), false)), "a second add-on beside it keeps what was measured");
+        save_to(&path, &both, &learned);
+        assert_eq!(load_from(&path, &with_addon), Some((learned.clone(), false)), "and so does removing one of two");
+        let newer = scope_of(Some("1.24.1-aaaa"), Some("10de:2684:32.0.15.6094"), Some("cuda-0.2.0-1234, openvino-1.8.2-def0"));
+        assert_eq!(load_from(&path, &newer), afresh(&[ScopePart::Addons]), "another version of either is a change");
         save_to(&path, &then, &learned);
         // A list written before the add-ons part existed is the same setup.
         save_to(&path, "setup 1 ort 1.24.1-aaaa drivers 10de:2684:32.0.15.6094", &learned);
