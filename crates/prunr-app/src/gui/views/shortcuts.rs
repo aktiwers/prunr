@@ -200,6 +200,24 @@ impl Action {
         Self::ALL.into_iter().find(|a| a.name() == name)
     }
 
+    /// A focused text field's own: egui's text box undoes its typing.
+    fn edits_text(self) -> bool {
+        matches!(self, Action::Undo | Action::Redo)
+    }
+
+    /// Acts while a modal is up: what closes it, the other help and
+    /// settings windows, a screenshot. The rest acts on the image behind
+    /// the modal, so it waits. Every action is listed: a new one decides.
+    pub fn works_over_modals(self) -> bool {
+        match self {
+            Action::Cancel | Action::Settings | Action::Shortcuts | Action::CliHelp | Action::PipelineFlow | Action::Screenshot => true,
+            Action::Open | Action::Process | Action::Save | Action::Copy | Action::Cut | Action::Delete | Action::Invert
+            | Action::Undo | Action::Redo | Action::FitToWindow | Action::ActualSize | Action::BeforeAfter
+            | Action::PrevImage | Action::NextImage | Action::ToggleQueue | Action::ToggleAdjustments
+            | Action::BrushSmaller | Action::BrushLarger => false,
+        }
+    }
+
     /// Discriminant order; `keys` indexes by it, and the keyboard
     /// dispatches pressed actions in it (Cancel before the modals it
     /// closes).
@@ -411,11 +429,12 @@ fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
     let mut out = Pressed::default();
     // Read before `ctx.input`: egui's context lock is not re-entrant.
     let text_focused = ctx.memory(|m| m.focused().is_some());
+    let typing = text_field_focused(ctx);
     ctx.input(|i| {
         if i.events.is_empty() || foreign_modifier_held(&i.modifiers) {
             return;
         }
-        for s in SHORTCUTS.iter().filter(|s| s.delivery != ByEvent) {
+        for s in SHORTCUTS.iter().filter(|s| s.delivery != ByEvent && !(typing && s.action.edits_text())) {
             let fresh = s.delivery == FreshPress;
             if bindings.chords(s.action).iter().any(|c| chord_pressed(i, *c, fresh, text_focused)) {
                 out.set(s.action);
@@ -747,6 +766,28 @@ mod tests {
         frame(&ctx, &mut text, false);
         frame(&ctx, &mut text, false);
         assert!(ctx.memory(|m| m.focused().is_some()) && !text_field_focused(&ctx));
+    }
+
+    /// Undo and Redo in a focused text field are its own: the box undoes
+    /// its typing and the image stays as it is. Other chords still act.
+    #[test]
+    fn undo_and_redo_in_a_text_field_are_the_fields_own() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut frame = |raw: RawInput| {
+            let mut pressed = Pressed::default();
+            let _ = ctx.run_ui(raw, |ui| {
+                pressed = pressed_with(ui.ctx(), &Bindings::shipped());
+                ui.text_edit_singleline(&mut text).request_focus();
+            });
+            pressed
+        };
+        frame(RawInput::default());
+        frame(RawInput::default());
+        assert!(!frame(press(Key::Z, Modifiers::COMMAND)).is(Action::Undo));
+        assert!(!frame(press(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT)).is(Action::Redo));
+        assert!(!frame(press(Key::Y, Modifiers::COMMAND)).is(Action::Redo));
+        assert!(frame(press(Key::O, Modifiers::COMMAND)).is(Action::Open));
     }
 
     #[test]
