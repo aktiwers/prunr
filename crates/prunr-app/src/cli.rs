@@ -580,6 +580,13 @@ impl Cli {
         self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
     }
 
+    /// Whether this run opens the window, where a failure to start has
+    /// no terminal to be read in: started from Finder, the Start menu or
+    /// a launcher.
+    pub fn opens_the_window(&self) -> bool {
+        !self.worker && !self.doctor && !self.clear_ep_cache && self.command.is_none() && (self.open.is_some() || self.inputs.is_empty())
+    }
+
     fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
@@ -1660,6 +1667,19 @@ mod tests {
         assert!(!writes(&[]), "the GUI");
         assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
         assert!(writes(&["bench"]));
+    }
+
+    /// A window run tells a failure to start in a dialog; a printing run
+    /// prints it and a worker's parent reports it.
+    #[test]
+    fn only_a_window_run_shows_a_failure_to_start() {
+        let opens = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args)).opens_the_window();
+        assert!(opens(&[]));
+        assert!(opens(&["--debug"]));
+        assert!(opens(&["--open", "photo.jpg"]));
+        for printing in [&["photo.jpg"][..], &["--doctor"], &["--clear-ep-cache"], &["bench"], &["--worker"]] {
+            assert!(!opens(printing), "{printing:?}");
+        }
     }
 
     /// `prunr bench` takes its own flags; a file named like it, or any
