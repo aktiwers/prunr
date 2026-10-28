@@ -270,9 +270,19 @@ impl RuntimeId {
     }
 }
 
-/// NVIDIA's CUDA 12 and cuDNN 9 libraries the CUDA runtime links, as the
+/// NVIDIA's CUDA 12 and cuDNN 9 libraries the CUDA add-on links, as the
 /// PyPI wheels that carry them: (package, pinned version). ORT asks for
-/// any 12.x / 9.x; these are the newest at pinning.
+/// any 12.x / 9.x; these are the newest at pinning. The Linux add-on
+/// names no cuRAND; Windows keeps it, as its add-on has not run without.
+#[cfg(not(windows))]
+pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
+    ("nvidia-cuda-runtime-cu12", "12.9.79"),
+    ("nvidia-cublas-cu12", "12.9.2.10"),
+    ("nvidia-cudnn-cu12", "9.27.0.42"),
+    ("nvidia-cufft-cu12", "11.4.1.4"),
+    ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
+];
+#[cfg(windows)]
 pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
     ("nvidia-cuda-runtime-cu12", "12.9.79"),
     ("nvidia-cublas-cu12", "12.9.2.10"),
@@ -586,7 +596,7 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
     let _ = tx.send(InstallEvent::Preparing);
     let target = nvidia_libraries_dir().ok_or("could not resolve user data dir")?;
     if !RuntimeId::Cuda.is_installed() {
-        return Err("install CUDA Runtime first".to_string());
+        return Err(format!("install {} first", RuntimeId::Cuda.display_name()));
     }
     let wheels = nvidia_wheels(&cancel)?;
     let total = wheels.iter().map(|w| w.size_bytes).sum();

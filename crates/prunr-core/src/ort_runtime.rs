@@ -470,7 +470,6 @@ const NVIDIA_LINKED: &[&str] = &[
     "libcudart.so.12",
     "libcublasLt.so.12",
     "libcublas.so.12",
-    "libcurand.so.10",
     "libcufft.so.11",
     CUDNN_LIBRARY,
 ];
