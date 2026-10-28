@@ -1021,20 +1021,25 @@ pub fn gpu_provider_names() -> Vec<String> {
     }).collect()
 }
 
-/// `on_engine`, and when it ran out of memory on a graphics card
-/// (`on_gpu`), `on_cpu` with that error: a run the card has no room for
-/// still finishes, on the processor, which may also give the error back.
+/// `on_engine`, a run of `model` on `provider`; when that ran out of
+/// memory on a graphics card, `on_cpu`: a run the card has no room for
+/// still finishes, on the processor, when the processor has the room.
 pub fn retry_on_cpu<T>(
-    on_gpu: bool,
+    model: prunr_models::ModelId,
+    provider: &str,
     progress: &crate::Progress,
     on_engine: impl FnOnce() -> Result<T, CoreError>,
-    on_cpu: impl FnOnce(CoreError) -> Result<T, CoreError>,
+    on_cpu: impl FnOnce() -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
     match on_engine() {
-        Err(e) if on_gpu && e.is_out_of_memory() => {
-            tracing::warn!(%e, "out of graphics memory; the run goes on on the processor");
+        Err(e) if !runs_on_host_cpu(provider) && e.is_out_of_memory() => {
+            if let Err(short) = crate::memory::fits_now(model, CPU_NAME) {
+                tracing::warn!(?model, %e, %short, "out of graphics memory, and the processor has no room either");
+                return Err(e);
+            }
+            tracing::warn!(?model, %e, "out of graphics memory; the run goes on on the processor");
             progress.step(crate::progress::Step::OnTheProcessor);
-            on_cpu(e)
+            on_cpu()
         }
         other => other,
     }
@@ -1845,14 +1850,15 @@ mod tests {
         use crate::types::CoreError;
         use std::sync::Arc;
         let oom = || Err::<u8, _>(CoreError::Inference("CUDA error: out of memory".into()));
+        let (model, card) = (prunr_models::ModelId::Silueta, "CUDAExecutionProvider");
         let sink = Arc::new(crate::progress::RecordingSink::default());
-        assert_eq!(super::retry_on_cpu(true, &crate::Progress::new(sink.clone()), oom, |_| Ok(7)).ok(), Some(7));
+        assert_eq!(super::retry_on_cpu(model, card, &crate::Progress::new(sink.clone()), oom, || Ok(7)).ok(), Some(7));
         assert!(sink.updates().contains(&crate::ProgressUpdate::Step(crate::Step::OnTheProcessor)));
         crate::progress::check_contract(&sink.updates()).expect("it names its step");
-        assert!(super::retry_on_cpu(false, &crate::Progress::none(), oom, |_| Ok(7)).is_err(), "already on the processor");
+        assert!(super::retry_on_cpu(model, super::CPU_NAME, &crate::Progress::none(), oom, || Ok(7)).is_err(), "already on the processor");
         let broken = || Err::<u8, _>(CoreError::Inference("Graph contains cycles".into()));
-        assert!(super::retry_on_cpu(true, &crate::Progress::none(), broken, |_| Ok(7)).is_err(), "not a memory failure");
-        assert!(super::retry_on_cpu(true, &crate::Progress::none(), oom, Err).is_err_and(|e| e.is_out_of_memory()), "no room on the processor either");
+        assert!(super::retry_on_cpu(model, card, &crate::Progress::none(), broken, || Ok(7)).is_err(), "not a memory failure");
+        assert!(super::retry_on_cpu(model, card, &crate::Progress::none(), oom, oom).is_err_and(|e| e.is_out_of_memory()), "out of memory on the processor too");
     }
     use super::*;
 
