@@ -2013,6 +2013,45 @@ mod tests {
         assert!(run_on_zeros(&mut session, 17).is_err());
     }
 
+    /// With the OpenVINO add-on registered, a session that names no
+    /// provider runs on ORT's own CPU provider: ORT's choice for such a
+    /// session put it on OpenVINO's processor under every policy, the
+    /// default too. `PRUNR_OPENVINO_ADDON` names the plugin.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_session_naming_no_provider_stays_on_ort_s_cpu() {
+        use crate::ort_runtime::{addon_devices, register_addon, use_addon, Addon};
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
+            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
+            return;
+        };
+        use_addon(Addon::OpenVino, plugin.into());
+        if !register_addon(Addon::OpenVino) || addon_devices(Addon::OpenVino).is_empty() {
+            eprintln!("SKIP: OpenVINO lists no device here");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ran_on = |devices: Vec<ort::device::Device<'static>>, run: &str| -> std::collections::BTreeSet<String> {
+            let mut built = crate::ort_runtime::session_builder().unwrap().with_profiling(dir.path().join(run)).unwrap();
+            if !devices.is_empty() {
+                built = built.with_devices(devices, None).unwrap();
+            }
+            let mut session = built.commit_from_memory(&reshape_model([3, -1])).unwrap();
+            assert_eq!(run_on_zeros(&mut session, 2), Ok(()));
+            let profile: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(session.end_profiling().unwrap()).unwrap()).unwrap();
+            profile.as_array().unwrap().iter().filter_map(|event| Some(event["args"]["provider"].as_str()?.to_string())).collect()
+        };
+        assert_eq!(ran_on(Vec::new(), "none"), ["CPUExecutionProvider".to_string()].into());
+        let processor: Vec<_> = addon_devices(Addon::OpenVino).into_iter().filter(|d| d.hardware_device().ty() == ort::memory::DeviceType::CPU).collect();
+        if !processor.is_empty() {
+            assert_eq!(ran_on(processor, "named"), ["OpenVINOExecutionProvider".to_string()].into(), "a session naming OpenVINO keeps it");
+        }
+    }
+
     /// A free channel axis says no count, so a session with one is not run.
     #[test]
     fn a_free_channel_axis_takes_no_test_input() {
