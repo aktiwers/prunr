@@ -738,6 +738,10 @@ static ADDONS: [OnceLock<PathBuf>; Addon::ALL.len()] = [const { OnceLock::new() 
 /// Whether this process registered each add-on, once it tried.
 static REGISTERED: [OnceLock<bool>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
 
+/// Why each add-on, installed, did not register, when it did not.
+#[cfg(not(target_os = "macos"))]
+static NOT_REGISTERED: [OnceLock<String>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
+
 /// Use `addon`, installed at `library`, in this process.
 pub fn use_addon(addon: Addon, library: PathBuf) {
     let _ = ADDONS[addon as usize].set(library);
@@ -768,10 +772,18 @@ pub(crate) fn register_addon(addon: Addon) -> bool {
             }
             Err(e) => {
                 tracing::warn!(addon = addon.name(), library = %library.display(), %e, "add-on did not register");
+                let _ = NOT_REGISTERED[addon as usize].set(e.to_string());
                 false
             }
         }
     })
+}
+
+/// Why `addon`, installed, did not register in this process; `None` when
+/// it did, is not installed, or waits for a newer runtime.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn registration_error(addon: Addon) -> Option<&'static str> {
+    NOT_REGISTERED[addon as usize].get().map(String::as_str)
 }
 
 /// `register` the add-on at `library` once, its answer kept in `slot`.

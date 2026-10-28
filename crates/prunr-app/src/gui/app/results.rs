@@ -289,7 +289,13 @@ impl PrunrApp {
             let (outcome, places_changed) = match event {
                 InstallEvent::Done { started: None, .. } => (Ok(format!("{name} installed. Restart Prunr to apply")), false),
                 InstallEvent::Done { started: Some(Ok(())), .. } => (Ok(format!("{name} installed: models it runs faster use it now")), true),
-                InstallEvent::Done { started: Some(Err(e)), .. } => (Err(format!("{name} installed, but it could not start: {e}")), false),
+                InstallEvent::Done { started: Some(Err(e)), .. } => {
+                    // Said here, so not again as its start failure.
+                    if let crate::runtime_install::InstallTarget::Runtime(rt) = progress.target {
+                        self.told_gpu_failures[rt.stack() as usize] = true;
+                    }
+                    (Err(format!("{name} installed, but it could not start: {e}")), false)
+                }
                 InstallEvent::Failed { error } => {
                     tracing::warn!(target = name, %error, "install failed");
                     (Err(format!("Could not install {name}: {error}")), false)
@@ -3060,6 +3066,12 @@ mod install_tests {
             assert_eq!((level, text.contains(says)), (kind, true), "{text}");
             assert_eq!(app.toasts.len_for_test(), before + 1, "once");
             assert!(app.runtime_install.is_none(), "the install closes");
+            let failure = prunr_core::engine::GpuStartFailure::cuda_for_test("no card");
+            let mut failures = [None; prunr_core::engine::GpuStack::ALL.len()];
+            failures[failure.stack as usize] = Some(&failure);
+            app.tell_gpu_start_failures(failures);
+            let told_again = app.toasts.len_for_test() > before + 1;
+            assert_eq!(told_again, kind == "success" || says.starts_with("Could"), "{says}: a failed start is not said twice");
         }
     }
 }
