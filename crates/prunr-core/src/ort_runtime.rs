@@ -87,10 +87,16 @@ pub fn runtime_tag() -> Option<&'static str> {
     static TAG: OnceLock<Option<String>> = OnceLock::new();
     TAG.get_or_init(|| {
         ensure_initialized().ok()?;
-        let meta = std::fs::metadata(LOADED.get()?).ok()?;
-        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        Some(tag_for(runtime_version(), meta.len(), modified))
+        let (len, modified) = file_stamp(LOADED.get()?)?;
+        Some(tag_for(runtime_version(), len, modified))
     }).as_deref()
+}
+
+/// A file's size and its time of change in seconds, which a new build of
+/// it changes.
+pub(crate) fn file_stamp(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()))
 }
 
 /// Names the add-ons installed beside the runtime, each by its tag
@@ -707,9 +713,8 @@ impl Addon {
     /// A fingerprint of its installed library ("cuda-2a1b3c4d"), which a
     /// new version of it changes; `None` with none installed.
     pub fn tag(self) -> Option<String> {
-        let meta = std::fs::metadata(self.library()?).ok()?;
-        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        Some(tag_for(Some(self.name()), meta.len(), modified))
+        let (len, modified) = file_stamp(self.library()?)?;
+        Some(tag_for(Some(self.name()), len, modified))
     }
 
     /// Whether sessions reach its provider in this process.
