@@ -105,6 +105,22 @@ pub fn addon_tag() -> Option<String> {
 /// The loaded runtime's version ("1.24.1"), as the library reports it.
 /// Its build info names it only on some builds: PyPI's say
 /// `git-branch=HEAD`.
+/// The oldest runtime the add-ons are built against: an older one lacks
+/// what they call.
+const ADDON_RUNTIME: (u32, u32) = (1, 30);
+
+/// Whether the loaded runtime can take the add-ons: Prunr's own on Linux
+/// and Windows, not an older one from the Runtime Store.
+pub fn hosts_addons() -> bool {
+    runtime_version().and_then(major_minor).is_some_and(|version| version >= ADDON_RUNTIME)
+}
+
+/// "1.30.0" as (1, 30).
+fn major_minor(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 pub fn runtime_version() -> Option<&'static str> {
     ensure_initialized().ok()?;
     VERSION.get()?.as_deref()
@@ -543,6 +559,10 @@ pub fn use_cuda_addon(library: PathBuf) {
 pub(crate) fn register_cuda_addon() -> bool {
     register_once(&CUDA_ADDON_REGISTERED, CUDA_ADDON.get().map(PathBuf::as_path), |library| {
         let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return false };
+        if !hosts_addons() {
+            tracing::warn!(version = runtime_version(), "the loaded runtime is older than the CUDA add-on is built for; it starts with Prunr's own");
+            return false;
+        }
         let started = std::time::Instant::now();
         if let Some(dir) = library.parent() {
             preload_nvidia_libraries_beside(dir);
@@ -735,6 +755,16 @@ mod tests {
         assert!(source[init..built].contains(".with_telemetry(false)"), "telemetry must be switched off where the environment is built");
     }
     use super::*;
+
+    /// The add-ons go into a runtime as new as they are built for.
+    #[test]
+    fn an_add_on_needs_a_runtime_as_new_as_it() {
+        assert_eq!(major_minor("1.30.0"), Some((1, 30)));
+        assert_eq!(major_minor("1.24.1"), Some((1, 24)));
+        assert_eq!(major_minor("garbage"), None);
+        assert!(Some((1, 30)) >= Some(ADDON_RUNTIME) && Some((1, 31)) >= Some(ADDON_RUNTIME) && Some((2, 0)) >= Some(ADDON_RUNTIME));
+        assert!(Some((1, 24)) < Some(ADDON_RUNTIME));
+    }
 
     /// On Windows every DLL in the NVIDIA folder loads, the linked ones
     /// first in their order: cuDNN's convolution engine was not in the

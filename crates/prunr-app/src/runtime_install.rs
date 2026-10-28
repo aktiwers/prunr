@@ -72,7 +72,7 @@ impl RuntimeId {
     /// Whether it loads into the runtime the app ships, as a provider
     /// add-on, rather than replacing it: CUDA on Windows, where the
     /// built-in runtime keeps DirectML beside it and each model takes the
-    /// faster.
+    /// faster, and on Linux.
     pub fn is_addon(self) -> bool {
         self.addon().is_some()
     }
@@ -80,8 +80,14 @@ impl RuntimeId {
     fn addon(self) -> Option<&'static ri::AddOn> {
         match self {
             Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
+            Self::Cuda if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_LINUX),
             _ => None,
         }
+    }
+
+    /// An add-on joining a built-in accelerator: CUDA beside DirectML.
+    fn beside_directml(self) -> bool {
+        self.is_addon() && prunr_core::ort_runtime::BUILT_IN_HAS_GPU
     }
 
     fn pypi_package(self) -> &'static str {
@@ -192,8 +198,8 @@ impl RuntimeId {
         let why = match (self, recommended) {
             (Self::OpenVino, false) => "",
             (Self::OpenVino, true) => " Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
-            (Self::Cuda, false) if self.is_addon() => " Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
-            (Self::Cuda, true) if self.is_addon() => " Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
+            (Self::Cuda, false) if self.beside_directml() => " Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
+            (Self::Cuda, true) if self.beside_directml() => " Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
             (Self::Cuda, false) => " Runs the models on an NVIDIA graphics card.",
             (Self::Cuda, true) => " Recommended for your NVIDIA graphics card: runs the models on it.",
             (Self::MiGraphX, false) => " Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
@@ -205,7 +211,7 @@ impl RuntimeId {
     /// Settings › Hardware's line once it is installed.
     pub fn installed_line(self) -> &'static str {
         match self {
-            Self::Cuda if self.is_addon() => "Installed. Runs beside DirectML on your NVIDIA graphics card.",
+            Self::Cuda if self.beside_directml() => "Installed. Runs beside DirectML on your NVIDIA graphics card.",
             _ => "Installed.",
         }
     }
@@ -226,11 +232,11 @@ impl RuntimeId {
             Self::OpenVino => format!("We detected Intel hardware that can use OpenVINO Runtime. \
                 Installing it ({size}) makes the models run faster, and lets you \
                 try running them on the Intel graphics chip (Settings › Hardware)."),
-            Self::Cuda if self.is_addon() => format!("We detected an NVIDIA graphics card. Installing CUDA \
+            Self::Cuda if self.beside_directml() => format!("We detected an NVIDIA graphics card. Installing CUDA \
                 ({size}) runs more models on it than DirectML can, and each model \
                 on the faster of the two."),
-            Self::Cuda => format!("We detected an NVIDIA graphics card. Installing CUDA Runtime \
-                ({size}) runs the models on it instead of the processor."),
+            Self::Cuda => format!("We detected an NVIDIA graphics card. Installing {} \
+                ({size}) runs the models on it instead of the processor.", self.display_name()),
             Self::MiGraphX => format!("We detected an AMD graphics card. Installing MIGraphX Runtime \
                 ({size}) runs the models on it instead of the processor. It needs \
                 AMD's ROCm 7 with MIGraphX on this computer."),
@@ -376,7 +382,8 @@ impl RuntimeChoice {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::BuiltIn => "DirectML: any DirectX 12 graphics card, else the processor",
+            Self::BuiltIn if prunr_core::ort_runtime::BUILT_IN_HAS_GPU => "DirectML: any DirectX 12 graphics card, else the processor",
+            Self::BuiltIn => "Prunr's own: CUDA on the NVIDIA card, else the processor",
             Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
             Self::Store(RuntimeId::Cuda) => "NVIDIA graphics cards",
             Self::Store(RuntimeId::MiGraphX) => "AMD graphics cards",
@@ -524,10 +531,14 @@ fn run_install(
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
     }
     // The runtime just installed is the one the user wants next start;
-    // an add-on starts now, in the runtime already loaded.
+    // an add-on starts now, in the runtime already loaded, when that is
+    // as new as the add-on (Prunr's own), else at the next start, in it.
     let started = if rt.is_addon() {
         use_installed_addons();
-        Some(start_addon())
+        if let Err(e) = prefer(RuntimeChoice::BuiltIn) {
+            tracing::warn!(%e, "could not prefer the built-in runtime for the add-on");
+        }
+        prunr_core::ort_runtime::hosts_addons().then(start_addon)
     } else {
         if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
             tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
@@ -854,7 +865,7 @@ mod tests {
             &[RuntimeId::OpenVino]
         };
         assert_eq!(RuntimeId::OFFERED, expected);
-        assert_eq!(RuntimeId::Cuda.is_addon(), cfg!(all(windows, target_arch = "x86_64")), "CUDA joins DirectML on Windows");
+        assert_eq!(RuntimeId::Cuda.is_addon(), cfg!(all(any(windows, target_os = "linux"), target_arch = "x86_64")), "CUDA joins Prunr's own runtime");
     }
 
     /// At the next start only the add-on marked for removal goes, with its

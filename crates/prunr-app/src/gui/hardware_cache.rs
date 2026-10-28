@@ -328,11 +328,11 @@ impl HardwareInstallCache {
         }
     }
 
-    /// Whether `choice` can load: the built-in GPU runtime is there, or
-    /// the store install is.
+    /// Whether `choice` can load: the built-in runtime runs an accelerator
+    /// (DirectML, or the CUDA add-on), or the store install is there.
     pub fn can_load(&self, choice: RuntimeChoice) -> bool {
         match choice {
-            RuntimeChoice::BuiltIn => self.built_in_gpu,
+            RuntimeChoice::BuiltIn => self.built_in_gpu || (self.cuda && RuntimeId::Cuda.is_addon()),
             RuntimeChoice::Store(rt) => !rt.is_addon() && self.has_runtime(rt),
         }
     }
