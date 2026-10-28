@@ -756,10 +756,12 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let installed = ctx.installs.has_runtime(rt);
     let installing_this = ctx.installing.as_ref().filter(|(t, _)| *t == InstallTarget::Runtime(rt));
     // An add-on is in use wherever it is installed; a runtime, once loaded.
-    let in_use = rt.is_addon() || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
+    let waits = rt.is_addon() && ctx.installs.addon_waits;
+    let in_use = (rt.is_addon() && !waits) || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
     let failure = ctx.gpu_failure.filter(|_| in_use).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
+        None if installed && waits => rt.waiting_line(),
         None if installed => failure.as_deref().unwrap_or(rt.installed_line()),
         None => &rt.not_installed(recommended, ctx.installs.nvidia_libraries),
     };
