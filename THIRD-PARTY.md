@@ -7,10 +7,10 @@ Prunr is built from the open-source Rust crates below (every platform's build co
 | Component | Licence | Source |
 |---|---|---|
 | ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; the OpenVINO and MIGraphX builds the app can download; and its CUDA provider plugin, downloaded on Linux and Windows) | MIT | https://github.com/microsoft/onnxruntime |
-| OpenVINO provider plugin for ONNX Runtime (downloaded on Linux; the components it carries are listed in the `third-party-programs.txt` kept beside it) | MIT | https://github.com/onnxruntime/onnxruntime-ep-openvino |
+| OpenVINO provider plugin for ONNX Runtime (downloaded on Linux and Windows; the components it carries are listed in the `third-party-programs.txt` kept beside it) | MIT | https://github.com/onnxruntime/onnxruntime-ep-openvino |
 | OpenVINO Toolkit (inside the OpenVINO build of ONNX Runtime, and downloaded with the OpenVINO plugin) | Apache-2.0 | https://github.com/openvinotoolkit/openvino |
 | oneTBB (downloaded with the OpenVINO plugin) | Apache-2.0 | https://github.com/uxlfoundation/oneTBB |
-| hwloc (downloaded with the OpenVINO plugin) | BSD-3-Clause | https://github.com/open-mpi/hwloc |
+| hwloc (downloaded with the OpenVINO plugin on Linux) | BSD-3-Clause | https://github.com/open-mpi/hwloc |
 | NVIDIA CUDA and cuDNN libraries (downloaded with ONNX Runtime's CUDA plugin) | NVIDIA's licence terms, shown before the download | https://pypi.org/user/nvidia/ |
 | Material Symbols (icon font, through egui_material_icons) | Apache-2.0 | https://github.com/google/material-design-icons |
 

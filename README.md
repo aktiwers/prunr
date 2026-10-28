@@ -157,10 +157,10 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 | CUDA | NVIDIA GPU | on-demand (Linux, Windows) | Settings → Hardware → Install (about 2 GB with NVIDIA's CUDA and cuDNN libraries); offered on first launch with an NVIDIA card. On Windows it joins the built-in DirectML, and each model runs on the faster |
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
 | DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download (the Windows ML build of ONNX Runtime 1.30); falls back to the CPU without a GPU |
-| **OpenVINO** | **Intel CPU / graphics** | **on-demand (Linux)** | Settings → Hardware → Install (50 MB); joins Prunr's own runtime, beside CUDA on a computer with an NVIDIA card |
+| **OpenVINO** | **Intel CPU / graphics** | **on-demand (Linux, Windows)** | Settings → Hardware → Install (50 MB on Linux, 76 MB on Windows); joins Prunr's own runtime, beside DirectML and CUDA |
 | CPU | Always | yes (everywhere) | Automatic fallback |
 
-**OpenVINO is the win for Intel computers without an NVIDIA card.** On an i5-11600KF it ran the upscalers 1.5 times and Depth twice as fast as Prunr's own processor engine, with the same pictures, and it can try Intel graphics (Settings → Hardware). The first launch on Intel hardware offers it; you can also install it later from Settings → Hardware. It lives at `~/.local/share/prunr/runtimes/` and takes about 150 MB of disk.
+**OpenVINO is the win for Intel computers without an NVIDIA card.** On an i5-11600KF it ran the upscalers 1.5 times and Depth twice as fast as Prunr's own processor engine, with the same pictures, and it can try Intel graphics (Settings → Hardware). The first launch on Intel hardware offers it; you can also install it later from Settings → Hardware. It lives in Prunr's runtime folder (`~/.local/share/prunr/runtimes/` on Linux) and takes about 150 MB of disk on Linux, 120 MB on Windows.
 
 **Where each model runs** is declared in the model registry (`places` field): per accelerator, on it or on the CPU and why. A model that doesn't load on a specific EP — e.g. Big-LaMa, whose graph OpenVINO's converter rejects — skips that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs until the graphics driver, the runtime or an add-on changes; `prunr --clear-ep-cache` wipes them.
 
