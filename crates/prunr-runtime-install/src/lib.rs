@@ -50,6 +50,15 @@ pub struct AddOn {
     pub size_bytes: u64,
     /// The library inside the archive, at its root.
     pub library: &'static str,
+    pub packing: Packing,
+}
+
+/// How a release packs its files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Packing {
+    Zip,
+    /// A gzip-compressed tar.
+    TarGz,
 }
 
 impl AddOn {
@@ -69,6 +78,19 @@ pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
     sha256: "ba698427418129d0215c1d51367a1a97995cc1eed56056479288e3245d19947c",
     size_bytes: 238_621_368,
     library: "onnxruntime_providers_cuda.dll",
+    packing: Packing::Zip,
+};
+
+/// `CUDA_ADDON_WINDOWS`'s Linux build. It needs CUDA 12.5 or later, which
+/// the libraries the app downloads beside it are; Ubuntu's own (12.4)
+/// lack what it calls.
+pub const CUDA_ADDON_LINUX: AddOn = AddOn {
+    version: "0.2.0",
+    url: "https://github.com/microsoft/onnxruntime/releases/download/plugin-ep-cuda/v0.2.0/cuda_ep_cuda12_0.2.0_linux-x64.tar.gz",
+    sha256: "22cfe716fad99d338cad73e325611f8ba59eb9b0d1932c43701ac998a5037ff3",
+    size_bytes: 436_640_825,
+    library: "libonnxruntime_providers_cuda.so",
+    packing: Packing::TarGz,
 };
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
@@ -505,14 +527,36 @@ fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&s
         if !written.insert(target_filename.clone()) {
             continue;
         }
-        let dest = target_dir.join(&target_filename);
-        let file = std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-        let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
-        std::io::copy(&mut entry, &mut out)
-            .and_then(|_| out.flush())
-            .map_err(|e| format!("extract {}: {e}", dest.display()))?;
+        write_out(&mut entry, &target_dir.join(&target_filename))?;
     }
     Ok(written.len())
+}
+
+/// `extract_flat` for a gzip-compressed tar: its regular files.
+fn extract_flat_tar_gz(archive: impl Read, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+    let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in archive.entries().map_err(|e| format!("tar parse: {e}"))? {
+        let mut entry = entry.map_err(|e| format!("tar entry: {e}"))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path().map_err(|e| format!("tar entry name: {e}"))?.into_owned();
+        let Some(target_filename) = path.to_str().map(|name| name.trim_start_matches("./")).and_then(&rename) else { continue };
+        if !written.insert(target_filename.clone()) {
+            continue;
+        }
+        write_out(&mut entry, &target_dir.join(&target_filename))?;
+    }
+    Ok(written.len())
+}
+
+fn write_out(entry: &mut impl Read, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    std::io::copy(entry, &mut out)
+        .and_then(|_| out.flush())
+        .map_err(|e| format!("extract {}: {e}", dest.display()))
 }
 
 /// Extract an `onnxruntime-*` wheel into `target_dir`, applying
@@ -524,13 +568,21 @@ pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<Pat
 /// Extract `addon`'s library from its release `archive` into
 /// `target_dir`; the library's path.
 pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn) -> Result<PathBuf, String> {
-    extract_library(archive, target_dir, |name| (name == addon.library).then(|| name.to_string()), addon.library)
+    let keep = |name: &str| (name == addon.library).then(|| name.to_string());
+    match addon.packing {
+        Packing::Zip => extract_library(archive, target_dir, keep, addon.library),
+        Packing::TarGz => extract_flat_tar_gz(archive, target_dir, keep).and_then(|_| library_in(target_dir, addon.library)),
+    }
 }
 
 /// `archive`'s files that `rename` keeps, flat in `target_dir`; the path
 /// of `library` among them, which an archive must hold.
 fn extract_library(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>, library: &str) -> Result<PathBuf, String> {
     extract_flat(archive, target_dir, rename)?;
+    library_in(target_dir, library)
+}
+
+fn library_in(target_dir: &Path, library: &str) -> Result<PathBuf, String> {
     let path = target_dir.join(library);
     if !path.is_file() {
         return Err(format!("{library} missing from the download: its layout may have changed"));
@@ -931,6 +983,33 @@ mod tests {
         let library = extract_addon(std::io::Cursor::new(zipped), dir.path(), &CUDA_ADDON_WINDOWS).unwrap();
         assert_eq!(std::fs::read_to_string(library).unwrap(), "dll");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the library");
+    }
+
+    /// A gzip-compressed tar of `files`, each (name, body).
+    fn tar_gz_of(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        for (name, body) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o666);
+            header.set_cksum();
+            tar.append_data(&mut header, name, body.as_bytes()).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// The Linux add-on, a gzip-compressed tar, gives up its library the
+    /// same way; one missing from it is said.
+    #[test]
+    fn a_tar_gz_addon_gives_up_only_its_library() {
+        let packed = tar_gz_of(&[("libonnxruntime_providers_cuda.so", "so"), ("version.json", "{}"), ("sub/libonnxruntime_providers_cuda.so", "no")]);
+        let dir = tempfile::tempdir().unwrap();
+        let library = extract_addon(std::io::Cursor::new(packed), dir.path(), &CUDA_ADDON_LINUX).unwrap();
+        assert_eq!(std::fs::read_to_string(library).unwrap(), "so");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the library");
+        let empty = tempfile::tempdir().unwrap();
+        let without = tar_gz_of(&[("version.json", "{}")]);
+        assert!(extract_addon(std::io::Cursor::new(without), empty.path(), &CUDA_ADDON_LINUX).is_err_and(|e| e.contains("missing")));
     }
 
     /// An NVIDIA wheel gives up its shared libraries by file name, and

@@ -6,16 +6,16 @@ Prunr is built from the open-source Rust crates below (every platform's build co
 
 | Component | Licence | Source |
 |---|---|---|
-| ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; the OpenVINO, CUDA and MIGraphX builds the app can download; and its CUDA provider plugin, downloaded on Windows) | MIT | https://github.com/microsoft/onnxruntime |
+| ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; the OpenVINO and MIGraphX builds the app can download; and its CUDA provider plugin, downloaded on Linux and Windows) | MIT | https://github.com/microsoft/onnxruntime |
 | OpenVINO Toolkit (inside the OpenVINO build of ONNX Runtime) | Apache-2.0 | https://github.com/openvinotoolkit/openvino |
-| NVIDIA CUDA and cuDNN libraries (downloaded with CUDA: the CUDA build of ONNX Runtime, or on Windows its CUDA plugin) | NVIDIA's licence terms, shown before the download | https://pypi.org/user/nvidia/ |
+| NVIDIA CUDA and cuDNN libraries (downloaded with ONNX Runtime's CUDA plugin) | NVIDIA's licence terms, shown before the download | https://pypi.org/user/nvidia/ |
 | Material Symbols (icon font, through egui_material_icons) | Apache-2.0 | https://github.com/google/material-design-icons |
 
 ## Rust crates
 
 Generated from `cargo metadata`; the licence column is the crate's own declaration. Regenerate after changing dependencies.
 
-### MIT OR Apache-2.0 (314)
+### MIT OR Apache-2.0 (315)
 
 | Crate | Version | Repository |
 |---|---|---|
@@ -236,6 +236,7 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | syn | 1.0.109 | https://github.com/dtolnay/syn |
 | syn | 2.0.117 | https://github.com/dtolnay/syn |
 | system-deps | 6.2.2 | https://github.com/gdesmott/system-deps |
+| tar | 0.4.46 | https://github.com/composefs/tar-rs |
 | tempfile | 3.27.0 | https://github.com/Stebalien/tempfile |
 | thiserror | 1.0.69 | https://github.com/dtolnay/thiserror |
 | thiserror | 2.0.18 | https://github.com/dtolnay/thiserror |
@@ -586,7 +587,7 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | vello_cpu | 0.0.6 | https://github.com/linebender/vello |
 | zeroize | 1.8.2 | https://github.com/RustCrypto/utils |
 
-### MIT/Apache-2.0 (27)
+### MIT/Apache-2.0 (28)
 
 | Crate | Version | Repository |
 |---|---|---|
@@ -594,6 +595,7 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | bitflags | 1.3.2 | https://github.com/bitflags/bitflags |
 | bitstream-io | 4.9.0 | https://github.com/tuffy/bitstream-io |
 | downcast-rs | 1.2.1 | https://github.com/marcianx/downcast-rs |
+| filetime | 0.2.29 | https://github.com/alexcrichton/filetime |
 | foreign-types | 0.5.0 | https://github.com/sfackler/foreign-types |
 | foreign-types-macros | 0.2.3 | https://github.com/sfackler/foreign-types |
 | foreign-types-shared | 0.3.1 | https://github.com/sfackler/foreign-types |
