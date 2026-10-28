@@ -166,6 +166,15 @@ impl TestResults {
         self.tested.is_some() || !self.rows.is_empty()
     }
 
+    pub fn row(&self, model: prunr_models::ModelId) -> Option<&TestRow> {
+        self.rows.iter().find(|r| r.model == model)
+    }
+
+    /// A test timed `model` on every accelerator it tries.
+    pub fn tested_everywhere(&self, model: prunr_models::ModelId) -> bool {
+        self.row(model).is_some_and(|row| row.complete)
+    }
+
     /// Whether the Model Store's Test may time `id` here.
     pub fn testable(&self, id: prunr_models::ModelId) -> bool {
         self.testable.contains(&id)
@@ -192,9 +201,8 @@ impl TestResults {
         let rows = installed()
             .filter_map(|id| {
                 let measured = prunr_core::ep_compat::measurements(id);
-                let mut row = test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))?;
-                row.complete = after_probe && crate::bench::here::columns_in_a_test(id).iter().all(|c| measured[c.index()].is_some());
-                Some(row)
+                let complete = after_probe && prunr_core::engine::tries_in_a_test(id).iter().all(|&(_, column)| measured[column.index()].is_some());
+                test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false), complete)
             })
             .collect();
         let mut results = Self {
@@ -221,6 +229,7 @@ fn test_row(
     measured: &[Option<prunr_core::ep_compat::Measured>],
     column_of: impl Fn(&str) -> Option<prunr_models::Column>,
     runs_on: &'static str,
+    complete: bool,
 ) -> Option<TestRow> {
     let fails_by_registry = |column: prunr_models::Column| {
         prunr_models::registry_places(model).get(column).fails()
@@ -237,7 +246,7 @@ fn test_row(
         })
         .collect();
     let cpu = measured.iter().flatten().find_map(|m| m.cpu_ms).map(Time::of);
-    Some(TestRow { model, cpu, cells, runs_on, complete: false })
+    Some(TestRow { model, cpu, cells, runs_on, complete })
 }
 
 /// Bytes the downloaded models take in `dir`, multi-part bundles included.
@@ -411,21 +420,21 @@ mod tests {
         let engines = [Engine { name: "DirectML", installed: true }, Engine { name: "CUDA", installed: false }];
         let column_of = |p: &str| Column::of(p);
         let mut measured: [Option<Measured>; Column::ALL.len()] = Default::default();
-        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU"), None, "nothing measured");
+        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU", true), None, "nothing measured");
         measured[Column::Cuda.index()] = Some(Measured::timed(PlaceKind::There, 440.0, 9_000.0, ""));
         let all = [Engine { name: "DirectML", installed: true }, Engine { name: "CUDA", installed: true }];
-        let row = super::test_row(ModelId::BiRefNetLite, &all, &measured, column_of, "CUDA").expect("a row");
+        let row = super::test_row(ModelId::BiRefNetLite, &all, &measured, column_of, "CUDA", true).expect("a row");
         assert_eq!(row.cells, [Cell::Fails, Cell::Time(super::Time::of(440.0))], "DirectML, never tried as Prunr's tests found it fails, says so");
         measured[Column::Cuda.index()] = None;
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Fails, "E_OUTOFMEMORY").with_times(None, Some(10_100.0)));
-        let row = super::test_row(ModelId::BiRefNetLite, &engines, &measured, column_of, "CPU").expect("a row");
+        let row = super::test_row(ModelId::BiRefNetLite, &engines, &measured, column_of, "CPU", true).expect("a row");
         assert_eq!(row.cells, [Cell::Fails, Cell::Untested]);
         assert_eq!(row.cpu.map(|t| t.ms), Some(10_100.0));
         measured[Column::DirectMl.index()] = Some(Measured::timed(PlaceKind::Slower, 900.0, 670.0, ""));
-        let row = super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").expect("a row");
+        let row = super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU", true).expect("a row");
         assert_eq!((&row.cells[0], row.cpu.map(|t| t.ms)), (&Cell::Time(super::Time::of(900.0)), Some(670.0)), "a slower engine still shows its time");
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Differs, "mean 3/255"));
-        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0].clone()), Some(Cell::Differs));
+        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU", true).map(|r| r.cells[0].clone()), Some(Cell::Differs));
     }
 
     /// What changed since the test is said in people's words.

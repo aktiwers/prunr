@@ -64,22 +64,10 @@ pub(crate) fn column_of(id: ModelId) -> Option<Column> {
     prunr_core::engine::column_for(id, super::first_tried(&ladder)?)
 }
 
-/// The GPU providers `id`'s sessions may try here, in their order.
-fn tried_here(id: ModelId) -> Vec<&'static str> {
-    super::tried(&prunr_core::engine::gpu_ladder(id))
-}
-
-/// The columns a test measures `id` in: one per accelerator it tries.
-pub(crate) fn columns_in_a_test(id: ModelId) -> Vec<Column> {
-    super::tried(&prunr_core::engine::gpu_ladder_in_a_test(id)).into_iter().filter_map(|p| prunr_core::engine::column_in_a_test(id, p)).collect()
-}
-
-/// `column_of` as a test reads it, which tries again the places Prunr's
-/// own tests keep on the CPU: the same answer in the app and in the
-/// test's own process.
-fn column_in_a_test(id: ModelId) -> Option<Column> {
-    let ladder = prunr_core::engine::gpu_ladder_in_a_test(id);
-    prunr_core::engine::column_in_a_test(id, super::first_tried(&ladder)?)
+/// The column a test measures `id` in first; `None` when no accelerator
+/// would try it.
+fn first_column_in_a_test(id: ModelId) -> Option<Column> {
+    prunr_core::engine::tries_in_a_test(id).first().map(|&(_, column)| column)
 }
 
 /// Run the test: every installed model the accelerator would try (a place
@@ -90,11 +78,11 @@ fn column_in_a_test(id: ModelId) -> Option<Column> {
 pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     prunr_core::engine::remeasure_places();
     let installed = super::select(only, true, prunr_models::is_available).unwrap_or_default().into_iter().filter(|&id| prunr_models::is_available(id)).collect();
-    let Plan { models, left_out } = plan(installed, column_in_a_test);
+    let Plan { models, left_out } = plan(installed, first_column_in_a_test);
     let inputs = Inputs::built_in();
     // Each model once on each accelerator it may try here: a place for
     // every one, so the fastest can be told apart.
-    let passes = |id| tried_here(id).into_iter().map(Some).collect();
+    let passes = |id| prunr_core::engine::tries_in_a_test(id).into_iter().map(|(provider, _)| Some(provider)).collect();
     super::run_passes(&models, &inputs, RUNS, passes, &mut |event| match event {
         Event::Stage { index, total, side, sides, provider, .. } => {
             let model = models[index - 1];
@@ -172,7 +160,7 @@ fn turn(id: ModelId, column: Option<Column>) -> Turn {
 
 /// A test would time `id` here: what the Model Store's Test offers.
 pub(crate) fn times(id: ModelId) -> bool {
-    turn(id, column_in_a_test(id)) == Turn::Runs
+    turn(id, first_column_in_a_test(id)) == Turn::Runs
 }
 
 fn plan(installed: Vec<ModelId>, column_of: impl Fn(ModelId) -> Option<Column>) -> Plan {

@@ -211,9 +211,10 @@ fn check_found(name: &str, accelerator: &str, place: prunr_models::Place) -> Str
 /// Test again.
 fn model_tested(results: &crate::gui::hardware_cache::TestResults, model: ModelId, on: &str) -> Result<String, String> {
     let name = prunr_models::display_name(model);
-    match results.rows.iter().find(|r| r.model == model) {
-        Some(row) if row.complete => Ok(format!("{name} tested: it runs on {on} here.")),
-        _ => Err(format!("{name} could not be timed everywhere this time, so its card offers Test again. The log has the details.")),
+    if results.tested_everywhere(model) {
+        Ok(format!("{name} tested: it runs on {on} here."))
+    } else {
+        Err(format!("{name} could not be timed everywhere this time, so its card offers Test again. The log has the details."))
     }
 }
 
