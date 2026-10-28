@@ -46,10 +46,11 @@ pub(crate) struct MachineTest {
 const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Pass each event of the test's `output` on, waking the window; once the
-/// output closes, keep waking it every `EXIT_POLL` until `over`: a
-/// process may close its output before it can be waited on, and nothing
-/// else would wake the window to see it end.
-fn relay(output: impl BufRead, tx: &mpsc::Sender<Told>, wake: impl Fn(), over: &AtomicBool) {
+/// output closes, let go of the channel, which tells `pump` so, and keep
+/// waking the window every `EXIT_POLL` until `over`: a process may close
+/// its output before it can be waited on, and nothing else would wake
+/// the window to see it end.
+fn relay(output: impl BufRead, tx: mpsc::Sender<Told>, wake: impl Fn(), over: &AtomicBool) {
     for line in output.lines().map_while(Result::ok) {
         if let Some(event) = Told::parse(&line) {
             if tx.send(event).is_err() {
@@ -58,6 +59,7 @@ fn relay(output: impl BufRead, tx: &mpsc::Sender<Told>, wake: impl Fn(), over: &
             wake();
         }
     }
+    drop(tx);
     while !over.load(Ordering::Relaxed) {
         wake();
         std::thread::sleep(EXIT_POLL);
@@ -111,12 +113,18 @@ impl MachineTest {
             .spawn()
             .map_err(|e| format!("The test could not start: {e}"))?;
         let stdout = child.stdout.take().ok_or("The test could not start: no output")?;
+        Self::reading(child, stdout, only, wake)
+    }
+
+    /// A test whose process is `child`, its events read from `output` on
+    /// a thread of their own.
+    fn reading(child: Child, output: impl std::io::Read + Send + 'static, only: Option<ModelId>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         let (tx, told) = mpsc::channel();
         let over = Arc::new(AtomicBool::new(false));
         let reader_over = Arc::clone(&over);
         std::thread::Builder::new()
             .name("machine-test".into())
-            .spawn(move || relay(std::io::BufReader::new(stdout), &tx, wake, &reader_over))
+            .spawn(move || relay(std::io::BufReader::new(output), tx, wake, &reader_over))
             .map_err(|e| format!("The test could not start: {e}"))?;
         Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, over })
     }
@@ -207,6 +215,19 @@ pub(crate) fn stopped_here() -> Measured {
 mod tests {
     use super::*;
 
+    /// A test whose process has ended and whose output said so is seen to
+    /// end: its reader lets go of the channel as the output closes.
+    #[test]
+    fn a_test_that_ended_is_seen_to_end() {
+        let output = std::io::Cursor::new(format!("{}\n", Told::Finished { left_out: Vec::new() }.line()).into_bytes());
+        let mut test = MachineTest::reading(crate::gui::tests::fixtures::quick_child(), output, None, || {}).unwrap();
+        let ended = (0..300).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            test.pump()
+        });
+        assert_eq!(ended, Some(Ended::Finished { left_out: Vec::new() }));
+    }
+
     /// The reader passes each event on and wakes the window; once the
     /// output closes it keeps waking it until the test is over, as the
     /// process may end only later.
@@ -216,7 +237,7 @@ mod tests {
         let output = std::io::Cursor::new(format!("{}\nnot an event\n", Told::Finished { left_out: Vec::new() }.line()));
         let (tx, told) = mpsc::channel();
         let (wakes, over) = (AtomicUsize::new(0), AtomicBool::new(false));
-        relay(output, &tx, || {
+        relay(output, tx, || {
             if wakes.fetch_add(1, Ordering::Relaxed) == 3 {
                 over.store(true, Ordering::Relaxed);
             }
