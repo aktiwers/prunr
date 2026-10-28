@@ -4,7 +4,6 @@ use egui::RichText;
 
 use super::chip::{button, ButtonKind};
 use crate::bench::here::Step;
-use crate::gui::hardware_cache::Engine;
 use crate::gui::machine_test::{MachineTest, Measuring};
 use crate::gui::theme;
 
@@ -17,9 +16,9 @@ const ROW_HEIGHT: f32 = 24.0;
 /// Its progress, the models it finished, and Cancel; `true` when Cancel
 /// was clicked. It holds the window: nothing under it takes a click, and
 /// no click beside it closes it, as a test takes minutes to start over.
-/// `engines`: this computer's, which it tries each model on beside the
-/// processor.
-pub(crate) fn render(ctx: &egui::Context, test: &MachineTest, engines: &[Engine]) -> bool {
+/// `engines`: what it tries each model on, said ("the processor and
+/// CUDA").
+pub(crate) fn render(ctx: &egui::Context, test: &MachineTest, engines: &str) -> bool {
     let mut cancel = false;
     theme::holding_modal_window(ctx, "machine_test", "Testing this computer", SIZE, |ui| {
         super::chip::modal_frame(ui, |ui| {
@@ -29,7 +28,7 @@ pub(crate) fn render(ctx: &egui::Context, test: &MachineTest, engines: &[Engine]
             let line = step.map_or_else(|| "Starting\u{2026}".to_string(), step_line);
             ui.label(RichText::new(line).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
             if let Some(step) = step {
-                ui.label(RichText::new(where_line(step, engines.iter().filter(|e| e.installed).map(|e| e.name))).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(where_line(step, engines)).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
             }
             ui.add_space(theme::SPACE_SM);
             super::chip::progress_bar(ui, step.map_or(0.0, |s| s.fraction()), BAR_HEIGHT);
@@ -73,24 +72,26 @@ fn step_line(step: Step) -> String {
 }
 
 /// "Model 4 of 13 · the processor, DirectML and CUDA each in turn".
-fn where_line<'a>(step: Step, engines: impl Iterator<Item = &'a str>) -> String {
-    format!("Model {} of {} \u{00b7} {} each in turn", step.index, step.total, super::fmt::and_list(std::iter::once("the processor").chain(engines)))
+fn where_line(step: Step, engines: &str) -> String {
+    format!("Model {} of {} \u{00b7} {engines} each in turn", step.index, step.total)
 }
 
 /// A finished model's line: its name, its time on the processor, and its
 /// fastest engine with that engine's time; the processor when none beat it.
-fn finished_cells(m: &Measuring) -> [String; 4] {
-    let cpu = m.cpu_ms.map_or_else(|| "\u{2014}".to_string(), super::fmt::seconds);
-    let (fastest, engine) = match m.fastest {
-        Some((engine, ms)) => (super::fmt::seconds(ms), engine.to_string()),
-        None => ("\u{2014}".to_string(), "Processor".to_string()),
+fn finished_cells(m: &Measuring) -> [&str; 4] {
+    const NONE: &str = "\u{2014}";
+    let cpu = m.cpu.as_ref().map_or(NONE, |t| t.text.as_str());
+    let (fastest, engine) = match &m.fastest {
+        Some((engine, time)) => (time.text.as_str(), *engine),
+        None => (NONE, super::fmt::engine_heading(prunr_core::engine::CPU_NAME)),
     };
-    [prunr_models::display_name(m.model).to_string(), cpu, fastest, engine]
+    [prunr_models::display_name(m.model), cpu, fastest, engine]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::hardware_cache::Time;
     use prunr_models::{Column, ModelId};
 
     #[test]
@@ -98,14 +99,14 @@ mod tests {
         let step = |side| Step { index: 4, total: 13, model: ModelId::U2net, side, sides: 3, column: Column::Cuda };
         assert_eq!(step_line(step(2)), "U2Net with CUDA");
         assert_eq!(step_line(step(0)), "U2Net on the processor");
-        assert_eq!(where_line(step(1), ["DirectML", "CUDA"].into_iter()), "Model 4 of 13 \u{00b7} the processor, DirectML and CUDA each in turn");
+        assert_eq!(where_line(step(1), "the processor, DirectML and CUDA"), "Model 4 of 13 \u{00b7} the processor, DirectML and CUDA each in turn");
     }
 
     #[test]
     fn a_finished_model_without_a_faster_engine_runs_on_the_processor() {
-        let m = Measuring { model: ModelId::Silueta, cpu_ms: Some(670.0), fastest: None };
-        assert_eq!(finished_cells(&m), ["Silueta".to_string(), "0.67 s".into(), "\u{2014}".into(), "Processor".into()]);
-        let m = Measuring { model: ModelId::Silueta, cpu_ms: Some(670.0), fastest: Some(("DirectML", 40.0)) };
-        assert_eq!(finished_cells(&m)[2..], ["0.04 s".to_string(), "DirectML".into()]);
+        let m = Measuring { model: ModelId::Silueta, cpu: Some(Time::of(670.0)), fastest: None };
+        assert_eq!(finished_cells(&m), ["Silueta", "0.67 s", "\u{2014}", "Processor"]);
+        let m = Measuring { model: ModelId::Silueta, cpu: Some(Time::of(670.0)), fastest: Some(("DirectML", Time::of(40.0))) };
+        assert_eq!(finished_cells(&m)[2..], ["0.04 s", "DirectML"]);
     }
 }

@@ -13,6 +13,7 @@ use prunr_core::ep_compat::{Measured, PlaceKind};
 use prunr_models::{Column, ModelId};
 
 use crate::bench::here::{Step, Told};
+use crate::gui::hardware_cache::Time;
 
 /// How a test ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,21 +40,23 @@ pub(crate) struct MachineTest {
 
 /// A model the test measured: its time on the processor, and its fastest
 /// engine that gives the processor's picture.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Measuring {
     pub model: ModelId,
-    pub cpu_ms: Option<f32>,
+    pub cpu: Option<Time>,
     /// The engine's provider name and its time.
-    pub fastest: Option<(&'static str, f32)>,
+    pub fastest: Option<(&'static str, Time)>,
 }
 
 impl Measuring {
     /// Take in what a run on `column` found.
     fn add(&mut self, column: Column, measured: &Measured) {
-        self.cpu_ms = self.cpu_ms.or(measured.cpu_ms);
+        if self.cpu.is_none() {
+            self.cpu = measured.cpu_ms.map(Time::of);
+        }
         let Some(ms) = measured.ms.filter(|_| measured.kind == PlaceKind::There) else { return };
-        if self.fastest.is_none_or(|(_, best)| ms < best) {
-            self.fastest = Some((column.provider(), ms));
+        if self.fastest.as_ref().is_none_or(|(_, best)| ms < best.ms) {
+            self.fastest = Some((column.provider(), Time::of(ms)));
         }
     }
 }
@@ -153,7 +156,7 @@ impl MachineTest {
         let at = match self.measured.iter().position(|m| m.model == model) {
             Some(at) => at,
             None => {
-                self.measured.push(Measuring { model, cpu_ms: None, fastest: None });
+                self.measured.push(Measuring { model, cpu: None, fastest: None });
                 self.measured.len() - 1
             }
         };
@@ -188,12 +191,12 @@ mod tests {
     /// one slower than the processor.
     #[test]
     fn a_finished_model_shows_its_fastest_engine_with_the_same_picture() {
-        let mut m = Measuring { model: ModelId::Silueta, cpu_ms: None, fastest: None };
+        let mut m = Measuring { model: ModelId::Silueta, cpu: None, fastest: None };
         m.add(Column::Cuda, &Measured::new(PlaceKind::Differs, "x").with_times(Some(10.0), Some(670.0)));
-        assert_eq!((m.cpu_ms, m.fastest), (Some(670.0), None));
+        assert_eq!((m.cpu.as_ref().map(|t| t.ms), &m.fastest), (Some(670.0), &None));
         m.add(Column::DirectMl, &Measured::timed(PlaceKind::There, 40.0, 670.0, ""));
         m.add(Column::OpenVino, &Measured::timed(PlaceKind::Slower, 900.0, 670.0, ""));
         m.add(Column::MiGraphX, &Measured::timed(PlaceKind::There, 57.0, 670.0, ""));
-        assert_eq!(m.fastest, Some(("DirectML", 40.0)));
+        assert_eq!(m.fastest, Some(("DirectML", Time::of(40.0))));
     }
 }

@@ -196,7 +196,6 @@ fn downloads_line(app: &PrunrApp) -> Option<String> {
 /// the chosen model runs on, which each model picks for itself; read again
 /// only when the model, the probe's answer or what was measured changes.
 fn model_engine<'a>(ctx: &egui::Context, app: &'a PrunrApp) -> &'a str {
-    use std::hash::{Hash, Hasher};
     let backend = app.settings.active_backend.as_str();
     if app.settings.cpu_only() {
         return "CPU only";
@@ -205,14 +204,14 @@ fn model_engine<'a>(ctx: &egui::Context, app: &'a PrunrApp) -> &'a str {
         return "Checking";
     }
     let Some(model) = app.settings.model.to_model_id() else { return backend };
-    let mut key = std::collections::hash_map::DefaultHasher::new();
-    (model, std::sync::Arc::as_ptr(&app.test_results) as usize, backend).hash(&mut key);
-    let key = key.finish();
+    // The probe answers once per process, and the results are read again
+    // whenever what was measured changes.
+    let key = (model, std::sync::Arc::as_ptr(&app.test_results) as usize);
     let id = egui::Id::new("statusbar_model_engine");
-    if let Some((_, engine)) = ctx.data(|d| d.get_temp::<(u64, &'static str)>(id)).filter(|(k, _)| *k == key) {
+    if let Some((_, engine)) = ctx.data(|d| d.get_temp::<((prunr_models::ModelId, usize), &'static str)>(id)).filter(|(k, _)| *k == key) {
         return engine;
     }
-    let engine = prunr_core::memory::provider_now(model, false);
+    let engine = app.settings.engine_of(model);
     ctx.data_mut(|d| d.insert_temp(id, (key, engine)));
     engine
 }

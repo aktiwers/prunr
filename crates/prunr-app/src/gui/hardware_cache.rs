@@ -51,6 +51,8 @@ pub(crate) struct TestResults {
     pub changed: Vec<prunr_core::ep_compat::ScopePart>,
     /// The installed models a test would time here (`bench::here::times`).
     pub testable: Vec<prunr_models::ModelId>,
+    /// "the processor, DirectML and CUDA": what a test times each model on.
+    pub engines_said: String,
 }
 
 /// An engine of this computer's: one this process runs models on, or
@@ -65,25 +67,54 @@ pub(crate) struct Engine {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TestRow {
     pub model: prunr_models::ModelId,
-    /// Milliseconds a run took on the processor.
-    pub cpu_ms: Option<f32>,
+    /// A run's time on the processor.
+    pub cpu: Option<Time>,
     /// One per engine of `TestResults::engines`.
     pub cells: Vec<Cell>,
     /// The provider it runs on while the accelerators are on.
     pub runs_on: &'static str,
 }
 
-/// What a test found for one model on one engine.
-#[derive(Debug, Clone, Copy, PartialEq)]
+impl TestRow {
+    /// The provider it runs on: the processor under "CPU only".
+    pub fn engine(&self, cpu_only: bool) -> &'static str {
+        if cpu_only { prunr_core::engine::CPU_NAME } else { self.runs_on }
+    }
+
+    /// Its time on `provider`, one of `engines` or the processor.
+    pub fn time_on(&self, engines: &[Engine], provider: &str) -> Option<&Time> {
+        if provider == prunr_core::engine::CPU_NAME {
+            return self.cpu.as_ref();
+        }
+        engines.iter().zip(&self.cells).find(|(e, _)| e.name == provider).and_then(|(_, cell)| match cell {
+            Cell::Time(time) => Some(time),
+            _ => None,
+        })
+    }
+}
+
+/// A run's time, and how the window says it, said once when it is read.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Time {
+    pub ms: f32,
+    pub text: String,
+}
+
+impl Time {
+    pub fn of(ms: f32) -> Self {
+        Self { ms, text: crate::gui::views::fmt::seconds(ms) }
+    }
+}
+
+/// What a test found for one model on one engine; an engine not installed
+/// has `Untested`.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Cell {
-    /// Milliseconds a run took there.
-    Time(f32),
+    Time(Time),
     Fails,
     /// A different picture from the processor's.
     Differs,
-    /// Not measured there.
     Untested,
-    NotInstalled,
 }
 
 impl Cell {
@@ -94,7 +125,7 @@ impl Cell {
             Some(m) => match m.kind {
                 PlaceKind::Fails => Self::Fails,
                 PlaceKind::Differs => Self::Differs,
-                PlaceKind::There | PlaceKind::Slower | PlaceKind::NoGain => m.ms.map_or(Self::Untested, Self::Time),
+                PlaceKind::There | PlaceKind::Slower | PlaceKind::NoGain => m.ms.map_or(Self::Untested, |ms| Self::Time(Time::of(ms))),
             },
         }
     }
@@ -112,6 +143,11 @@ impl TestResults {
             ScopePart::Setup => "how Prunr sets models up",
         };
         (!self.changed.is_empty()).then(|| crate::gui::views::fmt::and_list(self.changed.iter().map(|&part| said(part))))
+    }
+
+    /// The engines this process runs models on.
+    pub fn installed(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.engines.iter().filter(|e| e.installed).map(|e| e.name)
     }
 
     /// Some place is measured here: a test ran, or one was cancelled after
@@ -146,13 +182,16 @@ impl TestResults {
                 test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))
             })
             .collect();
-        Self {
+        let mut results = Self {
             tested: prunr_core::ep_compat::tested(),
             engines,
             rows,
             changed: prunr_core::ep_compat::changed_since_test(),
             testable: installed().filter(|&id| crate::bench::here::times(id)).collect(),
-        }
+            engines_said: String::new(),
+        };
+        results.engines_said = crate::gui::views::fmt::and_list(std::iter::once(crate::gui::views::fmt::engine(prunr_core::engine::CPU_NAME)).chain(results.installed()));
+        results
     }
 }
 
@@ -170,19 +209,19 @@ fn test_row(
     let fails_by_registry = |column: prunr_models::Column| {
         matches!(prunr_models::registry_places(model).get(column), prunr_models::Place::Cpu(prunr_models::Why::Fails(_)))
     };
+    if measured.iter().all(Option::is_none) {
+        return None;
+    }
     let cells: Vec<Cell> = engines
         .iter()
         .map(|e| match (e.installed, column_of(e.name)) {
-            (false, _) => Cell::NotInstalled,
+            (false, _) => Cell::Untested,
             (true, Some(column)) if measured[column.index()].is_none() && fails_by_registry(column) => Cell::Fails,
             (true, column) => Cell::of(column.and_then(|c| measured[c.index()].as_ref())),
         })
         .collect();
-    if measured.iter().all(Option::is_none) {
-        return None;
-    }
-    let cpu_ms = measured.iter().flatten().find_map(|m| m.cpu_ms);
-    Some(TestRow { model, cpu_ms, cells, runs_on })
+    let cpu = measured.iter().flatten().find_map(|m| m.cpu_ms).map(Time::of);
+    Some(TestRow { model, cpu, cells, runs_on })
 }
 
 /// Bytes the downloaded models take in `dir`, multi-part bundles included.
@@ -344,9 +383,8 @@ mod tests {
         assert_eq!(super::disk_usage_in(dir.path()), 42);
     }
 
-    /// A row holds what each installed engine measured, the processor's
-    /// time from any of them, and says which engine is not installed; a
-    /// model no engine measured has no row.
+    /// A row holds what each installed engine measured and the processor's
+    /// time from any of them; a model no engine measured has no row.
     #[test]
     fn a_row_shows_each_engine_and_the_processor() {
         use super::{Cell, Engine};
@@ -359,17 +397,17 @@ mod tests {
         measured[Column::Cuda.index()] = Some(Measured::timed(PlaceKind::There, 440.0, 9_000.0, ""));
         let all = [Engine { name: "DirectML", installed: true }, Engine { name: "CUDA", installed: true }];
         let row = super::test_row(ModelId::BiRefNetLite, &all, &measured, column_of, "CUDA").expect("a row");
-        assert_eq!(row.cells, [Cell::Fails, Cell::Time(440.0)], "DirectML, never tried as Prunr's tests found it fails, says so");
+        assert_eq!(row.cells, [Cell::Fails, Cell::Time(super::Time::of(440.0))], "DirectML, never tried as Prunr's tests found it fails, says so");
         measured[Column::Cuda.index()] = None;
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Fails, "E_OUTOFMEMORY").with_times(None, Some(10_100.0)));
         let row = super::test_row(ModelId::BiRefNetLite, &engines, &measured, column_of, "CPU").expect("a row");
-        assert_eq!(row.cells, [Cell::Fails, Cell::NotInstalled]);
-        assert_eq!(row.cpu_ms, Some(10_100.0));
+        assert_eq!(row.cells, [Cell::Fails, Cell::Untested]);
+        assert_eq!(row.cpu.map(|t| t.ms), Some(10_100.0));
         measured[Column::DirectMl.index()] = Some(Measured::timed(PlaceKind::Slower, 900.0, 670.0, ""));
         let row = super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").expect("a row");
-        assert_eq!((row.cells[0], row.cpu_ms), (Cell::Time(900.0), Some(670.0)), "a slower engine still shows its time");
+        assert_eq!((&row.cells[0], row.cpu.map(|t| t.ms)), (&Cell::Time(super::Time::of(900.0)), Some(670.0)), "a slower engine still shows its time");
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Differs, "mean 3/255"));
-        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0]), Some(Cell::Differs));
+        assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU").map(|r| r.cells[0].clone()), Some(Cell::Differs));
     }
 
     /// What changed since the test is said in people's words.

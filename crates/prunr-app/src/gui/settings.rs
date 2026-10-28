@@ -303,7 +303,12 @@ impl Settings {
     /// (two can run, CUDA beside DirectML), or the CPU when none runs this
     /// model, under "CPU only", or until the probe has answered.
     pub fn model_backend(&self, model: prunr_core::ModelKind) -> &'static str {
-        if is_accelerator(self.effective_backend()) { prunr_core::memory::provider_now(model.model_id(), false) } else { "CPU" }
+        self.engine_of(model.model_id())
+    }
+
+    /// `model_backend` for any model.
+    pub fn engine_of(&self, model: prunr_models::ModelId) -> &'static str {
+        if is_accelerator(self.effective_backend()) { prunr_core::memory::provider_now(model, false) } else { prunr_core::engine::CPU_NAME }
     }
 
     /// With no model the pipeline is pure CPU on decoded pixels, so the
