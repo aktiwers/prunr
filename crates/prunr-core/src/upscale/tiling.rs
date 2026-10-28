@@ -112,7 +112,8 @@ fn axis_tiles(len: u32, tile_size: u32, overlap: u32, align: u32) -> (Vec<u32>, 
 /// `run_tile(rgb_tile, padded_w, padded_h)` must return an RGB image of
 /// `scale * padded_w × scale * padded_h`. Returns `Cancelled` before the
 /// next tile once `progress` is cancelled.
-pub fn upscale_tiled<F>(
+#[cfg(test)]
+fn upscale_tiled<F>(
     input: &RgbaImage,
     scale: u32,
     cfg: TilingConfig,

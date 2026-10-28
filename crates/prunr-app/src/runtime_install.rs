@@ -77,7 +77,7 @@ impl RuntimeId {
         self.addon().is_some()
     }
 
-    pub(crate) fn addon(self) -> Option<&'static ri::AddOn> {
+    fn addon(self) -> Option<&'static ri::AddOn> {
         match self {
             Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
             _ => None,

@@ -10,7 +10,7 @@ pub mod postprocess;
 pub use postprocess::{sharpened, apply_ai_blend, apply_color_match, refine, Reference, Refine};
 
 pub use alpha::upscale_alpha_lanczos3;
-pub use tiling::{plan_upscale_tiles, upscale_tiled, TilingConfig, UpscaleTilePlacement};
+pub use tiling::{plan_upscale_tiles, TilingConfig, UpscaleTilePlacement};
 
 use std::sync::Arc;
 

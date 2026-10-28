@@ -62,6 +62,12 @@ impl Step {
             Step::OnTheProcessor => "Out of graphics memory: on the processor",
         }
     }
+
+    /// The run starts over from this step, so the counts before it need
+    /// not finish.
+    pub fn restarts(self) -> bool {
+        matches!(self, Step::OnTheProcessor)
+    }
 }
 
 /// What a count counts.
@@ -432,7 +438,7 @@ pub fn check_contract(updates: &[ProgressUpdate]) -> Result<(), String> {
                     return Err(format!("preview tile {}×{} at {},{} outside its {}×{} image", t.width, t.height, t.x, t.y, t.full_width, t.full_height));
                 }
             }
-            ProgressUpdate::Step(Step::OnTheProcessor) => last = [None, None],
+            ProgressUpdate::Step(step) if step.restarts() => last = [None, None],
             ProgressUpdate::Step(_) | ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) => {}
         }
     }
