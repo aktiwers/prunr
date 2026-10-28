@@ -105,7 +105,9 @@ impl MachineTest {
 
     fn spawn(args: &[&str], only: Option<ModelId>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         let exe = crate::subprocess::manager::worker_exe()?;
-        let mut child = Command::new(exe)
+        let mut command = Command::new(exe);
+        prunr_core::ort_runtime::same_runtime_for(&mut command);
+        let mut child = command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
