@@ -84,7 +84,7 @@ pub(crate) struct HardwareSectionContext {
     /// a Stable Diffusion erase, runs on the processor.
     pub cpu_only: bool,
     /// Why each provider does not run, by its stack, where it does not.
-    pub gpu_failures: [Option<&'static prunr_core::engine::GpuStartFailure>; prunr_core::engine::GpuStack::ALL.len()],
+    pub gpu_failures: prunr_core::engine::PerStack<Option<&'static prunr_core::engine::GpuStartFailure>>,
     /// There is an accelerator to test: not on CPU only.
     pub testable: bool,
     /// Something else uses the machine: a test waits for it.
@@ -761,7 +761,7 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     // An add-on is in use wherever it is installed; a runtime, once loaded.
     let waits = rt.is_addon() && ctx.installs.addon_waits;
     let in_use = (rt.is_addon() && !waits) || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
-    let failure = ctx.gpu_failures[rt.stack() as usize].filter(|_| in_use).map(|f| f.text());
+    let failure = ctx.gpu_failures[rt.stack().index()].filter(|_| in_use).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
         None if installed && waits => rt.waiting_line(),

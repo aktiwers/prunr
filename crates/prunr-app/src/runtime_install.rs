@@ -308,6 +308,12 @@ pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
     ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
 ];
 
+/// The first NVIDIA chip the pinned cuDNN runs on, as a PCI device id:
+/// cuDNN 9.11 and later dropped Maxwell, Pascal and Volta. NVIDIA numbers
+/// its chips in order: Turing's TU102 is 0x1E02, every older one lies
+/// below 0x1E00. A cuDNN pin that changes the generations moves this.
+pub const CUDA_FIRST_DEVICE_ID: u32 = 0x1E00;
+
 /// The NVIDIA libraries' download, for the button that offers them
 /// again when they are missing.
 pub const NVIDIA_DOWNLOAD_LABEL: &str = "1.6 GB";

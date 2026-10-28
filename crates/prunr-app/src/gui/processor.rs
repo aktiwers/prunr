@@ -524,7 +524,7 @@ impl DepthQueue {
 /// the run it was fails instead of the app.
 fn caught<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     crate::panics::caught("a model run", f)
-        .map_err(|_| "The model stopped unexpectedly. Try again; if it repeats, try another model.".to_string())
+        .ok_or_else(|| "The model stopped unexpectedly. Try again; if it repeats, try another model.".to_string())
 }
 
 /// Measure one photo on the warm engine, with the faces in it for Auto
@@ -1005,7 +1005,6 @@ impl Processor {
     /// runs none.
     fn spawn_model(&self, job: impl FnOnce() + Send + 'static) {
         if self.runs_models {
-            // rayon aborts the process on a job's panic.
             rayon::spawn(move || {
                 let _ = caught(job);
             });
@@ -1293,8 +1292,7 @@ impl Processor {
         let bridge_tx = self.inpaint_bridge_tx.clone();
         let inpaint_tx = self.inpaint_done.tx.clone();
         rayon::spawn(move || {
-            let failed = inpaint_tx.clone();
-            let sent = crate::panics::caught("an eraser stroke's send", move || {
+            let sent = crate::panics::caught("an eraser stroke's send", || {
                 // Checked before the work and before the bridge dispatch, so a
                 // mid-encode Esc never runs the SD bundle on a discarded stroke.
                 let cancelled = || progress.is_cancelled();
@@ -1335,8 +1333,8 @@ impl Processor {
                 };
                 let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(Box::new(job)));
             });
-            if sent.is_err() {
-                let _ = failed.send((item_id, generation, InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into())));
+            if sent.is_none() {
+                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into())));
             }
         });
     }
@@ -1352,9 +1350,9 @@ impl Processor {
                     rayon::spawn(move || {
                         let read = crate::panics::caught("reading an eraser result", || crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height));
                         let outcome = match read {
-                            Ok(Some(rgba)) => InpaintOutcome::Done { rgba, fill_scale },
-                            Ok(None) => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
-                            Err(_) => InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into()),
+                            Some(Some(rgba)) => InpaintOutcome::Done { rgba, fill_scale },
+                            Some(None) => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
+                            None => InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into()),
                         };
                         let _ = tx.send((item_id, generation, outcome));
                         if let Some(sink) = sink {

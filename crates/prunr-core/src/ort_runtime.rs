@@ -725,7 +725,7 @@ impl Addon {
 
     /// Whether sessions reach its provider in this process.
     pub fn registered(self) -> bool {
-        REGISTERED[self as usize].get().copied().unwrap_or(false)
+        REGISTERED[self as usize].get().is_some_and(Result::is_ok)
     }
 }
 
@@ -734,12 +734,10 @@ impl Addon {
 /// probes its providers. Set at startup, before any session.
 static ADDONS: [OnceLock<PathBuf>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
 
-/// Whether this process registered each add-on, once it tried.
-static REGISTERED: [OnceLock<bool>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
-
-/// Why each add-on, installed, did not register, when it did not.
-#[cfg(not(target_os = "macos"))]
-static NOT_REGISTERED: [OnceLock<String>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
+/// Whether this process registered each add-on, once it tried; one that
+/// did not keeps the runtime's reason, or none when the runtime was too
+/// old to try.
+static REGISTERED: [OnceLock<Result<(), Option<String>>>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
 
 /// Use `addon`, installed at `library`, in this process.
 pub fn use_addon(addon: Addon, library: PathBuf) {
@@ -752,10 +750,10 @@ pub fn use_addon(addon: Addon, library: PathBuf) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn register_addon(addon: Addon) -> bool {
     register_once(&REGISTERED[addon as usize], addon.library(), |library| {
-        let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return false };
+        let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return Err(None) };
         if !hosts_addons() {
             tracing::warn!(addon = addon.name(), version = runtime_version(), "the loaded runtime is older than the add-on is built for; it starts with Prunr's own");
-            return false;
+            return Err(None);
         }
         let started = std::time::Instant::now();
         match (addon, library.parent()) {
@@ -767,12 +765,11 @@ pub(crate) fn register_addon(addon: Addon) -> bool {
         match env.register_ep_library(addon.ep_name(), library) {
             Ok(()) => {
                 tracing::info!(addon = addon.name(), library = %library.display(), elapsed_ms = started.elapsed().as_millis() as u64, "add-on registered");
-                true
+                Ok(())
             }
             Err(e) => {
                 tracing::warn!(addon = addon.name(), library = %library.display(), %e, "add-on did not register");
-                let _ = NOT_REGISTERED[addon as usize].set(e.to_string());
-                false
+                Err(Some(e.to_string()))
             }
         }
     })
@@ -782,15 +779,15 @@ pub(crate) fn register_addon(addon: Addon) -> bool {
 /// it did, is not installed, or waits for a newer runtime.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn registration_error(addon: Addon) -> Option<&'static str> {
-    NOT_REGISTERED[addon as usize].get().map(String::as_str)
+    REGISTERED[addon as usize].get()?.as_ref().err()?.as_deref()
 }
 
 /// `register` the add-on at `library` once, its answer kept in `slot`.
 /// With none installed nothing is kept: one installed later registers.
 #[cfg(not(target_os = "macos"))]
-fn register_once(slot: &OnceLock<bool>, library: Option<&Path>, register: impl FnOnce(&Path) -> bool) -> bool {
+fn register_once(slot: &OnceLock<Result<(), Option<String>>>, library: Option<&Path>, register: impl FnOnce(&Path) -> Result<(), Option<String>>) -> bool {
     let Some(library) = library else { return false };
-    *slot.get_or_init(|| register(library))
+    slot.get_or_init(|| register(library)).is_ok()
 }
 
 /// The devices `addon` offers: one per card or processor it can use.
@@ -991,7 +988,7 @@ mod tests {
         let slot = std::sync::OnceLock::new();
         assert!(!super::register_once(&slot, None, |_| unreachable!("nothing to register")), "none installed");
         let library = std::path::Path::new("onnxruntime_providers_cuda.dll");
-        assert!(super::register_once(&slot, Some(library), |_| true), "installed since: it registers");
+        assert!(super::register_once(&slot, Some(library), |_| Ok(())), "installed since: it registers");
         assert!(super::register_once(&slot, Some(library), |_| unreachable!("once per process")), "kept");
     }
 

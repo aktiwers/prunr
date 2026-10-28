@@ -50,10 +50,6 @@ impl std::fmt::Display for GpuVendor {
     }
 }
 
-/// NVIDIA numbers its chips in order: Turing's TU102 is 0x1E02, and
-/// every Pascal and Volta chip lies below 0x1E00.
-const FIRST_TURING_DEVICE_ID: u32 = 0x1E00;
-
 #[derive(Debug, Clone)]
 pub struct HardwareProfile {
     pub cpu_vendor: CpuVendor,
@@ -88,7 +84,7 @@ impl HardwareProfile {
     /// Maxwell, Pascal and Volta. A card whose id went unread is given
     /// the benefit of the doubt.
     fn nvidia_runs_cuda(&self) -> bool {
-        self.dgpu == Some(GpuVendor::Nvidia) && self.dgpu_device.is_none_or(|id| id >= FIRST_TURING_DEVICE_ID)
+        self.dgpu == Some(GpuVendor::Nvidia) && self.dgpu_device.is_none_or(|id| id >= crate::runtime_install::CUDA_FIRST_DEVICE_ID)
     }
 
     /// Intel graphics, built in or a card, which OpenVINO can run on.
@@ -379,9 +375,10 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> GpuSlots {
         let name = entry.file_name();
         let name_s = name.to_string_lossy();
         if !is_card_dir(&name_s) { continue; }
-        let vendor_path = entry.path().join("device").join("vendor");
+        let device = entry.path().join("device");
+        let vendor_path = device.join("vendor");
         let Ok(vendor_raw) = std::fs::read_to_string(&vendor_path) else { continue };
-        let gpu_vendor = parse_pci_vendor(&vendor_raw);
+        let gpu_vendor = parse_pci_id(&vendor_raw).map_or(GpuVendor::Other, gpu_vendor);
         // Heuristic: GPU vendor matching CPU vendor is the iGPU. Known
         // limitation: AMD CPU + AMD dGPU (Ryzen + Radeon RX) reads the
         // dGPU as an iGPU.
@@ -390,7 +387,7 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> GpuSlots {
             slots.igpu.get_or_insert(gpu_vendor);
         } else if slots.dgpu.is_none() {
             slots.dgpu = Some(gpu_vendor);
-            slots.dgpu_device = std::fs::read_to_string(entry.path().join("device").join("device")).ok().and_then(|raw| parse_pci_id(&raw));
+            slots.dgpu_device = std::fs::read_to_string(device.join("device")).ok().and_then(|raw| parse_pci_id(&raw));
         }
     }
     slots
@@ -403,12 +400,6 @@ fn is_card_dir(name: &str) -> bool {
     name.starts_with("card")
         && name.len() >= 5
         && name[4..].chars().all(|c| c.is_ascii_digit())
-}
-
-/// Parse a `/sys/class/drm/.../device/vendor` value (e.g. `0x10de\n`).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // sysfs is Linux's; the tests run it everywhere
-fn parse_pci_vendor(raw: &str) -> GpuVendor {
-    parse_pci_id(raw).map_or(GpuVendor::Other, gpu_vendor)
 }
 
 /// A sysfs PCI id (`0x10de\n`).
@@ -612,10 +603,11 @@ mod tests {
 
     #[test]
     fn parse_pci_vendor_known_ids() {
-        assert_eq!(parse_pci_vendor("0x10de\n"), GpuVendor::Nvidia);
-        assert_eq!(parse_pci_vendor("0x1002\n"), GpuVendor::Amd);
-        assert_eq!(parse_pci_vendor("0x8086\n"), GpuVendor::Intel);
-        assert_eq!(parse_pci_vendor("0x1234\n"), GpuVendor::Other);
+        let vendor = |raw: &str| parse_pci_id(raw).map_or(GpuVendor::Other, gpu_vendor);
+        assert_eq!(vendor("0x10de\n"), GpuVendor::Nvidia);
+        assert_eq!(vendor("0x1002\n"), GpuVendor::Amd);
+        assert_eq!(vendor("0x8086\n"), GpuVendor::Intel);
+        assert_eq!(vendor("0x1234\n"), GpuVendor::Other);
     }
 
     #[test]

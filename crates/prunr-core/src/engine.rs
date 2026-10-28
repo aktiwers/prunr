@@ -40,6 +40,9 @@ pub const CUDA_NAME: &str = "CUDA";
 /// DirectML's provider name, defined on every platform like CUDA's.
 pub const DIRECTML_NAME: &str = "DirectML";
 
+/// MIGraphX's provider name, defined on every platform like CUDA's.
+pub(crate) const MIGRAPHX_NAME: &str = "MIGraphX";
+
 /// CoreML's provider name, defined on every platform like CUDA's.
 pub(crate) const COREML_NAME: &str = "CoreML";
 
@@ -56,7 +59,7 @@ impl EpKind {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda => CUDA_NAME,
             #[cfg(target_os = "linux")]
-            EpKind::MiGraphX => "MIGraphX",
+            EpKind::MiGraphX => MIGRAPHX_NAME,
             #[cfg(target_os = "macos")]
             EpKind::CoreMl => COREML_NAME,
             #[cfg(windows)]
@@ -92,12 +95,8 @@ pub(crate) fn available_gpu_eps() -> std::sync::Arc<[EpKind]> {
 /// add-on loads NVIDIA's libraries, seconds the first time.
 #[cfg(not(target_os = "macos"))]
 pub fn start_addon(addon: crate::ort_runtime::Addon) -> Result<(), String> {
-    use crate::ort_runtime::Addon;
     use std::sync::PoisonError;
-    let ep = match addon {
-        Addon::Cuda => EpKind::Cuda,
-        Addon::OpenVino => EpKind::OpenVino,
-    };
+    let ep = addon.ep();
     if available_gpu_eps().contains(&ep) {
         return Ok(());
     }
@@ -145,11 +144,15 @@ fn probe_gpu_eps() -> Vec<EpKind> {
         } else {
             addon_starts(Addon::Cuda)
         };
-        START_FAILURES.take(cuda, || eps.push(EpKind::Cuda));
+        if cuda.is_some_and(|started| START_FAILURES.started(started)) {
+            eps.push(EpKind::Cuda);
+        }
         #[cfg(target_os = "linux")]
         if ort::ep::MIGraphX::is_available().unwrap_or(false) {
             let migraphx = provider_starts(ort::ep::MIGraphX::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Rocm, &e));
-            START_FAILURES.take(Some(migraphx), || eps.push(EpKind::MiGraphX));
+            if START_FAILURES.started(migraphx) {
+                eps.push(EpKind::MiGraphX);
+            }
         }
         #[cfg(windows)]
         if ort::ep::DirectML::is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
@@ -157,7 +160,9 @@ fn probe_gpu_eps() -> Vec<EpKind> {
         // OpenVINO runs on the processor unless the user lets it use Intel
         // graphics, an integrated chip.
         let openvino = if ort::ep::OpenVINO::is_available().unwrap_or(false) { Some(Ok(())) } else { addon_starts(Addon::OpenVino) };
-        START_FAILURES.take(openvino, || eps.push(EpKind::OpenVino));
+        if openvino.is_some_and(|started| START_FAILURES.started(started)) {
+            eps.push(EpKind::OpenVino);
+        }
     }
     let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
     tracing::info!(eps = ?eps_str, "Available GPU execution providers");
@@ -167,7 +172,7 @@ fn probe_gpu_eps() -> Vec<EpKind> {
 /// Why each provider that could not start here did not, once the
 /// providers have been probed or an add-on started: CUDA and OpenVINO can
 /// be installed side by side, and each fails on its own.
-struct StartFailures([std::sync::OnceLock<GpuStartFailure>; GpuStack::ALL.len()]);
+struct StartFailures(PerStack<std::sync::OnceLock<GpuStartFailure>>);
 
 impl StartFailures {
     const fn new() -> Self {
@@ -178,32 +183,30 @@ impl StartFailures {
     #[cfg(not(target_os = "macos"))]
     fn record(&self, failure: GpuStartFailure) {
         tracing::info!(?failure, "a provider cannot start; sessions run on the CPU");
-        let _ = self.0[failure.stack as usize].set(failure);
+        let _ = self.0[failure.stack.index()].set(failure);
     }
 
-    /// A start's outcome: `listed` when it started, the failure kept when
-    /// it did not; nothing when there was nothing to start.
+    /// Whether a start succeeded; the failure is kept when it did not.
     #[cfg(not(target_os = "macos"))]
-    fn take(&self, started: Option<Result<(), GpuStartFailure>>, listed: impl FnOnce()) {
-        match started {
-            Some(Ok(())) => listed(),
-            Some(Err(failure)) => self.record(failure),
-            None => {}
-        }
+    fn started(&self, outcome: Result<(), GpuStartFailure>) -> bool {
+        outcome.map_err(|failure| self.record(failure)).is_ok()
     }
 
-    fn each(&self) -> [Option<&GpuStartFailure>; GpuStack::ALL.len()] {
+    fn each(&self) -> PerStack<Option<&GpuStartFailure>> {
         std::array::from_fn(|i| self.0[i].get())
     }
 }
 
 static START_FAILURES: StartFailures = StartFailures::new();
 
-/// Why each provider does not run here, by its stack (`GpuStack as
-/// usize`); `None` where it runs or there is none.
-pub fn gpu_start_failures() -> [Option<&'static GpuStartFailure>; GpuStack::ALL.len()] {
+/// Why each provider does not run here, by its stack; `None` where it
+/// runs or there is none.
+pub fn gpu_start_failures() -> PerStack<Option<&'static GpuStartFailure>> {
     START_FAILURES.each()
 }
+
+/// One value per vendor stack, indexed by `GpuStack::index`.
+pub type PerStack<T> = [T; GpuStack::ALL.len()];
 
 /// The vendor stack a provider needs installed beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,11 +222,15 @@ pub enum GpuStack {
 impl GpuStack {
     pub const ALL: [Self; 3] = [Self::Cuda, Self::Rocm, Self::OpenVino];
 
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     fn provider(self) -> &'static str {
         match self {
-            Self::Cuda => "CUDA",
-            Self::Rocm => "MIGraphX",
-            Self::OpenVino => "OpenVINO",
+            Self::Cuda => CUDA_NAME,
+            Self::Rocm => MIGRAPHX_NAME,
+            Self::OpenVino => OPENVINO_NAME,
         }
     }
 
@@ -261,6 +268,18 @@ impl GpuStartFailure {
         Self::of(GpuStack::Cuda, err)
     }
 
+    /// `failures` in their stacks' slots, as `gpu_start_failures` gives
+    /// them, for tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn by_stack<'a>(failures: &[&'a Self]) -> PerStack<Option<&'a Self>> {
+        std::array::from_fn(|i| failures.iter().copied().find(|f| f.stack.index() == i))
+    }
+
+    /// The driver runs but serves no device the provider can use.
+    pub const fn no_device(stack: GpuStack) -> Self {
+        Self { stack, why: StartFailure::NoDevice }
+    }
+
     /// `err` names the first library the loader could not find, or the
     /// vendor's error code. macOS starts no CUDA or ROCm provider.
     #[cfg(any(not(target_os = "macos"), test, feature = "test-utils"))]
@@ -288,16 +307,16 @@ impl GpuStartFailure {
         let provider = self.stack.provider();
         match &self.why {
             StartFailure::MissingLibrary(lib) => format!("{provider} could not start: {lib} is missing. It needs {}.", self.stack.needs()),
-            StartFailure::NoDriver => match self.stack {
-                GpuStack::Cuda => "CUDA could not start: the NVIDIA driver is missing or older than CUDA 12 needs (525 or newer).".to_string(),
-                GpuStack::Rocm => "MIGraphX could not start: the AMD graphics driver is missing or too old for ROCm 7.".to_string(),
-                GpuStack::OpenVino => "OpenVINO could not start: Intel's graphics driver is missing.".to_string(),
-            },
-            StartFailure::NoDevice => match self.stack {
-                GpuStack::Cuda => "CUDA could not start: no NVIDIA graphics card was found.".to_string(),
-                GpuStack::Rocm => "MIGraphX could not start: no AMD graphics card that ROCm supports was found.".to_string(),
-                GpuStack::OpenVino => "OpenVINO could not start: it found no Intel processor or Intel graphics it can use.".to_string(),
-            },
+            StartFailure::NoDriver => format!("{provider} could not start: {}", match self.stack {
+                GpuStack::Cuda => "the NVIDIA driver is missing or older than CUDA 12 needs (525 or newer).",
+                GpuStack::Rocm => "the AMD graphics driver is missing or too old for ROCm 7.",
+                GpuStack::OpenVino => "Intel's graphics driver is missing.",
+            }),
+            StartFailure::NoDevice => format!("{provider} could not start: {}", match self.stack {
+                GpuStack::Cuda => "no NVIDIA graphics card was found.",
+                GpuStack::Rocm => "no AMD graphics card that ROCm supports was found.",
+                GpuStack::OpenVino => "it found no Intel processor or Intel graphics it can use.",
+            }),
             StartFailure::Other => format!("{provider} could not start, so models run on the CPU. The log has the details."),
         }
     }
@@ -320,7 +339,7 @@ fn provider_starts(provider: ExecutionProviderDispatch) -> Result<(), String> {
 fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
     let devices = crate::ort_runtime::addon_devices(crate::ort_runtime::Addon::Cuda);
     if devices.is_empty() {
-        return Err(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDevice });
+        return Err(GpuStartFailure::no_device(GpuStack::Cuda));
     }
     devices_start(devices, None).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e))
 }
@@ -339,8 +358,7 @@ fn devices_start(devices: Vec<ort::device::Device<'static>>, options: Option<&[(
 /// lets it use them, and a session takes the one engines use first.
 #[cfg(not(target_os = "macos"))]
 fn openvino_addon_starts() -> Result<(), GpuStartFailure> {
-    let no_device = |_| GpuStartFailure { stack: GpuStack::OpenVino, why: StartFailure::NoDevice };
-    let session = OpenVinoTuning::default().addon_session().map_err(no_device)?;
+    let session = OpenVinoTuning::default().addon_session().map_err(|_| GpuStartFailure::no_device(GpuStack::OpenVino))?;
     devices_start(session.devices, Some(&session.options)).map_err(|e| GpuStartFailure::of(GpuStack::OpenVino, &e))
 }
 
@@ -351,16 +369,30 @@ fn openvino_addon_starts() -> Result<(), GpuStartFailure> {
 fn addon_starts(addon: crate::ort_runtime::Addon) -> Option<Result<(), GpuStartFailure>> {
     use crate::ort_runtime::Addon;
     if !crate::ort_runtime::register_addon(addon) {
-        let stack = match addon {
-            Addon::Cuda => GpuStack::Cuda,
-            Addon::OpenVino => GpuStack::OpenVino,
-        };
-        return crate::ort_runtime::registration_error(addon).map(|e| Err(GpuStartFailure::of(stack, e)));
+        return crate::ort_runtime::registration_error(addon).map(|e| Err(GpuStartFailure::of(addon.stack(), e)));
     }
     Some(match addon {
         Addon::Cuda => cuda_addon_starts(),
         Addon::OpenVino => openvino_addon_starts(),
     })
+}
+
+impl crate::ort_runtime::Addon {
+    /// The vendor stack its provider runs on, which a start failure names.
+    pub fn stack(self) -> GpuStack {
+        match self {
+            Self::Cuda => GpuStack::Cuda,
+            Self::OpenVino => GpuStack::OpenVino,
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn ep(self) -> EpKind {
+        match self {
+            Self::Cuda => EpKind::Cuda,
+            Self::OpenVino => EpKind::OpenVino,
+        }
+    }
 }
 
 /// Where a session goes on the OpenVINO add-on: the plugin's devices,
@@ -2692,8 +2724,7 @@ mod tests {
             GpuStartFailure::of(GpuStack::OpenVino, registration).text(),
             "OpenVINO could not start: libtbb.so.12 is missing. It needs its own files, which installing it again brings back.",
         );
-        let none = GpuStartFailure { stack: GpuStack::OpenVino, why: StartFailure::NoDevice };
-        assert_eq!(none.text(), "OpenVINO could not start: it found no Intel processor or Intel graphics it can use.");
+        assert_eq!(GpuStartFailure::no_device(GpuStack::OpenVino).text(), "OpenVINO could not start: it found no Intel processor or Intel graphics it can use.");
     }
 
     /// Each provider's start failure is kept on its own, the first of its
@@ -2703,17 +2734,14 @@ mod tests {
     fn each_provider_keeps_its_own_start_failure() {
         let failures = StartFailures::new();
         let failure = |stack, why| GpuStartFailure { stack, why };
-        let mut listed = 0;
-        failures.take(Some(Err(failure(GpuStack::Cuda, StartFailure::NoDriver))), || listed += 1);
-        failures.take(Some(Err(failure(GpuStack::OpenVino, StartFailure::NoDevice))), || listed += 1);
-        failures.take(Some(Err(failure(GpuStack::Cuda, StartFailure::Other))), || listed += 1);
-        failures.take(Some(Ok(())), || listed += 1);
-        failures.take(None, || listed += 1);
-        assert_eq!(listed, 1, "only a start that worked lists its provider");
+        assert!(!failures.started(Err(failure(GpuStack::Cuda, StartFailure::NoDriver))));
+        assert!(!failures.started(Err(failure(GpuStack::OpenVino, StartFailure::NoDevice))));
+        assert!(!failures.started(Err(failure(GpuStack::Cuda, StartFailure::Other))));
+        assert!(failures.started(Ok(())), "only a start that worked lists its provider");
         let kept = failures.each();
-        assert_eq!(kept[GpuStack::Cuda as usize].map(|f| &f.why), Some(&StartFailure::NoDriver), "the first of its stack");
-        assert_eq!(kept[GpuStack::OpenVino as usize].map(|f| &f.why), Some(&StartFailure::NoDevice));
-        assert_eq!(kept[GpuStack::Rocm as usize], None);
+        assert_eq!(kept[GpuStack::Cuda.index()].map(|f| &f.why), Some(&StartFailure::NoDriver), "the first of its stack");
+        assert_eq!(kept[GpuStack::OpenVino.index()].map(|f| &f.why), Some(&StartFailure::NoDevice));
+        assert_eq!(kept[GpuStack::Rocm.index()], None);
     }
 
     /// A CoreML failure that names a path in the model's compiled cache

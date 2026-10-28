@@ -2,13 +2,12 @@
 //! spawned job panics, and a thread that dies without answering leaves
 //! whatever waits on it (a busy pill, an image) waiting for good.
 
-/// `f`'s result, or `Err` with the panic's message, logged under `what`.
-pub fn caught<T>(what: &'static str, f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
-        let why = message(&*payload);
-        tracing::error!(%why, what, "panicked");
-        why
-    })
+/// `f`'s result, or `None` when it panicked, its message logged under
+/// `what`.
+pub fn caught<T>(what: &'static str, f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|payload| tracing::error!(why = %message(&*payload), what, "panicked"))
+        .ok()
 }
 
 fn message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -36,11 +35,12 @@ pub(crate) fn use_window_pool() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_panic_becomes_its_message() {
-        assert_eq!(super::caught("a test", || 7), Ok(7));
-        assert_eq!(super::caught("a test", || -> u32 { panic!("a driver bug") }), Err("a driver bug".to_string()));
-        let owned = String::from("owned");
-        assert_eq!(super::caught("a test", move || -> u32 { panic!("{owned}") }), Err("owned".to_string()));
+    fn a_panic_is_caught_and_its_message_read() {
+        assert_eq!(super::caught("a test", || 7), Some(7));
+        assert_eq!(super::caught("a test", || -> u32 { panic!("a driver bug") }), None);
+        let payload = |f: fn()| std::panic::catch_unwind(f).unwrap_err();
+        assert_eq!(super::message(&*payload(|| panic!("a driver bug"))), "a driver bug");
+        assert_eq!(super::message(&*payload(|| panic!("{}", String::from("owned")))), "owned");
     }
 
     /// Without the handler rayon aborts the process here, taking the
