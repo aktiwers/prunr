@@ -122,8 +122,7 @@ impl HardwareProfile {
 
 /// The graphics drivers a GPU provider runs on, as one string that a
 /// driver update changes: each DXGI adapter on Windows; on Linux the
-/// NVIDIA driver, ROCm and Intel's OpenCL driver; the macOS version,
-/// which CoreML comes with.
+/// NVIDIA driver and ROCm; the macOS version, which CoreML comes with.
 /// Empty where none is read. Every process reads the same, whatever its
 /// settings: one that read another would drop what the others learned.
 pub fn driver_identity() -> String {
@@ -133,7 +132,7 @@ pub fn driver_identity() -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        linux_driver_identity(|path| std::fs::read_to_string(path).ok(), intel_opencl_driver(std::path::Path::new("/etc/OpenCL/vendors")))
+        linux_driver_identity(|path| std::fs::read_to_string(path).ok())
     }
     #[cfg(target_os = "macos")]
     {
@@ -161,45 +160,20 @@ fn model_named_in(information: &str) -> Option<String> {
     information.lines().find_map(|line| line.strip_prefix("Model:")).map(|name| name.trim().to_string()).filter(|name| !name.is_empty())
 }
 
-/// The NVIDIA driver's and ROCm's versions as `read` finds them, and
-/// `intel`, Intel's OpenCL driver.
+/// Intel's graphics driver is left out: a record of OpenVINO on the
+/// Intel graphics holds for it alone (`ep_compat`), so its update leaves
+/// every other engine's records.
 #[cfg(any(target_os = "linux", test))]
-fn linux_driver_identity(read: impl Fn(&str) -> Option<String>, intel: Option<String>) -> String {
+fn linux_driver_identity(read: impl Fn(&str) -> Option<String>) -> String {
     let read = |path: &str| read(path).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     [
         read("/sys/module/nvidia/version").map(|v| format!("nvidia {v}")),
         read("/opt/rocm/.info/version").map(|v| format!("rocm {v}")),
-        intel,
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>()
     .join(", ")
-}
-
-/// Intel's GPU driver for OpenCL, which OpenVINO runs the Intel graphics
-/// on: each Intel driver `vendors` lists (`/etc/OpenCL/vendors`), by the
-/// size and time of the library it names, which its update changes. Not
-/// the kernel's Intel module: that moves with every kernel update, and
-/// would drop what every engine measured. `None` without one.
-#[cfg(any(target_os = "linux", test))]
-fn intel_opencl_driver(vendors: &std::path::Path) -> Option<String> {
-    let mut drivers: Vec<std::path::PathBuf> = std::fs::read_dir(vendors)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "icd") && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("intel")))
-        .collect();
-    drivers.sort();
-    let stamps: Vec<String> = drivers
-        .iter()
-        .filter_map(|driver| {
-            let meta = std::fs::metadata(std::fs::read_to_string(driver).ok()?.trim()).ok()?;
-            let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            Some(format!("{}-{modified}", meta.len()))
-        })
-        .collect();
-    (!stamps.is_empty()).then(|| format!("intel {}", stamps.join("+")))
 }
 
 pub fn profile() -> &'static HardwareProfile {
@@ -515,44 +489,15 @@ mod tests {
     }
 
     /// The Linux identity is the NVIDIA driver's and ROCm's versions,
-    /// trimmed, then Intel's OpenCL driver, in that order; the kernel's
-    /// Intel graphics module is not in it.
+    /// trimmed, in that order; no Intel graphics driver is in it.
     #[test]
-    fn the_linux_driver_identity_names_each_driver_once() {
+    fn the_linux_driver_identity_names_nvidia_and_rocm_only() {
         let files = |present: &'static [(&'static str, &'static str)]| move |path: &str| present.iter().find(|(p, _)| *p == path).map(|(_, v)| v.to_string());
         const ALL: [(&str, &str); 4] = [("/sys/module/nvidia/version", "580.95.05\n"), ("/opt/rocm/.info/version", "7.0.1"), ("/sys/module/i915/srcversion", "ABCDEF"), ("/sys/module/xe/srcversion", "123")];
         let all: &'static [(&str, &str)] = &ALL;
-        assert_eq!(super::linux_driver_identity(files(all), None), "nvidia 580.95.05, rocm 7.0.1");
-        assert_eq!(super::linux_driver_identity(files(all), Some("intel 9-1".into())), "nvidia 580.95.05, rocm 7.0.1, intel 9-1");
-        assert_eq!(super::linux_driver_identity(files(&all[2..]), None), "", "an Intel module alone is no identity");
-        assert_eq!(super::linux_driver_identity(files(&[("/sys/module/nvidia/version", "  ")]), None), "");
-    }
-
-    /// Intel's OpenCL driver is each Intel driver the vendors folder
-    /// lists, by its library's size and time: an update of it is a new
-    /// identity; another vendor's driver, or one whose library is gone,
-    /// is none.
-    #[test]
-    fn intels_opencl_driver_is_known_by_its_library() {
-        let vendors = tempfile::tempdir().unwrap();
-        let libraries = tempfile::tempdir().unwrap();
-        let driver = |icd: &str, library: &str, bytes: usize| {
-            let path = libraries.path().join(library);
-            std::fs::write(&path, vec![0u8; bytes]).unwrap();
-            std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)).unwrap();
-            std::fs::write(vendors.path().join(icd), format!("{}\n", path.display())).unwrap();
-        };
-        assert_eq!(super::intel_opencl_driver(vendors.path()), None, "none listed");
-        driver("pocl.icd", "libpocl.so.2", 7);
-        assert_eq!(super::intel_opencl_driver(vendors.path()), None, "another vendor's");
-        driver("intel.icd", "libigdrcl.so", 31);
-        driver("intel_legacy1.icd", "libigdrcl_legacy1.so", 9);
-        assert_eq!(super::intel_opencl_driver(vendors.path()).as_deref(), Some("intel 31-1700000000+9-1700000000"));
-        driver("intel.icd", "libigdrcl.so", 32);
-        assert_eq!(super::intel_opencl_driver(vendors.path()).as_deref(), Some("intel 32-1700000000+9-1700000000"), "an update");
-        std::fs::remove_file(libraries.path().join("libigdrcl_legacy1.so")).unwrap();
-        assert_eq!(super::intel_opencl_driver(vendors.path()).as_deref(), Some("intel 32-1700000000"), "a library gone");
-        assert_eq!(super::intel_opencl_driver(&vendors.path().join("missing")), None);
+        assert_eq!(super::linux_driver_identity(files(all)), "nvidia 580.95.05, rocm 7.0.1");
+        assert_eq!(super::linux_driver_identity(files(&all[2..])), "", "an Intel module alone is no identity");
+        assert_eq!(super::linux_driver_identity(files(&[("/sys/module/nvidia/version", "  ")])), "");
     }
 
     /// Settings offers a runtime only where it has a device: an Intel-only

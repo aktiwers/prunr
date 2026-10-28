@@ -287,25 +287,73 @@ fn cache_path() -> Option<PathBuf> {
 /// keeps the historic `Display` strings ("OpenVINO", "CUDA", "CoreML",
 /// "DirectML"), plus `"+gpu"` for an OpenVINO session on the Intel GPU
 /// (`engine::asks_intel_gpu`), so a GPU failure does not bar OpenVINO on
-/// the CPU once the switch is off.
+/// the CPU once the switch is off, and Intel's driver after it.
 fn key(ep: EpKind, model: prunr_models::ModelId, weights: Weights, intel_gpu: bool) -> String {
-    key_with(ep, model, weights, &prunr_models::files_id(model), intel_gpu)
+    key_with(ep, model, weights, &prunr_models::files_id(model), intel_gpu.then(intel_graphics_driver))
 }
 
-fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &str, intel_gpu: bool) -> String {
+/// `graphics`: the session ran on the Intel graphics, under this driver.
+fn key_with(ep: EpKind, model: prunr_models::ModelId, weights: Weights, files: &str, graphics: Option<&str>) -> String {
     let copy = match weights {
         Weights::Fp32 => "",
         Weights::Fp16 => "/fp16",
         Weights::Int8 => "/int8",
     };
-    let device = if intel_gpu { "+gpu" } else { "" };
+    let device = graphics.map_or(String::new(), |driver| format!("+gpu{}", under(driver)));
     format!("{ep}{device}::{model:?}{copy}@{files}")
 }
 
 /// `"{column}::{model}@{files}"`: a place belongs to the files measured,
-/// as a failure does.
+/// as a failure does; on the Intel graphics, to Intel's driver too.
 fn measured_key(column: prunr_models::Column, model: prunr_models::ModelId, files: &str) -> String {
-    format!("{}::{model:?}@{files}", column.field())
+    let driver = if column == prunr_models::Column::OpenVinoGpu { intel_graphics_driver() } else { "" };
+    measured_key_with(column, model, files, driver)
+}
+
+fn measured_key_with(column: prunr_models::Column, model: prunr_models::ModelId, files: &str, driver: &str) -> String {
+    format!("{}{}::{model:?}@{files}", column.field(), under(driver))
+}
+
+/// `"~{driver}"`, or nothing for a driver not read.
+fn under(driver: &str) -> String {
+    if driver.is_empty() { String::new() } else { format!("~{driver}") }
+}
+
+/// Intel's GPU driver for OpenCL, which OpenVINO runs the Intel graphics
+/// on, as a tag; empty where none is read, and off Linux. A record of
+/// OpenVINO on the Intel graphics holds for it alone, so its update tries
+/// those again and leaves every other engine's records. Not in the scope
+/// with the other drivers: on a computer with an NVIDIA card as well, it
+/// would drop CUDA's too.
+fn intel_graphics_driver() -> &'static str {
+    static DRIVER: OnceLock<String> = OnceLock::new();
+    DRIVER.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            intel_opencl_driver(Path::new("/etc/OpenCL/vendors")).unwrap_or_default()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            String::new()
+        }
+    })
+}
+
+/// Each Intel driver `vendors` lists (`/etc/OpenCL/vendors`), by the size
+/// and time of the library it names, which its update changes; `None`
+/// without one. Not the kernel's Intel module, which every kernel update
+/// moves.
+#[cfg(any(target_os = "linux", test))]
+fn intel_opencl_driver(vendors: &Path) -> Option<String> {
+    let stamps: Vec<(u64, u64)> = std::fs::read_dir(vendors)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "icd") && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("intel")))
+        .filter_map(|driver| crate::ort_runtime::file_stamp(Path::new(std::fs::read_to_string(driver).ok()?.trim())))
+        .collect();
+    let (len, modified) = stamps.iter().fold((0, 0), |(len, modified), &(l, m)| (len + l, modified.max(m)));
+    (!stamps.is_empty()).then(|| crate::ort_runtime::tag_for(Some("intel"), len, modified))
 }
 
 /// What was learned as last read or written, and the file's stamp then.
@@ -554,7 +602,7 @@ mod tests {
     #[test]
     fn key_format_is_stable_openvino() {
         assert_eq!(
-            key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, "v1.0.0", false),
+            key_with(EpKind::OpenVino, prunr_models::ModelId::Silueta, Weights::Fp32, "v1.0.0", None),
             "OpenVINO::Silueta@v1.0.0",
         );
         assert!(key(EpKind::Cuda, prunr_models::ModelId::SdV15InpaintFp16, Weights::Fp32, false)
@@ -584,8 +632,8 @@ mod tests {
     #[test]
     fn a_new_copy_of_a_model_is_a_new_key() {
         let lcm = prunr_models::ModelId::SdV15LcmInpaintFp16;
-        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000001", false);
-        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000002", false));
+        let old = key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000001", None);
+        assert_ne!(old, key_with(EpKind::OpenVino, lcm, Weights::Fp32, "0000000000000002", None));
         assert!(key(EpKind::OpenVino, lcm, Weights::Fp32, false).starts_with("OpenVINO::SdV15LcmInpaintFp16@"));
         let silueta = prunr_models::ModelId::Silueta;
         assert_eq!(key(EpKind::OpenVino, silueta, Weights::Fp32, false), format!("OpenVINO::Silueta@app{}", prunr_models::BUILT_IN_VERSION),
@@ -598,10 +646,11 @@ mod tests {
     #[test]
     fn an_intel_gpu_failure_has_its_own_key() {
         let silueta = prunr_models::ModelId::Silueta;
-        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", true), "OpenVINO+gpu::Silueta@v1");
+        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", Some("")), "OpenVINO+gpu::Silueta@v1");
+        assert_eq!(key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", Some("intel-1a2b3c4d")), "OpenVINO+gpu~intel-1a2b3c4d::Silueta@v1");
         assert_ne!(
-            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", true),
-            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", false),
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", Some("")),
+            key_with(EpKind::OpenVino, silueta, Weights::Fp32, "v1", None),
         );
         if crate::engine::openvino_on_gpu() {
             assert!(crate::engine::asks_intel_gpu(EpKind::OpenVino, prunr_models::ModelId::RealEsrganX4Plus), "faster on the graphics");
@@ -611,12 +660,53 @@ mod tests {
         assert!(!crate::engine::asks_intel_gpu(EpKind::Cuda, silueta));
     }
 
+    /// A new Intel graphics driver gives the records of OpenVINO on the
+    /// Intel graphics new keys, so they are tried again, and leaves every
+    /// other engine's.
+    #[test]
+    fn an_intel_driver_update_moves_only_the_intel_graphics_records() {
+        use prunr_models::{Column, ModelId};
+        let key = |column, driver| measured_key_with(column, ModelId::Teed, "v1", driver);
+        assert_ne!(key(Column::OpenVinoGpu, "intel-1"), key(Column::OpenVinoGpu, "intel-2"));
+        assert_eq!(measured_key(Column::Cuda, ModelId::Teed, "v1"), "cuda::Teed@v1", "no driver in another engine's");
+        assert_eq!(measured_key(Column::OpenVino, ModelId::Teed, "v1"), "openvino::Teed@v1");
+    }
+
+    /// Intel's OpenCL driver is known by each Intel driver the vendors
+    /// folder lists, by its library's size and time: an update of it is a
+    /// new tag; another vendor's driver, or one whose library is gone, is
+    /// none.
+    #[test]
+    fn intels_opencl_driver_is_known_by_its_library() {
+        let vendors = tempfile::tempdir().unwrap();
+        let libraries = tempfile::tempdir().unwrap();
+        let driver = |icd: &str, library: &str, bytes: usize| {
+            let path = libraries.path().join(library);
+            std::fs::write(&path, vec![0u8; bytes]).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)).unwrap();
+            std::fs::write(vendors.path().join(icd), format!("{}\n", path.display())).unwrap();
+        };
+        assert_eq!(intel_opencl_driver(vendors.path()), None, "none listed");
+        driver("pocl.icd", "libpocl.so.2", 7);
+        assert_eq!(intel_opencl_driver(vendors.path()), None, "another vendor's");
+        driver("intel.icd", "libigdrcl.so", 31);
+        driver("intel_legacy1.icd", "libigdrcl_legacy1.so", 9);
+        let both = intel_opencl_driver(vendors.path()).expect("two Intel drivers");
+        assert!(both.starts_with("intel-"), "{both}");
+        driver("intel.icd", "libigdrcl.so", 32);
+        let updated = intel_opencl_driver(vendors.path()).expect("an update");
+        assert_ne!(updated, both, "an update is a new tag");
+        std::fs::remove_file(libraries.path().join("libigdrcl_legacy1.so")).unwrap();
+        assert_ne!(intel_opencl_driver(vendors.path()), Some(updated), "a library gone");
+        assert_eq!(intel_opencl_driver(&vendors.path().join("missing")), None);
+    }
+
     /// Each copy of the weights fails on its own key.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn each_copy_of_the_weights_has_its_own_key() {
         let u2net = prunr_models::ModelId::U2net;
-        let keys = Weights::ALL.map(|w| key_with(EpKind::OpenVino, u2net, w, "0000000000005ca0", false));
+        let keys = Weights::ALL.map(|w| key_with(EpKind::OpenVino, u2net, w, "0000000000005ca0", None));
         assert_eq!(keys, [
             "OpenVINO::U2net@0000000000005ca0",
             "OpenVINO::U2net/fp16@0000000000005ca0",
