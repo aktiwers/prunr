@@ -463,7 +463,7 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU {
         prunr_core::ort_runtime::forget_preferred_runtime(prunr_core::ort_runtime::PREFER_BUILT_IN);
     }
-    if runtime.is_addon() && prunr_core::ort_runtime::cuda_addon_registered() {
+    if runtime.is_addon() && prunr_core::ort_runtime::Addon::Cuda.registered() {
         let mark = runtime.removal_mark().ok_or("could not resolve user data dir")?;
         std::fs::write(&mark, b"").map_err(|e| format!("mark {} for removal: {e}", dir.display()))?;
         return Ok(Uninstalled::AtNextStart);
@@ -573,7 +573,7 @@ fn run_install(
 pub fn use_installed_addons() {
     let cuda = RuntimeId::Cuda;
     if let Some(library) = cuda.library().filter(|_| cuda.is_addon() && cuda.is_installed()) {
-        prunr_core::ort_runtime::use_cuda_addon(library);
+        prunr_core::ort_runtime::use_addon(prunr_core::ort_runtime::Addon::Cuda, library);
     }
 }
 
