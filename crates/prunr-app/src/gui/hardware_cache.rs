@@ -201,7 +201,10 @@ impl TestResults {
         let rows = installed()
             .filter_map(|id| {
                 let measured = prunr_core::ep_compat::measurements(id);
-                let complete = after_probe && prunr_core::engine::tries_in_a_test(id).iter().all(|&(_, column)| measured[column.index()].is_some());
+                // By provider, not column: OpenVINO's Intel graphics a test
+                // found failing reads as its processor column afterwards.
+                let timed = |provider: &str| prunr_models::Column::ALL.iter().any(|c| c.provider() == provider && measured[c.index()].is_some());
+                let complete = after_probe && prunr_core::engine::tries_in_a_test(id).iter().all(|&(provider, _)| timed(provider));
                 test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false), complete)
             })
             .collect();
