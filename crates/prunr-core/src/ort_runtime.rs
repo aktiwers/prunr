@@ -750,8 +750,11 @@ pub(crate) fn register_addon(addon: Addon) -> bool {
             return false;
         }
         let started = std::time::Instant::now();
-        if let (Addon::Cuda, Some(dir)) = (addon, library.parent()) {
-            preload_nvidia_libraries_beside(dir);
+        match (addon, library.parent()) {
+            (Addon::Cuda, Some(dir)) => preload_nvidia_libraries_beside(dir),
+            #[cfg(unix)]
+            (Addon::OpenVino, Some(dir)) => preload_openvino_beside(dir),
+            _ => {}
         }
         match env.register_ep_library(addon.ep_name(), library) {
             Ok(()) => {
@@ -777,8 +780,41 @@ fn register_once(slot: &OnceLock<bool>, library: Option<&Path>, register: impl F
 /// The devices `addon` offers: one per card or processor it can use.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn addon_devices(addon: Addon) -> Vec<ort::device::Device<'static>> {
+    devices_named(addon.ep_name())
+}
+
+/// The devices the provider `ep` lists; a plugin's other factory has a
+/// name of its own (OpenVINO's AUTO).
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn devices_named(ep: &str) -> Vec<ort::device::Device<'static>> {
     let Some(env) = ENV.get() else { return Vec::new() };
-    env.devices().filter(|d| d.ep().is_ok_and(|name| name == addon.ep_name())).collect()
+    env.devices().filter(|d| d.ep().is_ok_and(|name| name == ep)).collect()
+}
+
+/// The OpenVINO libraries the plugin links by name. It searches its own
+/// folder only after `LD_LIBRARY_PATH`, where another OpenVINO build of
+/// the same name would win, and the loader reuses a library already
+/// loaded under a name: so they load first, from beside the plugin.
+/// Their own links search their folder first.
+#[cfg(unix)]
+const OPENVINO_LINKED: &[&str] = &["libopenvino.so.", "libopenvino_onnx_frontend.so."];
+
+#[cfg(unix)]
+fn preload_openvino_beside(dir: &Path) {
+    let mut present: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    present.sort();
+    for prefix in OPENVINO_LINKED {
+        for name in present.iter().filter(|name| name.starts_with(prefix)) {
+            // SAFETY: the add-on's own OpenVINO, which the plugin would
+            // load next; kept loaded for the process (forgotten handle),
+            // its symbols its own.
+            let loaded = unsafe { libloading::os::unix::Library::open(Some(dir.join(name)), libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL) };
+            match loaded {
+                Ok(lib) => std::mem::forget(lib),
+                Err(e) => tracing::warn!(name, %e, "OpenVINO library did not load"),
+            }
+        }
+    }
 }
 
 fn read_preferred(root: &Path) -> Option<String> {

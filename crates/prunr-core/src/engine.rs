@@ -71,8 +71,8 @@ impl std::fmt::Display for EpKind {
     }
 }
 
-/// The GPU providers this process offers, once probed; the CUDA add-on
-/// joins them when it installs (`start_cuda_addon`).
+/// The GPU providers this process offers, once probed; an add-on joins
+/// them when it installs (`start_addon`).
 static AVAILABLE: std::sync::RwLock<Option<std::sync::Arc<[EpKind]>>> = std::sync::RwLock::new(None);
 
 /// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
@@ -90,24 +90,33 @@ pub(crate) fn available_gpu_eps() -> std::sync::Arc<[EpKind]> {
     Arc::clone(slot.get_or_insert_with(|| probe_gpu_eps().into()))
 }
 
-/// Start the CUDA add-on installed after this process probed its
-/// providers: sessions built from now on may take it. Off the UI thread:
-/// registering loads NVIDIA's libraries, seconds the first time.
+/// Start `addon`, installed after this process probed its providers:
+/// sessions built from now on may take it. Off the UI thread: the CUDA
+/// add-on loads NVIDIA's libraries, seconds the first time.
 #[cfg(not(target_os = "macos"))]
-pub fn start_cuda_addon() -> Result<(), String> {
+pub fn start_addon(addon: crate::ort_runtime::Addon) -> Result<(), String> {
+    use crate::ort_runtime::Addon;
     use std::sync::PoisonError;
-    if available_gpu_eps().contains(&EpKind::Cuda) {
+    let ep = match addon {
+        Addon::Cuda => EpKind::Cuda,
+        Addon::OpenVino => EpKind::OpenVino,
+    };
+    if available_gpu_eps().contains(&ep) {
         return Ok(());
     }
-    if !crate::ort_runtime::register_addon(crate::ort_runtime::Addon::Cuda) {
-        return Err("the CUDA add-on did not register; the log says why".to_string());
+    if !crate::ort_runtime::register_addon(addon) {
+        return Err(format!("the {ep} add-on did not register; the log says why"));
     }
-    cuda_addon_starts().map_err(|failure| failure.text())?;
+    match addon {
+        Addon::Cuda => cuda_addon_starts().map_err(|failure| failure.text())?,
+        Addon::OpenVino => openvino_addon_starts()?,
+    }
     let mut slot = AVAILABLE.write().unwrap_or_else(PoisonError::into_inner);
     let mut eps: Vec<EpKind> = slot.as_deref().unwrap_or_default().to_vec();
-    eps.insert(cuda_position(&eps), EpKind::Cuda);
+    let at = if ep == EpKind::OpenVino { 0 } else { cuda_position(&eps) };
+    eps.insert(at, ep);
     *slot = Some(eps.into());
-    tracing::info!("CUDA add-on started; sessions may take it from now on");
+    tracing::info!(%ep, "add-on started; sessions may take it from now on");
     Ok(())
 }
 
@@ -130,7 +139,10 @@ fn probe_gpu_eps() -> Vec<EpKind> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        if ort::ep::OpenVINO::is_available().unwrap_or(false) { eps.push(EpKind::OpenVino); }
+        let openvino = ort::ep::OpenVINO::is_available().unwrap_or(false)
+            || (crate::ort_runtime::register_addon(crate::ort_runtime::Addon::OpenVino)
+                && openvino_addon_starts().inspect_err(|why| tracing::info!(%why, "OpenVINO cannot start; sessions run on the CPU")).is_ok());
+        if openvino { eps.push(EpKind::OpenVino); }
         let cuda = if ort::ep::CUDA::is_available().unwrap_or(false) {
             crate::ort_runtime::preload_nvidia_libraries();
             Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
@@ -285,6 +297,97 @@ fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
         .map_err(|e| e.to_string())
         .and_then(|b| b.with_devices(devices, None).map(drop).map_err(|e| e.to_string()))
         .map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e))
+}
+
+/// Whether the OpenVINO add-on can start here: it lists a device only for
+/// an Intel processor, or Intel graphics with Intel's driver once the user
+/// lets it use them, and a session takes the one engines use first.
+#[cfg(not(target_os = "macos"))]
+fn openvino_addon_starts() -> Result<(), String> {
+    let session = openvino_addon_session(None, None, false)?;
+    crate::ort_runtime::session_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|b| b.with_devices(session.devices, Some(&session.options)).map(drop).map_err(|e| e.to_string()))
+}
+
+/// Where a session goes on the OpenVINO add-on: the plugin's devices,
+/// with the settings it takes.
+#[cfg(not(target_os = "macos"))]
+struct OpenVinoSession {
+    devices: Vec<ort::device::Device<'static>>,
+    options: Vec<(String, String)>,
+}
+
+/// The OpenVINO add-on's devices for `device`, the name the old provider
+/// took (`AUTO:GPU,CPU`, `GPU`; `None` is the processor), with the
+/// session's settings: OpenVINO's thread cap on the processor
+/// (`threads`), and one stream (`one_stream`).
+#[cfg(not(target_os = "macos"))]
+fn openvino_addon_session(device: Option<&str>, threads: Option<usize>, one_stream: bool) -> Result<OpenVinoSession, String> {
+    let device = device.unwrap_or("CPU");
+    let (meta, wanted) = match device.split_once(':') {
+        Some((meta, devices)) => (Some(meta), devices.split(',').collect::<Vec<_>>()),
+        None => (None, vec![device]),
+    };
+    let ep = match meta {
+        Some(meta) => format!("{}.{meta}", crate::ort_runtime::Addon::OpenVino.ep_name()),
+        None => crate::ort_runtime::Addon::OpenVino.ep_name().to_string(),
+    };
+    let mut listed = crate::ort_runtime::devices_named(&ep);
+    let devices: Vec<_> = wanted
+        .iter()
+        .filter_map(|&name| {
+            let at = listed.iter().position(|d| device_type_name(d.hardware_device().ty()) == name)?;
+            Some(listed.remove(at))
+        })
+        .collect();
+    if devices.len() != wanted.len() {
+        return Err(format!("OpenVINO lists no {device} device here"));
+    }
+    let options = openvino_load_config(meta, &wanted, threads, one_stream)
+        .map(|config| vec![(format!("{ep}.load_config"), config)])
+        .unwrap_or_default();
+    Ok(OpenVinoSession { devices, options })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device_type_name(ty: ort::memory::DeviceType) -> &'static str {
+    match ty {
+        ort::memory::DeviceType::CPU => "CPU",
+        ort::memory::DeviceType::GPU => "GPU",
+        ort::memory::DeviceType::NPU => "NPU",
+        ort::memory::DeviceType::FPGA => "FPGA",
+    }
+}
+
+/// OpenVINO's settings for a session on `devices`, as the plugin's
+/// `load_config` takes them: per device, and under `meta`'s name for
+/// devices a meta device (AUTO) picks among, which is all the plugin
+/// reads for it. The legacy option names are ignored by the plugin.
+/// `None` when nothing is set.
+#[cfg(not(target_os = "macos"))]
+fn openvino_load_config(meta: Option<&str>, devices: &[&str], threads: Option<usize>, one_stream: bool) -> Option<String> {
+    let mut per_device = serde_json::Map::new();
+    for &device in devices {
+        let mut settings = serde_json::Map::new();
+        if let Some(threads) = threads.filter(|_| device == "CPU") {
+            settings.insert("INFERENCE_NUM_THREADS".into(), threads.max(1).to_string().into());
+        }
+        if one_stream {
+            settings.insert("NUM_STREAMS".into(), "1".into());
+        }
+        if !settings.is_empty() {
+            per_device.insert(device.into(), settings.into());
+        }
+    }
+    if per_device.is_empty() {
+        return None;
+    }
+    let config = match meta {
+        Some(meta) => serde_json::Map::from_iter([(meta.to_string(), per_device.into())]),
+        None => per_device,
+    };
+    Some(serde_json::Value::Object(config).to_string())
 }
 
 /// Whether DirectML can start a device here. The DirectML runtime, which
@@ -620,6 +723,16 @@ impl EpKind {
             #[cfg(not(target_os = "macos"))]
             EpKind::Cuda if crate::ort_runtime::Addon::Cuda.registered() => {
                 builder.with_devices(crate::ort_runtime::addon_devices(crate::ort_runtime::Addon::Cuda), Some(&CudaTuning::for_site(site).addon_options()))
+            }
+            #[cfg(not(target_os = "macos"))]
+            EpKind::OpenVino if crate::ort_runtime::Addon::OpenVino.registered() => {
+                let (threads, one_stream) = match site {
+                    EpSite::Engine { threads, .. } | EpSite::Fill { threads } => (Some(threads), false),
+                    EpSite::Selection { .. } => (None, false),
+                    EpSite::SdPart { .. } => (None, true),
+                };
+                let session = openvino_addon_session(site.ov_device(on_intel_gpu(model)), threads, one_stream).map_err(Miss::Unusable)?;
+                builder.with_devices(session.devices, Some(&session.options))
             }
             _ => builder.with_execution_providers([self.provider(model, site)]),
         };
@@ -2050,6 +2163,44 @@ mod tests {
         if !processor.is_empty() {
             assert_eq!(ran_on(processor, "named"), ["OpenVINOExecutionProvider".to_string()].into(), "a session naming OpenVINO keeps it");
         }
+    }
+
+    /// OpenVINO's settings reach the device they are for: the thread cap
+    /// the processor only, under AUTO's name when AUTO picks the device,
+    /// and nothing when nothing is set.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn openvino_settings_name_the_device_they_are_for() {
+        let config = |meta, devices: &[&str], threads, one_stream| openvino_load_config(meta, devices, threads, one_stream);
+        assert_eq!(config(None, &["CPU"], Some(4), false).as_deref(), Some(r#"{"CPU":{"INFERENCE_NUM_THREADS":"4"}}"#));
+        assert_eq!(config(Some("AUTO"), &["GPU", "CPU"], Some(4), false).as_deref(), Some(r#"{"AUTO":{"CPU":{"INFERENCE_NUM_THREADS":"4"}}}"#));
+        assert_eq!(config(None, &["GPU"], None, true).as_deref(), Some(r#"{"GPU":{"NUM_STREAMS":"1"}}"#));
+        assert_eq!(config(None, &["GPU"], Some(4), false), None, "no thread cap off the processor");
+        assert_eq!(config(None, &["CPU"], None, false), None);
+    }
+
+    /// With the OpenVINO add-on started, an engine runs on it.
+    /// `PRUNR_OPENVINO_ADDON` names the plugin.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_engine_runs_on_the_openvino_add_on() {
+        use crate::ort_runtime::{use_addon, Addon};
+        if let Err(why) = crate::ort_runtime::runtime_for_tests() {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
+            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
+            return;
+        };
+        use_addon(Addon::OpenVino, plugin.into());
+        if let Err(why) = start_addon(Addon::OpenVino) {
+            eprintln!("SKIP: {why}");
+            return;
+        }
+        assert_eq!(available_gpu_eps().first(), Some(&EpKind::OpenVino), "OpenVINO goes first, as it did");
+        let engine = OrtEngine::for_model(prunr_models::ModelId::RealEsrganX2Plus, 2, false).expect("Real-ESRGAN x2 loads");
+        assert_eq!(engine.active_provider(), OPENVINO_NAME);
     }
 
     /// A free channel axis says no count, so a session with one is not run.
