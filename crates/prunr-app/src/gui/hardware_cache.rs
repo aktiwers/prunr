@@ -17,6 +17,8 @@ pub(crate) struct HardwareInstallCache {
     pub intel_gpu: bool,
     /// The app ships a GPU runtime (DirectML on Windows release builds).
     pub built_in_gpu: bool,
+    /// The app ships its own runtime beside it.
+    pub built_in: bool,
     /// The runtime the next start loads.
     pub next_runtime: Option<RuntimeChoice>,
     /// The runtime this process loaded.
@@ -283,6 +285,7 @@ impl HardwareInstallCache {
             addon_waits: RuntimeId::Cuda.is_addon() && RuntimeId::Cuda.is_installed() && !prunr_core::ort_runtime::hosts_addons(),
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
+            built_in: prunr_core::ort_runtime::has_built_in(),
             next_runtime: RuntimeChoice::next(),
             loaded_runtime: RuntimeChoice::loaded(),
             taesd: prunr_models::is_available(ModelId::TaesdFp16),
@@ -314,6 +317,7 @@ impl HardwareInstallCache {
             addon_waits: false,
             intel_gpu: false,
             built_in_gpu: true,
+            built_in: true,
             next_runtime: None,
             loaded_runtime: None,
             taesd: true,
@@ -347,11 +351,12 @@ impl HardwareInstallCache {
         }
     }
 
-    /// Whether `choice` can load: the built-in runtime runs an accelerator
-    /// (DirectML, or the CUDA add-on), or the store install is there.
+    /// Whether `choice` can load: the app's own runtime is beside it, or
+    /// the store install is there. Prunr's own can be chosen again over
+    /// one from the store.
     pub fn can_load(&self, choice: RuntimeChoice) -> bool {
         match choice {
-            RuntimeChoice::BuiltIn => self.built_in_gpu || (self.cuda && RuntimeId::Cuda.is_addon()),
+            RuntimeChoice::BuiltIn => self.built_in,
             RuntimeChoice::Store(rt) => !rt.is_addon() && self.has_runtime(rt),
         }
     }
@@ -438,6 +443,19 @@ mod tests {
         assert_eq!((&row.cells[0], row.cpu.map(|t| t.ms)), (&Cell::Time(super::Time::of(900.0)), Some(670.0)), "a slower engine still shows its time");
         measured[Column::DirectMl.index()] = Some(Measured::new(PlaceKind::Differs, "mean 3/255"));
         assert_eq!(super::test_row(ModelId::Silueta, &engines, &measured, column_of, "CPU", true).map(|r| r.cells[0].clone()), Some(Cell::Differs));
+    }
+
+    /// Prunr's own runtime can be chosen whenever it is beside the app,
+    /// over one from the store too; a store install only once installed.
+    #[test]
+    fn the_built_in_runtime_is_a_choice_wherever_it_ships() {
+        use crate::runtime_install::{RuntimeChoice, RuntimeId};
+        let mut installs = super::HardwareInstallCache { built_in: true, ..Default::default() };
+        assert!(installs.can_load(RuntimeChoice::BuiltIn));
+        assert!(!installs.can_load(RuntimeChoice::Store(RuntimeId::OpenVino)));
+        installs.openvino = true;
+        assert!(installs.can_load(RuntimeChoice::Store(RuntimeId::OpenVino)) && installs.can_load(RuntimeChoice::BuiltIn));
+        assert!(!super::HardwareInstallCache::default().can_load(RuntimeChoice::BuiltIn), "none beside the app");
     }
 
     /// What changed since the test is said in people's words.
