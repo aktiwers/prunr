@@ -64,7 +64,8 @@ pub struct UpscaleTilePlacement {
 
 /// Overlapping tiles covering the image, all one size: per axis the
 /// fewest tiles of at most `cfg.tile_size` that overlap their neighbours
-/// by at least `cfg.overlap`, made equal and spread evenly. No tile is an
+/// by at least `cfg.overlap` with room left for `cfg.align` to round
+/// their starts down, made equal and spread evenly. No tile is an
 /// edge sliver: one would see little of the picture, and CoreML runs a
 /// new shape ~0.5 s slower and keeps only the last one warm. With
 /// `cfg.tile_multiple` each tile is padded bottom-right to that multiple,
