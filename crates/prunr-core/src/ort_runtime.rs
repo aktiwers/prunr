@@ -628,8 +628,7 @@ fn preload_nvidia_libraries_beside(dir: &Path) {
             return;
         }
         let started = std::time::Instant::now();
-        let present = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok());
-        for name in nvidia_load_order(NVIDIA_LINKED, present, cfg!(windows)) {
+        for name in nvidia_load_order(NVIDIA_LINKED, file_names_in(&dir), cfg!(windows)) {
             if let Err(e) = load_global(&dir.join(&name)) {
                 tracing::warn!(name, %e, "NVIDIA library did not load");
             }
@@ -758,7 +757,7 @@ pub(crate) fn register_addon(addon: Addon) -> bool {
         let started = std::time::Instant::now();
         match (addon, library.parent()) {
             (Addon::Cuda, Some(dir)) => preload_nvidia_libraries_beside(dir),
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             (Addon::OpenVino, Some(dir)) => preload_openvino_beside(dir),
             _ => {}
         }
@@ -802,25 +801,24 @@ pub(crate) fn devices_named(ep: &str) -> Vec<ort::device::Device<'static>> {
 /// the same name would win, and the loader reuses a library already
 /// loaded under a name: so they load first, from beside the plugin.
 /// Their own links search their folder first.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const OPENVINO_LINKED: &[&str] = &["libopenvino.so.", "libopenvino_onnx_frontend.so."];
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn preload_openvino_beside(dir: &Path) {
-    let mut present: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
-    present.sort();
+    let present: Vec<String> = file_names_in(dir).collect();
     for prefix in OPENVINO_LINKED {
         for name in present.iter().filter(|name| name.starts_with(prefix)) {
-            // SAFETY: the add-on's own OpenVINO, which the plugin would
-            // load next; kept loaded for the process (forgotten handle),
-            // its symbols its own.
-            let loaded = unsafe { libloading::os::unix::Library::open(Some(dir.join(name)), libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL) };
-            match loaded {
-                Ok(lib) => std::mem::forget(lib),
-                Err(e) => tracing::warn!(name, %e, "OpenVINO library did not load"),
+            if let Err(e) = ort::util::preload_dylib(dir.join(name)) {
+                tracing::warn!(name, %e, "OpenVINO library did not load");
             }
         }
     }
+}
+
+/// The names of the files in `dir`; none when it cannot be read.
+fn file_names_in(dir: &Path) -> impl Iterator<Item = String> {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok())
 }
 
 fn read_preferred(root: &Path) -> Option<String> {

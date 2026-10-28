@@ -197,15 +197,17 @@ pub fn install_subdir(short_name: &str, version: &str) -> String {
 /// Reject names that would escape `<data_dir>/runtimes/` when joined
 /// as a single path segment.
 pub fn validate_subdir(name: &str) -> Result<(), String> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-    {
+    if !one_segment(name) {
         return Err(format!("invalid runtime subdirectory name: {name:?}"));
     }
     Ok(())
+}
+
+/// Whether `name`, joined onto a folder, names a file or folder in it:
+/// the guard every extracted name and install folder passes, so none
+/// reaches outside.
+fn one_segment(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains('\\')
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +249,7 @@ fn pick_wheel_on(urls: &[serde_json::Value], rid: &str, glibc: (u32, u32)) -> Re
 /// filename, so anything containing `/` or `\\` is rejected.
 pub fn repackage_target_filename(zip_name: &str) -> Option<String> {
     let stripped = zip_name.strip_prefix("onnxruntime/capi/")?;
-    if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
+    if !one_segment(stripped) {
         return None;
     }
     if stripped.starts_with("onnxruntime_pybind11_state") { return None; }
@@ -609,21 +611,14 @@ pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn
 
 /// What `name` in `addon`'s archive is written as, when it is kept: the
 /// library, and with a `folder` each file in it, except a script and the
-/// library's copies under its versioned names. The same path-traversal
-/// guard as `repackage_target_filename`.
+/// library's copies under its versioned names.
 fn addon_file(addon: &AddOn, name: &str) -> Option<String> {
-    let file = match addon.folder {
-        Some(folder) => name.strip_prefix(folder)?.strip_prefix('/')?,
-        None => name,
+    let Some(folder) = addon.folder else {
+        return (name == addon.library).then(|| name.to_string());
     };
+    let file = name.strip_prefix(folder)?.strip_prefix('/')?;
     let library_copy = file.strip_prefix(addon.library).is_some_and(|rest| rest.starts_with('.'));
-    let in_folder = addon.folder.is_some()
-        && !matches!(file, "" | "." | "..")
-        && !file.contains('/')
-        && !file.contains('\\')
-        && !file.ends_with(".py")
-        && !library_copy;
-    (file == addon.library || in_folder).then(|| file.to_string())
+    (one_segment(file) && !file.ends_with(".py") && !library_copy).then(|| file.to_string())
 }
 
 /// `archive`'s files that `rename` keeps, flat in `target_dir`; the path
@@ -643,13 +638,12 @@ fn library_in(target_dir: &Path, library: &str) -> Result<PathBuf, String> {
 
 /// Filter + flatten for files extracted from an NVIDIA library wheel
 /// (`nvidia/<package>/lib/libX.so.N` on Linux, `nvidia/<package>/bin/
-/// X64_N.dll` on Windows): its shared libraries, by file name. The same
-/// path-traversal guard as `repackage_target_filename`.
+/// X64_N.dll` on Windows): its shared libraries, by file name.
 pub fn nvidia_target_filename(zip_name: &str) -> Option<String> {
     let rest = zip_name.strip_prefix("nvidia/")?;
     let (_package, file) = rest.split_once("/lib/").or_else(|| rest.split_once("/bin/"))?;
     let library = file.contains(".so") || file.ends_with(".dll");
-    if file.is_empty() || file.contains('/') || file.contains('\\') || !library {
+    if !one_segment(file) || !library {
         return None;
     }
     // Shipped beside what ORT links but never loaded by it.
