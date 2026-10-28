@@ -216,7 +216,8 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     // SAFETY: the options are live, and the callback reads only what ORT
     // hands it.
     let status = unsafe { (ort::api().SessionOptionsSetEpSelectionPolicyDelegate)(builder.ptr_mut(), Some(ort_s_cpu), std::ptr::null_mut()) };
-    check(status).map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
+    // SAFETY: the status is ORT's, read and released once.
+    unsafe { ort::Error::result_from_status(status) }.map_err(init)?;
     without_optimizers(builder, &[])
 }
 
@@ -249,19 +250,6 @@ unsafe extern "system" fn ort_s_cpu(
 
 /// ORT's name for its own CPU provider.
 const CPU_PROVIDER: &str = "CPUExecutionProvider";
-
-/// `status` as a result: ORT's error message, the status released.
-fn check(status: ort::sys::OrtStatusPtr) -> Result<(), String> {
-    if status.0.is_null() {
-        return Ok(());
-    }
-    // SAFETY: a non-null status is ORT's to read once and release.
-    unsafe {
-        let message = std::ffi::CStr::from_ptr((ort::api().GetErrorMessage)(status.0)).to_string_lossy().into_owned();
-        (ort::api().ReleaseStatus)(status.0);
-        Err(message)
-    }
-}
 
 /// `builder` with `extra` of ORT's optimizers turned off, and constant
 /// folding where it corrupts weights. ORT keeps one list and a second
@@ -415,42 +403,32 @@ fn create_env_for_openvino(devices: &str) -> Result<(), String> {
         let mut entries = std::ptr::null_mut();
         (api.CreateKeyValuePairs)(&mut entries);
         (api.AddKeyValuePair)(entries, key.as_ptr(), value.as_ptr());
+        // To ORT's own log, at the level ort sets when it builds the
+        // environment.
         let options = ort::sys::OrtEnvCreationOptions {
-            // The layout as of ORT 1.24, which ort's declares.
-            version: 24,
-            // As ort sets it with a logger of its own: `tracing` filters.
-            logging_severity_level: ort::sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE as i32,
+            version: ort::sys::ORT_API_VERSION,
+            logging_severity_level: ort_log_level(std::env::var("ORT_LOG").ok().as_deref()) as i32,
             log_id: c"default".as_ptr(),
-            custom_logging_function: Some(forward_ort_log),
-            custom_logging_param: std::ptr::null_mut(),
-            threading_options: std::ptr::null(),
             config_entries: entries,
+            ..Default::default()
         };
         let mut env = std::ptr::null_mut();
-        let created = check((api.CreateEnvWithOptions)(&options, &mut env));
+        let created = ort::Error::result_from_status((api.CreateEnvWithOptions)(&options, &mut env));
         (api.ReleaseKeyValuePairs)(entries);
         created.map_err(|e| format!("ORT environment with OpenVINO's devices ({devices}): {e}"))
     }
 }
 
-/// ORT's log into `tracing`, under the target ort's own logger uses.
-unsafe extern "system" fn forward_ort_log(
-    _param: *mut std::ffi::c_void,
-    severity: ort::sys::OrtLoggingLevel,
-    _category: *const std::ffi::c_char,
-    _log_id: *const std::ffi::c_char,
-    location: *const std::ffi::c_char,
-    message: *const std::ffi::c_char,
-) {
+/// The level ORT logs at, as `ORT_LOG` names it (as ort reads it), errors
+/// only without.
+fn ort_log_level(named: Option<&str>) -> ort::sys::OrtLoggingLevel {
     use ort::sys::OrtLoggingLevel as Level;
-    // SAFETY: ORT passes NUL-terminated strings that live through the call.
-    let text = |p: *const std::ffi::c_char| if p.is_null() { "".into() } else { unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy() };
-    let (location, message) = (text(location), text(message));
-    match severity {
-        Level::ORT_LOGGING_LEVEL_VERBOSE => tracing::trace!(target: "ort::logging", %location, "{message}"),
-        Level::ORT_LOGGING_LEVEL_INFO => tracing::info!(target: "ort::logging", %location, "{message}"),
-        Level::ORT_LOGGING_LEVEL_WARNING => tracing::warn!(target: "ort::logging", %location, "{message}"),
-        Level::ORT_LOGGING_LEVEL_ERROR | Level::ORT_LOGGING_LEVEL_FATAL => tracing::error!(target: "ort::logging", %location, "{message}"),
+    match named {
+        Some("fatal") => Level::ORT_LOGGING_LEVEL_FATAL,
+        Some("warning") => Level::ORT_LOGGING_LEVEL_WARNING,
+        Some("info") => Level::ORT_LOGGING_LEVEL_INFO,
+        Some("verbose") => Level::ORT_LOGGING_LEVEL_VERBOSE,
+        _ => Level::ORT_LOGGING_LEVEL_ERROR,
     }
 }
 
@@ -1068,6 +1046,21 @@ mod tests {
                 assert!(!device_id.exists(), "{child_test}: {} started its usage reporting", dylib.display());
             }
         }
+    }
+
+    /// The environment created for OpenVINO logs as ort's own does: to
+    /// ORT's log, errors only unless `ORT_LOG` names another level. It
+    /// first logged every line, at every level, through a callback.
+    #[test]
+    fn the_openvino_environment_logs_as_orts_own() {
+        use ort::sys::OrtLoggingLevel as Level;
+        assert_eq!(ort_log_level(None), Level::ORT_LOGGING_LEVEL_ERROR);
+        assert_eq!(ort_log_level(Some("warning")), Level::ORT_LOGGING_LEVEL_WARNING);
+        assert_eq!(ort_log_level(Some("verbose")), Level::ORT_LOGGING_LEVEL_VERBOSE);
+        assert_eq!(ort_log_level(Some("loud")), Level::ORT_LOGGING_LEVEL_ERROR);
+        let source = include_str!("ort_runtime.rs");
+        let options = source.find("let options = ort::sys::OrtEnvCreationOptions {").expect("the environment's options");
+        assert!(!source[options..options + 600].contains("custom_logging_function"), "no logger of Prunr's own");
     }
 
     /// A process using the OpenVINO add-on registers only its processor
