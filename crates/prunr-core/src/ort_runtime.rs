@@ -106,10 +106,11 @@ pub fn addon_tag() -> Option<String> {
 /// what they call.
 const ADDON_RUNTIME: (u32, u32) = (1, 30);
 
-/// Whether the loaded runtime can take the add-ons: Prunr's own on Linux
-/// and Windows, not an older one from the Runtime Store.
+/// Whether the runtime this process loaded can take the add-ons: Prunr's
+/// own on Linux and Windows, not an older one from the Runtime Store.
+/// Asks the one already loaded and never loads one, so the window may.
 pub fn hosts_addons() -> bool {
-    runtime_version().is_some_and(takes_addons)
+    VERSION.get().and_then(Option::as_deref).is_some_and(takes_addons)
 }
 
 fn takes_addons(version: &str) -> bool {
