@@ -228,10 +228,14 @@ impl RuntimeId {
         "Installed. It starts once Prunr runs on its own runtime (Built in, under Runtime) after a restart."
     }
 
-    /// Whether `failure` is this runtime's provider failing to start.
-    pub fn failed_as(self, failure: &prunr_core::engine::GpuStartFailure) -> bool {
+    /// The vendor stack its provider runs on, which a start failure names.
+    pub fn stack(self) -> prunr_core::engine::GpuStack {
         use prunr_core::engine::GpuStack;
-        matches!((self, failure.stack), (Self::Cuda, GpuStack::Cuda) | (Self::MiGraphX, GpuStack::Rocm))
+        match self {
+            Self::Cuda => GpuStack::Cuda,
+            Self::MiGraphX => GpuStack::Rocm,
+            Self::OpenVino => GpuStack::OpenVino,
+        }
     }
 
     /// Settings › Hardware's line once it is installed.

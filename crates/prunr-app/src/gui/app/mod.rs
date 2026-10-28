@@ -132,8 +132,9 @@ pub struct PrunrApp {
     pub(crate) pending_license_request: Option<super::views::model_store::LicenseRequest>,
     /// Shown on the first frame: egui is not ready while the app is built.
     pub(crate) pending_first_toasts: Vec<String>,
-    /// The accelerator runtime that could not start was named in a toast.
-    told_gpu_failure: bool,
+    /// Each provider that could not start was named in a toast, by its
+    /// stack (`GpuStack as usize`).
+    pub(crate) told_gpu_failures: [bool; prunr_core::engine::GpuStack::ALL.len()],
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
     /// Settings › Hardware › Test this computer, while it runs: a modal
@@ -460,7 +461,7 @@ impl PrunrApp {
             model_store: None,
             pending_license_request: None,
             pending_first_toasts: Vec::new(),
-            told_gpu_failure: false,
+            told_gpu_failures: [false; prunr_core::engine::GpuStack::ALL.len()],
             runtime_install: None,
             machine_test: None,
             hardware_install_cache: Default::default(),
@@ -1004,12 +1005,15 @@ impl PrunrApp {
         }
     }
 
-    /// An accelerator runtime that could not start (the models quietly
-    /// run on the CPU) is said once, when the probe has answered.
-    pub(crate) fn tell_gpu_start_failure(&mut self, failure: Option<&prunr_core::engine::GpuStartFailure>) {
-        let Some(failure) = failure.filter(|_| !self.told_gpu_failure) else { return };
-        self.told_gpu_failure = true;
-        self.toasts.warning(format!("{} See Settings › Hardware.", failure.text()));
+    /// Each provider that could not start (the models it would run
+    /// quietly run on the CPU) is said once, when the probe has answered or
+    /// the add-on started.
+    pub(crate) fn tell_gpu_start_failures(&mut self, failures: [Option<&prunr_core::engine::GpuStartFailure>; prunr_core::engine::GpuStack::ALL.len()]) {
+        for (told, failure) in self.told_gpu_failures.iter_mut().zip(failures) {
+            let Some(failure) = failure.filter(|_| !*told) else { continue };
+            *told = true;
+            self.toasts.warning(format!("{} See Settings › Hardware.", failure.text()));
+        }
     }
 
     /// While the Shortcuts tab waits for a key, this frame's press is the
@@ -1229,7 +1233,7 @@ impl eframe::App for PrunrApp {
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         self.popup_open_at_frame_start = popup_open || (self.popup_open_at_frame_start && pointer_down);
         self.take_probed_backend();
-        self.tell_gpu_start_failure(prunr_core::engine::gpu_start_failure());
+        self.tell_gpu_start_failures(prunr_core::engine::gpu_start_failures());
         self.hold_close_over_unsaved_work(ctx);
         #[cfg(target_os = "macos")]
         super::macos_quit::set_unsaved(!self.close_anyway && self.batch.unsaved_count() > 0);
@@ -1699,22 +1703,30 @@ mod field_list_tests {
         assert_eq!(raw.events, vec![egui::Event::Text("x".into())]);
     }
 
-    /// An accelerator runtime that cannot start says so in the window
-    /// once (the models quietly ran on the CPU), pointing to Settings ›
-    /// Hardware; nothing to say, no toast.
+    /// Each provider that cannot start says so in the window once (the
+    /// models it would run quietly run on the CPU), pointing to Settings ›
+    /// Hardware; nothing to say, no toast. CUDA's failure and OpenVINO's
+    /// are each said.
     #[test]
-    fn a_gpu_that_cannot_start_says_so_once() {
+    fn each_provider_that_cannot_start_says_so_once() {
+        use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
         let mut app = super::PrunrApp::new_for_test();
         let before = app.toasts.len_for_test();
-        app.tell_gpu_start_failure(None);
+        app.tell_gpu_start_failures([None; GpuStack::ALL.len()]);
         assert_eq!(app.toasts.len_for_test(), before, "nothing to say");
-        let failure = prunr_core::engine::GpuStartFailure::cuda_for_test("libcublasLt.so.12: cannot open shared object file: No such file or directory");
-        app.tell_gpu_start_failure(Some(&failure));
+        let cuda = GpuStartFailure::cuda_for_test("libcublasLt.so.12: cannot open shared object file: No such file or directory");
+        let mut failures = [None; GpuStack::ALL.len()];
+        failures[GpuStack::Cuda as usize] = Some(&cuda);
+        app.tell_gpu_start_failures(failures);
         let (kind, text) = app.toasts.last_for_test().expect("a toast");
         assert_eq!(kind, "warning");
         assert!(text.contains("libcublasLt.so.12") && text.contains("Settings › Hardware"), "{text}");
-        app.tell_gpu_start_failure(Some(&failure));
-        assert_eq!(app.toasts.len_for_test(), before + 1, "once");
+        let openvino = GpuStartFailure { stack: GpuStack::OpenVino, why: StartFailure::NoDevice };
+        failures[GpuStack::OpenVino as usize] = Some(&openvino);
+        app.tell_gpu_start_failures(failures);
+        assert!(app.toasts.last_for_test().expect("a toast").1.starts_with("OpenVINO could not start"));
+        app.tell_gpu_start_failures(failures);
+        assert_eq!(app.toasts.len_for_test(), before + 2, "each once");
     }
 
     /// The first-launch prompt offers the recommended runtime only while
@@ -1766,7 +1778,7 @@ mod field_list_tests {
             model_store: _,
             pending_license_request: _,
             pending_first_toasts: _,
-            told_gpu_failure: _,
+            told_gpu_failures: _,
             runtime_install: _,
             machine_test: _,
             hardware_install_cache: _,

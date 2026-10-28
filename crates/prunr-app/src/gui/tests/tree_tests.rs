@@ -88,10 +88,20 @@ fn hardware_page(installs: crate::gui::hardware_cache::HardwareInstallCache) -> 
         sd_margin_mb: 2048,
         cpu_only: false,
         test: Default::default(),
-        gpu_failure: None,
+        gpu_failures: [None; prunr_core::engine::GpuStack::ALL.len()],
         testable: false,
         test_waits: false,
     }
+}
+
+/// Each of `failures` in its stack's slot, as Settings › Hardware reads
+/// them.
+fn start_failures(failures: &[&'static prunr_core::engine::GpuStartFailure]) -> [Option<&'static prunr_core::engine::GpuStartFailure>; prunr_core::engine::GpuStack::ALL.len()] {
+    let mut slots = [None; prunr_core::engine::GpuStack::ALL.len()];
+    for &failure in failures {
+        slots[failure.stack as usize] = Some(failure);
+    }
+    slots
 }
 
 /// Settings › Hardware as Windows shows it, which offers both runtimes:
@@ -214,7 +224,7 @@ fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
 
 /// A provider that could not start says so on its own row only: with
 /// CUDA and OpenVINO installed side by side, CUDA's failure is not
-/// OpenVINO's.
+/// OpenVINO's, and OpenVINO's is said on its row.
 #[test]
 fn a_start_failure_shows_on_its_own_runtime_only() {
     use crate::gui::hardware_cache::HardwareInstallCache;
@@ -222,20 +232,24 @@ fn a_start_failure_shows_on_its_own_runtime_only() {
     use crate::runtime_install::RuntimeId;
     use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
     static NO_DRIVER: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDriver };
+    static NO_DEVICE: GpuStartFailure = GpuStartFailure { stack: GpuStack::OpenVino, why: StartFailure::NoDevice };
     if !(RuntimeId::Cuda.is_addon() && RuntimeId::OpenVino.is_addon()) {
         return;
     }
-    let said = |openvino: bool| {
+    let said = |openvino: bool, failures: &[&'static GpuStartFailure], failure: &GpuStartFailure| {
         let mut installs = HardwareInstallCache::default();
         (installs.cuda, installs.openvino, installs.nvidia_libraries) = (true, openvino, true);
-        let ctx = HardwareSectionContext { gpu_failure: Some(&NO_DRIVER), ..hardware_page(installs) };
+        let ctx = HardwareSectionContext { gpu_failures: start_failures(failures), ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
-        texts(&harness).iter().filter(|t| **t == NO_DRIVER.text()).count()
+        let text = failure.text();
+        texts(&harness).iter().filter(|t| **t == text).count()
     };
-    let alone = said(false);
+    let alone = said(false, &[&NO_DRIVER], &NO_DRIVER);
     assert!(alone > 0, "CUDA's row says it");
-    assert_eq!(said(true), alone, "and OpenVINO's row does not");
+    assert_eq!(said(true, &[&NO_DRIVER], &NO_DRIVER), alone, "and OpenVINO's row does not");
+    assert_eq!(said(true, &[&NO_DRIVER, &NO_DEVICE], &NO_DEVICE), alone, "OpenVINO's row says its own");
+    assert_eq!(said(true, &[&NO_DRIVER, &NO_DEVICE], &NO_DRIVER), alone, "beside CUDA's");
 }
 
 /// The NVIDIA libraries are offered whenever the CUDA runtime lacks its
@@ -258,14 +272,14 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
     let mut with_libraries = on_cuda;
     with_libraries.nvidia_libraries = true;
     let shapes = [
-        ("missing a library", on_cuda, Some(&MISSING), None, Some("Download NVIDIA libraries")),
-        ("starts on the system's", on_cuda, None, None, Some("Download NVIDIA libraries")),
-        ("installing", on_cuda, Some(&MISSING), installing, Some("Cancel")),
-        ("installed", with_libraries, None, None, None),
-        ("no CUDA runtime", HardwareInstallCache::default(), None, None, None),
+        ("missing a library", on_cuda, start_failures(&[&MISSING]), None, Some("Download NVIDIA libraries")),
+        ("starts on the system's", on_cuda, start_failures(&[]), None, Some("Download NVIDIA libraries")),
+        ("installing", on_cuda, start_failures(&[&MISSING]), installing, Some("Cancel")),
+        ("installed", with_libraries, start_failures(&[]), None, None),
+        ("no CUDA runtime", HardwareInstallCache::default(), start_failures(&[]), None, None),
     ];
-    for (shape, installs, failure, installing, expected) in shapes {
-        let ctx = HardwareSectionContext { installing, gpu_failure: failure, ..hardware_page(installs) };
+    for (shape, installs, gpu_failures, installing, expected) in shapes {
+        let ctx = HardwareSectionContext { installing, gpu_failures, ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert_all_controls_named(&harness, shape);
