@@ -43,7 +43,7 @@ const SESSION_SETUP: u32 = 1;
 /// What a recorded failure holds for: this way of setting sessions up,
 /// runtime build, drivers and the add-ons registered beside the runtime.
 fn scope() -> String {
-    scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str), crate::ort_runtime::addon_tag().as_deref())
+    scope_of(crate::ort_runtime::runtime_tag(), DRIVERS.get().map(String::as_str), crate::ort_runtime::addons_tag().as_deref())
 }
 
 fn scope_of(runtime: Option<&str>, drivers: Option<&str>, addons: Option<&str>) -> String {

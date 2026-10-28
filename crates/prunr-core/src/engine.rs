@@ -99,7 +99,7 @@ pub fn start_cuda_addon() -> Result<(), String> {
     if available_gpu_eps().contains(&EpKind::Cuda) {
         return Ok(());
     }
-    if !crate::ort_runtime::register_cuda_addon() {
+    if !crate::ort_runtime::register_addon(crate::ort_runtime::Addon::Cuda) {
         return Err("the CUDA add-on did not register; the log says why".to_string());
     }
     cuda_addon_starts().map_err(|failure| failure.text())?;
@@ -135,7 +135,7 @@ fn probe_gpu_eps() -> Vec<EpKind> {
             crate::ort_runtime::preload_nvidia_libraries();
             Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
         } else {
-            crate::ort_runtime::register_cuda_addon().then(cuda_addon_starts)
+            crate::ort_runtime::register_addon(crate::ort_runtime::Addon::Cuda).then(cuda_addon_starts)
         };
         match cuda {
             Some(Ok(())) => eps.push(EpKind::Cuda),
@@ -277,7 +277,7 @@ fn provider_starts(provider: ExecutionProviderDispatch) -> Result<(), String> {
 /// old for CUDA 12), and a session takes that device.
 #[cfg(not(target_os = "macos"))]
 fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
-    let devices = crate::ort_runtime::cuda_addon_devices();
+    let devices = crate::ort_runtime::addon_devices(crate::ort_runtime::Addon::Cuda);
     if devices.is_empty() {
         return Err(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDevice });
     }
@@ -601,7 +601,7 @@ impl CudaTuning {
         ]
         .into_iter()
         .filter(|&(set, ..)| set)
-        .map(|(_, key, value)| (format!("{}.{key}", crate::ort_runtime::CUDA_PLUGIN_EP), value.to_string()))
+        .map(|(_, key, value)| (format!("{}.{key}", crate::ort_runtime::Addon::Cuda.ep_name()), value.to_string()))
         .collect()
     }
 }
@@ -618,8 +618,8 @@ impl EpKind {
         };
         let registered = match self {
             #[cfg(not(target_os = "macos"))]
-            EpKind::Cuda if crate::ort_runtime::cuda_addon_registered() => {
-                builder.with_devices(crate::ort_runtime::cuda_addon_devices(), Some(&CudaTuning::for_site(site).addon_options()))
+            EpKind::Cuda if crate::ort_runtime::Addon::Cuda.registered() => {
+                builder.with_devices(crate::ort_runtime::addon_devices(crate::ort_runtime::Addon::Cuda), Some(&CudaTuning::for_site(site).addon_options()))
             }
             _ => builder.with_execution_providers([self.provider(model, site)]),
         };
@@ -2192,7 +2192,7 @@ mod tests {
             return;
         }
         if let Some(addon) = std::env::var_os("PRUNR_CUDA_ADDON") {
-            crate::ort_runtime::use_cuda_addon(addon.into());
+            crate::ort_runtime::use_addon(crate::ort_runtime::Addon::Cuda, addon.into());
         }
         let engine = OrtEngine::for_model(prunr_models::ModelId::BiRefNetLite, 4, false).expect("BiRefNet-lite loads");
         if engine.active_provider() != CUDA_NAME {

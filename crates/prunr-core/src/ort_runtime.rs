@@ -92,14 +92,11 @@ pub fn runtime_tag() -> Option<&'static str> {
     }).as_deref()
 }
 
-/// Names the add-on registered beside the runtime ("cuda-2a1b3c4d"): a
-/// fingerprint of its library file, which a new add-on version changes.
-/// `None` with none installed.
-pub fn addon_tag() -> Option<String> {
-    let library = CUDA_ADDON.get()?;
-    let meta = std::fs::metadata(library).ok()?;
-    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    Some(tag_for(Some("cuda"), meta.len(), modified))
+/// Names the add-ons installed beside the runtime, each by its tag
+/// ("cuda-2a1b3c4d, openvino-5e6f7a8b"). `None` with none installed.
+pub fn addons_tag() -> Option<String> {
+    let tags: Vec<String> = Addon::ALL.into_iter().filter_map(Addon::tag).collect();
+    (!tags.is_empty()).then(|| tags.join(", "))
 }
 
 /// The oldest runtime the add-ons are built against: an older one lacks
@@ -567,44 +564,85 @@ fn load_global(path: &Path) -> Result<(), String> {
     }
 }
 
-/// The ORT name of the CUDA provider, as a plugin lists its devices.
-pub const CUDA_PLUGIN_EP: &str = "CUDAExecutionProvider";
-
-/// The installed CUDA add-on's library (NVIDIA's libraries in
-/// `NVIDIA_LIBS_DIR` beside it), for this process to register when it
-/// probes its providers. Set at startup, before any session.
-static CUDA_ADDON: OnceLock<PathBuf> = OnceLock::new();
-
-/// Whether this process registered the CUDA add-on, once it tried.
-static CUDA_ADDON_REGISTERED: OnceLock<bool> = OnceLock::new();
-
-/// Use the CUDA add-on at `library` in this process.
-pub fn use_cuda_addon(library: PathBuf) {
-    let _ = CUDA_ADDON.set(library);
+/// A provider that comes as an add-on: a plugin library registered into
+/// the loaded runtime beside the providers it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Addon {
+    Cuda,
+    OpenVino,
 }
 
-/// Register the CUDA add-on with the loaded runtime, once per process:
-/// NVIDIA's libraries first, which it links by name. `false` when none is
-/// installed or it did not register.
+impl Addon {
+    pub const ALL: [Self; 2] = [Self::Cuda, Self::OpenVino];
+
+    /// The plugin's provider, as its devices name it.
+    pub fn ep_name(self) -> &'static str {
+        match self {
+            Self::Cuda => "CUDAExecutionProvider",
+            Self::OpenVino => "OpenVINOExecutionProvider",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cuda => "cuda",
+            Self::OpenVino => "openvino",
+        }
+    }
+
+    fn library(self) -> Option<&'static Path> {
+        ADDONS[self as usize].get().map(PathBuf::as_path)
+    }
+
+    /// A fingerprint of its installed library ("cuda-2a1b3c4d"), which a
+    /// new version of it changes; `None` with none installed.
+    pub fn tag(self) -> Option<String> {
+        let meta = std::fs::metadata(self.library()?).ok()?;
+        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(tag_for(Some(self.name()), meta.len(), modified))
+    }
+
+    /// Whether sessions reach its provider in this process.
+    pub fn registered(self) -> bool {
+        REGISTERED[self as usize].get().copied().unwrap_or(false)
+    }
+}
+
+/// Each installed add-on's library (the CUDA add-on's NVIDIA libraries in
+/// `NVIDIA_LIBS_DIR` beside it), for this process to register when it
+/// probes its providers. Set at startup, before any session.
+static ADDONS: [OnceLock<PathBuf>; Addon::ALL.len()] = [OnceLock::new(), OnceLock::new()];
+
+/// Whether this process registered each add-on, once it tried.
+static REGISTERED: [OnceLock<bool>; Addon::ALL.len()] = [OnceLock::new(), OnceLock::new()];
+
+/// Use `addon`, installed at `library`, in this process.
+pub fn use_addon(addon: Addon, library: PathBuf) {
+    let _ = ADDONS[addon as usize].set(library);
+}
+
+/// Register `addon` with the loaded runtime, once per process: the CUDA
+/// add-on after NVIDIA's libraries, which it links by name. `false` when
+/// it is not installed or did not register.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn register_cuda_addon() -> bool {
-    register_once(&CUDA_ADDON_REGISTERED, CUDA_ADDON.get().map(PathBuf::as_path), |library| {
+pub(crate) fn register_addon(addon: Addon) -> bool {
+    register_once(&REGISTERED[addon as usize], addon.library(), |library| {
         let (Ok(_), Some(env)) = (ensure_initialized(), ENV.get()) else { return false };
         if !hosts_addons() {
-            tracing::warn!(version = runtime_version(), "the loaded runtime is older than the CUDA add-on is built for; it starts with Prunr's own");
+            tracing::warn!(addon = addon.name(), version = runtime_version(), "the loaded runtime is older than the add-on is built for; it starts with Prunr's own");
             return false;
         }
         let started = std::time::Instant::now();
-        if let Some(dir) = library.parent() {
+        if let (Addon::Cuda, Some(dir)) = (addon, library.parent()) {
             preload_nvidia_libraries_beside(dir);
         }
-        match env.register_ep_library("CUDA", library) {
+        match env.register_ep_library(addon.ep_name(), library) {
             Ok(()) => {
-                tracing::info!(library = %library.display(), elapsed_ms = started.elapsed().as_millis() as u64, "CUDA add-on registered");
+                tracing::info!(addon = addon.name(), library = %library.display(), elapsed_ms = started.elapsed().as_millis() as u64, "add-on registered");
                 true
             }
             Err(e) => {
-                tracing::warn!(library = %library.display(), %e, "CUDA add-on did not register");
+                tracing::warn!(addon = addon.name(), library = %library.display(), %e, "add-on did not register");
                 false
             }
         }
@@ -619,16 +657,11 @@ fn register_once(slot: &OnceLock<bool>, library: Option<&Path>, register: impl F
     *slot.get_or_init(|| register(library))
 }
 
-/// Whether sessions reach CUDA through the add-on in this process.
-pub fn cuda_addon_registered() -> bool {
-    CUDA_ADDON_REGISTERED.get().copied().unwrap_or(false)
-}
-
-/// The devices the CUDA add-on offers: one per NVIDIA card it can use.
+/// The devices `addon` offers: one per card or processor it can use.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn cuda_addon_devices() -> Vec<ort::device::Device<'static>> {
+pub(crate) fn addon_devices(addon: Addon) -> Vec<ort::device::Device<'static>> {
     let Some(env) = ENV.get() else { return Vec::new() };
-    env.devices().filter(|d| d.ep().is_ok_and(|name| name == CUDA_PLUGIN_EP)).collect()
+    env.devices().filter(|d| d.ep().is_ok_and(|name| name == addon.ep_name())).collect()
 }
 
 fn read_preferred(root: &Path) -> Option<String> {
