@@ -272,25 +272,17 @@ impl Settings {
         is_accelerator(&self.active_backend)
     }
 
-    /// Record the provider a worker reports. Under "CPU only" the report
-    /// says CPU by choice, so the detected accelerator is kept (Settings
-    /// still offers Auto). A new provider re-derives the job count.
+    /// Record the provider a worker reports, or one that started in this
+    /// process (an add-on installed while Prunr runs). Under "CPU only" a
+    /// worker reports the CPU by choice, so the detected accelerator is
+    /// kept (Settings still offers Auto). A new provider re-derives the
+    /// job count.
     pub fn note_backend(&mut self, backend: String) {
-        if backend.is_empty() || self.cpu_only() || self.active_backend == backend {
+        if backend.is_empty() || (self.cpu_only() && !is_accelerator(&backend)) || self.active_backend == backend {
             return;
         }
         self.active_backend = backend;
         self.parallel_jobs = self.default_jobs();
-    }
-
-    /// An accelerator that started in this process after the probe found
-    /// none (an add-on installed while Prunr runs) is the backend, as the
-    /// probe would say at the next start; one already there stays.
-    pub fn accelerator_started(&mut self, provider: &str) {
-        if !self.is_gpu() {
-            self.active_backend = provider.to_string();
-            self.parallel_jobs = self.default_jobs();
-        }
     }
 
     pub fn cpu_only(&self) -> bool {
@@ -1007,18 +999,15 @@ mod tests {
 
     /// CUDA installed on a computer the probe found no accelerator on is
     /// the backend from then on, under "CPU only" too (Settings offers
-    /// Auto again); DirectML found by the probe stays.
+    /// Auto again).
     #[test]
     fn an_add_on_that_starts_is_the_backend_when_there_was_none() {
         for processor in [ComputeMode::Auto, ComputeMode::CpuOnly] {
             let mut s = Settings { active_backend: "CPU".into(), processor, ..Settings::default() };
-            s.accelerator_started("CUDA");
+            s.note_backend("CUDA".into());
             assert_eq!(s.active_backend, "CUDA");
             assert!(s.is_gpu());
         }
-        let mut s = Settings { active_backend: "DirectML".into(), ..Settings::default() };
-        s.accelerator_started("CUDA");
-        assert_eq!(s.active_backend, "DirectML");
     }
 
     #[test]

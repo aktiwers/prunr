@@ -988,18 +988,18 @@ impl PrunrApp {
 }
 
 impl PrunrApp {
-    /// While the Shortcuts tab waits for a key, this frame's press is the
-    /// new chord (Escape cancels, Backspace clears the slot), never a
-    /// command. Returns true while capture is active.
     /// The accelerator the startup probe found, once it has answered.
     /// The test results read before it are read again with it.
     pub(crate) fn take_probed_backend(&mut self) {
+        if !prunr_core::OrtEngine::probed() {
+            return;
+        }
         if self.settings.active_backend.is_empty() {
             if let Some(provider) = prunr_core::OrtEngine::detected_provider() {
                 self.settings.active_backend = provider;
             }
         }
-        if !self.test_results.after_probe && prunr_core::OrtEngine::probed() {
+        if !self.test_results.after_probe {
             self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(&self.hardware_install_cache));
         }
     }
@@ -1012,6 +1012,9 @@ impl PrunrApp {
         self.toasts.warning(format!("{} See Settings › Hardware.", failure.text()));
     }
 
+    /// While the Shortcuts tab waits for a key, this frame's press is the
+    /// new chord (Escape cancels, Backspace clears the slot), never a
+    /// command. Returns true while capture is active.
     fn handle_hotkey_capture(&mut self, ctx: &egui::Context) -> bool {
         use crate::gui::views::shortcuts::{self, Chord};
         // A capture lives on its tab: Settings closed by any way, or

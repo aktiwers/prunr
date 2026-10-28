@@ -510,45 +510,59 @@ fn backoff(base_ms: u64, tries: u32, patience: u64) -> std::time::Duration {
     std::time::Duration::from_millis(base_ms.saturating_mul(1 << tries.min(6)).saturating_mul(patience))
 }
 
-/// The files of the wheel `archive` that `rename` keeps, written flat into
-/// `target_dir` under the names it gives; how many. Caller owns dir
-/// creation + safety guards (e.g. refusing non-`runtimes/` paths), which
-/// are install-time policy.
+/// An archive's entries that `rename` keeps, written flat into `target_dir`
+/// under the names it gives. Caller owns dir creation + safety guards
+/// (e.g. refusing non-`runtimes/` paths), which are install-time policy.
 ///
 /// When two entries map to the same target (`libonnxruntime.so` and
 /// `libonnxruntime.so.1.24.1`), the first write wins: otherwise a 0-byte
 /// symlink-flattened entry could shadow the real dylib.
-fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
-    let mut archive = zip::ZipArchive::new(archive).map_err(|e| format!("zip parse: {e}"))?;
-    let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
-        let Some(target_filename) = rename(entry.name()) else { continue };
-        if !written.insert(target_filename.clone()) {
-            continue;
-        }
-        write_out(&mut entry, &target_dir.join(&target_filename))?;
-    }
-    Ok(written.len())
+struct Flat<'a, R> {
+    target_dir: &'a Path,
+    rename: R,
+    written: std::collections::HashSet<String>,
 }
 
-/// `extract_flat` for a gzip-compressed tar: its regular files.
+impl<'a, R: Fn(&str) -> Option<String>> Flat<'a, R> {
+    fn new(target_dir: &'a Path, rename: R) -> Self {
+        Self { target_dir, rename, written: std::collections::HashSet::new() }
+    }
+
+    fn entry(&mut self, name: &str, entry: &mut impl Read) -> Result<(), String> {
+        let Some(target_filename) = (self.rename)(name) else { return Ok(()) };
+        if self.written.insert(target_filename.clone()) {
+            write_out(entry, &self.target_dir.join(&target_filename))?;
+        }
+        Ok(())
+    }
+}
+
+/// `Flat` over a wheel or zip; how many files it wrote.
+fn extract_flat(archive: impl Read + Seek, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    let mut archive = zip::ZipArchive::new(archive).map_err(|e| format!("zip parse: {e}"))?;
+    let mut flat = Flat::new(target_dir, rename);
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+        let name = entry.name().to_string();
+        flat.entry(&name, &mut entry)?;
+    }
+    Ok(flat.written.len())
+}
+
+/// `Flat` over a gzip-compressed tar's regular files; how many it wrote.
 fn extract_flat_tar_gz(archive: impl Read, target_dir: &Path, rename: impl Fn(&str) -> Option<String>) -> Result<usize, String> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-    let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut flat = Flat::new(target_dir, rename);
     for entry in archive.entries().map_err(|e| format!("tar parse: {e}"))? {
         let mut entry = entry.map_err(|e| format!("tar entry: {e}"))?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
         let path = entry.path().map_err(|e| format!("tar entry name: {e}"))?.into_owned();
-        let Some(target_filename) = path.to_str().map(|name| name.trim_start_matches("./")).and_then(&rename) else { continue };
-        if !written.insert(target_filename.clone()) {
-            continue;
-        }
-        write_out(&mut entry, &target_dir.join(&target_filename))?;
+        let Some(name) = path.to_str() else { continue };
+        flat.entry(name.trim_start_matches("./"), &mut entry)?;
     }
-    Ok(written.len())
+    Ok(flat.written.len())
 }
 
 fn write_out(entry: &mut impl Read, dest: &Path) -> Result<(), String> {

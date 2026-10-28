@@ -18,6 +18,17 @@ fn pointer_to(h: &mut Harness<'_, PrunrApp>, pos: egui::Pos2) {
     h.step();
 }
 
+/// A raw click where the button named `name` is drawn, whatever window
+/// is over it: what a click through a modal's backdrop would reach.
+fn click_where(h: &mut Harness<'_, PrunrApp>, name: &str) {
+    use egui_kittest::kittest::Queryable;
+    let at = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some(name) && n.role() == egui::accesskit::Role::Button).rect().center();
+    pointer_to(h, at);
+    press(h, at, true);
+    press(h, at, false);
+    settle(h);
+}
+
 fn press(h: &mut Harness<'_, PrunrApp>, pos: egui::Pos2, pressed: bool) {
     h.input_mut().events.push(egui::Event::PointerButton {
         pos,
@@ -473,7 +484,6 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
 /// open), and Cancel ends it and stops its process.
 #[test]
 fn the_computer_test_holds_the_window_until_cancelled() {
-    use egui_kittest::kittest::Queryable;
     let child = crate::gui::tests::fixtures::idle_child();
     #[cfg(target_os = "linux")]
     let pid = child.id();
@@ -488,11 +498,7 @@ fn the_computer_test_holds_the_window_until_cancelled() {
     settle(&mut h);
     assert!(h.state().machine_test.is_some(), "Escape leaves it up");
     assert!(h.state().show_settings, "Escape leaves the Settings under it too");
-    let gear = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Settings") && n.role() == egui::accesskit::Role::Button).rect().center();
-    pointer_to(&mut h, gear);
-    press(&mut h, gear, true);
-    press(&mut h, gear, false);
-    settle(&mut h);
+    click_where(&mut h, "Settings");
     assert!(h.state().show_settings, "the toolbar under it takes no click, nor closes the Settings under it");
     let ctx = h.ctx.clone();
     h.state_mut().perform(crate::gui::views::shortcuts::Action::Settings, &ctx);
@@ -515,7 +521,6 @@ fn the_computer_test_holds_the_window_until_cancelled() {
 /// card cannot be removed, and Cancel on the card ends it.
 #[test]
 fn a_card_test_holds_the_window_until_cancelled() {
-    use egui_kittest::kittest::Queryable;
     let mut h = loaded();
     h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(crate::gui::tests::fixtures::idle_child(), Some(prunr_models::ModelId::U2net)));
@@ -523,11 +528,7 @@ fn a_card_test_holds_the_window_until_cancelled() {
     assert_all_controls_named(&h, "a card's test");
     assert!(!enabled(&h, "Close Model Store"), "the store stays up");
     assert!(!enabled(&h, "Remove U2Net"), "the model under test stays");
-    let gear = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Settings") && n.role() == egui::accesskit::Role::Button).rect().center();
-    pointer_to(&mut h, gear);
-    press(&mut h, gear, true);
-    press(&mut h, gear, false);
-    settle(&mut h);
+    click_where(&mut h, "Settings");
     assert!(!h.state().show_settings, "the toolbar under it takes no click");
     assert!(h.state().model_store.is_some(), "nor closes the store");
     click(&mut h, "Cancel the test of U2Net");

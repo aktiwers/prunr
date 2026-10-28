@@ -95,7 +95,8 @@ fn axis_tiles(len: u32, tile_size: u32, overlap: u32, align: u32) -> (Vec<u32>, 
     // of overlap with the next, and the last tile grows by what its start
     // gave up, so tiles are planned with that much more overlap and that
     // much smaller.
-    let slack = align.max(1) - 1;
+    let align = align.max(1);
+    let slack = align - 1;
     let (planned_size, planned_overlap) = (tile_size.saturating_sub(slack).max(1), overlap + slack);
     let step = planned_size.saturating_sub(planned_overlap).max(1);
     // ≥ 2: len > tile_size ≥ planned_size
@@ -104,7 +105,7 @@ fn axis_tiles(len: u32, tile_size: u32, overlap: u32, align: u32) -> (Vec<u32>, 
     // overlap by at least that and size ≤ planned_size.
     let size = (len + (count - 1) * planned_overlap).div_ceil(count);
     let span = len - size;
-    let starts: Vec<u32> = (0..count).map(|i| i * span / (count - 1) / (slack + 1) * (slack + 1)).collect();
+    let starts: Vec<u32> = (0..count).map(|i| i * span / (count - 1) / align * align).collect();
     let size = len - starts[starts.len() - 1];
     (starts, size)
 }

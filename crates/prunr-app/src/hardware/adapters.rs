@@ -40,19 +40,28 @@ struct AdapterClass {
     suits_directml: bool,
 }
 
-/// What a display adapter is; `None` for a software one. `strong`: it
-/// is the strong card beside another hardware adapter (`Some(true)`), or
-/// another adapter beside one (`Some(false)`), where an AMD or Intel
-/// adapter is the integrated GPU however much memory it reserves (a
-/// Ryzen APU can hold 2 GB or more). An Intel iGPU without a card beside
-/// it does not suit DirectML.
-fn classify_adapter(adapter: &AdapterFacts, strong: Option<bool>) -> Option<AdapterClass> {
+/// Where an adapter stands among the hardware ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rank {
+    /// The only one.
+    Alone,
+    /// The strong card beside another.
+    Strong,
+    /// Another beside the strong card: an AMD or Intel one is the
+    /// integrated GPU however much memory it reserves (a Ryzen APU can
+    /// hold 2 GB or more).
+    Beside,
+}
+
+/// What a display adapter is; `None` for a software one. An Intel iGPU
+/// without a card beside it does not suit DirectML.
+fn classify_adapter(adapter: &AdapterFacts, rank: Rank) -> Option<AdapterClass> {
     if !adapter.is_hardware() {
         return None;
     }
     let vendor = gpu_vendor(adapter.vendor_id);
     let has_card_memory = adapter.dedicated_mb >= CARD_MIN_DEDICATED_MB;
-    let kind = if strong == Some(true) || vendor == GpuVendor::Nvidia || (has_card_memory && strong != Some(false)) {
+    let kind = if rank == Rank::Strong || vendor == GpuVendor::Nvidia || (has_card_memory && rank != Rank::Beside) {
         GpuKind::Discrete
     } else {
         GpuKind::Integrated
@@ -83,7 +92,12 @@ pub(super) fn sort_adapters(adapters: &[AdapterFacts], os_choice: Option<usize>)
     let order = strong.into_iter().chain((0..adapters.len()).filter(|&i| Some(i) != strong));
     for i in order {
         let a = &adapters[i];
-        let Some(class) = classify_adapter(a, strong.map(|s| s == i)) else { continue };
+        let rank = match strong {
+            None => Rank::Alone,
+            Some(s) if s == i => Rank::Strong,
+            Some(_) => Rank::Beside,
+        };
+        let Some(class) = classify_adapter(a, rank) else { continue };
         let slot = match class.kind {
             GpuKind::Discrete if slots.dgpu.is_none() => {
                 slots.dgpu_name = Some(a.name.clone()).filter(|name| !name.is_empty());

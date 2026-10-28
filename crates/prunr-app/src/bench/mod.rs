@@ -845,18 +845,28 @@ impl Run for LamaRun<'_> {
         let went = std::sync::Arc::new(WentToProcessor::default());
         let filled = prunr_core::inpaint::process_lama(photo, mask, self.id, self.cpu_only, prunr_core::inpaint::FillScale::Auto, &prunr_core::Progress::new(went.clone()))
             .map_err(|e| e.to_string())?;
-        if went.0.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err("out of memory on the graphics card; the fill finished on the processor".to_string());
+        if went.went() {
+            return Err(FINISHED_ON_THE_PROCESSOR.to_string());
         }
         Ok(Output::Picture(filled.rgba.into()))
     }
 }
+
+/// A LaMa run the card ran short for and the processor finished: out of
+/// memory, a passing failure nothing is saved for.
+const FINISHED_ON_THE_PROCESSOR: &str = "out of memory on the graphics card; the fill finished on the processor";
 
 /// Notes a run that went on on the processor when the card ran out of
 /// memory: its time is the processor's, not the accelerator's it is
 /// measured for.
 #[derive(Default)]
 struct WentToProcessor(std::sync::atomic::AtomicBool);
+
+impl WentToProcessor {
+    fn went(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
 
 impl prunr_core::progress::ProgressSink for WentToProcessor {
     fn report(&self, update: prunr_core::ProgressUpdate) {
@@ -1055,10 +1065,10 @@ mod tests {
         use prunr_core::progress::ProgressSink;
         let went = WentToProcessor::default();
         went.report(prunr_core::ProgressUpdate::Step(prunr_core::Step::Erasing));
-        assert!(!went.0.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!went.went());
         went.report(prunr_core::ProgressUpdate::Step(prunr_core::Step::OnTheProcessor));
-        assert!(went.0.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(prunr_core::ep_compat::is_transient("out of memory on the graphics card; the fill finished on the processor"));
+        assert!(went.went());
+        assert!(prunr_core::ep_compat::is_transient(FINISHED_ON_THE_PROCESSOR));
     }
 
     /// Every stage counts the sides its model's passes give, the GPU ones
