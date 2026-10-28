@@ -45,12 +45,20 @@ pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
 }
 
-/// Names Windows keeps for devices, whatever follows a dot.
-const DEVICE_NAMES: [&str; 24] = [
-    "CON", "PRN", "AUX", "NUL",
-    "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
+/// A name Windows keeps for a device, whatever follows a dot: CON, PRN,
+/// AUX, NUL, COM0-9, LPT0-9.
+fn is_device_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (name.len() == 4 && (name.starts_with("COM") || name.starts_with("LPT")) && name.as_bytes()[3].is_ascii_digit())
+}
+
+/// The name a typed one saves under, as its file keeps it; `None` for a
+/// blank one.
+pub(crate) fn preset_name(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    (!typed.is_empty()).then(|| sanitize_filename(typed))
+}
 
 /// Strips path separators, `..`, control chars, the characters Windows
 /// refuses in a file name and leading dots (no hidden files), and marks a
@@ -72,7 +80,7 @@ pub fn sanitize_filename(name: &str) -> String {
         return "preset".to_string();
     }
     let device = out.split('.').next().unwrap_or_default();
-    if DEVICE_NAMES.iter().any(|d| device.eq_ignore_ascii_case(d)) {
+    if is_device_name(device) {
         out.insert(device.len(), '_');
     }
     out
@@ -368,8 +376,6 @@ mod tests {
         }
     }
 
-    /// A preset a newer Prunr saved is left out, not read as defaults, and
-    /// its name cannot be saved over, so that version keeps it.
     /// A name Windows cannot save stays savable there, and on the
     /// computer a preset is shared to: its forbidden characters go, and a
     /// device name (CON, NUL, COM1...) gets a mark.
@@ -389,6 +395,18 @@ mod tests {
         }
     }
 
+    /// A typed name is the preset's name as its file keeps it, so the
+    /// dialog checks what will be saved: "a:b" overwrites "ab".
+    #[test]
+    fn a_typed_name_is_the_name_its_file_keeps() {
+        assert_eq!(preset_name("  Sky: blue? "), Some("Sky blue".to_string()));
+        assert_eq!(preset_name("CON"), Some("CON_".to_string()));
+        assert_eq!(preset_name("Portrait"), Some("Portrait".to_string()));
+        assert_eq!(preset_name("   "), None);
+    }
+
+    /// A preset a newer Prunr saved is left out, not read as defaults, and
+    /// its name cannot be saved over, so that version keeps it.
     #[test]
     fn a_newer_preset_is_left_out_and_never_written_over() {
         let dir = tempfile::tempdir().unwrap();

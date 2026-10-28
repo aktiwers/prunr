@@ -204,16 +204,18 @@ pub(crate) fn render(
                 if !commit && ui.memory(|m| m.focused().is_none()) {
                     text_resp.request_focus();
                 }
-                let trimmed = name_buf.trim();
-                let refusal = crate::gui::presets_fs::name_refusal(trimmed, &settings.newer_presets);
+                let name = crate::gui::presets_fs::preset_name(name_buf);
+                let refusal = name.as_deref().and_then(|name| crate::gui::presets_fs::name_refusal(name, &settings.newer_presets));
                 if let Some(why) = refusal {
                     ui.label(RichText::new(why).color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_SECONDARY));
-                } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
+                } else if let Some(name) = name.as_ref().filter(|name| existing_names.contains(name)) {
                     ui.label(
-                        RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
+                        RichText::new(format!("⚠ Will overwrite \"{name}\""))
                             .color(theme::DESTRUCTIVE)
                             .size(theme::FONT_SIZE_SECONDARY),
                     );
+                } else if let Some(name) = name.as_ref().filter(|name| *name != name_buf.trim()) {
+                    ui.label(RichText::new(format!("Saves as \"{name}\"")).size(theme::FONT_SIZE_SECONDARY));
                 }
 
                 ui.add_space(theme::SPACE_SM);
@@ -253,14 +255,13 @@ pub(crate) fn render(
         });
         cancel |= backdrop_closed;
 
-        let trimmed = name_buf.trim();
         let is_overwrite = overwrite_target.is_some();
         // Resolve the target name: overwrite button wins, else a valid typed
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
         let target_name = overwrite_target.or_else(|| {
-            (commit && !trimmed.is_empty() && crate::gui::presets_fs::name_refusal(trimmed, &settings.newer_presets).is_none())
-                .then(|| trimmed.to_string())
+            crate::gui::presets_fs::preset_name(name_buf)
+                .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
         });
         if let Some(name) = target_name {
             let model_id = settings.preset_model();
