@@ -107,10 +107,7 @@ impl Drop for SemaphoreGuard {
 /// `work`'s answer, or the eraser's own words when it panicked: a stroke
 /// thread dying without an answer would leave the stroke busy for good.
 fn stroke_answer<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
-        tracing::error!("eraser stroke panicked");
-        Err("The eraser stopped unexpectedly. Erase again.".into())
-    })
+    prunr_app::panics::caught("an eraser stroke", work).unwrap_or_else(|_| Err(prunr_app::subprocess::protocol::ERASER_STOPPED.into()))
 }
 
 /// Write a result for the parent to read. One that fails (a full temp

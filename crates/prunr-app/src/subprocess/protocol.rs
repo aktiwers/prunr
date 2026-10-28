@@ -41,6 +41,10 @@ pub fn is_cancel_error(error: &str) -> bool {
 /// knows the abort was self-defence, not a stroke-quality failure.
 pub const MEMORY_PRESSURE_ABORT_MSG: &str = "memory-pressure-abort";
 
+/// What a stroke that died says, wherever it died: the worker, its
+/// thread, or the GUI side that sends and reads it.
+pub const ERASER_STOPPED: &str = "The eraser stopped unexpectedly. Erase again.";
+
 /// The version a worker must be to talk with this app: a worker of
 /// another (an update replaced the binary while the app ran) would not
 /// read its messages.

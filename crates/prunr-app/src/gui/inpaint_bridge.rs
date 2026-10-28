@@ -379,7 +379,7 @@ fn end_if_dead(
     *sub_state = SubState::Idle;
     let why = match reason {
         crate::subprocess::manager::Crash::OutOfMemory => "The eraser ran out of memory. Try a lighter eraser or a smaller region.",
-        _ => "The eraser stopped unexpectedly. Erase again.",
+        _ => crate::subprocess::protocol::ERASER_STOPPED,
     };
     fail_inflight(strokes, res_tx, why);
 }
