@@ -691,6 +691,14 @@ pub enum Addon {
 impl Addon {
     pub const ALL: [Self; 2] = [Self::Cuda, Self::OpenVino];
 
+    /// The provider it brings, as Prunr names it.
+    pub fn provider_name(self) -> &'static str {
+        match self {
+            Self::Cuda => crate::engine::CUDA_NAME,
+            Self::OpenVino => crate::engine::OPENVINO_NAME,
+        }
+    }
+
     /// The plugin's provider, as its devices name it.
     pub fn ep_name(self) -> &'static str {
         match self {
@@ -726,10 +734,10 @@ impl Addon {
 /// Each installed add-on's library (the CUDA add-on's NVIDIA libraries in
 /// `NVIDIA_LIBS_DIR` beside it), for this process to register when it
 /// probes its providers. Set at startup, before any session.
-static ADDONS: [OnceLock<PathBuf>; Addon::ALL.len()] = [OnceLock::new(), OnceLock::new()];
+static ADDONS: [OnceLock<PathBuf>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
 
 /// Whether this process registered each add-on, once it tried.
-static REGISTERED: [OnceLock<bool>; Addon::ALL.len()] = [OnceLock::new(), OnceLock::new()];
+static REGISTERED: [OnceLock<bool>; Addon::ALL.len()] = [const { OnceLock::new() }; Addon::ALL.len()];
 
 /// Use `addon`, installed at `library`, in this process.
 pub fn use_addon(addon: Addon, library: PathBuf) {

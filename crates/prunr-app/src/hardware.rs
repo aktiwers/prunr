@@ -72,8 +72,7 @@ impl HardwareProfile {
     pub fn runs(&self, rt: crate::runtime_install::RuntimeId) -> bool {
         use crate::runtime_install::RuntimeId;
         match rt {
-            RuntimeId::OpenVino if rt.is_addon() => self.cpu_vendor == CpuVendor::Intel || self.intel_graphics(),
-            RuntimeId::OpenVino => true,
+            RuntimeId::OpenVino => !rt.is_addon() || self.recommends_openvino(),
             RuntimeId::Cuda => self.dgpu == Some(GpuVendor::Nvidia),
             RuntimeId::MiGraphX => self.recommends_rocm(),
         }
@@ -97,7 +96,7 @@ impl HardwareProfile {
     /// breaks. Any other card that suits DirectML needs none, since
     /// DirectML is built in, even with an Intel iGPU beside it. A graphics
     /// card wins over an Intel iGPU beside it (the usual Linux laptop):
-    /// CUDA or MIGraphX runs the card, OpenVINO only the iGPU.
+    /// CUDA or MIGraphX runs the card, OpenVINO only the iGPU or the processor.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
         use crate::runtime_install::RuntimeId;
         let cuda = (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda).filter(|rt| RuntimeId::OFFERED.contains(rt));

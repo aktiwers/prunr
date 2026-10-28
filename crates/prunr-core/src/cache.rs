@@ -113,11 +113,7 @@ pub fn cache_path_for(id: ModelId, ep_name: &str) -> Option<PathBuf> {
 
 /// The add-on `ep_name` comes from, when it is one: its graphs are its own.
 fn provider_tag(ep_name: &str) -> Option<String> {
-    use crate::ort_runtime::Addon;
-    let addon = [(crate::engine::CUDA_NAME, Addon::Cuda), (crate::engine::OPENVINO_NAME, Addon::OpenVino)]
-        .into_iter()
-        .find_map(|(name, addon)| ep_name.eq_ignore_ascii_case(name).then_some(addon))?;
-    addon.tag()
+    crate::ort_runtime::Addon::ALL.into_iter().find(|addon| ep_name.eq_ignore_ascii_case(addon.provider_name()))?.tag()
 }
 
 /// `<model>-<version>-<files>-ort<runtime tag>[+<add-on tag>]-v<format>`,

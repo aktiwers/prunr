@@ -90,10 +90,17 @@ impl RuntimeId {
 
     /// The add-on it is, where it is one.
     fn addon_kind(self) -> Option<Addon> {
-        self.addon().map(|_| match self {
-            Self::Cuda => Addon::Cuda,
-            _ => Addon::OpenVino,
-        })
+        self.addon()?;
+        match self {
+            Self::Cuda => Some(Addon::Cuda),
+            Self::OpenVino => Some(Addon::OpenVino),
+            Self::MiGraphX => None,
+        }
+    }
+
+    /// The add-ons this platform offers.
+    pub fn addons() -> impl Iterator<Item = RuntimeId> {
+        Self::OFFERED.iter().copied().filter(|rt| rt.is_addon())
     }
 
     /// An add-on joining a built-in accelerator: CUDA beside DirectML.
@@ -184,15 +191,10 @@ impl RuntimeId {
     /// where NVIDIA's libraries are already here (`nvidia_here`).
     pub fn download_label(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
+        let addon = self.addon().map(|addon| Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)));
         match self {
-            Self::OpenVino => match self.addon() {
-                Some(addon) => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
-                None => Cow::Borrowed("80 MB"),
-            },
-            Self::Cuda => match self.addon() {
-                Some(addon) if nvidia_here => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
-                _ => Cow::Borrowed("about 2 GB"),
-            },
+            Self::OpenVino => addon.unwrap_or(Cow::Borrowed("80 MB")),
+            Self::Cuda => addon.filter(|_| nvidia_here).unwrap_or(Cow::Borrowed("about 2 GB")),
             Self::MiGraphX => Cow::Borrowed("20 MB"),
         }
     }
@@ -484,8 +486,7 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     // Installing the add-on made Prunr's own runtime the choice; where
     // that runtime has no accelerator of its own and no other add-on
     // stays, one chosen from the store before comes back.
-    let another_addon = RuntimeId::OFFERED.iter().any(|&rt| rt != runtime && rt.is_addon() && rt.is_installed());
-    if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU && !another_addon {
+    if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU && !RuntimeId::addons().any(|rt| rt != runtime && rt.is_installed()) {
         prunr_core::ort_runtime::forget_preferred_runtime(prunr_core::ort_runtime::PREFER_BUILT_IN);
     }
     if runtime.addon_kind().is_some_and(Addon::registered) {
@@ -511,7 +512,7 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
 /// its mark stays until it is gone (`is_installed`).
 pub fn finish_uninstalls() {
     let Some(store) = prunr_models::runtime_store_dir() else { return };
-    let marked: Vec<String> = RuntimeId::OFFERED.iter().filter(|rt| rt.is_addon() && rt.removal_pending()).map(|rt| rt.install_subdir()).collect();
+    let marked: Vec<String> = RuntimeId::addons().filter(|rt| rt.removal_pending()).map(|rt| rt.install_subdir()).collect();
     if !marked.is_empty() {
         std::thread::spawn(move || remove_marked(&store, marked));
     }
@@ -549,7 +550,7 @@ fn run_install(
     if let Some(mark) = rt.removal_mark().filter(|mark| mark.is_file()) {
         std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
         let install_dir = rt.checked_install_dir()?;
-        let _ = tx.send(InstallEvent::Done { install_dir, started: Some(start_addon(rt)) });
+        let _ = tx.send(InstallEvent::Done { install_dir, started: rt.addon_kind().map(start_addon) });
         return Ok(());
     }
     let wheel = match rt.addon() {
@@ -584,10 +585,10 @@ fn run_install(
     if let Err(e) = prefer(choice) {
         tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the runtime it needs as preferred");
     }
-    let started = rt.is_addon().then(|| {
+    let started = rt.addon_kind().and_then(|addon| {
         use_installed_addons();
-        prunr_core::ort_runtime::hosts_addons().then(|| start_addon(rt))
-    }).flatten();
+        prunr_core::ort_runtime::hosts_addons().then(|| start_addon(addon))
+    });
 
     let _ = tx.send(InstallEvent::Done { install_dir, started });
     Ok(())
@@ -597,23 +598,23 @@ fn run_install(
 /// session: each one registers when the providers are probed, and
 /// OpenVINO's sets how the runtime starts.
 pub fn use_installed_addons() {
-    for &rt in RuntimeId::OFFERED {
+    for rt in RuntimeId::addons() {
         if let (Some(addon), Some(library)) = (rt.addon_kind(), rt.library().filter(|_| rt.is_installed())) {
             prunr_core::ort_runtime::use_addon(addon, library);
         }
     }
 }
 
-/// Start the installed add-on `rt` in this process.
-fn start_addon(rt: RuntimeId) -> Result<(), String> {
-    let addon = rt.addon_kind().ok_or("not an add-on")?;
+/// Start the installed `addon` in this process.
+#[cfg_attr(target_os = "macos", allow(unused_variables))] // macOS has no add-on to start
+fn start_addon(addon: Addon) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         prunr_core::engine::start_addon(addon)
     }
     #[cfg(target_os = "macos")]
     {
-        Err(format!("no add-on runs on macOS ({addon:?})"))
+        Err("no add-on runs on macOS".to_string())
     }
 }
 
