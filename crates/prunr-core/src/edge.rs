@@ -1138,7 +1138,7 @@ mod tests {
         for (v, want) in [(128, 128), (0, 0), (255, 255)] {
             assert_eq!(out([v; 3], InputTransform::ContrastBoost { percent: 200 })[0], want, "ContrastBoost(200%) at {v}");
         }
-        for (v, want) in [(0, 0), (84, 0), (85, 85), (170, 170), (255, 255)] {
+        for (v, want) in [(0, 0), (42, 0), (43, 85), (127, 85), (128, 170), (255, 255)] {
             assert_eq!(out([v; 3], InputTransform::Posterize { levels: 4 })[0], want, "Posterize(4) at {v}");
         }
     }

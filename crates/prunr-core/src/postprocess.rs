@@ -487,10 +487,13 @@ pub(crate) fn posterize_steps(levels: u8) -> u16 {
     levels.max(2) as u16 - 1
 }
 
-/// `v` snapped to one of `n + 1` evenly spaced levels.
+/// `v` snapped to the nearest of `n + 1` evenly spaced levels, each
+/// written rounded.
 #[inline]
 pub(crate) fn posterize_u8(v: u8, n: u16) -> u8 {
-    ((v as u16 * n / 255) * 255 / n) as u8
+    let (v, n) = (v as u32, n as u32);
+    let level = (v * n + 127) / 255;
+    ((level * 255 + n / 2) / n) as u8
 }
 
 /// The picture `effect` makes from `source`, opaque, at the source's
@@ -1237,6 +1240,18 @@ mod tests {
     }
 
     /// Duotone and Gradient map share one evenly-spaced gradient map; at
+    /// Each value goes to its nearest level: two levels split at
+    /// mid-grey, where rounding down sent everything under white to black.
+    #[test]
+    fn posterize_snaps_each_value_to_its_nearest_level() {
+        let two = posterize_steps(2);
+        assert_eq!((posterize_u8(127, two), posterize_u8(128, two), posterize_u8(254, two)), (0, 255, 255));
+        let five = posterize_steps(5);
+        let levels: std::collections::BTreeSet<u8> = (0..=255u8).map(|v| posterize_u8(v, five)).collect();
+        assert_eq!(levels.into_iter().collect::<Vec<_>>(), [0, 64, 128, 191, 255]);
+        assert_eq!((posterize_u8(90, five), posterize_u8(100, five)), (64, 128));
+    }
+
     /// every grey level it gives what each computed on its own before.
     #[test]
     fn posterize_keeps_black_and_white_and_snaps_to_its_levels() {
