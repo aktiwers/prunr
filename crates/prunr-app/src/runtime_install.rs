@@ -298,29 +298,20 @@ impl RuntimeId {
 
 /// NVIDIA's CUDA 12 and cuDNN 9 libraries the CUDA add-on links, as the
 /// PyPI wheels that carry them: (package, pinned version). ORT asks for
-/// any 12.x / 9.x; these are the newest at pinning. The Linux add-on
-/// names no cuRAND; Windows keeps it, as its add-on has not run without.
-#[cfg(not(windows))]
+/// any 12.x / 9.x; these are the newest at pinning. No cuRAND: neither
+/// add-on names it, and every model ran on CUDA without it, on Linux and
+/// on Windows.
 pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
     ("nvidia-cuda-runtime-cu12", "12.9.79"),
     ("nvidia-cublas-cu12", "12.9.2.10"),
     ("nvidia-cudnn-cu12", "9.27.0.42"),
     ("nvidia-cufft-cu12", "11.4.1.4"),
-    ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
-];
-#[cfg(windows)]
-pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
-    ("nvidia-cuda-runtime-cu12", "12.9.79"),
-    ("nvidia-cublas-cu12", "12.9.2.10"),
-    ("nvidia-cudnn-cu12", "9.27.0.42"),
-    ("nvidia-cufft-cu12", "11.4.1.4"),
-    ("nvidia-curand-cu12", "10.3.10.19"),
     ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
 ];
 
 /// The NVIDIA libraries' download, for the button that offers them
 /// again when they are missing.
-pub const NVIDIA_DOWNLOAD_LABEL: &str = "1.7 GB";
+pub const NVIDIA_DOWNLOAD_LABEL: &str = "1.6 GB";
 
 /// The settings key the NVIDIA libraries' license acceptance is kept under.
 pub const NVIDIA_LICENSE_KEY: &str = "NvidiaCudaLibraries";

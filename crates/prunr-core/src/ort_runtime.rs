@@ -592,7 +592,6 @@ const NVIDIA_LINKED: &[&str] = &[
     "cublas64_12.dll",
     "cufft64_11.dll",
     "cudart64_12.dll",
-    "curand64_10.dll",
     "nvrtc64_120_0.dll",
     "nvrtc-builtins64_129.dll",
     "cudnn_engines_runtime_compiled64_9.dll",
