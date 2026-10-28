@@ -86,22 +86,24 @@ fn the_hardware_page_names_every_runtime_control() {
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::RuntimeId;
     use crate::runtime_install::RuntimeChoice;
+    let openvino = RuntimeId::OpenVino;
     let mut both = HardwareInstallCache::all_installed();
-    both.next_runtime = Some(RuntimeChoice::Store(RuntimeId::OpenVino));
+    let store = RuntimeChoice::ALL.into_iter().find(|&c| c != RuntimeChoice::BuiltIn && both.can_load(c)).expect("a runtime from the store loads");
+    both.next_runtime = Some(store);
     let mut built_in_only = HardwareInstallCache::default();
     built_in_only.built_in_gpu = true;
-    let installing = Some((crate::runtime_install::InstallTarget::Runtime(RuntimeId::OpenVino), "Downloading 40% (32/80 MB)".to_string()));
+    let installing = Some((crate::runtime_install::InstallTarget::Runtime(openvino), "Downloading 40% (32/80 MB)".to_string()));
     let shapes = [
-        ("both installed", both, None, vec!["Uninstall OpenVINO Runtime", "Built in", "OpenVINO"]),
+        ("both installed", both, None, vec![openvino.uninstall_label(), "Built in", store.name()]),
         ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
-        ("none installed", HardwareInstallCache::default(), None, vec!["Install OpenVINO Runtime"]),
+        ("none installed", HardwareInstallCache::default(), None, vec![openvino.install_button_label()]),
     ];
-    // Where no runtime is offered for download (Windows), the page has no
-    // install, uninstall or cancel; a runtime installed anyway still gives
-    // the choice. Every control is still named.
-    let offered = RuntimeId::OFFERED.contains(&RuntimeId::OpenVino);
+    // Where OpenVINO is not offered for download (Windows), the page has
+    // no install, uninstall or cancel for it; a runtime installed anyway
+    // still gives the choice. Every control is still named.
+    let offered = RuntimeId::OFFERED.contains(&openvino);
     for (shape, installs, installing, expected) in shapes {
-        let download_controls = |name: &&str| name.ends_with("OpenVINO Runtime") || *name == "Cancel";
+        let download_controls = |name: &&str| [openvino.install_button_label(), openvino.uninstall_label(), "Cancel"].contains(name);
         let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
         let ctx = HardwareSectionContext {
             machine: test_machine(),
@@ -224,6 +226,43 @@ fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
         harness.run_steps(2);
         assert!(texts(&harness).iter().any(|t| t == line), "waits {waits}: {line:?} missing");
     }
+}
+
+/// A provider that could not start says so on its own row only: with
+/// CUDA and OpenVINO installed side by side, CUDA's failure is not
+/// OpenVINO's.
+#[test]
+fn a_start_failure_shows_on_its_own_runtime_only() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    use prunr_core::engine::{GpuStack, GpuStartFailure, StartFailure};
+    static NO_DRIVER: GpuStartFailure = GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDriver };
+    if !(RuntimeId::Cuda.is_addon() && RuntimeId::OpenVino.is_addon()) {
+        return;
+    }
+    let said = |openvino: bool| {
+        let mut installs = HardwareInstallCache::default();
+        (installs.cuda, installs.openvino, installs.nvidia_libraries) = (true, openvino, true);
+        let ctx = HardwareSectionContext {
+            machine: test_machine(),
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing: None,
+            sd_margin_mb: 2048,
+            cpu_only: false,
+            test: Default::default(),
+            gpu_failure: Some(&NO_DRIVER),
+            testable: false,
+            test_waits: false,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        texts(&harness).iter().filter(|t| **t == NO_DRIVER.text()).count()
+    };
+    let alone = said(false);
+    assert!(alone > 0, "CUDA's row says it");
+    assert_eq!(said(true), alone, "and OpenVINO's row does not");
 }
 
 /// The NVIDIA libraries are offered whenever the CUDA runtime lacks its

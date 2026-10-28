@@ -559,7 +559,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                 }
             });
         }
-        if ctx.installs.openvino && p.recommends_openvino() {
+        if ctx.installs.openvino && p.intel_graphics() {
             rows.row(
                 "Use Intel graphics",
                 "Experimental. Runs cut-outs and upscaling on the Intel graphics chip as well as the CPU: faster for some models and computers, slower for others. Takes effect when you restart Prunr.",
@@ -761,7 +761,7 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     // An add-on is in use wherever it is installed; a runtime, once loaded.
     let waits = rt.is_addon() && ctx.installs.addon_waits;
     let in_use = (rt.is_addon() && !waits) || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
-    let failure = ctx.gpu_failure.filter(|_| in_use).map(|f| f.text());
+    let failure = ctx.gpu_failure.filter(|f| in_use && rt.failed_as(f)).map(|f| f.text());
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
         None if installed && waits => rt.waiting_line(),

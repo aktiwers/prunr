@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc};
 
+use prunr_core::ort_runtime::Addon;
 use prunr_runtime_install as ri;
 
 /// User agent for every HTTP request the app makes.
@@ -58,7 +59,8 @@ impl RuntimeId {
     /// session would run on the CPU, where DirectML runs the same iGPU.
     /// CUDA is offered on Windows too, as an add-on beside the built-in
     /// DirectML (`is_addon`): DirectML fails models on an NVIDIA card that
-    /// CUDA runs, and is faster for others. MIGraphX has a Linux wheel only.
+    /// CUDA runs, and is faster for others. On Linux, CUDA and OpenVINO
+    /// are add-ons. MIGraphX has a Linux wheel only.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
         &[Self::Cuda]
     } else if cfg!(windows) {
@@ -72,7 +74,7 @@ impl RuntimeId {
     /// Whether it loads into the runtime the app ships, as a provider
     /// add-on, rather than replacing it: CUDA on Windows, where the
     /// built-in runtime keeps DirectML beside it and each model takes the
-    /// faster, and on Linux.
+    /// faster, and CUDA and OpenVINO on Linux.
     pub fn is_addon(self) -> bool {
         self.addon().is_some()
     }
@@ -81,8 +83,17 @@ impl RuntimeId {
         match self {
             Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
             Self::Cuda if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_LINUX),
+            Self::OpenVino if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(&ri::OPENVINO_ADDON_LINUX),
             _ => None,
         }
+    }
+
+    /// The add-on it is, where it is one.
+    fn addon_kind(self) -> Option<Addon> {
+        self.addon().map(|_| match self {
+            Self::Cuda => Addon::Cuda,
+            _ => Addon::OpenVino,
+        })
     }
 
     /// An add-on joining a built-in accelerator: CUDA beside DirectML.
@@ -161,6 +172,7 @@ impl RuntimeId {
 
     pub fn display_name(self) -> &'static str {
         match self {
+            Self::OpenVino if self.is_addon() => "OpenVINO",
             Self::OpenVino => "OpenVINO Runtime",
             Self::Cuda if self.is_addon() => "CUDA",
             Self::Cuda => "CUDA Runtime",
@@ -173,7 +185,10 @@ impl RuntimeId {
     pub fn download_label(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
         match self {
-            Self::OpenVino => Cow::Borrowed("80 MB"),
+            Self::OpenVino => match self.addon() {
+                Some(addon) => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
+                None => Cow::Borrowed("80 MB"),
+            },
             Self::Cuda => match self.addon() {
                 Some(addon) if nvidia_here => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
                 _ => Cow::Borrowed("about 2 GB"),
@@ -197,7 +212,7 @@ impl RuntimeId {
     pub fn not_installed(self, recommended: bool, nvidia_here: bool) -> String {
         let why = match (self, recommended) {
             (Self::OpenVino, false) => "",
-            (Self::OpenVino, true) => " Recommended for Intel hardware: the models run faster, and you can try running them on the Intel graphics chip.",
+            (Self::OpenVino, true) => " Recommended for Intel hardware: the models run faster, and you can try running them on Intel graphics.",
             (Self::Cuda, false) if self.beside_directml() => " Runs models on an NVIDIA graphics card beside DirectML; Prunr uses the faster for each model.",
             (Self::Cuda, true) if self.beside_directml() => " Recommended for your NVIDIA graphics card: it runs models DirectML cannot, and Prunr uses the faster for each model.",
             (Self::Cuda, false) => " Runs the models on an NVIDIA graphics card.",
@@ -214,6 +229,12 @@ impl RuntimeId {
         "Installed. It starts once Prunr runs on its own runtime (Built in, under Runtime) after a restart."
     }
 
+    /// Whether `failure` is this runtime's provider failing to start.
+    pub fn failed_as(self, failure: &prunr_core::engine::GpuStartFailure) -> bool {
+        use prunr_core::engine::GpuStack;
+        matches!((self, failure.stack), (Self::Cuda, GpuStack::Cuda) | (Self::MiGraphX, GpuStack::Rocm))
+    }
+
     /// Settings › Hardware's line once it is installed.
     pub fn installed_line(self) -> &'static str {
         match self {
@@ -224,6 +245,7 @@ impl RuntimeId {
 
     pub fn uninstall_label(self) -> &'static str {
         match self {
+            Self::OpenVino if self.is_addon() => "Uninstall OpenVINO",
             Self::OpenVino => "Uninstall OpenVINO Runtime",
             Self::Cuda if self.is_addon() => "Uninstall CUDA",
             Self::Cuda => "Uninstall CUDA Runtime",
@@ -235,9 +257,9 @@ impl RuntimeId {
     pub fn first_launch_prompt_body(self, nvidia_here: bool) -> String {
         let size = self.download_size(nvidia_here);
         match self {
-            Self::OpenVino => format!("We detected Intel hardware that can use OpenVINO Runtime. \
+            Self::OpenVino => format!("We detected Intel hardware that can use {}. \
                 Installing it ({size}) makes the models run faster, and lets you \
-                try running them on the Intel graphics chip (Settings › Hardware)."),
+                try running them on Intel graphics (Settings › Hardware).", self.display_name()),
             Self::Cuda if self.beside_directml() => format!("We detected an NVIDIA graphics card. Installing CUDA \
                 ({size}) runs more models on it than DirectML can, and each model \
                 on the faster of the two."),
@@ -252,6 +274,7 @@ impl RuntimeId {
     /// The first-launch prompt's install-button label.
     pub fn install_button_label(self) -> &'static str {
         match self {
+            Self::OpenVino if self.is_addon() => "Install OpenVINO",
             Self::OpenVino => "Install OpenVINO Runtime",
             Self::Cuda if self.is_addon() => "Install CUDA",
             Self::Cuda => "Install CUDA Runtime",
@@ -399,6 +422,7 @@ impl RuntimeChoice {
     pub fn description(self) -> &'static str {
         match self {
             Self::BuiltIn if prunr_core::ort_runtime::BUILT_IN_HAS_GPU => "DirectML: any DirectX 12 graphics card, else the processor",
+            Self::BuiltIn if RuntimeId::OpenVino.is_addon() => "Prunr's own: the processor, and CUDA or OpenVINO when installed",
             Self::BuiltIn => "Prunr's own: the processor, and CUDA when installed",
             Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
             Self::Store(RuntimeId::Cuda) => "NVIDIA graphics cards",
@@ -458,12 +482,13 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
         return Ok(Uninstalled::Now); // already absent — nothing to do
     }
     // Installing the add-on made Prunr's own runtime the choice; where
-    // that runtime has no accelerator of its own, one chosen from the
-    // store before comes back.
-    if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU {
+    // that runtime has no accelerator of its own and no other add-on
+    // stays, one chosen from the store before comes back.
+    let another_addon = RuntimeId::OFFERED.iter().any(|&rt| rt != runtime && rt.is_addon() && rt.is_installed());
+    if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU && !another_addon {
         prunr_core::ort_runtime::forget_preferred_runtime(prunr_core::ort_runtime::PREFER_BUILT_IN);
     }
-    if runtime.is_addon() && prunr_core::ort_runtime::Addon::Cuda.registered() {
+    if runtime.addon_kind().is_some_and(Addon::registered) {
         let mark = runtime.removal_mark().ok_or("could not resolve user data dir")?;
         std::fs::write(&mark, b"").map_err(|e| format!("mark {} for removal: {e}", dir.display()))?;
         return Ok(Uninstalled::AtNextStart);
@@ -524,7 +549,7 @@ fn run_install(
     if let Some(mark) = rt.removal_mark().filter(|mark| mark.is_file()) {
         std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
         let install_dir = rt.checked_install_dir()?;
-        let _ = tx.send(InstallEvent::Done { install_dir, started: Some(start_addon()) });
+        let _ = tx.send(InstallEvent::Done { install_dir, started: Some(start_addon(rt)) });
         return Ok(());
     }
     let wheel = match rt.addon() {
@@ -561,7 +586,7 @@ fn run_install(
     }
     let started = rt.is_addon().then(|| {
         use_installed_addons();
-        prunr_core::ort_runtime::hosts_addons().then(start_addon)
+        prunr_core::ort_runtime::hosts_addons().then(|| start_addon(rt))
     }).flatten();
 
     let _ = tx.send(InstallEvent::Done { install_dir, started });
@@ -569,23 +594,26 @@ fn run_install(
 }
 
 /// Tell this process where the installed add-ons are, before it loads any
-/// session: each one registers when the providers are probed.
+/// session: each one registers when the providers are probed, and
+/// OpenVINO's sets how the runtime starts.
 pub fn use_installed_addons() {
-    let cuda = RuntimeId::Cuda;
-    if let Some(library) = cuda.library().filter(|_| cuda.is_addon() && cuda.is_installed()) {
-        prunr_core::ort_runtime::use_addon(prunr_core::ort_runtime::Addon::Cuda, library);
+    for &rt in RuntimeId::OFFERED {
+        if let (Some(addon), Some(library)) = (rt.addon_kind(), rt.library().filter(|_| rt.is_installed())) {
+            prunr_core::ort_runtime::use_addon(addon, library);
+        }
     }
 }
 
-/// Start the installed add-on in this process.
-fn start_addon() -> Result<(), String> {
+/// Start the installed add-on `rt` in this process.
+fn start_addon(rt: RuntimeId) -> Result<(), String> {
+    let addon = rt.addon_kind().ok_or("not an add-on")?;
     #[cfg(not(target_os = "macos"))]
     {
-        prunr_core::engine::start_addon(prunr_core::ort_runtime::Addon::Cuda)
+        prunr_core::engine::start_addon(addon)
     }
     #[cfg(target_os = "macos")]
     {
-        Err("no add-on runs on macOS".to_string())
+        Err(format!("no add-on runs on macOS ({addon:?})"))
     }
 }
 
