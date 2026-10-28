@@ -2,6 +2,8 @@
 //! egui-notify 0.22 hardcodes infinite-width `TextWrapping::Extend`, so a
 //! caption with a path or error text would drift off-screen.
 
+use std::time::{Duration, Instant};
+
 use egui::{Context, Vec2};
 use egui_notify::{Anchor, Toast};
 
@@ -11,13 +13,24 @@ const TOAST_LINE_CHARS: usize = 60;
 #[derive(Default)]
 pub(crate) struct Toasts(
     egui_notify::Toasts,
-    /// The latest captions, kept while a script reads them.
-    std::collections::VecDeque<String>,
+    /// The latest captions and when each leaves, kept while a script
+    /// reads them.
+    std::collections::VecDeque<(String, Instant)>,
     #[cfg(test)] Vec<(&'static str, String)>,
 );
 
 /// How many captions `Toasts` keeps for a script; more never show at once.
 const KEPT_CAPTIONS: usize = 8;
+
+/// How long a success or a note stays.
+const BRIEF: Duration = Duration::from_millis(3500);
+
+/// How long an error or a warning stays: long enough to read at about 15
+/// characters a second, 8 to 20 s. Hovering holds a toast, and each can
+/// be closed.
+fn reading_time(caption: &str) -> Duration {
+    Duration::from_secs_f32((4.0 + caption.chars().count() as f32 / 15.0).clamp(8.0, 20.0))
+}
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
@@ -30,27 +43,31 @@ impl Toasts {
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        self.keep(&caption);
+        let lasts = BRIEF;
+        self.keep(&caption, lasts);
         #[cfg(test)] self.2.push(("success", caption.clone()));
-        self.0.success(wrap(&caption))
+        self.0.success(wrap(&caption)).duration(lasts)
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        self.keep(&caption);
+        let lasts = BRIEF;
+        self.keep(&caption, lasts);
         #[cfg(test)] self.2.push(("info", caption.clone()));
-        self.0.info(wrap(&caption))
+        self.0.info(wrap(&caption)).duration(lasts)
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        self.keep(&caption);
+        let lasts = reading_time(&caption);
+        self.keep(&caption, lasts);
         #[cfg(test)] self.2.push(("warning", caption.clone()));
-        self.0.warning(wrap(&caption))
+        self.0.warning(wrap(&caption)).duration(lasts)
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        self.keep(&caption);
+        let lasts = reading_time(&caption);
+        self.keep(&caption, lasts);
         #[cfg(test)] self.2.push(("error", caption.clone()));
-        self.0.error(wrap(&caption))
+        self.0.error(wrap(&caption)).duration(lasts)
     }
     /// A success toast for `Ok`, an error toast for `Err`.
     pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
@@ -75,21 +92,23 @@ impl Toasts {
         self.0.show(ctx)
     }
 
-    fn keep(&mut self, caption: &str) {
+    fn keep(&mut self, caption: &str, lasts: Duration) {
         if !crate::gui::automation::record::is_on() {
             return;
         }
         if self.1.len() == KEPT_CAPTIONS {
             self.1.pop_front();
         }
-        self.1.push_back(caption.to_owned());
+        self.1.push_back((caption.to_owned(), Instant::now() + lasts));
     }
 
-    /// The captions on screen, oldest first: the latest as many as are
-    /// still shown (they leave in the order they came). Empty unless a
-    /// script turned recording on.
+    /// The captions on screen, oldest first: those not yet due to leave,
+    /// the latest as many as are shown. Empty unless a script turned
+    /// recording on.
     pub fn shown(&self) -> Vec<String> {
-        self.1.iter().rev().take(self.0.len()).rev().cloned().collect()
+        let now = Instant::now();
+        let live: Vec<&String> = self.1.iter().filter(|(_, leaves)| *leaves > now).map(|(caption, _)| caption).collect();
+        live[live.len().saturating_sub(self.0.len())..].iter().map(|caption| (*caption).clone()).collect()
     }
 }
 
@@ -176,6 +195,17 @@ mod tests {
         let s = "Header line\nSecond line that is not particularly long";
         let w = wrap(s);
         assert_eq!(w.lines().count(), 2);
+    }
+
+    /// An error stays long enough to read, a long one longer, within
+    /// bounds; a success stays briefly.
+    #[test]
+    fn an_error_stays_long_enough_to_read() {
+        assert_eq!(reading_time("Could not save."), Duration::from_secs(8));
+        let long = "Could not install CUDA: the download stopped. Check the connection and try again from Settings.";
+        assert!(reading_time(long) > Duration::from_secs(10), "{:?}", reading_time(long));
+        assert_eq!(reading_time(&"x".repeat(2000)), Duration::from_secs(20));
+        assert!(BRIEF < reading_time(""));
     }
 
     #[test]
