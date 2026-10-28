@@ -73,24 +73,16 @@ fn strong_card(adapters: &[AdapterFacts], os_choice: Option<usize>) -> Option<us
     })
 }
 
-/// The graphics card's name, of the adapter `sort_adapters` puts in the
-/// card's slot.
-pub(super) fn card_name(adapters: &[AdapterFacts], os_choice: Option<usize>) -> Option<String> {
-    let strong = strong_card(adapters, os_choice);
-    adapters
-        .iter()
-        .enumerate()
-        .find(|&(i, a)| classify_adapter(a, strong == Some(i)).is_some_and(|c| c.kind == GpuKind::Discrete))
-        .map(|(_, a)| a.name.clone())
-        .filter(|name| !name.is_empty())
-}
-
 pub(super) fn sort_adapters(adapters: &[AdapterFacts], os_choice: Option<usize>) -> GpuSlots {
     let strong = strong_card(adapters, os_choice);
     let mut slots = GpuSlots::default();
     for (i, a) in adapters.iter().enumerate() {
         let Some(class) = classify_adapter(a, strong == Some(i)) else { continue };
         let slot = match class.kind {
+            GpuKind::Discrete if slots.dgpu.is_none() => {
+                slots.dgpu_name = Some(a.name.clone()).filter(|name| !name.is_empty());
+                &mut slots.dgpu
+            }
             GpuKind::Discrete => &mut slots.dgpu,
             GpuKind::Integrated => &mut slots.igpu,
         };
@@ -119,33 +111,34 @@ mod tests {
     fn the_card_named_is_the_one_in_the_cards_slot() {
         let named = |name: &str, vendor_id, dedicated_mb| AdapterFacts { name: name.into(), ..adapter(vendor_id, dedicated_mb) };
         let hybrid = [named("Intel(R) UHD Graphics 630", 0x8086, 128), named("NVIDIA GeForce RTX 3060 Laptop GPU", 0x10de, 6144)];
-        assert_eq!(card_name(&hybrid, Some(1)).as_deref(), Some("NVIDIA GeForce RTX 3060 Laptop GPU"));
-        assert_eq!(card_name(&hybrid[..1], Some(0)), None, "an iGPU alone is no card");
-        assert_eq!(card_name(&[basic_render()], Some(0)), None);
+        let card_name = |adapters: &[AdapterFacts]| sort_adapters(adapters, Some(adapters.len() - 1)).dgpu_name;
+        assert_eq!(card_name(&hybrid).as_deref(), Some("NVIDIA GeForce RTX 3060 Laptop GPU"));
+        assert_eq!(card_name(&hybrid[..1]), None, "an iGPU alone is no card");
+        assert_eq!(card_name(&[basic_render()]), None);
     }
 
     /// One row per machine shape the Windows detection meets.
     #[test]
     fn dxgi_adapters_sort_into_slots_and_the_directml_verdict() {
-        let none = GpuSlots::default();
+        let none = GpuSlots::default;
         let rows: [(&str, Vec<AdapterFacts>, Option<usize>, GpuSlots); 9] = [
-            ("VM or remote desktop", vec![basic_render()], Some(0), none),
+            ("VM or remote desktop", vec![basic_render()], Some(0), none()),
             ("Intel iGPU alone", vec![adapter(0x8086, 128), basic_render()], Some(0),
-                GpuSlots { igpu: Some(GpuVendor::Intel), ..none }),
+                GpuSlots { igpu: Some(GpuVendor::Intel), ..none() }),
             ("Intel Arc iGPU alone", vec![adapter(0x8086, 128)], None,
-                GpuSlots { igpu: Some(GpuVendor::Intel), ..none }),
+                GpuSlots { igpu: Some(GpuVendor::Intel), ..none() }),
             ("Intel Arc card", vec![adapter(0x8086, 16_000)], Some(0),
-                GpuSlots { dgpu: Some(GpuVendor::Intel), suits_directml: true, ..none }),
+                GpuSlots { dgpu: Some(GpuVendor::Intel), suits_directml: true, ..none() }),
             ("hybrid laptop, OS ranks the card", vec![adapter(0x8086, 128), adapter(0x10de, 4096)], Some(1),
-                GpuSlots { dgpu: Some(GpuVendor::Nvidia), igpu: Some(GpuVendor::Intel), suits_directml: true }),
+                GpuSlots { dgpu: Some(GpuVendor::Nvidia), igpu: Some(GpuVendor::Intel), suits_directml: true, ..none() }),
             ("Ryzen APU alone", vec![adapter(0x1002, 512)], Some(0),
-                GpuSlots { igpu: Some(GpuVendor::Amd), suits_directml: true, ..none }),
+                GpuSlots { igpu: Some(GpuVendor::Amd), suits_directml: true, ..none() }),
             ("Ryzen APU + small Radeon card, OS ranks the card", vec![adapter(0x1002, 512), adapter(0x1002, 1024)], Some(1),
-                GpuSlots { dgpu: Some(GpuVendor::Amd), igpu: Some(GpuVendor::Amd), suits_directml: true }),
+                GpuSlots { dgpu: Some(GpuVendor::Amd), igpu: Some(GpuVendor::Amd), suits_directml: true, ..none() }),
             ("Ryzen APU + small Radeon card, no OS ranking", vec![adapter(0x1002, 1024), adapter(0x1002, 512)], None,
-                GpuSlots { dgpu: Some(GpuVendor::Amd), igpu: Some(GpuVendor::Amd), suits_directml: true }),
+                GpuSlots { dgpu: Some(GpuVendor::Amd), igpu: Some(GpuVendor::Amd), suits_directml: true, ..none() }),
             ("NVIDIA card alone", vec![adapter(0x10de, 2048), basic_render()], Some(0),
-                GpuSlots { dgpu: Some(GpuVendor::Nvidia), suits_directml: true, ..none }),
+                GpuSlots { dgpu: Some(GpuVendor::Nvidia), suits_directml: true, ..none() }),
         ];
         for (shape, adapters, os_choice, want) in rows {
             assert_eq!(sort_adapters(&adapters, os_choice), want, "{shape}");

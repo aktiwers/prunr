@@ -227,7 +227,7 @@ fn throttled<T: Copy>(cache: &Reading<T>, read: impl FnOnce() -> T) -> T {
 
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
-    let (GpuSlots { dgpu, igpu, suits_directml }, dgpu_name) = detect_gpus(cpu_vendor);
+    let GpuSlots { dgpu, dgpu_name, igpu, suits_directml } = detect_gpus(cpu_vendor);
     HardwareProfile {
         cpu_vendor,
         cpu_brand,
@@ -282,20 +282,21 @@ fn classify_cpu_vendor(vendor_id: &str, brand: &str) -> CpuVendor {
 }
 
 /// The GPUs found, by slot.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct GpuSlots {
     dgpu: Option<GpuVendor>,
+    /// The card's name, where the system tells it.
+    dgpu_name: Option<String>,
     igpu: Option<GpuVendor>,
     suits_directml: bool,
 }
 
-/// The GPUs found, and the graphics card's name where the system tells it.
-fn detect_gpus(cpu_vendor: CpuVendor) -> (GpuSlots, Option<String>) {
+fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
     #[cfg(target_os = "linux")]
     {
         let (dgpu, igpu) = detect_gpus_linux(cpu_vendor);
-        let name = (dgpu == Some(GpuVendor::Nvidia)).then(prunr_core::card_memory::cuda_card_name).flatten();
-        (GpuSlots { dgpu, igpu, suits_directml: false }, name)
+        let dgpu_name = (dgpu == Some(GpuVendor::Nvidia)).then(prunr_core::card_memory::cuda_card_name).flatten();
+        GpuSlots { dgpu, dgpu_name, igpu, suits_directml: false }
     }
     #[cfg(target_os = "macos")]
     {
@@ -303,19 +304,19 @@ fn detect_gpus(cpu_vendor: CpuVendor) -> (GpuSlots, Option<String>) {
         // (we don't ship OpenVINO on macOS, so detail isn't needed).
         let _ = cpu_vendor;
         let igpu = (std::env::consts::ARCH == "aarch64").then_some(GpuVendor::Apple);
-        (GpuSlots { dgpu: None, igpu, suits_directml: false }, None)
+        GpuSlots { igpu, ..GpuSlots::default() }
     }
     #[cfg(target_os = "windows")]
     {
         // DXGI says which card is which; the CPU vendor guess is not needed.
         let _ = cpu_vendor;
         let (adapters, os_choice) = dxgi::adapters();
-        (adapters::sort_adapters(&adapters, os_choice), adapters::card_name(&adapters, os_choice))
+        adapters::sort_adapters(&adapters, os_choice)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = cpu_vendor;
-        (GpuSlots::default(), None)
+        GpuSlots::default()
     }
 }
 
