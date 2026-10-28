@@ -835,13 +835,20 @@ pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: Ep
 /// engines with the switch on. Fills stay on the CPU, and SD parts carry
 /// their own device. A failure there is its own (`ep_compat`).
 pub(crate) fn asks_intel_gpu(ep: EpKind, model: prunr_models::ModelId) -> bool {
+    asks_intel_gpu_as(ep, model, remeasuring())
+}
+
+/// `asks_intel_gpu` with places measured again (`remeasuring`) or not, as
+/// the failure a test looks up is keyed the way the test reads places.
+fn asks_intel_gpu_as(ep: EpKind, model: prunr_models::ModelId, remeasuring: bool) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
-        ep == EpKind::OpenVino && on_intel_gpu(model)
+        ep == EpKind::OpenVino
+            && prunr_models::column_in(&places_here(model), model, OPENVINO_NAME, openvino_on_gpu(), remeasuring) == Some(prunr_models::Column::OpenVinoGpu)
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = (ep, model);
+        let _ = (ep, model, remeasuring);
         false
     }
 }
@@ -1088,7 +1095,7 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Opti
     if let Some(why) = kept_off(model, ep, remeasuring) {
         return Some(Skip::KeptOff(why));
     }
-    let intel_gpu = asks_intel_gpu(ep, model);
+    let intel_gpu = asks_intel_gpu_as(ep, model, remeasuring);
     [lighter_weights(model, false, &[ep]), Some(Weights::Fp32)].into_iter().flatten()
         .all(|weights| crate::ep_compat::is_known_failure(ep, model, weights, intel_gpu))
         .then_some(Skip::FailedBefore)
