@@ -45,13 +45,22 @@ pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
 }
 
-/// Strips path separators, `..`, control chars and leading dots (no
-/// hidden files); an empty result becomes `preset`.
+/// Names Windows keeps for devices, whatever follows a dot.
+const DEVICE_NAMES: [&str; 24] = [
+    "CON", "PRN", "AUX", "NUL",
+    "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Strips path separators, `..`, control chars, the characters Windows
+/// refuses in a file name and leading dots (no hidden files), and marks a
+/// device name; an empty result becomes `preset`. Every platform does
+/// all of it: presets are shared between computers.
 pub fn sanitize_filename(name: &str) -> String {
     let mut out: String = name
         .trim()
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'))
         .collect();
     if out.starts_with('.') {
         out = out.trim_start_matches('.').to_string();
@@ -61,6 +70,10 @@ pub fn sanitize_filename(name: &str) -> String {
     }
     if out.is_empty() {
         return "preset".to_string();
+    }
+    let device = out.split('.').next().unwrap_or_default();
+    if DEVICE_NAMES.iter().any(|d| device.eq_ignore_ascii_case(d)) {
+        out.insert(device.len(), '_');
     }
     out
 }
@@ -357,6 +370,25 @@ mod tests {
 
     /// A preset a newer Prunr saved is left out, not read as defaults, and
     /// its name cannot be saved over, so that version keeps it.
+    /// A name Windows cannot save stays savable there, and on the
+    /// computer a preset is shared to: its forbidden characters go, and a
+    /// device name (CON, NUL, COM1...) gets a mark.
+    #[test]
+    fn a_preset_name_is_a_file_name_windows_can_save() {
+        for (name, file) in [
+            ("Sky: blue?", "Sky blue"),
+            ("a<b>c|d\"e*f", "abcdef"),
+            ("CON", "CON_"),
+            ("nul.portrait", "nul_.portrait"),
+            ("com1", "com1_"),
+            ("LPT9", "LPT9_"),
+            ("Console", "Console"),
+            ("COM10", "COM10"),
+        ] {
+            assert_eq!(sanitize_filename(name), file, "{name:?}");
+        }
+    }
+
     #[test]
     fn a_newer_preset_is_left_out_and_never_written_over() {
         let dir = tempfile::tempdir().unwrap();
