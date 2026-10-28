@@ -296,8 +296,10 @@ pub struct BenchArgs {
     #[arg(long)]
     pub needs: bool,
 
-    /// With `--needs`, run an upscaler on tiles of this side instead of its
-    /// own: how its memory grows with the tile.
+    /// With `--needs`, give an upscaler a square input of this side (no
+    /// larger than the photo) instead of its usual one. Up to the model's
+    /// own tile it runs as one tile of that side, so its memory shows how
+    /// memory grows with the tile; above it, the model tiles at its own.
     #[arg(long, value_name = "PIXELS", value_parser = clap::value_parser!(u32).range(16..=2048))]
     pub tile: Option<u32>,
 
