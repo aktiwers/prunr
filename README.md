@@ -57,7 +57,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Restore faces** — GFPGAN or RestoreFormer++ redraw soft, small or compressed faces on cut-outs, upscales and plain photos, blended by strength
 - **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / tile) or a blurred, lens-blurred or black-and-white version of the photo
 - **Depth effects** — Depth Anything V2 measures how near each part of the photo is: lens blur and tilt-shift, fog, aerial perspective, lines that fade with distance, select by depth, and 16-bit depth map export
-- **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel iGPU/NPU), automatic CPU fallback
+- **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel processors and graphics), automatic CPU fallback
 - **Batch processing** — tick images and Process runs any model on each: cut-outs in parallel, upscales, colorize and erasers one after the other; switch between images while they work, chain background removal into lines or upscale
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
 - **Presets and undo** — per-model presets, Compare toggle, undo across strokes, results and presets
@@ -157,12 +157,12 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 | CUDA | NVIDIA GPU | on-demand (Linux, Windows) | Settings → Hardware → Install (about 2 GB with NVIDIA's CUDA and cuDNN libraries); offered on first launch with an NVIDIA card. On Windows it joins the built-in DirectML, and each model runs on the faster |
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
 | DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download (the Windows ML build of ONNX Runtime 1.30); falls back to the CPU without a GPU |
-| **OpenVINO** | **Intel CPU/iGPU/NPU** | **on-demand** | Settings → Hardware → Install (~80 MB) |
+| **OpenVINO** | **Intel CPU / graphics** | **on-demand (Linux)** | Settings → Hardware → Install (50 MB); joins Prunr's own runtime, beside CUDA on a computer with an NVIDIA card |
 | CPU | Always | yes (everywhere) | Automatic fallback |
 
-**OpenVINO is the big win for Intel users.** On a CPU-only or Intel-iGPU laptop, installing OpenVINO Runtime lets us route inference (most importantly Stable Diffusion) through Intel's accelerated kernels. The first launch on Intel hardware shows a one-shot prompt to install it; you can also accept later from Settings → Hardware. The runtime lives at `~/.local/share/prunr/runtimes/` (Linux) and uses ~150 MB of disk after extraction.
+**OpenVINO is the win for Intel computers without an NVIDIA card.** On an i5-11600KF it ran the upscalers 1.5 times and Depth twice as fast as Prunr's own processor engine, with the same pictures, and it can try Intel graphics (Settings → Hardware). The first launch on Intel hardware offers it; you can also install it later from Settings → Hardware. It lives at `~/.local/share/prunr/runtimes/` and takes about 160 MB of disk.
 
-**Where each model runs** is declared in the model registry (`places` field): per accelerator, on it or on the CPU and why. A model that doesn't load on a specific EP — e.g. Silueta's ONNX has graph cycles that OpenVINO rejects — skips that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs. Wipe the cache with `prunr --clear-ep-cache` after installing new drivers or upgrading OpenVINO.
+**Where each model runs** is declared in the model registry (`places` field): per accelerator, on it or on the CPU and why. A model that doesn't load on a specific EP — e.g. Big-LaMa, whose graph OpenVINO's converter rejects — skips that EP entirely instead of paying a failed-load cost. User-specific failures (driver bugs, etc.) are also auto-cached at `~/.local/share/prunr/ep_compat.json` and persist across runs until the graphics driver, the runtime or an add-on changes; `prunr --clear-ep-cache` wipes them.
 
 The active backend is shown in the status bar. For diagnostics, run `prunr --doctor` to dump the full hardware profile, runtime status, model availability, and resolution chain — pasteable directly into bug reports.
 
@@ -177,13 +177,6 @@ cargo xtask fetch-models                          # one-time model download, ~17
 cargo build --release -p prunr-app                # release binary
 cargo run --release -p prunr-app                  # build + run GUI
 
-# Optional — install OpenVINO Runtime (Intel iGPU/NPU acceleration).
-# The pinned version lives in `prunr_runtime_install::PINNED_ORT_VERSION`
-# so a single bump there propagates to GUI Settings → Hardware → Install
-# and the matching CI staging steps. Run with the literal version on the
-# command line, e.g.:
-cargo xtask install-runtime onnxruntime-openvino <version>
-
 # Diagnostic
 target/release/prunr --doctor                     # hardware + runtime status dump
 target/release/prunr --clear-ep-cache             # reset EP compatibility cache
@@ -196,7 +189,7 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 2. User Runtime Store: `~/.local/share/prunr/runtimes/<id>/libonnxruntime.so`
 3. Bundled fallback: `<exe>/runtime/libonnxruntime.so`
 
-Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime[-windowsml] <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux artifacts (tar.gz / AppImage / .deb / .rpm) get the CPU-only runtime in `<exe>/runtime/`; Windows artifacts (.zip / installer) the Windows ML build (`onnxruntime.dll` + `DirectML.dll`); installing a store runtime makes it the one Prunr loads, and Settings › Hardware › Runtime switches between them; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). Opt-in EP-specific runtimes (CUDA, OpenVINO, MIGraphX, as each platform has a wheel for) install via Settings → Hardware or `cargo xtask install-runtime`.
+Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime[-windowsml] <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux artifacts (tar.gz / AppImage / .deb / .rpm) get the CPU-only runtime in `<exe>/runtime/`; Windows artifacts (.zip / installer) the Windows ML build (`onnxruntime.dll` + `DirectML.dll`); installing a store runtime makes it the one Prunr loads, and Settings › Hardware › Runtime switches between them; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). The CUDA and OpenVINO add-ons, which join the runtime Prunr ships, and the MIGraphX runtime install via Settings → Hardware.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
 
