@@ -1142,17 +1142,12 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         mode: line_mode, edge, fade_pct: args.line_fade,
         scales: prunr_app::subprocess::protocol::InferredScales::Drawn,
     };
-    let batch_results = run_batch_subprocess(
-        &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
-        lines, &backdrop,
-        &spinners_arc, &inputs_arc, quiet,
-    );
-
     let mut success_count = 0usize;
-    let mut fail_count = 0usize;
-    fail_count += load_fail_count;
+    let mut fail_count = load_fail_count;
 
-    for (batch_idx, result) in batch_results.iter().enumerate() {
+    // Each result is written as it lands: a stopped batch keeps what it
+    // finished, and one result is held at a time.
+    let mut land = |batch_idx: usize, result: Result<prunr_core::ProcessResult, CoreError>| {
         let original_idx = valid_indices[batch_idx];
         let input = &args.inputs[original_idx];
         let elapsed = start_times[original_idx].elapsed();
@@ -1166,7 +1161,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                 if let Err(msg) = check_overwrite(&out_path, args.force) {
                     report_skipped(spinner_opt, input, &msg, args.quiet);
                     fail_count += 1;
-                    continue;
+                    return;
                 }
                 let saved = prunr_app::fs_util::write_replacing(&out_path, |w| {
                     prunr_core::ExportFormat::Png.encode_into(&pr.rgba_image, w).map_err(std::io::Error::other)
@@ -1203,7 +1198,12 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
                 report_failure(spinner_opt, input, "process", e);
             }
         }
-    }
+    };
+    run_batch_subprocess(
+        &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
+        lines, &backdrop,
+        &spinners_arc, &inputs_arc, quiet, &mut land,
+    );
 
     if let Some(ref opb) = overall { opb.finish_and_clear(); }
 
@@ -1221,7 +1221,8 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     }
 }
 
-/// Run batch processing via subprocess with auto-retry on OOM.
+/// Run batch processing via subprocess with auto-retry on OOM, each
+/// input's result handed to `land` (by its batch index) as it comes.
 /// Accepts file paths — bytes are read lazily by the subprocess.
 // One call site: the recipe, runtime knobs and UI surface arrive together,
 // and a struct would be a builder no other site reuses.
@@ -1238,13 +1239,17 @@ fn run_batch_subprocess(
     spinners: &[Option<ProgressBar>],
     inputs: &[std::path::PathBuf],
     quiet: bool,
-) -> Vec<Result<prunr_core::ProcessResult, CoreError>> {
+    land: &mut dyn FnMut(usize, Result<prunr_core::ProcessResult, CoreError>),
+) {
     use prunr_app::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
     use prunr_app::subprocess::manager::{Crash, SubprocessManager};
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
-    let mut results: Vec<Option<Result<prunr_core::ProcessResult, CoreError>>> =
-        (0..valid_paths.len()).map(|_| None).collect();
+    let mut landed = vec![false; valid_paths.len()];
+    let mut give = |idx: usize, result| {
+        landed[idx] = true;
+        land(idx, result);
+    };
     let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
     let mut max_jobs = initial_jobs;
 
@@ -1266,7 +1271,7 @@ fn run_batch_subprocess(
             Ok(s) => s,
             Err(e) => {
                 for &idx in &pending {
-                    results[idx] = Some(Err(CoreError::Model(e.clone())));
+                    give(idx, Err(CoreError::Model(e.clone())));
                 }
                 break;
             }
@@ -1289,7 +1294,7 @@ fn run_batch_subprocess(
                     }
                     // A live worker that cannot take it would refuse it again;
                     // one a dead worker refused is the crash path's to rerun.
-                    Err(e) if sub.is_alive() => results[idx] = Some(Err(CoreError::Model(e))),
+                    Err(e) if sub.is_alive() => give(idx, Err(CoreError::Model(e))),
                     Err(_) => {
                         pending.push_front(idx);
                         break;
@@ -1337,7 +1342,7 @@ fn run_batch_subprocess(
                 if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
                     // in_flight holds batch indices, each sent once a pass.
                     in_flight.retain(|&i| i != ridx);
-                    results[ridx] = Some(result);
+                    give(ridx, result);
                 }
             }
 
@@ -1365,7 +1370,7 @@ fn run_batch_subprocess(
             OnCrash::FailInFlight => {
                 let advice = if crash == Crash::OutOfMemory { " \u{2014} try a smaller model" } else { "" };
                 for idx in in_flight {
-                    results[idx] = Some(Err(CoreError::Model(format!("worker {crash}{advice}"))));
+                    give(idx, Err(CoreError::Model(format!("worker {crash}{advice}"))));
                 }
             }
             OnCrash::RetryWith(jobs) => {
@@ -1384,10 +1389,9 @@ fn run_batch_subprocess(
     // whatever the worker didn't read-and-delete.
     prunr_app::subprocess::protocol::cleanup_cli_persistent_temps();
 
-    // Convert Option<Result> to Result (None should not happen, but handle gracefully)
-    results.into_iter()
-        .map(|r| r.unwrap_or_else(|| Err(CoreError::Model("Not processed".into()))))
-        .collect()
+    for idx in (0..landed.len()).filter(|&idx| !landed[idx]) {
+        land(idx, Err(CoreError::Model("Not processed".into())));
+    }
 }
 
 /// `prunr --doctor`: dump everything a support ticket would ask for.

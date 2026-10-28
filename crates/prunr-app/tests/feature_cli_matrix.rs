@@ -283,6 +283,53 @@ fn cli_batch_leaves_no_ipc_files() {
     }
 }
 
+/// Each result is written as it lands, while the worker goes on with the
+/// next image: a batch stopped halfway keeps what it finished, and holds
+/// one result in memory at a time. So when the first output appears, the
+/// worker (a child of the CLI) is still running.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_batch_writes_each_result_while_the_rest_run() {
+    let dir = tempdir().expect("tempdir");
+    let first = write_fixture_png(dir.path());
+    let big = dir.path().join("big.png");
+    image::RgbaImage::from_fn(3000, 3000, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, 90, 255]))
+        .save(&big)
+        .expect("write big.png");
+    let mut child = Command::new(CLI_BIN)
+        .args([&first, &big]).arg("-o").arg(dir.path()).arg("-f").args(["-m", "silueta", "-j", "1"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn().expect("spawn prunr binary");
+    let pid = child.id();
+    let first_out = dir.path().join("input.prunr.png");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let worker_alive = loop {
+        if first_out.exists() {
+            break children_of(pid) > 0;
+        }
+        if child.try_wait().expect("wait on prunr").is_some() || std::time::Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let status = child.wait().expect("wait on prunr");
+    if !status.success() && !first_out.exists() {
+        eprintln!("[cli_streams] SKIP: prerequisite not available");
+        return;
+    }
+    assert!(worker_alive, "the first result was written only once the worker had stopped");
+}
+
+/// How many processes `pid` started that are still running.
+#[cfg(target_os = "linux")]
+fn children_of(pid: u32) -> usize {
+    std::fs::read_dir("/proc").map(|d| d.flatten().filter(|e| {
+        std::fs::read_to_string(e.path().join("stat")).ok()
+            .and_then(|stat| stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1).map(str::to_string)))
+            .is_some_and(|ppid| ppid == pid.to_string())
+    }).count()).unwrap_or(0)
+}
+
 /// A worker started by another version of the app (an update replaced
 /// the binary while the app ran) stops at once with its own exit code,
 /// before it reads a message it might not understand.
