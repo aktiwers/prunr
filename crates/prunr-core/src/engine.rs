@@ -78,9 +78,6 @@ static AVAILABLE: std::sync::RwLock<Option<std::sync::Arc<[EpKind]>>> = std::syn
 /// The GPU EP ladder filtered by `is_available()`: a `load-dynamic`
 /// runtime may lack EPs (the OpenVINO wheel has CPU + OpenVINO only).
 /// Probed once per process; an add-on installed later joins it.
-///
-/// OpenVINO goes before CUDA so Intel users get it; an NVIDIA machine
-/// has no OpenVINO runtime, so it still reaches CUDA.
 pub(crate) fn available_gpu_eps() -> std::sync::Arc<[EpKind]> {
     use std::sync::{Arc, PoisonError};
     if let Some(eps) = AVAILABLE.read().unwrap_or_else(PoisonError::into_inner).as_ref() {
@@ -113,17 +110,17 @@ pub fn start_addon(addon: crate::ort_runtime::Addon) -> Result<(), String> {
     }
     let mut slot = AVAILABLE.write().unwrap_or_else(PoisonError::into_inner);
     let mut eps: Vec<EpKind> = slot.as_deref().unwrap_or_default().to_vec();
-    let at = if ep == EpKind::OpenVino { 0 } else { cuda_position(&eps) };
-    eps.insert(at, ep);
+    eps.insert(addon_position(&eps, ep), ep);
     *slot = Some(eps.into());
     tracing::info!(%ep, "add-on started; sessions may take it from now on");
     Ok(())
 }
 
-/// Where CUDA goes among `eps`, in the probe's order: after OpenVINO.
+/// Where the add-on `ep` goes among `eps`, in the probe's order: CUDA
+/// first, OpenVINO last.
 #[cfg(not(target_os = "macos"))]
-fn cuda_position(eps: &[EpKind]) -> usize {
-    eps.iter().position(|&ep| ep != EpKind::OpenVino).unwrap_or(eps.len())
+fn addon_position(eps: &[EpKind], ep: EpKind) -> usize {
+    if ep == EpKind::Cuda { 0 } else { eps.len() }
 }
 
 fn probe_gpu_eps() -> Vec<EpKind> {
@@ -139,10 +136,6 @@ fn probe_gpu_eps() -> Vec<EpKind> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let openvino = ort::ep::OpenVINO::is_available().unwrap_or(false)
-            || (crate::ort_runtime::register_addon(crate::ort_runtime::Addon::OpenVino)
-                && openvino_addon_starts().inspect_err(|why| tracing::info!(%why, "OpenVINO cannot start; sessions run on the CPU")).is_ok());
-        if openvino { eps.push(EpKind::OpenVino); }
         let cuda = if ort::ep::CUDA::is_available().unwrap_or(false) {
             crate::ort_runtime::preload_nvidia_libraries();
             Some(provider_starts(ort::ep::CUDA::default().with_device_id(0).build().error_on_failure()).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e)))
@@ -169,6 +162,13 @@ fn probe_gpu_eps() -> Vec<EpKind> {
         }
         #[cfg(windows)]
         if ort::ep::DirectML::is_available().unwrap_or(false) && directml_starts() { eps.push(EpKind::DirectMl); }
+        // Last: a model no test measured tries a graphics card first, and
+        // OpenVINO runs on the processor unless the user lets it use Intel
+        // graphics, an integrated chip.
+        let openvino = ort::ep::OpenVINO::is_available().unwrap_or(false)
+            || (crate::ort_runtime::register_addon(crate::ort_runtime::Addon::OpenVino)
+                && openvino_addon_starts().inspect_err(|why| tracing::info!(%why, "OpenVINO cannot start; sessions run on the CPU")).is_ok());
+        if openvino { eps.push(EpKind::OpenVino); }
     }
     let eps_str: Vec<&'static str> = eps.iter().map(EpKind::as_str).collect();
     tracing::info!(eps = ?eps_str, "Available GPU execution providers");
@@ -2198,7 +2198,7 @@ mod tests {
             eprintln!("SKIP: {why}");
             return;
         }
-        assert_eq!(available_gpu_eps().first(), Some(&EpKind::OpenVino), "OpenVINO goes first, as it did");
+        assert_eq!(available_gpu_eps().last(), Some(&EpKind::OpenVino), "OpenVINO goes last");
         let engine = OrtEngine::for_model(prunr_models::ModelId::RealEsrganX2Plus, 2, false).expect("Real-ESRGAN x2 loads");
         assert_eq!(engine.active_provider(), OPENVINO_NAME);
     }
@@ -2490,17 +2490,22 @@ mod tests {
         assert_eq!(MOST.load(Ordering::SeqCst), 1);
     }
 
-    /// The CUDA add-on, started after the probe, takes CUDA's place in its
-    /// order: after OpenVINO, before the rest.
+    /// An add-on started after the probe takes its place in the probe's
+    /// order: CUDA before every other provider, OpenVINO after them, so a
+    /// model no test measured tries a graphics card before OpenVINO, which
+    /// runs on the processor unless the user lets it use Intel graphics.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn a_started_add_on_joins_the_providers_where_cuda_goes() {
-        assert_eq!(cuda_position(&[]), 0);
-        assert_eq!(cuda_position(&[EpKind::OpenVino]), 1);
+    fn a_started_add_on_joins_the_providers_where_the_probe_puts_it() {
+        assert_eq!(addon_position(&[], EpKind::Cuda), 0);
+        assert_eq!(addon_position(&[EpKind::OpenVino], EpKind::Cuda), 0, "before OpenVINO");
         #[cfg(windows)]
-        assert_eq!(cuda_position(&[EpKind::DirectMl]), 0, "before DirectML");
+        assert_eq!(addon_position(&[EpKind::DirectMl], EpKind::Cuda), 0, "before DirectML");
         #[cfg(target_os = "linux")]
-        assert_eq!(cuda_position(&[EpKind::OpenVino, EpKind::MiGraphX]), 1, "between OpenVINO and MIGraphX");
+        {
+            assert_eq!(addon_position(&[EpKind::MiGraphX, EpKind::OpenVino], EpKind::Cuda), 0, "before MIGraphX");
+            assert_eq!(addon_position(&[EpKind::Cuda, EpKind::MiGraphX], EpKind::OpenVino), 2, "OpenVINO last");
+        }
     }
 
     /// A test of this computer tries again what Prunr's own tests keep on
