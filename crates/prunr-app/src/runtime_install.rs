@@ -763,17 +763,6 @@ fn move_into_place(staging: &Path, target: &Path, kept: &[&str]) -> Result<(), S
 mod tests {
     use super::*;
 
-    /// A runtime is offered only where a build of it exists to install:
-    /// Intel publishes OpenVINO for ONNX Runtime, and Microsoft its CUDA
-    /// plugin, for x64 Linux and Windows only, so a Mac (Apple silicon or
-    /// Intel) or an ARM Linux computer is offered none.
-    #[test]
-    fn nothing_is_offered_where_no_build_exists() {
-        if cfg!(any(target_os = "macos", all(target_os = "linux", not(target_arch = "x86_64")), all(windows, not(target_arch = "x86_64")))) {
-            assert_eq!(RuntimeId::OFFERED, &[] as &[RuntimeId]);
-        }
-    }
-
     /// Answer each connection to the returned URL with the next of
     /// `responses`; the handle tells how many were asked for.
     fn serve(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
@@ -910,21 +899,23 @@ mod tests {
         assert!(std::fs::File::create(&spool).is_ok(), "{}", spool.display());
     }
 
-    /// Windows offers CUDA alone (DirectML is built in, OpenVINO's wheel
-    /// there lacks openvino.dll); CUDA only where its wheel exists.
+    /// A runtime is offered only where a build of it exists to install:
+    /// Intel publishes OpenVINO for ONNX Runtime, and Microsoft its CUDA
+    /// plugin, for x64 Linux and Windows only (DirectML is built into
+    /// Windows), so a Mac (Apple silicon or Intel) or an ARM computer is
+    /// offered none. Both join Prunr's own runtime as add-ons.
     #[test]
-    fn each_platform_offers_the_runtimes_it_has_a_wheel_for() {
+    fn each_platform_offers_the_runtimes_it_has_a_build_for() {
         let expected: &[RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
-            &[RuntimeId::Cuda]
-        } else if cfg!(windows) {
-            &[]
+            &[RuntimeId::OpenVino, RuntimeId::Cuda]
         } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             &[RuntimeId::OpenVino, RuntimeId::Cuda, RuntimeId::MiGraphX]
         } else {
-            &[RuntimeId::OpenVino]
+            &[]
         };
         assert_eq!(RuntimeId::OFFERED, expected);
-        assert_eq!(RuntimeId::Cuda.is_addon(), cfg!(all(any(windows, target_os = "linux"), target_arch = "x86_64")), "CUDA joins Prunr's own runtime");
+        let x64 = cfg!(all(any(windows, target_os = "linux"), target_arch = "x86_64"));
+        assert_eq!([RuntimeId::Cuda.is_addon(), RuntimeId::OpenVino.is_addon()], [x64, x64], "CUDA and OpenVINO join Prunr's own runtime");
     }
 
     /// At the next start only the add-on marked for removal goes, with its
