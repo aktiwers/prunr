@@ -794,7 +794,7 @@ fn nvidia_libraries_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, inten
     let status = match installing {
         Some((_, progress)) => progress.clone(),
         None if ctx.installs.nvidia_libraries => format!("Installed beside {}.", RuntimeId::Cuda.display_name()),
-        None => format!("CUDA Runtime runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
+        None => format!("{} runs on its own copy of NVIDIA's CUDA 12 and cuDNN 9 libraries. Download them ({}) under NVIDIA's license.", RuntimeId::Cuda.display_name(), crate::runtime_install::NVIDIA_DOWNLOAD_LABEL),
     };
     rows.row("NVIDIA libraries", &status, |ui| {
         if installing.is_some() {
