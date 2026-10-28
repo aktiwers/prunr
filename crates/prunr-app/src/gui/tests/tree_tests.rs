@@ -77,6 +77,23 @@ fn test_machine() -> &'static crate::hardware::HardwareProfile {
     })
 }
 
+/// Settings › Hardware's context for `installs` on the test computer:
+/// nothing installing, nothing tested or to test, no start failure.
+fn hardware_page(installs: crate::gui::hardware_cache::HardwareInstallCache) -> crate::gui::views::settings::HardwareSectionContext {
+    crate::gui::views::settings::HardwareSectionContext {
+        machine: test_machine(),
+        offered: crate::runtime_install::RuntimeId::OFFERED,
+        installs,
+        installing: None,
+        sd_margin_mb: 2048,
+        cpu_only: false,
+        test: Default::default(),
+        gpu_failure: None,
+        testable: false,
+        test_waits: false,
+    }
+}
+
 /// Settings › Hardware as Windows shows it, which offers both runtimes:
 /// every runtime row and the runtime choice are named. The page is drawn
 /// on its own because the app reads this machine's platform and store.
@@ -105,18 +122,7 @@ fn the_hardware_page_names_every_runtime_control() {
     for (shape, installs, installing, expected) in shapes {
         let download_controls = |name: &&str| [openvino.install_button_label(), openvino.uninstall_label(), "Cancel"].contains(name);
         let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
-        let ctx = HardwareSectionContext {
-            machine: test_machine(),
-            offered: RuntimeId::OFFERED,
-            installs,
-            installing,
-            sd_margin_mb: 2048,
-            cpu_only: false,
-            test: Default::default(),
-            gpu_failure: None,
-            testable: true,
-            test_waits: false,
-        };
+        let ctx = HardwareSectionContext { installing, testable: true, ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert_all_controls_named(&harness, shape);
@@ -169,18 +175,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
         ("no accelerator", tested, false, vec![], vec!["Test this computer", "Forget the test"], None),
     ];
     for (shape, test, testable, present_names, absent_names, note) in shapes {
-        let ctx = HardwareSectionContext {
-            machine: test_machine(),
-            offered: RuntimeId::OFFERED,
-            installs: HardwareInstallCache::default(),
-            test,
-            installing: None,
-            sd_margin_mb: 2048,
-            cpu_only: false,
-            gpu_failure: None,
-            testable,
-            test_waits: false,
-        };
+        let ctx = HardwareSectionContext { test, testable, ..hardware_page(HardwareInstallCache::default()) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert_all_controls_named(&harness, shape);
@@ -202,7 +197,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
 #[test]
 fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
     use crate::gui::hardware_cache::HardwareInstallCache;
-    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::gui::views::settings::render_page_hardware;
     use crate::runtime_install::RuntimeId;
     if !RuntimeId::Cuda.is_addon() {
         return;
@@ -210,18 +205,7 @@ fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
     for (waits, line) in [(true, RuntimeId::Cuda.waiting_line()), (false, RuntimeId::Cuda.installed_line())] {
         let mut installs = HardwareInstallCache::default();
         (installs.cuda, installs.nvidia_libraries, installs.addon_waits) = (true, true, waits);
-        let ctx = HardwareSectionContext {
-            machine: test_machine(),
-            offered: RuntimeId::OFFERED,
-            installs,
-            installing: None,
-            sd_margin_mb: 2048,
-            cpu_only: false,
-            test: Default::default(),
-            gpu_failure: None,
-            testable: false,
-            test_waits: false,
-        };
+        let ctx = hardware_page(installs);
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert!(texts(&harness).iter().any(|t| t == line), "waits {waits}: {line:?} missing");
@@ -244,18 +228,7 @@ fn a_start_failure_shows_on_its_own_runtime_only() {
     let said = |openvino: bool| {
         let mut installs = HardwareInstallCache::default();
         (installs.cuda, installs.openvino, installs.nvidia_libraries) = (true, openvino, true);
-        let ctx = HardwareSectionContext {
-            machine: test_machine(),
-            offered: RuntimeId::OFFERED,
-            installs,
-            installing: None,
-            sd_margin_mb: 2048,
-            cpu_only: false,
-            test: Default::default(),
-            gpu_failure: Some(&NO_DRIVER),
-            testable: false,
-            test_waits: false,
-        };
+        let ctx = HardwareSectionContext { gpu_failure: Some(&NO_DRIVER), ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         texts(&harness).iter().filter(|t| **t == NO_DRIVER.text()).count()
@@ -292,18 +265,7 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
         ("no CUDA runtime", HardwareInstallCache::default(), None, None, None),
     ];
     for (shape, installs, failure, installing, expected) in shapes {
-        let ctx = HardwareSectionContext {
-            machine: test_machine(),
-            offered: RuntimeId::OFFERED,
-            installs,
-            installing,
-            sd_margin_mb: 2048,
-            cpu_only: false,
-            test: Default::default(),
-            gpu_failure: failure,
-            testable: false,
-            test_waits: false,
-        };
+        let ctx = HardwareSectionContext { installing, gpu_failure: failure, ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
         harness.run_steps(2);
         assert_all_controls_named(&harness, shape);

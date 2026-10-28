@@ -2114,7 +2114,7 @@ mod tests {
     /// With the OpenVINO add-on registered, a session that names no
     /// provider runs on ORT's own CPU provider: ORT's choice for such a
     /// session put it on OpenVINO's processor under every policy, the
-    /// default too. `PRUNR_OPENVINO_ADDON` names the plugin.
+    /// default too.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_session_naming_no_provider_stays_on_ort_s_cpu() {
@@ -2123,10 +2123,7 @@ mod tests {
             eprintln!("SKIP: {why}");
             return;
         }
-        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
-            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
-            return;
-        };
+        let Some(plugin) = crate::ort_runtime::openvino_plugin_for_tests() else { return };
         use_addon(Addon::OpenVino, plugin.into());
         if !register_addon(Addon::OpenVino) || addon_devices(Addon::OpenVino).is_empty() {
             eprintln!("SKIP: OpenVINO lists no device here");
@@ -2179,7 +2176,6 @@ mod tests {
     }
 
     /// With the OpenVINO add-on started, an engine runs on it.
-    /// `PRUNR_OPENVINO_ADDON` names the plugin.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn an_engine_runs_on_the_openvino_add_on() {
@@ -2188,10 +2184,7 @@ mod tests {
             eprintln!("SKIP: {why}");
             return;
         }
-        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
-            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
-            return;
-        };
+        let Some(plugin) = crate::ort_runtime::openvino_plugin_for_tests() else { return };
         use_addon(Addon::OpenVino, plugin.into());
         if let Err(why) = start_addon(Addon::OpenVino) {
             eprintln!("SKIP: {why}");
