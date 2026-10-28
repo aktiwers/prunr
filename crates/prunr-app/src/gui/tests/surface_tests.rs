@@ -527,7 +527,7 @@ fn a_card_test_holds_the_window_until_cancelled() {
     settle(&mut h);
     assert_all_controls_named(&h, "a card's test");
     assert!(!enabled(&h, "Close Model Store"), "the store stays up");
-    assert!(!enabled(&h, "Remove U2Net"), "the model under test stays");
+    assert!(names(&h).iter().any(|n| n == "Remove U2Net") && !enabled(&h, "Remove U2Net"), "the model under test stays");
     click_where(&mut h, "Settings");
     assert!(!h.state().show_settings, "the toolbar under it takes no click");
     assert!(h.state().model_store.is_some(), "nor closes the store");

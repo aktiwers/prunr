@@ -837,25 +837,35 @@ mod tests {
         assert_eq!(left, vec![std::ffi::OsString::from("openvino-1.24.1-linux-x64")], "no staging folder left");
     }
 
-    /// Reinstalling the CUDA runtime keeps the NVIDIA libraries inside it
-    /// and replaces everything else.
+    /// Reinstalling CUDA keeps the NVIDIA libraries inside its install and
+    /// replaces everything else.
     #[test]
     fn a_reinstall_keeps_the_nvidia_libraries() {
         let store = tempfile::tempdir().unwrap();
-        let target = store.path().join("cuda-1.24.1-linux-x64");
-        let staging = store.path().join(".cuda-1.24.1-linux-x64.staging");
-        let nvidia = prunr_core::ort_runtime::NVIDIA_LIBS_DIR;
+        let target = store.path().join("cuda-addon-0.2.0-linux-x64");
+        let staging = store.path().join(".cuda-addon-0.2.0-linux-x64.staging");
+        let (nvidia, library) = (prunr_core::ort_runtime::NVIDIA_LIBS_DIR, ri::CUDA_ADDON_LINUX.library);
         std::fs::create_dir_all(target.join(nvidia)).unwrap();
         std::fs::write(target.join(nvidia).join("libcudnn.so.9"), b"downloaded").unwrap();
-        std::fs::write(target.join("libonnxruntime.so"), b"old").unwrap();
+        std::fs::write(target.join(library), b"old").unwrap();
         std::fs::write(target.join("stale"), b"old").unwrap();
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("libonnxruntime.so"), b"new").unwrap();
+        std::fs::write(staging.join(library), b"new").unwrap();
         move_into_place(&staging, &target, &[nvidia]).unwrap();
         assert_eq!(std::fs::read(target.join(nvidia).join("libcudnn.so.9")).unwrap(), b"downloaded");
-        assert_eq!(std::fs::read(target.join("libonnxruntime.so")).unwrap(), b"new");
+        assert_eq!(std::fs::read(target.join(library)).unwrap(), b"new");
         assert!(!target.join("stale").exists(), "the rest is replaced");
         assert!(!staging.exists());
+    }
+
+    /// CUDA's texts speak of DirectML only where it runs beside it.
+    #[test]
+    fn cudas_texts_name_directml_only_beside_it() {
+        let beside = cfg!(all(windows, target_arch = "x86_64"));
+        let cuda = RuntimeId::Cuda;
+        for text in [cuda.not_installed(true, false), cuda.not_installed(false, true), cuda.first_launch_prompt_body(false), cuda.installed_line().to_string()] {
+            assert_eq!(text.contains("DirectML"), beside, "{text}");
+        }
     }
 
     /// The first install on a computer meets no runtime folder yet: the
