@@ -60,6 +60,23 @@ fn a_run_in_flight_names_its_cancel_button() {
     assert!(names.iter().any(|n| n == "Cancel"), "the capsule's Cancel is named: {names:?}");
 }
 
+/// An Intel processor with Intel graphics, for pages that offer what a
+/// computer runs: the same whatever computer runs the test.
+fn test_machine() -> &'static crate::hardware::HardwareProfile {
+    use crate::hardware::{CpuVendor, GpuVendor, HardwareProfile};
+    static MACHINE: std::sync::OnceLock<HardwareProfile> = std::sync::OnceLock::new();
+    MACHINE.get_or_init(|| HardwareProfile {
+        cpu_vendor: CpuVendor::Intel,
+        cpu_brand: "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz".into(),
+        dgpu: None,
+        dgpu_name: None,
+        igpu: Some(GpuVendor::Intel),
+        suits_directml: false,
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+    })
+}
+
 /// Settings › Hardware as Windows shows it, which offers both runtimes:
 /// every runtime row and the runtime choice are named. The page is drawn
 /// on its own because the app reads this machine's platform and store.
@@ -87,6 +104,7 @@ fn the_hardware_page_names_every_runtime_control() {
         let download_controls = |name: &&str| name.ends_with("OpenVINO Runtime") || *name == "Cancel";
         let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
         let ctx = HardwareSectionContext {
+            machine: test_machine(),
             offered: RuntimeId::OFFERED,
             installs,
             installing,
@@ -150,6 +168,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
     ];
     for (shape, test, testable, present_names, absent_names, note) in shapes {
         let ctx = HardwareSectionContext {
+            machine: test_machine(),
             offered: RuntimeId::OFFERED,
             installs: HardwareInstallCache::default(),
             test,
@@ -190,6 +209,7 @@ fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
         let mut installs = HardwareInstallCache::default();
         (installs.cuda, installs.nvidia_libraries, installs.addon_waits) = (true, true, waits);
         let ctx = HardwareSectionContext {
+            machine: test_machine(),
             offered: RuntimeId::OFFERED,
             installs,
             installing: None,
@@ -234,6 +254,7 @@ fn the_nvidia_libraries_are_offered_while_the_cuda_runtime_lacks_them() {
     ];
     for (shape, installs, failure, installing, expected) in shapes {
         let ctx = HardwareSectionContext {
+            machine: test_machine(),
             offered: RuntimeId::OFFERED,
             installs,
             installing,
