@@ -91,17 +91,20 @@ fn axis_tiles(len: u32, tile_size: u32, overlap: u32, align: u32) -> (Vec<u32>, 
     if len <= tile_size {
         return (vec![0], len);
     }
-    let step = tile_size.saturating_sub(overlap).max(1);
-    // ≥ 2: len > tile_size
-    let count = len.saturating_sub(overlap).div_ceil(step);
-    // count × size ≥ len + (count - 1) × overlap, so neighbours overlap
-    // by at least `overlap` and size ≤ tile_size.
-    let size = (len + (count - 1) * overlap).div_ceil(count);
+    // Rounding a start down to `align` costs its tile up to `align - 1`
+    // of overlap with the next, and the last tile grows by what its start
+    // gave up, so tiles are planned with that much more overlap and that
+    // much smaller.
+    let slack = align.max(1) - 1;
+    let (planned_size, planned_overlap) = (tile_size.saturating_sub(slack).max(1), overlap + slack);
+    let step = planned_size.saturating_sub(planned_overlap).max(1);
+    // ≥ 2: len > tile_size ≥ planned_size
+    let count = len.saturating_sub(planned_overlap).div_ceil(step);
+    // count × size ≥ len + (count - 1) × planned_overlap, so neighbours
+    // overlap by at least that and size ≤ planned_size.
+    let size = (len + (count - 1) * planned_overlap).div_ceil(count);
     let span = len - size;
-    let align = align.max(1);
-    let starts: Vec<u32> = (0..count).map(|i| i * span / (count - 1) / align * align).collect();
-    // Starts only move back, so neighbours overlap at least as much; the
-    // last tile grows by what its start gave up, to reach the edge.
+    let starts: Vec<u32> = (0..count).map(|i| i * span / (count - 1) / (slack + 1) * (slack + 1)).collect();
     let size = len - starts[starts.len() - 1];
     (starts, size)
 }
@@ -186,7 +189,7 @@ fn upscale_tiled_as<F>(
 where
     F: Fn(&RgbImage, u32, u32) -> Result<RgbImage, CoreError>,
 {
-    let TilingConfig { tile_size, overlap, .. } = cfg;
+    let TilingConfig { overlap, .. } = cfg;
     let (in_w, in_h) = input.dimensions();
     let out_w = in_w * scale;
     let out_h = in_h * scale;
@@ -201,7 +204,7 @@ where
     // are final: the accumulator holds one tile row of output, finished
     // into `out_img` and slid up as the rows advance.
     let row_len = out_w as usize;
-    let band_rows = (tile_size.min(in_h) * scale) as usize;
+    let band_rows = (tiles.iter().map(|t| t.h).max().unwrap_or(0) * scale) as usize;
     let mut band = Band { top: 0, rgb: vec![0.0; band_rows * row_len * 3], weight: vec![0.0; band_rows * row_len] };
     let mut out_img = RgbaImage::new(out_w, out_h);
 
@@ -417,17 +420,36 @@ mod tests {
         assert_eq!(result.height(), 200 * scale);
     }
 
-    /// Aligned tiles start on the multiple, still reach the far edge, and
-    /// still overlap by at least the overlap asked.
+    /// Aligned tiles start on the multiple, still reach the far edge,
+    /// still overlap by at least the overlap asked, and are never larger
+    /// than the tile asked: the output band is that tall.
     #[test]
     fn aligned_tiles_start_on_the_multiple_and_cover_the_axis() {
-        for (len, tile, overlap, align) in [(1024, 512, 16, 2), (1000, 512, 64, 2), (777, 256, 32, 2), (1500, 512, 96, 4), (300, 512, 16, 2)] {
-            let (starts, size) = axis_tiles(len, tile, overlap, align);
-            assert!(starts.iter().all(|s| s % align == 0), "{len}/{tile}/{overlap}: {starts:?}");
-            assert_eq!(starts.last().copied().unwrap_or(0) + size, len, "{len}/{tile}/{overlap}: reaches the edge");
-            assert!(starts.windows(2).all(|w| w[0] + size >= w[1] + overlap), "{len}/{tile}/{overlap}: overlap kept");
-            assert!(size < tile + align, "{len}/{tile}/{overlap}: {size}");
+        for tile in [128, 256, 512] {
+            for overlap in [16, 32, 64] {
+                for align in [1, 2, 4] {
+                    for len in 1..3000 {
+                        let (starts, size) = axis_tiles(len, tile, overlap, align);
+                        let at = format!("{len}/{tile}/{overlap}/{align}: {starts:?} {size}");
+                        assert!(starts.iter().all(|s| s % align == 0), "{at}");
+                        assert_eq!(starts.last().copied().unwrap_or(0) + size, len, "{at}: reaches the edge");
+                        assert!(starts.windows(2).all(|w| w[0] + size >= w[1] + overlap), "{at}: overlap kept");
+                        assert!(size <= tile, "{at}: larger than the tile");
+                    }
+                }
+            }
         }
+    }
+
+    /// An x2 model's tiles start on even pixels; at a height where that
+    /// grew the last tile past the tile size, its rows ran past the band.
+    #[test]
+    fn an_aligned_tiling_fits_its_band_at_any_height() {
+        let input = RgbaImage::from_pixel(24, 959, image::Rgba([10, 20, 30, 255]));
+        let cfg = TilingConfig { tile_size: 512, tile_multiple: Some(2), overlap: 64, align: 2 };
+        let upscale = |t: &RgbImage, w: u32, h: u32| Ok(image::imageops::resize(t, w * 2, h * 2, image::imageops::FilterType::Nearest));
+        let out = upscale_tiled(&input, 2, cfg, upscale, &Progress::none()).expect("an x2 tiling");
+        assert_eq!(out.dimensions(), (48, 1918));
     }
 
     /// Tiles go down by halves on a multiple of the model's window, and
