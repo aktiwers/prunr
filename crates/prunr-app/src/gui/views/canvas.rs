@@ -282,7 +282,7 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
     if !clicked {
         return;
     }
-    match hover.filter(|p| img_rect.contains(*p)) {
+    match hover.filter(|p| img_rect.intersect(canvas_rect).contains(*p)) {
         Some(p) => {
             let f = super::brush_overlay::screen_to_model(p, img_rect, 1, 1);
             let (fx, fy) = (f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0));
@@ -307,7 +307,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let hover_pos_for_cursor = ui.ctx().input(|i| i.pointer.hover_pos());
 
     let look = super::brush_overlay::CursorLook { erase: app.settings.brush_erases(), ..super::brush_overlay::MAGIC_CURSOR };
-    let pointer_on_img = hover_pos_for_cursor.filter(|p| img_rect.contains(*p));
+    let pointer_on_img = hover_pos_for_cursor.filter(|&p| super::brush_overlay::on_shown_image(ui, img_rect, p));
     super::brush_overlay::draw_trail_for(ui, look, look.shape, app.magic_brush_state.active_trail.stamps());
     super::brush_overlay::draw_cursor(ui, img_rect, look, pointer_on_img.is_some());
 
@@ -321,9 +321,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         let p = &i.pointer;
         (p.primary_clicked(), p.primary_pressed(), p.primary_down(), p.primary_released(), p.hover_pos())
     });
-    // On the image, and not on a control drawn over it (the strip).
-    let layer = ui.layer_id();
-    let on_image = hover_pos.is_some_and(|p| img_rect.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == layer));
+    let on_image = hover_pos.is_some_and(|p| super::brush_overlay::on_shown_image(ui, img_rect, p));
 
     // What a click or stroke selects with: the depth map, or SAM. A SAM
     // pick made before the encoder has finished waits for the embedding.

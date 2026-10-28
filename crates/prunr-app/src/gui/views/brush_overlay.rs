@@ -60,9 +60,7 @@ pub(crate) fn handle_input(
             i.pointer.primary_released(),
         )
     });
-    // On the image, and not on a control drawn over it (the strip).
-    let layer = ui.layer_id();
-    let pointer_on_img = hover.filter(|p| img_rect.contains(*p) && ui.ctx().layer_id_at(*p).is_none_or(|l| l == layer));
+    let pointer_on_img = hover.filter(|&p| on_shown_image(ui, img_rect, p));
 
     // In-progress stroke trail (drawn first so the cursor renders on top).
     draw_trail(ui, brush_state, look);
@@ -242,15 +240,23 @@ fn trail_mesh(
     mesh
 }
 
+/// Whether `p` is on the part of the image the canvas shows, and not on a
+/// control drawn over it (the strip). Zoomed in, the image reaches under
+/// the toolbars, which share the canvas's layer: there the pointer is on
+/// the toolbar.
+pub(crate) fn on_shown_image(ui: &Ui, img_rect: Rect, p: Pos2) -> bool {
+    img_rect.intersect(ui.clip_rect()).contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id())
+}
+
 pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let Some(p) = pointer else { return };
-    if !img_rect.contains(p) {
+    if !img_rect.intersect(ui.clip_rect()).contains(p) {
         return;
     }
     // Ours replaces the system's (an arrow, or a cross on GNOME), except
     // over a control floating on the image, which keeps its own.
-    if ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id()) {
+    if on_shown_image(ui, img_rect, p) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
     }
     let r = s.radius.max(MIN_SCREEN_RADIUS_PX);
