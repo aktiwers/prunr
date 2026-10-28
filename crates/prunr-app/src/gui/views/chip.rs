@@ -699,8 +699,13 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
 /// A bare modal's page: the margin, the header row, then `body`. True on
 /// the frame its close was clicked.
 pub(super) fn modal_page(ui: &mut Ui, title: &str, subtitle: &str, body: impl FnOnce(&mut Ui)) -> bool {
+    modal_page_closable(ui, title, subtitle, true, body)
+}
+
+/// `modal_page` whose close is greyed while not `closable`.
+pub(super) fn modal_page_closable(ui: &mut Ui, title: &str, subtitle: &str, closable: bool, body: impl FnOnce(&mut Ui)) -> bool {
     modal_frame(ui, |ui| {
-        let close = modal_header(ui, title, subtitle);
+        let close = modal_header(ui, title, subtitle, closable);
         ui.add_space(theme::SPACE_MD);
         body(ui);
         close
@@ -724,7 +729,7 @@ pub(super) fn progress_bar(ui: &mut Ui, fraction: f32, height: f32) {
 
 /// A modal's header row: its title, a line under it, and the round close
 /// button at the right. True on the frame close was clicked.
-pub(super) fn modal_header(ui: &mut Ui, title: &str, subtitle: &str) -> bool {
+pub(super) fn modal_header(ui: &mut Ui, title: &str, subtitle: &str, closable: bool) -> bool {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.label(RichText::new(title).size(theme::FONT_SIZE_MODAL_TITLE).color(theme::TEXT_PRIMARY));
@@ -733,7 +738,7 @@ pub(super) fn modal_header(ui: &mut Ui, title: &str, subtitle: &str) -> bool {
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            let x = icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL);
+            let x = ui.add_enabled_ui(closable, |ui| icon_square_button(ui, ICON_CLOSE.codepoint, theme::TEXT_SECONDARY, theme::FIELD_FILL)).inner;
             named(x, &format!("Close {title}")).clicked()
         })
         .inner

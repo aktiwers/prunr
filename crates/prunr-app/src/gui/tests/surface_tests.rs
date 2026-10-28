@@ -5,7 +5,7 @@ use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
 use super::harness::{
-    assert_all_controls_named, click, harness, harness_builder, loaded, loaded_with, names, new_app, settle, settle_until_shown, tree,
+    assert_all_controls_named, click, enabled, harness, harness_builder, loaded, loaded_with, names, new_app, settle, settle_until_shown, tree,
 };
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
@@ -508,6 +508,32 @@ fn the_computer_test_holds_the_window_until_cancelled() {
         });
         assert!(gone, "its process stopped");
     }
+}
+
+/// A Model Store card's test owns the window too: a click on the toolbar
+/// under the store lands on nothing, the store does not close, the tested
+/// card cannot be removed, and Cancel on the card ends it.
+#[test]
+fn a_card_test_holds_the_window_until_cancelled() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = loaded();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(crate::gui::tests::fixtures::idle_child(), Some(prunr_models::ModelId::U2net)));
+    settle(&mut h);
+    assert_all_controls_named(&h, "a card's test");
+    assert!(!enabled(&h, "Close Model Store"), "the store stays up");
+    assert!(!enabled(&h, "Remove U2Net"), "the model under test stays");
+    let gear = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Settings") && n.role() == egui::accesskit::Role::Button).rect().center();
+    pointer_to(&mut h, gear);
+    press(&mut h, gear, true);
+    press(&mut h, gear, false);
+    settle(&mut h);
+    assert!(!h.state().show_settings, "the toolbar under it takes no click");
+    assert!(h.state().model_store.is_some(), "nor closes the store");
+    click(&mut h, "Cancel the test of U2Net");
+    settle(&mut h);
+    assert!(h.state().machine_test.is_none(), "Cancel ends it");
+    assert!(enabled(&h, "Close Model Store"));
 }
 
 /// The save dialog takes the popover's place and opens ready for a name:

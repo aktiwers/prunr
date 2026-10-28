@@ -99,9 +99,12 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     let mut new_filter = initial_filter;
     let mut pending_actions: Vec<(ModelId, Click)> = Vec::with_capacity(REGISTRY.len());
 
-    let closed = theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
+    // A card's test owns the machine as the whole computer's does: the
+    // store holds the window until it ends.
+    let testing = app.machine_test.as_ref().is_some_and(|t| t.only().is_some());
+    let mut page = |ui: &mut egui::Ui| {
         let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(app.hardware_install_cache.models_on_disk));
-        super::chip::modal_page(ui, "Model Store", &subtitle, |ui| {
+        super::chip::modal_page_closable(ui, "Model Store", &subtitle, !testing, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
 
@@ -144,7 +147,15 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                 ui.ctx().request_repaint();
             }
         })
-    });
+    };
+    let closed = if testing {
+        theme::holding_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
+            page(ui);
+        });
+        false
+    } else {
+        theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, page)
+    };
 
     for (id, action) in pending_actions {
         let action = match action {
@@ -329,7 +340,10 @@ fn render_card(ui: &mut egui::Ui, card: &Card<'_>, size: egui::Vec2) -> (Option<
                             CardAction::Download => ButtonKind::Primary,
                             _ => ButtonKind::Secondary,
                         };
-                        let reason = (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet."));
+                        let reason = match test {
+                            CardTest::Testing { .. } => Some("Waits until its test is done."),
+                            _ => (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet.")),
+                        };
                         let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
                         let resp = super::chip::named_with(resp, || format!("{label} {}", desc.display_name));
                         if resp.clicked() {
