@@ -992,13 +992,15 @@ impl PrunrApp {
     /// new chord (Escape cancels, Backspace clears the slot), never a
     /// command. Returns true while capture is active.
     /// The accelerator the startup probe found, once it has answered.
-    /// The engines the test results name come with it.
+    /// The test results read before it are read again with it.
     pub(crate) fn take_probed_backend(&mut self) {
         if self.settings.active_backend.is_empty() {
             if let Some(provider) = prunr_core::OrtEngine::detected_provider() {
                 self.settings.active_backend = provider;
-                self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(&self.hardware_install_cache));
             }
+        }
+        if !self.test_results.after_probe && prunr_core::OrtEngine::probed() {
+            self.test_results = std::sync::Arc::new(super::hardware_cache::TestResults::read(&self.hardware_install_cache));
         }
     }
 
@@ -1605,14 +1607,17 @@ mod hotkey_capture_tests {
     }
 
     /// The window opens before the accelerator probe answers; its answer
-    /// is taken when it comes.
+    /// is taken when it comes, and the test results read before it are
+    /// read again.
     #[test]
     fn the_probed_backend_is_taken_when_it_answers() {
         let mut app = PrunrApp::new_for_test();
         let probed = prunr_core::OrtEngine::detect_active_provider();
         app.settings.active_backend = String::new();
+        app.test_results = std::sync::Arc::new(super::super::hardware_cache::TestResults::default());
         app.take_probed_backend();
         assert_eq!(app.settings.active_backend, probed);
+        assert!(app.test_results.after_probe, "read again with the probe's answer");
     }
 
     /// A capture ends with its tab: with Settings closed (by its window's
