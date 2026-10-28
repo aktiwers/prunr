@@ -311,7 +311,8 @@ fn init() -> Result<DylibSource, String> {
     // nothing, so ort is called once: each candidate is opened and checked
     // here, and ort gets the first that passes.
     let ((path, source), failures) = load_first(&candidates, probe_runtime)?;
-    load_runtime(path)?;
+    let version = version_of(path);
+    load_runtime(path, version.as_deref())?;
     if !failures.is_empty() {
         tracing::warn!(failures = %failures.join("; "), %source, "runtime fallback");
         let _ = FELL_BACK.set(match source {
@@ -319,7 +320,6 @@ fn init() -> Result<DylibSource, String> {
             _ => "The chosen runtime would not load, so Prunr uses another installed one. Install it again in Settings.",
         });
     }
-    let version = version_of(path);
     tracing::info!(path = %path.display(), %source, ?version, "ORT runtime loaded");
     let _ = VERSION.set(version);
     let _ = LOADED.set(path.clone());
@@ -368,13 +368,16 @@ fn probe_runtime(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_runtime(path: &Path) -> Result<(), String> {
+fn load_runtime(path: &Path, version: Option<&str>) -> Result<(), String> {
     for name in PRELOAD_BESIDE_RUNTIME {
         preload_beside(path, name);
     }
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
-    let env = ort::init_from(path)
-        .map_err(|e| format!("ort::init_from({}): {e}", path.display()))?
+    let builder = ort::init_from(path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
+    if Addon::OpenVino.library().is_some() && version.is_some_and(takes_addons) {
+        create_env_for_openvino(openvino_devices(intel_gpu_chosen()))?;
+    }
+    let env = builder
         // Off, though `ort` turns it on. Windows reads only this: the
         // official build there reports through Windows' event tracing.
         // Linux and macOS need `ORT_TELEMETRY_OFF` as well.
@@ -383,6 +386,72 @@ fn load_runtime(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("ORT environment on {}: {e}", path.display()))?;
     let _ = ENV.set(env);
     Ok(())
+}
+
+/// The devices OpenVINO may load its parts for: its graphics part only
+/// once the user lets it use the Intel graphics. Its NPU part never: the
+/// Linux plugin has no NPU compiler.
+fn openvino_devices(intel_gpu: bool) -> &'static str {
+    if intel_gpu { "CPU;GPU" } else { "CPU" }
+}
+
+/// Create the process's ORT environment with OpenVINO's device filter,
+/// which OpenVINO reads from the environment's settings as it registers,
+/// and which ort cannot set: ORT keeps one environment per process, so
+/// the one ort builds next is this one, and lives as long. Unfiltered,
+/// registering loads OpenVINO's graphics and NPU parts and the system's
+/// OpenCL drivers whether a session uses them or not: on an i7-6700 with
+/// an HD 530, 80 ms, +208 MB and 9 threads instead of 15 ms, +21 MB and
+/// none, in every process.
+fn create_env_for_openvino(devices: &str) -> Result<(), String> {
+    use std::ffi::CString;
+    let key = CString::new("ep.openvinoexecutionprovider.hardware_device_type").map_err(|e| e.to_string())?;
+    let value = CString::new(devices).map_err(|e| e.to_string())?;
+    let api = ort::api();
+    // SAFETY: each pointer handed over is live for the call; ORT copies
+    // the settings, so they are released after, and the environment is
+    // kept for the process, as ort keeps its own.
+    unsafe {
+        let mut entries = std::ptr::null_mut();
+        (api.CreateKeyValuePairs)(&mut entries);
+        (api.AddKeyValuePair)(entries, key.as_ptr(), value.as_ptr());
+        let options = ort::sys::OrtEnvCreationOptions {
+            // The layout as of ORT 1.24, which ort's declares.
+            version: 24,
+            // As ort sets it with a logger of its own: `tracing` filters.
+            logging_severity_level: ort::sys::OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE as i32,
+            log_id: c"default".as_ptr(),
+            custom_logging_function: Some(forward_ort_log),
+            custom_logging_param: std::ptr::null_mut(),
+            threading_options: std::ptr::null(),
+            config_entries: entries,
+        };
+        let mut env = std::ptr::null_mut();
+        let created = check((api.CreateEnvWithOptions)(&options, &mut env));
+        (api.ReleaseKeyValuePairs)(entries);
+        created.map_err(|e| format!("ORT environment with OpenVINO's devices ({devices}): {e}"))
+    }
+}
+
+/// ORT's log into `tracing`, under the target ort's own logger uses.
+unsafe extern "system" fn forward_ort_log(
+    _param: *mut std::ffi::c_void,
+    severity: ort::sys::OrtLoggingLevel,
+    _category: *const std::ffi::c_char,
+    _log_id: *const std::ffi::c_char,
+    location: *const std::ffi::c_char,
+    message: *const std::ffi::c_char,
+) {
+    use ort::sys::OrtLoggingLevel as Level;
+    // SAFETY: ORT passes NUL-terminated strings that live through the call.
+    let text = |p: *const std::ffi::c_char| if p.is_null() { "".into() } else { unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy() };
+    let (location, message) = (text(location), text(message));
+    match severity {
+        Level::ORT_LOGGING_LEVEL_VERBOSE => tracing::trace!(target: "ort::logging", %location, "{message}"),
+        Level::ORT_LOGGING_LEVEL_INFO => tracing::info!(target: "ort::logging", %location, "{message}"),
+        Level::ORT_LOGGING_LEVEL_WARNING => tracing::warn!(target: "ort::logging", %location, "{message}"),
+        Level::ORT_LOGGING_LEVEL_ERROR | Level::ORT_LOGGING_LEVEL_FATAL => tracing::error!(target: "ort::logging", %location, "{message}"),
+    }
 }
 
 /// The first of `candidates` that `load` takes, with why each before it
@@ -963,6 +1032,47 @@ mod tests {
                 assert!(!device_id.exists(), "{child_test}: {} started its usage reporting", dylib.display());
             }
         }
+    }
+
+    /// A process using the OpenVINO add-on registers only its processor
+    /// part until the user lets it use the Intel graphics: unfiltered, it
+    /// loaded the graphics part and the system's OpenCL drivers, used or
+    /// not. `PRUNR_OPENVINO_ADDON` names the plugin.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn openvino_registers_only_the_devices_it_may_use() {
+        assert_eq!([openvino_devices(false), openvino_devices(true)], ["CPU", "CPU;GPU"]);
+        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
+            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
+            return;
+        };
+        if runtime_for_tests().is_err() || !hosts_addons() {
+            eprintln!("SKIP: no runtime that takes add-ons");
+            return;
+        }
+        let home = tempfile::tempdir().expect("temp home");
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "ort_runtime::tests::a_process_with_openvino_lists_its_processor_only", "--ignored"])
+            .env("ORT_DYLIB_PATH", loaded_dylib().expect("loaded"))
+            .env("PRUNR_OPENVINO_ADDON", plugin)
+            .env("HOME", home.path())
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_CACHE_HOME", home.path().join("cache"))
+            .output()
+            .expect("child runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run in a process of its own by openvino_registers_only_the_devices_it_may_use"]
+    fn a_process_with_openvino_lists_its_processor_only() {
+        use_addon(Addon::OpenVino, std::env::var_os("PRUNR_OPENVINO_ADDON").expect("named").into());
+        ensure_initialized().expect("the runtime loads");
+        assert!(register_addon(Addon::OpenVino), "the add-on registers");
+        let kinds: Vec<_> = addon_devices(Addon::OpenVino).iter().map(|d| d.hardware_device().ty()).collect();
+        assert!(kinds.iter().all(|&kind| kind == ort::memory::DeviceType::CPU), "{kinds:?}");
     }
 
     #[test]
