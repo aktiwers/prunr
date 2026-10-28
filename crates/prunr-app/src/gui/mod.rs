@@ -45,6 +45,7 @@ pub(crate) mod macos_quit;
 pub(crate) mod tests;
 
 pub fn run() -> eframe::Result {
+    crate::panics::use_window_pool();
     // The GPU provider probe (DirectML starts a device) and the hardware
     // profile (DXGI lists the adapters on Windows) run while the window
     // opens; `PrunrApp::new` and the first frame read what they found.

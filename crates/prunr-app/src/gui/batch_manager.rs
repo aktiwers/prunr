@@ -412,15 +412,12 @@ impl BatchManager {
             // decodes don't pile up DynamicImage + RGBA per thread.
             // Every decode answers, a panic included: the image waits on
             // it until then.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let result = crate::panics::caught("an image decode", || {
                 bytes().and_then(|bytes| match prunr_core::load_image_from_bytes(&bytes) {
                     Ok(img) => Ok(Arc::new(img.into_rgba8())),
                     Err(e) => Err(format!("Could not read the image: {e}")),
                 })
-            })).unwrap_or_else(|_| {
-                tracing::error!(item_id, "image decode panicked");
-                Err("Could not read the image.".to_string())
-            });
+            }).unwrap_or_else(|_| Err("Could not read the image.".to_string()));
             let _ = tx.send((item_id, result));
         });
     }

@@ -483,7 +483,10 @@ impl LivePreview {
                 let start = inputs.start.clone();
                 let faced_key = inputs.faces.as_ref().map(|f| f.key.clone());
                 let started = std::time::Instant::now();
-                let output = run_preview(inputs, &cancel);
+                let Ok(output) = crate::panics::caught("a live preview", || run_preview(inputs, &cancel)) else {
+                    let _ = tx.send(Finished { item_id: id, generation, result: None });
+                    return;
+                };
                 tracing::debug!(item_id = id, kind = ?dispatch_kind, ms = started.elapsed().as_millis() as u64, "live preview ran");
                 if cancel.load(Ordering::Acquire) {
                     return;

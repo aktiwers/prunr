@@ -523,13 +523,8 @@ impl DepthQueue {
 /// Run `f`; a panic in it (a model or driver bug) becomes its message, so
 /// the run it was fails instead of the app.
 fn caught<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
-        let why = payload.downcast_ref::<&str>().map(|s| s.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_default();
-        tracing::error!(%why, "a model run panicked");
-        "The model stopped unexpectedly. Try again; if it repeats, try another model.".to_string()
-    })
+    crate::panics::caught("a model run", f)
+        .map_err(|_| "The model stopped unexpectedly. Try again; if it repeats, try another model.".to_string())
 }
 
 /// Measure one photo on the warm engine, with the faces in it for Auto
@@ -1298,45 +1293,51 @@ impl Processor {
         let bridge_tx = self.inpaint_bridge_tx.clone();
         let inpaint_tx = self.inpaint_done.tx.clone();
         rayon::spawn(move || {
-            // Checked before the work and before the bridge dispatch, so a
-            // mid-encode Esc never runs the SD bundle on a discarded stroke.
-            let cancelled = || progress.is_cancelled();
-            let send_cancelled = || {
-                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Cancelled));
-            };
-            if cancelled() { send_cancelled(); return; }
-            let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
-                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed("the image could not be read".into())));
-                return;
-            };
-            // Before the dispatch, so it lands under the worker's previews.
-            preview_the_photo(&progress, &image);
-            let mask = tuning.fill_region(&correction, image.dimensions());
-            let sd_req = sd_request(&tuning);
-            let dir = crate::subprocess::protocol::ipc_temp_dir();
-            let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_generation(dir, item_id, generation);
-            let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_generation(dir, item_id, generation);
-            let res: Result<(), String> = (|| {
-                crate::subprocess::ipc::write_image(&image_path, &image).map_err(|e| format!("write source: {e}"))?;
-                crate::subprocess::ipc::write_image(&mask_path, &mask).map_err(|e| format!("write mask: {e}"))
-            })();
-            if let Err(e) = res {
-                let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed(e)));
-                return;
+            let failed = inpaint_tx.clone();
+            let sent = crate::panics::caught("an eraser stroke's send", move || {
+                // Checked before the work and before the bridge dispatch, so a
+                // mid-encode Esc never runs the SD bundle on a discarded stroke.
+                let cancelled = || progress.is_cancelled();
+                let send_cancelled = || {
+                    let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Cancelled));
+                };
+                if cancelled() { send_cancelled(); return; }
+                let (Some(image), Some(correction)) = (image.load(), correction.load()) else {
+                    let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed("the image could not be read".into())));
+                    return;
+                };
+                // Before the dispatch, so it lands under the worker's previews.
+                preview_the_photo(&progress, &image);
+                let mask = tuning.fill_region(&correction, image.dimensions());
+                let sd_req = sd_request(&tuning);
+                let dir = crate::subprocess::protocol::ipc_temp_dir();
+                let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_generation(dir, item_id, generation);
+                let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_generation(dir, item_id, generation);
+                let res: Result<(), String> = (|| {
+                    crate::subprocess::ipc::write_image(&image_path, &image).map_err(|e| format!("write source: {e}"))?;
+                    crate::subprocess::ipc::write_image(&mask_path, &mask).map_err(|e| format!("write mask: {e}"))
+                })();
+                if let Err(e) = res {
+                    let _ = inpaint_tx.send((item_id, generation, InpaintOutcome::Failed(e)));
+                    return;
+                }
+                if cancelled() {
+                    let _ = std::fs::remove_file(&image_path);
+                    let _ = std::fs::remove_file(&mask_path);
+                    send_cancelled();
+                    return;
+                }
+                let job = crate::subprocess::protocol::InpaintJob {
+                    item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
+                    feather_px: tuning.feather_px,
+                    sharpen: tuning.sharpen,
+                    edge_colour: tuning.edge_colour,
+                };
+                let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(Box::new(job)));
+            });
+            if sent.is_err() {
+                let _ = failed.send((item_id, generation, InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into())));
             }
-            if cancelled() {
-                let _ = std::fs::remove_file(&image_path);
-                let _ = std::fs::remove_file(&mask_path);
-                send_cancelled();
-                return;
-            }
-            let job = crate::subprocess::protocol::InpaintJob {
-                item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
-                feather_px: tuning.feather_px,
-                sharpen: tuning.sharpen,
-                edge_colour: tuning.edge_colour,
-            };
-            let _ = bridge_tx.send(InpaintBridgeMsg::Dispatch(Box::new(job)));
         });
     }
 
@@ -1349,9 +1350,11 @@ impl Processor {
                     // full-size image); the capsule ends once it is there.
                     let (tx, sink) = (self.inpaint_done.tx.clone(), self.inpaint_runs.get(&item_id).cloned());
                     rayon::spawn(move || {
-                        let outcome = match crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height) {
-                            Some(rgba) => InpaintOutcome::Done { rgba, fill_scale },
-                            None => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
+                        let read = crate::panics::caught("reading an eraser result", || crate::subprocess::ipc::read_result_rgba(&rgba_path, width, height));
+                        let outcome = match read {
+                            Ok(Some(rgba)) => InpaintOutcome::Done { rgba, fill_scale },
+                            Ok(None) => InpaintOutcome::Failed(format!("eraser result missing or the wrong size: {}", rgba_path.display())),
+                            Err(_) => InpaintOutcome::Failed(crate::subprocess::protocol::ERASER_STOPPED.into()),
                         };
                         let _ = tx.send((item_id, generation, outcome));
                         if let Some(sink) = sink {
