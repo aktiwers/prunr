@@ -1401,7 +1401,8 @@ pub fn run_doctor() {
     section("Hardware");
     println!("CPU vendor:  {}", p.cpu_vendor);
     println!("CPU brand:   {}", p.cpu_brand);
-    println!("dGPU:        {}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
+    let device = p.dgpu_device.map_or(String::new(), |id| format!(" (device {id:#06x})"));
+    println!("dGPU:        {}{device}", p.dgpu.map_or("None".to_string(), |g| g.to_string()));
     println!("iGPU:        {}", p.igpu.map_or("None".to_string(), |g| g.to_string()));
     println!("Recommended runtime: {}", p.recommended_runtime().map_or("none", |rt| rt.display_name()));
     println!("Recommends ROCm:     {}", p.recommends_rocm());

@@ -50,6 +50,10 @@ impl std::fmt::Display for GpuVendor {
     }
 }
 
+/// NVIDIA numbers its chips in order: Turing's TU102 is 0x1E02, and
+/// every Pascal and Volta chip lies below 0x1E00.
+const FIRST_TURING_DEVICE_ID: u32 = 0x1E00;
+
 #[derive(Debug, Clone)]
 pub struct HardwareProfile {
     pub cpu_vendor: CpuVendor,
@@ -58,6 +62,8 @@ pub struct HardwareProfile {
     /// The graphics card's name, where the system tells it: DXGI on
     /// Windows, NVIDIA's driver on Linux.
     pub dgpu_name: Option<String>,
+    /// The graphics card's PCI device id, which names its chip.
+    pub dgpu_device: Option<u32>,
     pub igpu: Option<GpuVendor>,
     /// A graphics card DirectML runs well on (Windows only).
     pub suits_directml: bool,
@@ -66,16 +72,23 @@ pub struct HardwareProfile {
 }
 
 impl HardwareProfile {
-    /// Whether `rt` has a device to run on here: CUDA an NVIDIA card,
-    /// MIGraphX an AMD one. OpenVINO's add-on lists Intel processors and
-    /// graphics only; its runtime ran on any processor.
+    /// Whether `rt` has a device to run on here: CUDA an NVIDIA card from
+    /// Turing on, MIGraphX an AMD one. OpenVINO's add-on lists Intel
+    /// processors and graphics only; its runtime ran on any processor.
     pub fn runs(&self, rt: crate::runtime_install::RuntimeId) -> bool {
         use crate::runtime_install::RuntimeId;
         match rt {
             RuntimeId::OpenVino => !rt.is_addon() || self.recommends_openvino(),
-            RuntimeId::Cuda => self.dgpu == Some(GpuVendor::Nvidia),
+            RuntimeId::Cuda => self.nvidia_runs_cuda(),
             RuntimeId::MiGraphX => self.recommends_rocm(),
         }
+    }
+
+    /// An NVIDIA card the CUDA add-on starts on: its cuDNN dropped
+    /// Maxwell, Pascal and Volta. A card whose id went unread is given
+    /// the benefit of the doubt.
+    fn nvidia_runs_cuda(&self) -> bool {
+        self.dgpu == Some(GpuVendor::Nvidia) && self.dgpu_device.is_none_or(|id| id >= FIRST_TURING_DEVICE_ID)
     }
 
     /// Intel graphics, built in or a card, which OpenVINO can run on.
@@ -91,15 +104,16 @@ impl HardwareProfile {
     }
 
     /// The runtime download the first-launch prompt and Settings
-    /// recommend, among those offered here. An NVIDIA card gets CUDA where
-    /// it is offered, Windows included: it runs models DirectML refuses or
-    /// breaks. Any other card that suits DirectML needs none, since
-    /// DirectML is built in, even with an Intel iGPU beside it. A graphics
-    /// card wins over an Intel iGPU beside it (the usual Linux laptop):
-    /// CUDA or MIGraphX runs the card, OpenVINO only the iGPU or the processor.
+    /// recommend, among those offered here. An NVIDIA card CUDA starts on
+    /// gets it where it is offered, Windows included: it runs models
+    /// DirectML refuses or breaks. Any other card that suits DirectML
+    /// needs none, since DirectML is built in, even with an Intel iGPU
+    /// beside it. A graphics card wins over an Intel iGPU beside it (the
+    /// usual Linux laptop): CUDA or MIGraphX runs the card, OpenVINO only
+    /// the iGPU or the processor.
     pub fn recommended_runtime(&self) -> Option<crate::runtime_install::RuntimeId> {
         use crate::runtime_install::RuntimeId;
-        let cuda = (self.dgpu == Some(GpuVendor::Nvidia)).then_some(RuntimeId::Cuda).filter(|rt| RuntimeId::OFFERED.contains(rt));
+        let cuda = self.nvidia_runs_cuda().then_some(RuntimeId::Cuda).filter(|rt| RuntimeId::OFFERED.contains(rt));
         if cuda.is_some() || self.suits_directml {
             return cuda;
         }
@@ -260,12 +274,13 @@ fn throttled<T: Copy>(cache: &Reading<T>, read: impl FnOnce() -> T) -> T {
 
 fn detect_now() -> HardwareProfile {
     let (cpu_vendor, cpu_brand) = detect_cpu();
-    let GpuSlots { dgpu, dgpu_name, igpu, suits_directml } = detect_gpus(cpu_vendor);
+    let GpuSlots { dgpu, dgpu_name, dgpu_device, igpu, suits_directml } = detect_gpus(cpu_vendor);
     HardwareProfile {
         cpu_vendor,
         cpu_brand,
         dgpu,
         dgpu_name,
+        dgpu_device,
         igpu,
         suits_directml,
         os: std::env::consts::OS,
@@ -320,6 +335,7 @@ struct GpuSlots {
     dgpu: Option<GpuVendor>,
     /// The card's name, where the system tells it.
     dgpu_name: Option<String>,
+    dgpu_device: Option<u32>,
     igpu: Option<GpuVendor>,
     suits_directml: bool,
 }
@@ -327,9 +343,9 @@ struct GpuSlots {
 fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
     #[cfg(target_os = "linux")]
     {
-        let (dgpu, igpu) = detect_gpus_linux(cpu_vendor);
-        let dgpu_name = (dgpu == Some(GpuVendor::Nvidia)).then(nvidia_card_name).flatten();
-        GpuSlots { dgpu, dgpu_name, igpu, suits_directml: false }
+        let mut slots = detect_gpus_linux(cpu_vendor);
+        slots.dgpu_name = (slots.dgpu == Some(GpuVendor::Nvidia)).then(nvidia_card_name).flatten();
+        slots
     }
     #[cfg(target_os = "macos")]
     {
@@ -354,12 +370,11 @@ fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
 }
 
 #[cfg(target_os = "linux")]
-fn detect_gpus_linux(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVendor>) {
+fn detect_gpus_linux(cpu_vendor: CpuVendor) -> GpuSlots {
+    let mut slots = GpuSlots::default();
     let Ok(read) = std::fs::read_dir("/sys/class/drm") else {
-        return (None, None);
+        return slots;
     };
-    let mut dgpu = None;
-    let mut igpu = None;
     for entry in read.flatten() {
         let name = entry.file_name();
         let name_s = name.to_string_lossy();
@@ -372,12 +387,13 @@ fn detect_gpus_linux(cpu_vendor: CpuVendor) -> (Option<GpuVendor>, Option<GpuVen
         // dGPU as an iGPU.
         let is_integrated = matches_cpu(gpu_vendor, cpu_vendor);
         if is_integrated {
-            igpu.get_or_insert(gpu_vendor);
-        } else {
-            dgpu.get_or_insert(gpu_vendor);
+            slots.igpu.get_or_insert(gpu_vendor);
+        } else if slots.dgpu.is_none() {
+            slots.dgpu = Some(gpu_vendor);
+            slots.dgpu_device = std::fs::read_to_string(entry.path().join("device").join("device")).ok().and_then(|raw| parse_pci_id(&raw));
         }
     }
-    (dgpu, igpu)
+    slots
 }
 
 #[cfg(target_os = "linux")]
@@ -392,7 +408,13 @@ fn is_card_dir(name: &str) -> bool {
 /// Parse a `/sys/class/drm/.../device/vendor` value (e.g. `0x10de\n`).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // sysfs is Linux's; the tests run it everywhere
 fn parse_pci_vendor(raw: &str) -> GpuVendor {
-    u32::from_str_radix(raw.trim().trim_start_matches("0x"), 16).map_or(GpuVendor::Other, gpu_vendor)
+    parse_pci_id(raw).map_or(GpuVendor::Other, gpu_vendor)
+}
+
+/// A sysfs PCI id (`0x10de\n`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // sysfs is Linux's; the tests run it everywhere
+fn parse_pci_id(raw: &str) -> Option<u32> {
+    u32::from_str_radix(raw.trim().trim_start_matches("0x"), 16).ok()
 }
 
 /// A PCI vendor id, as sysfs and DXGI both report it.
@@ -507,7 +529,7 @@ mod tests {
         use super::{CpuVendor, GpuVendor, HardwareProfile};
         use crate::runtime_install::RuntimeId::{Cuda, MiGraphX, OpenVino};
         let machine = |dgpu, igpu| HardwareProfile {
-            cpu_vendor: CpuVendor::Intel, cpu_brand: String::new(), dgpu, dgpu_name: None, igpu,
+            cpu_vendor: CpuVendor::Intel, cpu_brand: String::new(), dgpu, dgpu_name: None, dgpu_device: None, igpu,
             suits_directml: false, os: "linux", arch: "x86_64",
         };
         let runs = |p: &HardwareProfile| [OpenVino, Cuda, MiGraphX].map(|rt| p.runs(rt));
@@ -518,6 +540,40 @@ mod tests {
         let amd = |igpu| HardwareProfile { cpu_vendor: CpuVendor::Amd, ..machine(None, igpu) };
         assert_eq!(amd(None).runs(OpenVino), !OpenVino.is_addon(), "OpenVINO's add-on lists no AMD processor");
         assert!(amd(Some(GpuVendor::Intel)).runs(OpenVino), "but Intel graphics beside one");
+    }
+
+    /// The CUDA add-on's cuDNN runs Turing and later: a GTX 1080, a GT
+    /// 1030 or a Tesla V100 would download it and never start it, so a
+    /// Windows one keeps DirectML. A card whose id went unread is offered it.
+    #[test]
+    fn cuda_is_offered_only_to_turing_cards_and_later() {
+        use crate::runtime_install::RuntimeId;
+        let card = |dgpu_device| HardwareProfile {
+            cpu_vendor: CpuVendor::Amd, cpu_brand: String::new(), dgpu: Some(GpuVendor::Nvidia), dgpu_name: None,
+            dgpu_device, igpu: None, suits_directml: true, os: "windows", arch: "x86_64",
+        };
+        let offered = RuntimeId::OFFERED.contains(&RuntimeId::Cuda);
+        for (device, runs) in [
+            (Some(0x1b80), false),
+            (Some(0x1d01), false),
+            (Some(0x1db4), false),
+            (Some(0x1e04), true),
+            (Some(0x1f82), true),
+            (Some(0x2182), true),
+            (Some(0x2504), true),
+            (Some(0x2d04), true),
+            (None, true),
+        ] {
+            let p = card(device);
+            assert_eq!(p.runs(RuntimeId::Cuda), runs, "{device:#x?}");
+            assert_eq!(p.recommended_runtime() == Some(RuntimeId::Cuda), runs && offered, "{device:#x?}");
+        }
+    }
+
+    #[test]
+    fn a_cards_pci_id_is_read_as_sysfs_writes_it() {
+        assert_eq!(parse_pci_id("0x2504\n"), Some(0x2504));
+        assert_eq!(parse_pci_id("garbage"), None);
     }
 
     #[test]
@@ -591,6 +647,7 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: None,
             dgpu_name: None,
+            dgpu_device: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "linux", arch: "x86_64",
@@ -614,6 +671,7 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: Some(GpuVendor::Amd),
             dgpu_name: None,
+            dgpu_device: None,
             igpu: None,
             suits_directml: false,
             os: "linux", arch: "x86_64",
@@ -633,6 +691,7 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: None,
             dgpu_name: None,
+            dgpu_device: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "windows", arch: "x86_64",
@@ -662,6 +721,7 @@ mod tests {
             cpu_brand: "Intel Core i7".into(),
             dgpu: Some(GpuVendor::Nvidia),
             dgpu_name: None,
+            dgpu_device: None,
             igpu: Some(GpuVendor::Intel),
             suits_directml: false,
             os: "linux", arch: "x86_64",
