@@ -951,7 +951,23 @@ fn bundled_dylib() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::openvino_plugin_for_tests;
+
+#[cfg(test)]
 mod tests {
+    /// The variable naming the OpenVINO plugin for the tests that run it.
+    pub(crate) const OPENVINO_PLUGIN_FOR_TESTS: &str = "PRUNR_OPENVINO_ADDON";
+
+    /// The OpenVINO plugin `OPENVINO_PLUGIN_FOR_TESTS` names; without one
+    /// the test says it skips.
+    pub(crate) fn openvino_plugin_for_tests() -> Option<std::ffi::OsString> {
+        let plugin = std::env::var_os(OPENVINO_PLUGIN_FOR_TESTS);
+        if plugin.is_none() {
+            eprintln!("SKIP: {OPENVINO_PLUGIN_FOR_TESTS} names no plugin");
+        }
+        plugin
+    }
+
 
     /// A process that probed its providers before the CUDA add-on was
     /// installed still registers it once installed: the probe found no
@@ -1093,15 +1109,12 @@ mod tests {
     /// part until the user lets it use the Intel graphics, whether the
     /// add-on was there when the process started or installed while it
     /// ran: unfiltered, it loaded the graphics part and the system's
-    /// OpenCL drivers, used or not. `PRUNR_OPENVINO_ADDON` names the plugin.
+    /// OpenCL drivers, used or not.
     #[cfg(target_os = "linux")]
     #[test]
     fn openvino_registers_only_the_devices_it_may_use() {
         assert_eq!([openvino_devices(false), openvino_devices(true)], ["CPU", "CPU;GPU"]);
-        let Some(plugin) = std::env::var_os("PRUNR_OPENVINO_ADDON") else {
-            eprintln!("SKIP: PRUNR_OPENVINO_ADDON names no plugin");
-            return;
-        };
+        let Some(plugin) = openvino_plugin_for_tests() else { return };
         if runtime_for_tests().is_err() || !hosts_addons() {
             eprintln!("SKIP: no runtime that takes add-ons");
             return;
@@ -1111,7 +1124,7 @@ mod tests {
             let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
                 .args(["--exact", &format!("ort_runtime::tests::{child_test}"), "--ignored"])
                 .env("ORT_DYLIB_PATH", loaded_dylib().expect("loaded"))
-                .env("PRUNR_OPENVINO_ADDON", &plugin)
+                .env(OPENVINO_PLUGIN_FOR_TESTS, &plugin)
                 .env("HOME", home.path())
                 .env("XDG_DATA_HOME", home.path().join("data"))
                 .env("XDG_CACHE_HOME", home.path().join("cache"))
@@ -1135,7 +1148,7 @@ mod tests {
     #[test]
     #[ignore = "run in a process of its own by openvino_registers_only_the_devices_it_may_use"]
     fn a_process_with_openvino_lists_its_processor_only() {
-        use_addon(Addon::OpenVino, std::env::var_os("PRUNR_OPENVINO_ADDON").expect("named").into());
+        use_addon(Addon::OpenVino, std::env::var_os(OPENVINO_PLUGIN_FOR_TESTS).expect("named").into());
         ensure_initialized().expect("the runtime loads");
         openvino_lists_the_processor_only();
     }
@@ -1145,7 +1158,7 @@ mod tests {
     #[ignore = "run in a process of its own by openvino_registers_only_the_devices_it_may_use"]
     fn openvino_installed_later_lists_the_processor_only() {
         ensure_initialized().expect("the runtime loads");
-        use_addon(Addon::OpenVino, std::env::var_os("PRUNR_OPENVINO_ADDON").expect("named").into());
+        use_addon(Addon::OpenVino, std::env::var_os(OPENVINO_PLUGIN_FOR_TESTS).expect("named").into());
         openvino_lists_the_processor_only();
     }
 
