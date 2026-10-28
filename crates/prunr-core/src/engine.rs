@@ -293,10 +293,16 @@ fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
     if devices.is_empty() {
         return Err(GpuStartFailure { stack: GpuStack::Cuda, why: StartFailure::NoDevice });
     }
+    devices_start(devices, None).map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e))
+}
+
+/// Whether a session takes an add-on's `devices`, with `options`: what
+/// it takes for the add-on to start.
+#[cfg(not(target_os = "macos"))]
+fn devices_start(devices: Vec<ort::device::Device<'static>>, options: Option<&[(String, String)]>) -> Result<(), String> {
     crate::ort_runtime::session_builder()
         .map_err(|e| e.to_string())
-        .and_then(|b| b.with_devices(devices, None).map(drop).map_err(|e| e.to_string()))
-        .map_err(|e| GpuStartFailure::of(GpuStack::Cuda, &e))
+        .and_then(|b| b.with_devices(devices, options).map(drop).map_err(|e| e.to_string()))
 }
 
 /// Whether the OpenVINO add-on can start here: it lists a device only for
@@ -304,10 +310,8 @@ fn cuda_addon_starts() -> Result<(), GpuStartFailure> {
 /// lets it use them, and a session takes the one engines use first.
 #[cfg(not(target_os = "macos"))]
 fn openvino_addon_starts() -> Result<(), String> {
-    let session = openvino_addon_session(None, None, false)?;
-    crate::ort_runtime::session_builder()
-        .map_err(|e| e.to_string())
-        .and_then(|b| b.with_devices(session.devices, Some(&session.options)).map(drop).map_err(|e| e.to_string()))
+    let session = OpenVinoTuning::default().addon_session()?;
+    devices_start(session.devices, Some(&session.options))
 }
 
 /// Where a session goes on the OpenVINO add-on: the plugin's devices,
@@ -318,45 +322,81 @@ struct OpenVinoSession {
     options: Vec<(String, String)>,
 }
 
-/// The OpenVINO add-on's devices for `device`, the name the old provider
-/// took (`AUTO:GPU,CPU`, `GPU`; `None` is the processor), with the
-/// session's settings: OpenVINO's thread cap on the processor
-/// (`threads`), and one stream (`one_stream`).
+/// How an OpenVINO session is set up for its site, whether the loaded
+/// runtime carries OpenVINO or its add-on brings it.
 #[cfg(not(target_os = "macos"))]
-fn openvino_addon_session(device: Option<&str>, threads: Option<usize>, one_stream: bool) -> Result<OpenVinoSession, String> {
-    let device = device.unwrap_or("CPU");
-    let (meta, wanted) = match device.split_once(':') {
-        Some((meta, devices)) => (Some(meta), devices.split(',').collect::<Vec<_>>()),
-        None => (None, vec![device]),
-    };
-    let ep = match meta {
-        Some(meta) => format!("{}.{meta}", crate::ort_runtime::Addon::OpenVino.ep_name()),
-        None => crate::ort_runtime::Addon::OpenVino.ep_name().to_string(),
-    };
-    let mut listed = crate::ort_runtime::devices_named(&ep);
-    let devices: Vec<_> = wanted
-        .iter()
-        .filter_map(|&name| {
-            let at = listed.iter().position(|d| device_type_name(d.hardware_device().ty()) == name)?;
-            Some(listed.remove(at))
-        })
-        .collect();
-    if devices.len() != wanted.len() {
-        return Err(format!("OpenVINO lists no {device} device here"));
-    }
-    let options = openvino_load_config(meta, &wanted, threads, one_stream)
-        .map(|config| vec![(format!("{ep}.load_config"), config)])
-        .unwrap_or_default();
-    Ok(OpenVinoSession { devices, options })
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OpenVinoTuning<'a> {
+    /// As OpenVINO names it (`AUTO:GPU,CPU`, `GPU`); `None` is the
+    /// processor.
+    device: Option<&'a str>,
+    /// OpenVINO's thread cap on the processor. Uncapped, its TBB pool
+    /// takes every logical core and oversubscribes against rayon
+    /// (`sched_yield` ~2% of CLI batch wall time).
+    threads: Option<usize>,
+    /// One stream and dynamic shapes: a Stable Diffusion part. One stream
+    /// keeps no buffers per stream (the bundle sits at ~16 GB RSS on an
+    /// i7-6700 either way; measured 2026-10), and dynamic shapes cost
+    /// nothing per step, so one bundle serves 512² tiles and the 512×768
+    /// crop.
+    sd_part: bool,
 }
 
 #[cfg(not(target_os = "macos"))]
-fn device_type_name(ty: ort::memory::DeviceType) -> &'static str {
-    match ty {
-        ort::memory::DeviceType::CPU => "CPU",
-        ort::memory::DeviceType::GPU => "GPU",
-        ort::memory::DeviceType::NPU => "NPU",
-        ort::memory::DeviceType::FPGA => "FPGA",
+impl<'a> OpenVinoTuning<'a> {
+    fn for_site(site: EpSite<'a>, model: prunr_models::ModelId) -> Self {
+        let device = site.ov_device(on_intel_gpu(model));
+        match site {
+            EpSite::Engine { threads, .. } | EpSite::Fill { threads } => Self { device, threads: Some(threads), sd_part: false },
+            EpSite::Selection { .. } => Self { device, threads: None, sd_part: false },
+            EpSite::SdPart { .. } => Self { device, threads: None, sd_part: true },
+        }
+    }
+
+    /// The loaded runtime's own OpenVINO provider, so tuned. Not given a
+    /// cache dir: on ort 2.0.0-rc.12 + OpenVINO 1.24.1 cold and warm SD
+    /// UNet commits match (23.7 / 23.2 s) because OpenVINO keys the cache
+    /// differently each launch and rewrites ~3.3 GB every build.
+    fn provider(self) -> ExecutionProviderDispatch {
+        let mut provider = ort::ep::OpenVINO::default();
+        if let Some(threads) = self.threads {
+            provider = provider.with_num_threads(threads.max(1));
+        }
+        if self.sd_part {
+            provider = provider.with_num_streams(1).with_dynamic_shapes(true);
+        }
+        if let Some(device) = self.device {
+            provider = provider.with_device_type(device);
+        }
+        provider.build()
+    }
+
+    /// The add-on's devices for the device, with the settings it takes:
+    /// AUTO's factory for a device AUTO picks among. Its shapes are
+    /// dynamic without asking.
+    fn addon_session(self) -> Result<OpenVinoSession, String> {
+        let device = self.device.unwrap_or("CPU");
+        let (meta, wanted) = match device.split_once(':') {
+            Some((meta, devices)) => (Some(meta), devices.split(',').collect::<Vec<_>>()),
+            None => (None, vec![device]),
+        };
+        let addon = crate::ort_runtime::Addon::OpenVino.ep_name();
+        let ep = meta.map_or_else(|| addon.to_string(), |meta| format!("{addon}.{meta}"));
+        let mut listed = crate::ort_runtime::devices_named(&ep);
+        let devices: Vec<_> = wanted
+            .iter()
+            .filter_map(|&name| {
+                let at = listed.iter().position(|d| format!("{:?}", d.hardware_device().ty()) == name)?;
+                Some(listed.remove(at))
+            })
+            .collect();
+        if devices.len() != wanted.len() {
+            return Err(format!("OpenVINO lists no {device} device here"));
+        }
+        let options = openvino_load_config(meta, &wanted, self.threads, self.sd_part)
+            .map(|config| vec![(format!("{ep}.load_config"), config)])
+            .unwrap_or_default();
+        Ok(OpenVinoSession { devices, options })
     }
 }
 
@@ -612,15 +652,15 @@ fn disabled_optimizers_on(provider: &str) -> &'static [&'static str] {
 const OV_ENGINE_DEVICE: &str = "AUTO:GPU,CPU";
 
 #[cfg(not(target_os = "macos"))]
-impl EpSite<'_> {
+impl<'a> EpSite<'a> {
     /// The OpenVINO device this site asks for, `intel_gpu` when the model
     /// runs on the Intel graphics (`on_intel_gpu`); `None` is OpenVINO's
     /// CPU. Fills stay there.
-    fn ov_device(&self, intel_gpu: bool) -> Option<&str> {
+    fn ov_device(self, intel_gpu: bool) -> Option<&'a str> {
         match self {
             EpSite::Engine { .. } | EpSite::Selection { .. } => intel_gpu.then_some(OV_ENGINE_DEVICE),
             EpSite::Fill { .. } => None,
-            EpSite::SdPart { ov_device, .. } => *ov_device,
+            EpSite::SdPart { ov_device, .. } => ov_device,
         }
     }
 }
@@ -715,12 +755,7 @@ impl EpKind {
             }
             #[cfg(not(target_os = "macos"))]
             EpKind::OpenVino if crate::ort_runtime::Addon::OpenVino.registered() => {
-                let (threads, one_stream) = match site {
-                    EpSite::Engine { threads, .. } | EpSite::Fill { threads } => (Some(threads), false),
-                    EpSite::Selection { .. } => (None, false),
-                    EpSite::SdPart { .. } => (None, true),
-                };
-                let session = openvino_addon_session(site.ov_device(on_intel_gpu(model)), threads, one_stream).map_err(Miss::Unusable)?;
+                let session = OpenVinoTuning::for_site(site, model).addon_session().map_err(Miss::Unusable)?;
                 builder.with_devices(session.devices, Some(&session.options))
             }
             _ => builder.with_execution_providers([self.provider(model, site)]),
@@ -763,47 +798,8 @@ impl EpKind {
             }
             #[cfg(windows)]
             EpKind::DirectMl => directml_provider(),
-            // NOT using `with_cache_dir`: on ort 2.0.0-rc.12 + OpenVINO
-            // 1.24.1 cold and warm SD UNet commits match (23.7 / 23.2 s)
-            // because OpenVINO keys the cache differently each launch and
-            // rewrites ~3.3 GB every build.
             #[cfg(not(target_os = "macos"))]
-            EpKind::OpenVino => match site {
-                // Uncapped, OpenVINO's TBB pool takes every logical core
-                // and oversubscribes against rayon (`sched_yield` ~2% of
-                // CLI batch wall time).
-                EpSite::Engine { threads, .. } | EpSite::Fill { threads } => {
-                    let provider = ort::ep::OpenVINO::default().with_num_threads(threads.max(1));
-                    match site.ov_device(on_intel_gpu(model)) {
-                        Some(device) => provider.with_device_type(device),
-                        None => provider,
-                    }
-                    .build()
-                }
-                EpSite::Selection { .. } => {
-                    let provider = ort::ep::OpenVINO::default();
-                    match site.ov_device(on_intel_gpu(model)) {
-                        Some(device) => provider.with_device_type(device),
-                        None => provider,
-                    }
-                    .build()
-                }
-                // `num_streams=1` disables per-stream buffer duplication
-                // (the bundle sits at ~16 GB RSS on an i7-6700 either
-                // way; measured 2026-10). Dynamic shapes cost nothing per
-                // step, so one bundle serves 512² tiles and the 512×768
-                // crop.
-                EpSite::SdPart { .. } => {
-                    let provider = ort::ep::OpenVINO::default()
-                        .with_num_streams(1)
-                        .with_dynamic_shapes(true);
-                    match site.ov_device(on_intel_gpu(model)) {
-                        Some(device) => provider.with_device_type(device),
-                        None => provider,
-                    }
-                    .build()
-                }
-            },
+            EpKind::OpenVino => OpenVinoTuning::for_site(site, model).provider(),
         };
         dispatch.error_on_failure()
     }
@@ -2152,6 +2148,20 @@ mod tests {
         if !processor.is_empty() {
             assert_eq!(ran_on(processor, "named"), ["OpenVINOExecutionProvider".to_string()].into(), "a session naming OpenVINO keeps it");
         }
+    }
+
+    /// OpenVINO is tuned per site, for its own provider and its add-on
+    /// alike: the thread cap for engines and fills, one stream and dynamic
+    /// shapes for a Stable Diffusion part, neither for the Magic Brush.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn openvino_is_tuned_per_site() {
+        let lama = prunr_models::ModelId::LaMaFp32;
+        let tuned = |site| OpenVinoTuning::for_site(site, lama);
+        assert_eq!(tuned(EpSite::Fill { threads: 3 }), OpenVinoTuning { device: None, threads: Some(3), sd_part: false });
+        assert_eq!(tuned(EpSite::Engine { threads: 4, part: None }).threads, Some(4));
+        assert_eq!(tuned(EpSite::Selection { part: "encoder" }), OpenVinoTuning::default());
+        assert_eq!(tuned(EpSite::SdPart { part: "unet", ov_device: Some("GPU") }), OpenVinoTuning { device: Some("GPU"), threads: None, sd_part: true });
     }
 
     /// OpenVINO's settings reach the device they are for: the thread cap
