@@ -581,7 +581,7 @@ pub fn use_installed_addons() {
 fn start_addon() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
-        prunr_core::engine::start_cuda_addon()
+        prunr_core::engine::start_addon(prunr_core::ort_runtime::Addon::Cuda)
     }
     #[cfg(target_os = "macos")]
     {
