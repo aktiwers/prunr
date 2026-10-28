@@ -61,54 +61,42 @@ pub fn prewarm(id: prunr_models::ModelId, cpu_only: bool) -> Result<(), CoreErro
     }
 }
 
-/// Dilate (px > 0) or erode (px < 0) a binary mask by `|px|` iterations
-/// of 4-connected morphology — fine for the small values the GUI exposes.
+/// Grow (px > 0) or shrink (px < 0) a binary mask by a disc of `|px|`
+/// pixels (`morphology::dilate_round`): N steps of 4-connected
+/// morphology grew a diamond, which leaked the eraser's feather along the
+/// diagonals. Shrinking grows what is not masked; outside the image counts
+/// as not masked, so a mask shrinks away from the image's edge too.
 ///
-/// Works on the mask's bbox (plus `px` when dilating): nothing farther
-/// than `px` from the mask can change, so the result is bit-identical
-/// to a full-image pass. Peak RAM: the output plus two bbox buffers.
+/// Growing works on the mask's bbox plus `px`: nothing farther than `px`
+/// from the mask can change, so the result is bit-identical to a
+/// full-image pass. Peak RAM: the output plus two bbox planes; a shrink,
+/// the output plus two full planes.
 pub fn grow_mask(mask: &GrayImage, px: i32) -> GrayImage {
     if px == 0 {
         return mask.clone();
     }
     let (w, h) = mask.dimensions();
-    // After w + h steps every pixel is as far as any can be: further ones
-    // change nothing.
-    let iters = px.unsigned_abs().min(w + h);
-    let dilate = px > 0;
+    // Past w + h every pixel is as far as any can be.
+    let r = px.unsigned_abs().min(w + h);
+    let binary = |v: u8, set: bool| if (v > 127) == set { 255 } else { 0 };
     let mut out = GrayImage::new(w, h);
-    let Some(b) = mask_bbox(mask, 128, if dilate { iters } else { 0 }) else {
+    if px > 0 {
+        let Some(b) = mask_bbox(mask, 128, r) else { return out };
+        let mut region = image::imageops::crop_imm(mask, b.x, b.y, b.w, b.h).to_image();
+        region.pixels_mut().for_each(|p| p.0[0] = binary(p.0[0], true));
+        let grown = crate::morphology::dilate_round(&region, r);
+        image::imageops::replace(&mut out, &grown, b.x as i64, b.y as i64);
         return out;
-    };
-    let mut current = image::imageops::crop_imm(mask, b.x, b.y, b.w, b.h).to_image();
-    let mut next = GrayImage::new(b.w, b.h);
-    for _ in 0..iters {
-        morphology_step_into(&current, &mut next, dilate);
-        std::mem::swap(&mut current, &mut next);
     }
-    image::imageops::replace(&mut out, &current, b.x as i64, b.y as i64);
+    let mut outside = mask.clone();
+    outside.pixels_mut().for_each(|p| p.0[0] = binary(p.0[0], false));
+    let reached = crate::morphology::dilate_round(&outside, r);
+    drop(outside);
+    for (x, y, p) in out.enumerate_pixels_mut() {
+        let at_edge = x < r || y < r || x + r >= w || y + r >= h;
+        p.0[0] = if at_edge || reached.get_pixel(x, y).0[0] > 127 { 0 } else { 255 };
+    }
     out
-}
-
-fn morphology_step_into(mask: &GrayImage, out: &mut GrayImage, dilate: bool) {
-    let (w, h) = mask.dimensions();
-    let w_us = w as usize;
-    let h_us = h as usize;
-    let raw = mask.as_raw();
-    let buf = out.as_mut();
-    for y in 0..h_us {
-        for x in 0..w_us {
-            // Out of bounds counts as zero, so erosion shrinks at the
-            // image boundary.
-            let center = raw[y * w_us + x] > 127;
-            let n = y > 0 && raw[(y - 1) * w_us + x] > 127;
-            let s = y + 1 < h_us && raw[(y + 1) * w_us + x] > 127;
-            let e = x + 1 < w_us && raw[y * w_us + x + 1] > 127;
-            let we = x > 0 && raw[y * w_us + x - 1] > 127;
-            let bit = if dilate { center || n || s || e || we } else { center && n && s && e && we };
-            buf[y * w_us + x] = if bit { 255 } else { 0 };
-        }
-    }
 }
 
 /// For each pixel, the distance to the nearest mask==0 pixel (0.0 if
@@ -1344,18 +1332,29 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
-    /// The bbox-cropped grow matches full-image morphology, for masks in
-    /// the middle and touching each image edge, growing and shrinking.
+    /// The bbox-cropped grow matches the disc taken pixel by pixel over the
+    /// whole image, for masks in the middle and touching each image edge,
+    /// growing and shrinking.
     #[test]
     fn grow_mask_matches_full_image_morphology() {
+        // Each pixel looked at on its own: in the disc of reach r + 0.5
+        // of a set pixel when growing; kept when no unset pixel and no
+        // image edge is within it when shrinking.
         let full = |m: &GrayImage, px: i32| {
-            let mut cur = m.clone();
-            let mut next = GrayImage::new(m.width(), m.height());
-            for _ in 0..px.unsigned_abs() {
-                morphology_step_into(&cur, &mut next, px > 0);
-                std::mem::swap(&mut cur, &mut next);
-            }
-            cur
+            let (w, h) = (m.width() as i64, m.height() as i64);
+            let r = px.unsigned_abs() as i64;
+            let reach = (r as f64 + 0.5).powi(2);
+            let set = |x: i64, y: i64| (0..w).contains(&x) && (0..h).contains(&y) && m.get_pixel(x as u32, y as u32).0[0] > 127;
+            let near = |x: i64, y: i64, want: bool| (-r..=r).any(|dy| (-r..=r).any(|dx| ((dx * dx + dy * dy) as f64) <= reach && {
+                let (qx, qy) = (x + dx, y + dy);
+                let inside = (0..w).contains(&qx) && (0..h).contains(&qy);
+                if want { set(qx, qy) } else { !inside || !set(qx, qy) }
+            }));
+            GrayImage::from_fn(w as u32, h as u32, |x, y| {
+                let (x, y) = (x as i64, y as i64);
+                let on = if px > 0 { near(x, y, true) } else { set(x, y) && !near(x, y, false) };
+                Luma([if on { 255 } else { 0 }])
+            })
         };
         for (x0, y0, x1, y1) in [(10, 12, 20, 25), (0, 0, 6, 9), (30, 33, 40, 40), (0, 15, 40, 18)] {
             let mut m = rect_mask(40, 40, (x0, y0, x1, y1));
@@ -1777,10 +1776,23 @@ mod tests {
         }
     }
 
-    /// Grow 0 is the mask itself; +1 adds the 4-connected neighbours (not
-    /// the diagonals); −1 strips a pixel off every edge.
+    /// Expand grows by a disc, not a diamond: on the diagonal 7, 7 px out
+    /// (9.9 px away) is in at 10 px, 8, 8 px out (11.3 px) is not; and it
+    /// reaches 10 px straight out, no further.
     #[test]
-    fn grow_mask_dilates_and_erodes_by_4_connectivity() {
+    fn expand_grows_a_disc() {
+        let mut dot = GrayImage::new(41, 41);
+        dot.put_pixel(20, 20, Luma([255]));
+        let grown = grow_mask(&dot, 10);
+        let on = |x, y| grown.get_pixel(x, y).0[0] == 255;
+        assert!(on(27, 27) && !on(28, 28), "the diagonal");
+        assert!(on(30, 20) && !on(31, 20) && on(20, 10) && !on(20, 9), "straight out");
+    }
+
+    /// Grow 0 is the mask itself; +1 adds the neighbours and the
+    /// diagonals (the smallest disc); −1 strips a pixel off every edge.
+    #[test]
+    fn grow_mask_dilates_and_erodes_by_the_smallest_disc() {
         let mut dot = GrayImage::new(5, 5);
         dot.put_pixel(2, 2, Luma([255]));
         assert_eq!(grow_mask(&dot, 0).as_raw(), dot.as_raw());
@@ -1788,7 +1800,7 @@ mod tests {
         for (x, y) in [(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)] {
             assert_eq!(grown.get_pixel(x, y).0[0], 255, "({x}, {y})");
         }
-        assert_eq!(grown.get_pixel(1, 1).0[0], 0, "a diagonal");
+        assert_eq!((grown.get_pixel(1, 1).0[0], grown.get_pixel(0, 2).0[0]), (255, 0), "a diagonal, not two out");
         let block = rect_mask(5, 5, (1, 1, 4, 4));
         let shrunk = grow_mask(&block, -1);
         assert_eq!(shrunk.get_pixel(2, 2).0[0], 255, "the centre survives");
