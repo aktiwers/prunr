@@ -53,6 +53,7 @@ pub(super) fn adapters() -> (Vec<AdapterFacts>, Option<usize>) {
         let facts = AdapterFacts {
             name: String::from_utf16_lossy(&desc.Description[..name_len]),
             vendor_id: desc.VendorId,
+            device_id: desc.DeviceId,
             dedicated_mb: (desc.DedicatedVideoMemory / (1024 * 1024)) as u64,
             is_software: is_software(desc),
         };
@@ -60,7 +61,7 @@ pub(super) fn adapters() -> (Vec<AdapterFacts>, Option<usize>) {
             index,
             name = %facts.name,
             vendor_id = format_args!("{:#06x}", facts.vendor_id),
-            device_id = format_args!("{:#06x}", desc.DeviceId),
+            device_id = format_args!("{:#06x}", facts.device_id),
             dedicated_mb = facts.dedicated_mb,
             software = facts.is_software,
             "DXGI adapter",

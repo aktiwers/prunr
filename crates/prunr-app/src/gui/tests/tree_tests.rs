@@ -70,6 +70,7 @@ fn test_machine() -> &'static crate::hardware::HardwareProfile {
         cpu_brand: "Intel(R) Core(TM) i7-6700 CPU @ 3.40GHz".into(),
         dgpu: None,
         dgpu_name: None,
+        dgpu_device: None,
         igpu: Some(GpuVendor::Intel),
         suits_directml: false,
         os: std::env::consts::OS,
