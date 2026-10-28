@@ -650,7 +650,8 @@ const BIREFNET_ON_OPENVINO: Why = Why::Fails(
 
 const MIGAN_ON_OPENVINO: Why = Why::Fails(
     "its session does not build: OpenVINO's CPU plugin has no implementation for one of its nodes (\"No suitable \
-     implementations found\") (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25)",
+     implementations found\") (i7-6700 and HD 530, OpenVINO 1.24.1, 2026-10-25; OpenVINO's plugin 1.8.1 on the \
+     processor too, 2026-10-27)",
 );
 
 const SAM_ON_OPENVINO: Why = Why::Fails(
@@ -848,7 +849,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There(Speed::on(440.0, 525.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::There(Speed::on(36.42, 618.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::NoGain("0.94x: 255 ms against the CPU's 240 ms, within 10%, in 1300 MB of system memory against the CPU's 750 MB (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::Cpu(SILUETA_ON_OPENVINO),
+            openvino: Place::Cpu(Why::Slower("0.82x: 782 ms against the CPU's 638 ms (i7-6700, OpenVINO plugin 1.8.1 on the processor, 2026-10-27)")),
             openvino_gpu: Place::Cpu(SILUETA_ON_OPENVINO),
             ..Places::UNMEASURED
         },
@@ -935,7 +936,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
                  matched the CPU at half its speed, 17.6 s against 8.2 s, with ScatterND, Equal, Expand, ConstantOfShape, Mod \
                  and Floor left to the CPU (MacBook Air M1, 2026-10-24)",
             )),
-            openvino: Place::Cpu(BIREFNET_ON_OPENVINO),
+            openvino: Place::Cpu(Why::Slower("1.1x slower than the CPU with ORT's constant folding on (i7-6700, OpenVINO 1.24.1, 2026-10-26); OpenVINO's plugin ran it as fast as that build, 8.7 s against 8.4 s (i7-6700, OpenVINO plugin 1.8.1 on the processor, 2026-10-27)")),
             openvino_gpu: Place::Cpu(BIREFNET_ON_OPENVINO),
             ..Places::UNMEASURED
         },
@@ -1062,7 +1063,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There(Speed::on(1298.6, 2740.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::Cpu(Why::Fails("its session fails to build: \"the parameter is incorrect\" (80070057) (RTX 3060, Windows ML 1.30 and DirectML 1.24.1, 2026-10-26)")),
             coreml: Place::Cpu(Why::Slower("0.72x: 3.81 s against the CPU's 2.75 s (MacBook Air M1 16 GB, ORT 1.30, 2026-10-25)")),
-            openvino: Place::There(Speed::on(3571.4, 4000.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
+            openvino: Place::Cpu(Why::Fails("its session does not build: \"Conversion is failed for: Transpose-13\", at every optimization level (i7-6700, OpenVINO plugin 1.8.1 on the processor, 2026-10-27)")),
             openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
@@ -1801,7 +1802,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There(Speed::on(75.07, 1120.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::There(Speed::on(176.0, 1160.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::Cpu(Why::Differs("its colours vary between runs: 4.8%, 14.5% and 9.5% of values more than 2/255 from the CPU's in three runs, against a 10% tolerance (MacBook Air M1, ORT 1.30, 2026-10-23 and 2026-10-25)")),
-            openvino: Place::Cpu(DDCOLOR_ON_OPENVINO),
+            openvino: Place::There(Speed::on(901.0, 1130.0, "i7-6700, OpenVINO plugin 1.8.1 on the processor, 2026-10-27")),
             openvino_gpu: Place::Cpu(DDCOLOR_ON_OPENVINO),
             ..Places::UNMEASURED
         },
@@ -1899,7 +1900,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cuda: Place::There(Speed::on(379.0, 2510.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
             directml: Place::There(Speed::on(382.52, 1970.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
             coreml: Place::There(Speed::on(717.9, 1680.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
-            openvino: Place::Cpu(SAM_ON_OPENVINO),
+            openvino: Place::There(Speed::on(1650.0, 1820.0, "the encoder, i7-6700, OpenVINO plugin 1.8.1 on the processor, 2026-10-27")),
             openvino_gpu: Place::Cpu(SAM_ON_OPENVINO),
             ..Places::UNMEASURED
         },
