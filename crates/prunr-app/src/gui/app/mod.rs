@@ -1073,7 +1073,8 @@ impl PrunrApp {
     /// Escape: the top-most modal first, then a run in flight, then
     /// the selection. One press does one thing.
     fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
-        if self.close_top_modal() {
+        // A modal Escape cannot close still keeps it from what is behind.
+        if self.close_top_modal() || self.any_modal_open() {
             return;
         }
         let finding_faces = self.processor.dispatch_progress().is_some_and(|p| p.kind == super::dispatch_progress::ProgressKind::Faces);
