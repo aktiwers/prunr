@@ -10,7 +10,7 @@ pub(crate) struct HardwareInstallCache {
     pub migraphx: bool,
     /// NVIDIA's libraries beside the CUDA runtime.
     pub nvidia_libraries: bool,
-    /// The add-on is installed but this process loaded an older runtime
+    /// An add-on is installed but this process loaded an older runtime
     /// from the Runtime Store, which cannot take it.
     pub addon_waits: bool,
     /// OpenVINO may run models on the Intel GPU from the next start.
@@ -282,7 +282,7 @@ impl HardwareInstallCache {
             cuda: RuntimeId::Cuda.is_installed(),
             migraphx: RuntimeId::MiGraphX.is_installed(),
             nvidia_libraries: crate::runtime_install::nvidia_libraries_installed(),
-            addon_waits: RuntimeId::Cuda.is_addon() && RuntimeId::Cuda.is_installed() && !prunr_core::ort_runtime::hosts_addons(),
+            addon_waits: RuntimeId::OFFERED.iter().any(|rt| rt.is_addon() && rt.is_installed()) && !prunr_core::ort_runtime::hosts_addons(),
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
             built_in: prunr_core::ort_runtime::has_built_in(),
@@ -452,9 +452,9 @@ mod tests {
         use crate::runtime_install::{RuntimeChoice, RuntimeId};
         let mut installs = super::HardwareInstallCache { built_in: true, ..Default::default() };
         assert!(installs.can_load(RuntimeChoice::BuiltIn));
-        assert!(!installs.can_load(RuntimeChoice::Store(RuntimeId::OpenVino)));
-        installs.openvino = true;
-        assert!(installs.can_load(RuntimeChoice::Store(RuntimeId::OpenVino)) && installs.can_load(RuntimeChoice::BuiltIn));
+        assert!(!installs.can_load(RuntimeChoice::Store(RuntimeId::MiGraphX)));
+        installs.migraphx = true;
+        assert!(installs.can_load(RuntimeChoice::Store(RuntimeId::MiGraphX)) && installs.can_load(RuntimeChoice::BuiltIn));
         assert!(!super::HardwareInstallCache::default().can_load(RuntimeChoice::BuiltIn), "none beside the app");
     }
 

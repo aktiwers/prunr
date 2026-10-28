@@ -67,18 +67,28 @@ pub struct HardwareProfile {
 
 impl HardwareProfile {
     /// Whether `rt` has a device to run on here: CUDA an NVIDIA card,
-    /// MIGraphX an AMD one, OpenVINO any computer (its CPU plugin).
+    /// MIGraphX an AMD one. OpenVINO's add-on lists Intel processors and
+    /// graphics only; its runtime ran on any processor.
     pub fn runs(&self, rt: crate::runtime_install::RuntimeId) -> bool {
         use crate::runtime_install::RuntimeId;
         match rt {
+            RuntimeId::OpenVino if rt.is_addon() => self.cpu_vendor == CpuVendor::Intel || self.intel_graphics(),
             RuntimeId::OpenVino => true,
             RuntimeId::Cuda => self.dgpu == Some(GpuVendor::Nvidia),
             RuntimeId::MiGraphX => self.recommends_rocm(),
         }
     }
 
+    /// Intel graphics, built in or a card, which OpenVINO can run on.
+    pub fn intel_graphics(&self) -> bool {
+        self.igpu == Some(GpuVendor::Intel) || self.dgpu == Some(GpuVendor::Intel)
+    }
+
+    /// OpenVINO suits Intel graphics, and its add-on an Intel processor
+    /// too: it ran the models 1.1 to 1.8 times as fast as Prunr's own
+    /// processor engine on an i7-6700.
     pub fn recommends_openvino(&self) -> bool {
-        self.igpu == Some(GpuVendor::Intel)
+        self.intel_graphics() || (crate::runtime_install::RuntimeId::OpenVino.is_addon() && self.cpu_vendor == CpuVendor::Intel)
     }
 
     /// The runtime download the first-launch prompt and Settings
@@ -506,6 +516,9 @@ mod tests {
         assert_eq!(runs(&machine(Some(GpuVendor::Nvidia), Some(GpuVendor::Intel))), [true, true, false], "NVIDIA card");
         assert_eq!(runs(&machine(Some(GpuVendor::Amd), None)), [true, false, true], "AMD card");
         assert_eq!(runs(&machine(None, Some(GpuVendor::Amd))), [true, false, false], "an AMD APU is not offered ROCm");
+        let amd = |igpu| HardwareProfile { cpu_vendor: CpuVendor::Amd, ..machine(None, igpu) };
+        assert_eq!(amd(None).runs(OpenVino), !OpenVino.is_addon(), "OpenVINO's add-on lists no AMD processor");
+        assert!(amd(Some(GpuVendor::Intel)).runs(OpenVino), "but Intel graphics beside one");
     }
 
     #[test]
@@ -569,8 +582,11 @@ mod tests {
         assert!(!is_card_dir("controlD64"));
     }
 
+    /// OpenVINO is recommended for Intel graphics, built in or a card, and
+    /// where it comes as an add-on for an Intel processor too.
     #[test]
-    fn recommends_openvino_only_for_intel_igpu() {
+    fn recommends_openvino_for_intel_hardware() {
+        let addon = crate::runtime_install::RuntimeId::OpenVino.is_addon();
         let mut p = HardwareProfile {
             cpu_vendor: CpuVendor::Intel,
             cpu_brand: "Intel Core i7".into(),
@@ -580,11 +596,16 @@ mod tests {
             suits_directml: false,
             os: "linux", arch: "x86_64",
         };
-        assert!(p.recommends_openvino());
+        assert!(p.recommends_openvino() && p.intel_graphics());
         p.igpu = None;
+        assert_eq!(p.recommends_openvino(), addon, "an Intel processor alone");
+        assert!(!p.intel_graphics());
+        p.cpu_vendor = CpuVendor::Amd;
         assert!(!p.recommends_openvino());
         p.igpu = Some(GpuVendor::Apple);
         assert!(!p.recommends_openvino());
+        p.dgpu = Some(GpuVendor::Intel);
+        assert!(p.recommends_openvino() && p.intel_graphics(), "an Intel card");
     }
 
     #[test]
@@ -628,7 +649,8 @@ mod tests {
         p.dgpu = None;
         p.igpu = None;
         p.suits_directml = false;
-        assert_eq!(p.recommended_runtime(), None);
+        let addon = RuntimeId::OpenVino.is_addon().then_some(RuntimeId::OpenVino);
+        assert_eq!(p.recommended_runtime(), addon, "an Intel processor alone, where OpenVINO is an add-on");
     }
 
     /// An NVIDIA card gets CUDA where it is offered, even beside an Intel
