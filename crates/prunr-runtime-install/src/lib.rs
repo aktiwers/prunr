@@ -1021,6 +1021,10 @@ mod tests {
         let library = extract_addon(std::io::Cursor::new(packed), dir.path(), &CUDA_ADDON_LINUX).unwrap();
         assert_eq!(std::fs::read_to_string(library).unwrap(), "so");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the library");
+        let dotted = tempfile::tempdir().unwrap();
+        let packed = tar_gz_of(&[("./libonnxruntime_providers_cuda.so", "first"), ("libonnxruntime_providers_cuda.so", "second")]);
+        let library = extract_addon(std::io::Cursor::new(packed), dotted.path(), &CUDA_ADDON_LINUX).unwrap();
+        assert_eq!(std::fs::read_to_string(library).unwrap(), "first", "a ./ name is the same file, and the first write wins");
         let empty = tempfile::tempdir().unwrap();
         let without = tar_gz_of(&[("version.json", "{}")]);
         assert!(extract_addon(std::io::Cursor::new(without), empty.path(), &CUDA_ADDON_LINUX).is_err_and(|e| e.contains("missing")));
