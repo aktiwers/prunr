@@ -417,7 +417,7 @@ impl BatchManager {
                     Ok(img) => Ok(Arc::new(img.into_rgba8())),
                     Err(e) => Err(format!("Could not read the image: {e}")),
                 })
-            }).unwrap_or_else(|_| Err("Could not read the image.".to_string()));
+            }).unwrap_or_else(|| Err("Could not read the image.".to_string()));
             let _ = tx.send((item_id, result));
         });
     }

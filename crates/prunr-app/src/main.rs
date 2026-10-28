@@ -96,15 +96,12 @@ fn main() {
         std::process::exit(cli::run_bench(args));
     }
 
-    // `--open <path>` forces GUI mode regardless of input args.
-    if let Some(path) = cli.open.as_ref() {
-        if let Some(s) = path.to_str() {
-            // SAFETY: single-threaded at this point in main.
-            unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
-        }
-    } else if !cli.inputs.is_empty() {
-        let exit_code = cli::run_remove(&cli);
-        std::process::exit(exit_code);
+    if !cli.opens_the_window() {
+        std::process::exit(cli::run_remove(&cli));
+    }
+    if let Some(s) = cli.open.as_ref().and_then(|path| path.to_str()) {
+        // SAFETY: single-threaded at this point in main.
+        unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
     }
 
     if cli.debug {

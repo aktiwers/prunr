@@ -200,9 +200,18 @@ impl Action {
         Self::ALL.into_iter().find(|a| a.name() == name)
     }
 
-    /// A focused text field's own: egui's text box undoes its typing.
+    /// A focused text field's own: egui's text box undoes its typing
+    /// (Copy and Cut arrive as its events). Every action is listed: a new
+    /// one decides.
     fn edits_text(self) -> bool {
-        matches!(self, Action::Undo | Action::Redo)
+        match self {
+            Action::Undo | Action::Redo => true,
+            Action::Open | Action::Process | Action::Save | Action::Copy | Action::Cut | Action::Delete | Action::Invert
+            | Action::Cancel | Action::Shortcuts | Action::CliHelp | Action::PipelineFlow | Action::Screenshot
+            | Action::FitToWindow | Action::ActualSize | Action::Settings | Action::BeforeAfter
+            | Action::PrevImage | Action::NextImage | Action::ToggleQueue | Action::ToggleAdjustments
+            | Action::BrushSmaller | Action::BrushLarger => false,
+        }
     }
 
     /// Acts while a modal is up: what closes it, the other help and
@@ -429,7 +438,7 @@ fn pressed_with(ctx: &egui::Context, bindings: &Bindings) -> Pressed {
     let mut out = Pressed::default();
     // Read before `ctx.input`: egui's context lock is not re-entrant.
     let text_focused = ctx.memory(|m| m.focused().is_some());
-    let typing = text_field_focused(ctx);
+    let typing = text_focused && text_field_focused(ctx);
     ctx.input(|i| {
         if i.events.is_empty() || foreign_modifier_held(&i.modifiers) {
             return;

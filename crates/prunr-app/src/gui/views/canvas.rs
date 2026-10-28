@@ -321,7 +321,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
         let p = &i.pointer;
         (p.primary_clicked(), p.primary_pressed(), p.primary_down(), p.primary_released(), p.hover_pos())
     });
-    let on_image = hover_pos.is_some_and(|p| super::brush_overlay::on_shown_image(ui, img_rect, p));
+    let on_image = pointer_on_img.is_some();
 
     // What a click or stroke selects with: the depth map, or SAM. A SAM
     // pick made before the encoder has finished waits for the embedding.
@@ -900,7 +900,7 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
 /// image runs far past the window and its unseen tiles are skipped.
 fn checker_tiles(bounds: Rect, clip: Rect, tile_px: f32, mut tile: impl FnMut(Rect, Pos2)) {
     let shown = bounds.intersect(clip);
-    let first = |shown_min: f32, origin: f32| origin + ((shown_min - origin) / tile_px).floor().max(0.0) * tile_px;
+    let first = |shown_min: f32, origin: f32| origin + ((shown_min - origin) / tile_px).floor() * tile_px;
     let mut y = first(shown.min.y, bounds.min.y);
     while y < shown.max.y {
         let row_h = tile_px.min(bounds.max.y - y);

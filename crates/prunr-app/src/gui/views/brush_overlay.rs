@@ -245,7 +245,11 @@ fn trail_mesh(
 /// the toolbars, which share the canvas's layer: there the pointer is on
 /// the toolbar.
 pub(crate) fn on_shown_image(ui: &Ui, img_rect: Rect, p: Pos2) -> bool {
-    img_rect.intersect(ui.clip_rect()).contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id())
+    img_rect.intersect(ui.clip_rect()).contains(p) && on_canvas_layer(ui, p)
+}
+
+fn on_canvas_layer(ui: &Ui, p: Pos2) -> bool {
+    ui.ctx().layer_id_at(p).is_none_or(|l| l == ui.layer_id())
 }
 
 pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
@@ -256,7 +260,7 @@ pub(crate) fn draw_cursor(ui: &Ui, img_rect: Rect, s: CursorLook, armed: bool) {
     }
     // Ours replaces the system's (an arrow, or a cross on GNOME), except
     // over a control floating on the image, which keeps its own.
-    if on_shown_image(ui, img_rect, p) {
+    if on_canvas_layer(ui, p) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
     }
     let r = s.radius.max(MIN_SCREEN_RADIUS_PX);

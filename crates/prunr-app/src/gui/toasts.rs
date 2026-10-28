@@ -42,32 +42,26 @@ impl Toasts {
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
-        let caption = caption.into();
-        let lasts = BRIEF;
-        self.keep(&caption, lasts);
-        #[cfg(test)] self.2.push(("success", caption.clone()));
-        self.0.success(wrap(&caption)).duration(lasts)
+        self.push("success", caption.into(), BRIEF, |toasts, text| toasts.success(text))
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
-        let caption = caption.into();
-        let lasts = BRIEF;
-        self.keep(&caption, lasts);
-        #[cfg(test)] self.2.push(("info", caption.clone()));
-        self.0.info(wrap(&caption)).duration(lasts)
+        self.push("info", caption.into(), BRIEF, |toasts, text| toasts.info(text))
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        let lasts = reading_time(&caption);
-        self.keep(&caption, lasts);
-        #[cfg(test)] self.2.push(("warning", caption.clone()));
-        self.0.warning(wrap(&caption)).duration(lasts)
+        self.push("warning", caption.clone(), reading_time(&caption), |toasts, text| toasts.warning(text))
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
         let caption = caption.into();
-        let lasts = reading_time(&caption);
+        self.push("error", caption.clone(), reading_time(&caption), |toasts, text| toasts.error(text))
+    }
+
+    #[cfg_attr(not(test), allow(unused_variables))] // the level is kept for tests only
+    fn push(&mut self, level: &'static str, caption: String, lasts: Duration, show: fn(&mut egui_notify::Toasts, String) -> &mut Toast) -> &mut Toast {
         self.keep(&caption, lasts);
-        #[cfg(test)] self.2.push(("error", caption.clone()));
-        self.0.error(wrap(&caption)).duration(lasts)
+        let text = wrap(&caption);
+        #[cfg(test)] self.2.push((level, caption));
+        show(&mut self.0, text).duration(lasts)
     }
     /// A success toast for `Ok`, an error toast for `Err`.
     pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
@@ -107,8 +101,9 @@ impl Toasts {
     /// recording on.
     pub fn shown(&self) -> Vec<String> {
         let now = Instant::now();
-        let live: Vec<&String> = self.1.iter().filter(|(_, leaves)| *leaves > now).map(|(caption, _)| caption).collect();
-        live[live.len().saturating_sub(self.0.len())..].iter().map(|caption| (*caption).clone()).collect()
+        let mut shown: Vec<String> = self.1.iter().rev().filter(|(_, leaves)| *leaves > now).take(self.0.len()).map(|(caption, _)| caption.clone()).collect();
+        shown.reverse();
+        shown
     }
 }
 
