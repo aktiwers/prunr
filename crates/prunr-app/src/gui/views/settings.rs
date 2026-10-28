@@ -70,6 +70,8 @@ impl SettingsTab {
 /// Read-only snapshot of runtime-install state passed into the Hardware
 /// page so its renderer doesn't need a `&mut PrunrApp`.
 pub(crate) struct HardwareSectionContext {
+    /// This computer's hardware, which decides what is offered.
+    pub machine: &'static crate::hardware::HardwareProfile,
     /// The runtimes this platform offers to download.
     pub offered: &'static [RuntimeId],
     pub installs: HardwareInstallCache,
@@ -218,6 +220,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
         SettingsTab::Performance => { render_page_performance(ui, &mut app.settings, app.hardware_install_cache.has_sd_eraser()); None }
         SettingsTab::Hardware => {
             let hw_ctx = HardwareSectionContext {
+                machine: crate::hardware::profile(),
                 offered: RuntimeId::OFFERED,
                 installs: app.hardware_install_cache,
                 test: Arc::clone(&app.test_results),
@@ -469,7 +472,7 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_instal
 pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionContext) -> Option<HardwareSectionIntent> {
     use crate::hardware;
     let mut intent = None;
-    let p = hardware::profile();
+    let p = ctx.machine;
     let avail_ram = hardware::available_ram_bytes_throttled();
 
     group_heading(ui, "This computer");
