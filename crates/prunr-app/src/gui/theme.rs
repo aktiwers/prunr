@@ -302,19 +302,33 @@ pub fn bare_modal_window(
     size: [f32; 2],
     body: impl FnOnce(&mut egui::Ui) -> bool,
 ) -> bool {
+    bare_modal_window_holding(ctx, id, title, size, false, body)
+}
+
+/// A bare modal that, while `holds`, holds the window: a click anywhere
+/// else lands on nothing, and neither it nor the body's close closes it.
+pub fn bare_modal_window_holding(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    size: [f32; 2],
+    holds: bool,
+    body: impl FnOnce(&mut egui::Ui) -> bool,
+) -> bool {
     // Opaque: a page of text over a busy photo should not let it through.
     let window = egui::Window::new(title).title_bar(false).frame(panel_frame().inner_margin(0).fill(MODAL_FILL));
     let mut close_clicked = false;
-    let closed = show_modal(ctx, id, window, size, false, |ui| close_clicked = body(ui));
-    closed || close_clicked
+    let closed = show_modal(ctx, id, window, size, holds, |ui| close_clicked = body(ui));
+    !holds && (closed || close_clicked)
 }
 
-/// A modal like `bare_modal_window` that holds the window while it is up:
-/// a click anywhere else lands on nothing, nor closes it. The body says
-/// how it ends.
+/// A bare modal that holds the window while it is up. The body says how
+/// it ends.
 pub fn holding_modal_window(ctx: &egui::Context, id: &str, title: &str, size: [f32; 2], body: impl FnOnce(&mut egui::Ui)) {
-    let window = egui::Window::new(title).title_bar(false).frame(panel_frame().inner_margin(0).fill(MODAL_FILL));
-    let _ = show_modal(ctx, id, window, size, true, body);
+    bare_modal_window_holding(ctx, id, title, size, true, |ui| {
+        body(ui);
+        false
+    });
 }
 
 fn show_modal(

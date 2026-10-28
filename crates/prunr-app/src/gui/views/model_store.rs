@@ -106,7 +106,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     // A card's test owns the machine as the whole computer's does: the
     // store holds the window until it ends.
     let testing = app.machine_test.as_ref().is_some_and(|t| t.only().is_some());
-    let mut page = |ui: &mut egui::Ui| {
+    let page = |ui: &mut egui::Ui| {
         let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(app.hardware_install_cache.models_on_disk));
         super::chip::modal_page_closable(ui, "Model Store", &subtitle, !testing, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
@@ -152,14 +152,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
             }
         })
     };
-    let closed = if testing {
-        theme::holding_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, |ui| {
-            page(ui);
-        });
-        false
-    } else {
-        theme::bare_modal_window(ctx, "model_store", "Model Store", STORE_SIZE, page)
-    };
+    let closed = theme::bare_modal_window_holding(ctx, "model_store", "Model Store", STORE_SIZE, testing, page);
 
     for (id, action) in pending_actions {
         let action = match action {
