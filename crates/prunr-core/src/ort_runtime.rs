@@ -950,16 +950,18 @@ fn bundled_dylib() -> Option<PathBuf> {
     bundled_paths().into_iter().find(|p| p.is_file())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 pub(crate) use tests::openvino_plugin_for_tests;
 
 #[cfg(test)]
 mod tests {
     /// The variable naming the OpenVINO plugin for the tests that run it.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) const OPENVINO_PLUGIN_FOR_TESTS: &str = "PRUNR_OPENVINO_ADDON";
 
     /// The OpenVINO plugin `OPENVINO_PLUGIN_FOR_TESTS` names; without one
     /// the test says it skips.
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn openvino_plugin_for_tests() -> Option<std::ffi::OsString> {
         let plugin = std::env::var_os(OPENVINO_PLUGIN_FOR_TESTS);
         if plugin.is_none() {
