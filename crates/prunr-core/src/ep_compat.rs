@@ -129,7 +129,7 @@ pub fn is_transient(error: &str) -> bool {
 
 /// Error text of a run or session that ran out of memory, the card's or
 /// the system's: a smaller piece of work, or the processor, may fit.
-pub fn is_out_of_memory(error: &str) -> bool {
+pub(crate) fn is_out_of_memory(error: &str) -> bool {
     const MARKS: &[&str] = &["out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate"];
     let error = error.to_ascii_lowercase();
     MARKS.iter().any(|m| error.contains(m))

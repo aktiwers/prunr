@@ -65,9 +65,10 @@ pub(crate) fn render(ctx: &egui::Context, test: &MachineTest, engines: &str) -> 
 /// "BiRefNet-lite with CUDA", or "on the processor" while its CPU side runs.
 fn step_line(step: Step) -> String {
     let name = prunr_models::display_name(step.model);
-    match step.on_gpu() {
-        true => format!("{name} with {}", step.column.provider()),
-        false => format!("{name} on the processor"),
+    if step.on_gpu() {
+        format!("{name} with {}", step.column.provider())
+    } else {
+        format!("{name} on the processor")
     }
 }
 

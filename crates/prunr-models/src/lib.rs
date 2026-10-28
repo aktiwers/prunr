@@ -766,10 +766,7 @@ pub const PART_NORMS: &str = "norms";
 impl UpscaleModelKnobs {
     /// Tile overlap in pixels: 32 for window-attention transformers
     /// (two window widths hide attention-window seams), 64 for CNN /
-    /// RRDB. Against one seamless tile, 512 px tiles of a 1024 x 768 photo
-    /// with 16 px left values up to 25/255 off along the seams (x4; 27 for
-    /// x2), with 64 px 12 (x4; 18 for x2), for 17% more time on the CPU
-    /// and about 8% on a graphics card.
+    /// RRDB, whose seams at 16 px stood out against one seamless tile.
     pub const fn tile_overlap(&self) -> u32 {
         if self.uses_window_attention { 32 } else { 64 }
     }

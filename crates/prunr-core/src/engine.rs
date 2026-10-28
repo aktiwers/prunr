@@ -542,10 +542,9 @@ struct CudaTuning {
     heuristic_search: bool,
     tf32: bool,
     /// ORT's memory pattern off. On, it reserves one block of a run's peak
-    /// from the second run on, on top of the pool the first run filled:
-    /// BiRefNet-lite at 1024 went from 7.6 to 12.0 GB on a 12 GB RTX 3060
-    /// and spilled into system memory. Off, it and six other models held
-    /// their first run's memory at the same speed.
+    /// from the second run on, on top of the pool the first run filled,
+    /// which can take a model past the card's memory; off, a model holds
+    /// its first run's memory at the same speed.
     no_memory_pattern: bool,
 }
 
@@ -564,8 +563,8 @@ impl CudaTuning {
             // 4.0 s, and its pixels differ from the defaults' no more than
             // two default runs do. The Magic Brush's masks on it match the
             // CPU's (same pick on 20 of 20 clicks, IoU 0.9998).
-            // A Stable Diffusion part sets its memory pattern by its own
-            // plan (`SdMemPlan`).
+            // A Stable Diffusion part sets its memory pattern from its own
+            // memory plan.
             EpSite::SdPart { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false, no_memory_pattern: false },
             EpSite::Selection { .. } => Self { pool_as_asked: true, heuristic_search: true, tf32: false, no_memory_pattern: true },
             EpSite::Fill { .. } => Self { pool_as_asked: false, heuristic_search: false, tf32: false, no_memory_pattern: true },
