@@ -26,8 +26,8 @@ pub enum Told {
 }
 
 /// Where a test is: the model at `index` of `total`, on its `side` of
-/// `sides`: 0 the CPU, then each accelerator it tries; `column` the one
-/// that runs now, or its first while the CPU runs.
+/// `sides`: 0 the CPU, then each accelerator it tries; `column` the
+/// accelerator that runs now, `None` while the CPU does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub index: usize,
@@ -35,14 +35,10 @@ pub struct Step {
     pub model: ModelId,
     pub side: usize,
     pub sides: usize,
-    pub column: Column,
+    pub column: Option<Column>,
 }
 
 impl Step {
-    pub fn on_gpu(&self) -> bool {
-        self.side > 0
-    }
-
     /// How far the test is: each side a model runs on an equal share of
     /// its turn.
     pub fn fraction(&self) -> f32 {
@@ -81,7 +77,7 @@ fn tried_here(id: ModelId) -> Vec<&'static str> {
 pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     prunr_core::engine::remeasure_places();
     let installed = super::select(only, true, prunr_models::is_available).unwrap_or_default().into_iter().filter(|&id| prunr_models::is_available(id)).collect();
-    let Plan { models, columns, left_out } = plan(installed, column_of);
+    let Plan { models, left_out } = plan(installed, column_of);
     let inputs = Inputs::built_in();
     // Each model once on each accelerator it may try here: a place for
     // every one, so the fastest can be told apart.
@@ -89,7 +85,7 @@ pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     super::run_passes(&models, &inputs, RUNS, passes, &mut |event| match event {
         Event::Stage { index, total, side, sides, provider, .. } => {
             let model = models[index - 1];
-            let column = provider.and_then(|p| prunr_core::engine::column_for(model, p)).unwrap_or(columns[index - 1]);
+            let column = provider.and_then(|p| prunr_core::engine::column_for(model, p));
             on(Told::Step(Step { index, total, model, side, sides, column }));
         }
         Event::Done { row, provider, .. } => {
@@ -131,11 +127,10 @@ fn checked(id: ModelId) -> Option<(Column, prunr_core::ep_compat::Measured)> {
     Some((column, place?))
 }
 
-/// What a test runs: each model with the column it is measured in.
+/// What a test runs.
 #[derive(Debug, PartialEq)]
 struct Plan {
     models: Vec<ModelId>,
-    columns: Vec<Column>,
     /// The heavy models it does not run.
     left_out: Vec<ModelId>,
 }
@@ -143,8 +138,8 @@ struct Plan {
 /// What a test does with one model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Turn {
-    /// Times it, its accelerator side in this column.
-    Runs(Column),
+    /// Times it.
+    Runs,
     /// Leaves it out: a heavy model takes many minutes on the CPU.
     LeftOut,
     /// Nothing to measure: no accelerator would try it (`column`, from
@@ -157,24 +152,21 @@ fn turn(id: ModelId, column: Option<Column>) -> Turn {
     match column {
         Some(_) if !super::in_catalog(id) => Turn::Passed,
         Some(_) if super::HEAVY.contains(&id) => Turn::LeftOut,
-        Some(column) => Turn::Runs(column),
+        Some(_) => Turn::Runs,
         None => Turn::Passed,
     }
 }
 
 /// A test would time `id` here: what the Model Store's Test offers.
 pub(crate) fn times(id: ModelId) -> bool {
-    matches!(turn(id, column_of(id)), Turn::Runs(_))
+    turn(id, column_of(id)) == Turn::Runs
 }
 
 fn plan(installed: Vec<ModelId>, column_of: impl Fn(ModelId) -> Option<Column>) -> Plan {
-    let mut plan = Plan { models: Vec::new(), columns: Vec::new(), left_out: Vec::new() };
+    let mut plan = Plan { models: Vec::new(), left_out: Vec::new() };
     for id in installed {
         match turn(id, column_of(id)) {
-            Turn::Runs(column) => {
-                plan.models.push(id);
-                plan.columns.push(column);
-            }
+            Turn::Runs => plan.models.push(id),
             Turn::LeftOut => plan.left_out.push(id),
             Turn::Passed => {}
         }
@@ -195,7 +187,6 @@ mod tests {
         let column_of = |id| (id != ModelId::BiRefNetLite && id != ModelId::SdV15InpaintFp16).then_some(Column::Cuda);
         assert_eq!(plan(installed, column_of), Plan {
             models: vec![ModelId::Silueta, ModelId::U2net],
-            columns: vec![Column::Cuda, Column::Cuda],
             left_out: vec![ModelId::Nomos8kSchatL],
         });
     }
@@ -214,19 +205,18 @@ mod tests {
     /// The bar moves an equal share of a model's turn per side it runs on.
     #[test]
     fn the_bar_moves_a_share_of_the_model_per_side() {
-        let step = |index, side, sides| Step { index, total: 4, model: ModelId::U2net, side, sides, column: Column::Cuda };
+        let step = |index, side, sides| Step { index, total: 4, model: ModelId::U2net, side, sides, column: (side > 0).then_some(Column::Cuda) };
         assert_eq!(step(1, 0, 3).fraction(), 0.0);
         assert!((step(1, 1, 2).fraction() - 0.125).abs() < 1e-6);
         assert!((step(4, 2, 3).fraction() - (3.0 + 2.0 / 3.0) / 4.0).abs() < 1e-6);
-        assert!(!step(2, 0, 2).on_gpu() && step(2, 1, 2).on_gpu());
     }
 
     /// Each event survives the line it travels on.
     #[test]
     fn every_event_reads_back_from_its_line() {
         for told in [
-            Told::Step(Step { index: 2, total: 9, model: ModelId::U2net, side: 1, sides: 2, column: Column::OpenVinoGpu }),
-            Told::Step(Step { index: 1, total: 9, model: ModelId::Silueta, side: 0, sides: 3, column: Column::Cuda }),
+            Told::Step(Step { index: 2, total: 9, model: ModelId::U2net, side: 1, sides: 2, column: Some(Column::OpenVinoGpu) }),
+            Told::Step(Step { index: 1, total: 9, model: ModelId::Silueta, side: 0, sides: 3, column: None }),
             Told::Placed { model: ModelId::Silueta, column: Column::DirectMl, measured: prunr_core::ep_compat::Measured::timed(prunr_core::ep_compat::PlaceKind::There, 40.0, 670.0, "") },
             Told::Placed {
                 model: ModelId::BiRefNetLite,
