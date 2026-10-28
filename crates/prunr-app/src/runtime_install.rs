@@ -57,14 +57,13 @@ impl RuntimeId {
     /// runs models DirectML fails on an NVIDIA card and is faster for
     /// others, and OpenVINO runs the models DirectML fails faster on an
     /// Intel processor than Prunr's own. MIGraphX has a Linux wheel only.
+    /// None is built for a Mac or for ARM.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
         &[Self::OpenVino, Self::Cuda]
-    } else if cfg!(windows) {
-        &[]
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         &[Self::OpenVino, Self::Cuda, Self::MiGraphX]
     } else {
-        &[Self::OpenVino]
+        &[]
     };
 
     /// Whether it loads into the runtime the app ships, as a provider
@@ -763,6 +762,17 @@ fn move_into_place(staging: &Path, target: &Path, kept: &[&str]) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A runtime is offered only where a build of it exists to install:
+    /// Intel publishes OpenVINO for ONNX Runtime, and Microsoft its CUDA
+    /// plugin, for x64 Linux and Windows only, so a Mac (Apple silicon or
+    /// Intel) or an ARM Linux computer is offered none.
+    #[test]
+    fn nothing_is_offered_where_no_build_exists() {
+        if cfg!(any(target_os = "macos", all(target_os = "linux", not(target_arch = "x86_64")), all(windows, not(target_arch = "x86_64")))) {
+            assert_eq!(RuntimeId::OFFERED, &[] as &[RuntimeId]);
+        }
+    }
 
     /// Answer each connection to the returned URL with the next of
     /// `responses`; the handle tells how many were asked for.
