@@ -69,6 +69,14 @@ fn tried_here(id: ModelId) -> Vec<&'static str> {
     super::tried(&prunr_core::engine::gpu_ladder(id))
 }
 
+/// `column_of` as a test reads it, which tries again the places Prunr's
+/// own tests keep on the CPU: the same answer in the app and in the
+/// test's own process.
+fn column_in_a_test(id: ModelId) -> Option<Column> {
+    let ladder = prunr_core::engine::gpu_ladder_in_a_test(id);
+    prunr_core::engine::column_in_a_test(id, super::first_tried(&ladder)?)
+}
+
 /// Run the test: every installed model the accelerator would try (a place
 /// the registry keeps on the CPU for a slower, different or no-gain result
 /// is tried again: `remeasure_places`), but the heavy ones; or only the
@@ -77,7 +85,7 @@ fn tried_here(id: ModelId) -> Vec<&'static str> {
 pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
     prunr_core::engine::remeasure_places();
     let installed = super::select(only, true, prunr_models::is_available).unwrap_or_default().into_iter().filter(|&id| prunr_models::is_available(id)).collect();
-    let Plan { models, left_out } = plan(installed, column_of);
+    let Plan { models, left_out } = plan(installed, column_in_a_test);
     let inputs = Inputs::built_in();
     // Each model once on each accelerator it may try here: a place for
     // every one, so the fastest can be told apart.
@@ -159,7 +167,7 @@ fn turn(id: ModelId, column: Option<Column>) -> Turn {
 
 /// A test would time `id` here: what the Model Store's Test offers.
 pub(crate) fn times(id: ModelId) -> bool {
-    turn(id, column_of(id)) == Turn::Runs
+    turn(id, column_in_a_test(id)) == Turn::Runs
 }
 
 fn plan(installed: Vec<ModelId>, column_of: impl Fn(ModelId) -> Option<Column>) -> Plan {

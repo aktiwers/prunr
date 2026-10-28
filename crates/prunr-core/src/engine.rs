@@ -380,11 +380,16 @@ pub fn remeasure_places() {
 /// Why `model` runs on the CPU rather than `ep`: its place there, or a
 /// provider that cannot serve its kind of session.
 fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Why> {
+    kept_off_as(model, ep, remeasuring())
+}
+
+/// `kept_off` with places measured again (`remeasuring`) or not.
+fn kept_off_as(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<prunr_models::Why> {
     if compiles_per_shape(model, ep) {
         return Some(COMPILES_PER_SHAPE);
     }
-    match place_here(model, ep.as_str(), openvino_on_gpu(), remeasuring()) {
-        place @ prunr_models::Place::Cpu(why) if place.kept_off(remeasuring()) => Some(why),
+    match place_here(model, ep.as_str(), openvino_on_gpu(), remeasuring) {
+        place @ prunr_models::Place::Cpu(why) if place.kept_off(remeasuring) => Some(why),
         _ => None,
     }
 }
@@ -424,6 +429,11 @@ fn place_here(model: prunr_models::ModelId, provider: &str, intel_gpu: bool, rem
 /// (`prunr_models::column_in`).
 pub fn column_for(model: prunr_models::ModelId, provider: &str) -> Option<prunr_models::Column> {
     prunr_models::column_in(&places_here(model), model, provider, openvino_on_gpu(), remeasuring())
+}
+
+/// `column_for` as a test of this computer reads it, in any process.
+pub fn column_in_a_test(model: prunr_models::ModelId, provider: &str) -> Option<prunr_models::Column> {
+    prunr_models::column_in(&places_here(model), model, provider, openvino_on_gpu(), true)
 }
 
 /// Whether OpenVINO runs `model` on the Intel graphics here.
@@ -1074,7 +1084,11 @@ fn fp16_eps(id: prunr_models::ModelId, eps: &[EpKind]) -> Vec<EpKind> {
 /// Why a GPU session of `model` passes `ep` over for every weights it
 /// tries (`None`: it tries `ep`).
 fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
-    if let Some(why) = kept_off(model, ep) {
+    gpu_skip_as(model, ep, remeasuring())
+}
+
+fn gpu_skip_as(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<Skip> {
+    if let Some(why) = kept_off_as(model, ep, remeasuring) {
         return Some(Skip::KeptOff(why));
     }
     let intel_gpu = asks_intel_gpu(ep, model);
@@ -1106,7 +1120,18 @@ pub(crate) fn first_gpu_provider(model: prunr_models::ModelId, cpu_only: bool) -
 /// `model` tries them, with why it would pass one over (`None`: it would
 /// try it).
 pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
-    gpu_eps_for(model, false).into_iter().map(|ep| (ep.as_str(), gpu_skip(model, ep))).collect()
+    ladder_as(model, remeasuring())
+}
+
+/// `gpu_ladder` as a test of this computer walks it, in any process: the
+/// places Prunr's own tests keep on the CPU are tried again
+/// (`remeasure_places`).
+pub fn gpu_ladder_in_a_test(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
+    ladder_as(model, true)
+}
+
+fn ladder_as(model: prunr_models::ModelId, remeasuring: bool) -> Vec<(&'static str, Option<Skip>)> {
+    gpu_eps_for(model, false).into_iter().map(|ep| (ep.as_str(), gpu_skip_as(model, ep, remeasuring))).collect()
 }
 
 /// The weights file a session loaded: the model's own (FP32 for
@@ -2223,6 +2248,27 @@ mod tests {
         assert_eq!(cuda_position(&[EpKind::DirectMl]), 0, "before DirectML");
         #[cfg(target_os = "linux")]
         assert_eq!(cuda_position(&[EpKind::OpenVino, EpKind::MiGraphX]), 1, "between OpenVINO and MIGraphX");
+    }
+
+    /// A test of this computer tries again what Prunr's own tests keep on
+    /// the CPU for a slower, different or no-gain result, from any
+    /// process; a known failure stays off in both views.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_test_tries_again_what_the_registry_keeps_on_the_cpu() {
+        use prunr_models::{Column, Place, Why};
+        let mut seen = 0;
+        for d in prunr_models::REGISTRY {
+            let Place::Cpu(why) = place_here(d.id, OPENVINO_NAME, false, false) else { continue };
+            if compiles_per_shape(d.id, EpKind::OpenVino) || openvino_on_gpu() {
+                continue;
+            }
+            assert_eq!(prunr_models::registry_places(d.id).get(Column::OpenVino), Place::Cpu(why));
+            assert!(kept_off_as(d.id, EpKind::OpenVino, false).is_some(), "{:?}", d.id);
+            assert_eq!(kept_off_as(d.id, EpKind::OpenVino, true).is_some(), matches!(why, Why::Fails(_)), "{:?}: {why:?}", d.id);
+            seen += 1;
+        }
+        assert!(seen > 0);
     }
 
     /// While a test measures one provider, a model tries that one alone; a
