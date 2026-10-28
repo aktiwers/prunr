@@ -112,9 +112,9 @@ impl HardwareProfile {
 
 /// The graphics drivers a GPU provider runs on, as one string that a
 /// driver update changes: each DXGI adapter on Windows; on Linux the
-/// NVIDIA driver, ROCm, and the kernel's Intel graphics driver while
-/// OpenVINO may use the Intel graphics; the macOS version, which CoreML
-/// comes with. Empty where none is read.
+/// NVIDIA driver and ROCm; the macOS version, which CoreML comes with.
+/// Empty where none is read. Every process reads the same, whatever its
+/// settings: one that read another would drop what the others learned.
 pub fn driver_identity() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -122,17 +122,7 @@ pub fn driver_identity() -> String {
     }
     #[cfg(target_os = "linux")]
     {
-        let read = |path: &str| std::fs::read_to_string(path).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let intel_gpu = prunr_core::ort_runtime::intel_gpu_chosen();
-        [
-            read("/sys/module/nvidia/version").map(|v| format!("nvidia {v}")),
-            read("/opt/rocm/.info/version").map(|v| format!("rocm {v}")),
-            intel_gpu.then(|| read("/sys/module/i915/srcversion").or_else(|| read("/sys/module/xe/srcversion"))).flatten().map(|v| format!("intel {v}")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ")
+        linux_driver_identity(|path| std::fs::read_to_string(path).ok())
     }
     #[cfg(target_os = "macos")]
     {
@@ -142,6 +132,22 @@ pub fn driver_identity() -> String {
     {
         String::new()
     }
+}
+
+/// The Linux kernel's Intel graphics module is left out: its version
+/// moves with every kernel update, which would drop every provider's
+/// measurements, not only OpenVINO's.
+#[cfg(any(target_os = "linux", test))]
+fn linux_driver_identity(read: impl Fn(&str) -> Option<String>) -> String {
+    let read = |path: &str| read(path).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    [
+        read("/sys/module/nvidia/version").map(|v| format!("nvidia {v}")),
+        read("/opt/rocm/.info/version").map(|v| format!("rocm {v}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 pub fn profile() -> &'static HardwareProfile {
@@ -446,6 +452,18 @@ fn displays_from_lspci(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The Linux identity is the NVIDIA driver's and ROCm's versions,
+    /// trimmed, in that order; the Intel graphics module is not in it.
+    #[test]
+    fn the_linux_driver_identity_names_nvidia_and_rocm_only() {
+        let files = |present: &'static [(&'static str, &'static str)]| move |path: &str| present.iter().find(|(p, _)| *p == path).map(|(_, v)| v.to_string());
+        const ALL: [(&str, &str); 4] = [("/sys/module/nvidia/version", "580.95.05\n"), ("/opt/rocm/.info/version", "7.0.1"), ("/sys/module/i915/srcversion", "ABCDEF"), ("/sys/module/xe/srcversion", "123")];
+        let all: &'static [(&str, &str)] = &ALL;
+        assert_eq!(super::linux_driver_identity(files(all)), "nvidia 580.95.05, rocm 7.0.1");
+        assert_eq!(super::linux_driver_identity(files(&all[2..])), "", "an Intel module alone is no identity");
+        assert_eq!(super::linux_driver_identity(files(&[("/sys/module/nvidia/version", "  ")])), "");
+    }
+
     /// Settings offers a runtime only where it has a device: an Intel-only
     /// computer sees OpenVINO alone, CUDA needs an NVIDIA card, MIGraphX an
     /// AMD one.
