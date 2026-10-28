@@ -368,10 +368,10 @@ fn load_runtime(path: &Path, version: Option<&str>) -> Result<(), String> {
     }
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let builder = ort::init_from(path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
-    // On Linux, where OpenVINO comes as an add-on, before one is
-    // installed too: one installed while the process runs registers into
-    // this environment. Without the plugin the filter names nothing.
-    if cfg!(target_os = "linux") && version.is_some_and(takes_addons) {
+    // Where OpenVINO comes as an add-on, before one is installed too: one
+    // installed while the process runs registers into this environment.
+    // Without the plugin the filter names nothing.
+    if cfg!(any(target_os = "linux", windows)) && version.is_some_and(takes_addons) {
         create_env_for_openvino(openvino_devices(openvino_may_use_graphics()))?;
     }
     let env = builder

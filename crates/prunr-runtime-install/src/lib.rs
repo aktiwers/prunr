@@ -119,6 +119,20 @@ pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
     packing: Packing::Zip,
 };
 
+/// `OPENVINO_ADDON_LINUX`'s Windows build. Windows finds its DLLs beside
+/// it: ONNX Runtime loads a plugin with its own folder searched first.
+/// Without its NPU part it keeps no networking import at all.
+pub const OPENVINO_ADDON_WINDOWS: AddOn = AddOn {
+    version: "1.8.1",
+    url: "https://files.pythonhosted.org/packages/75/98/224ead07344390258ae0515ed285ba2951e9c1405f4507443a03bb7dd5c7/onnxruntime_ep_openvino-1.8.1-py3-none-win_amd64.whl",
+    sha256: "1acd878be173b02bb8b953460f2f59b121e5f6e47ebc6aad490c0590cf6718fb",
+    size_bytes: 75_824_318,
+    library: "onnxruntime_providers_openvino_plugin.dll",
+    folder: Some("onnxruntime_ep_openvino"),
+    left_out: &["openvino_intel_npu"],
+    packing: Packing::Zip,
+};
+
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
 /// for unsupported platforms, for which no wheel fits.
 pub fn host_rid() -> &'static str {
@@ -1096,6 +1110,29 @@ mod tests {
         let mut kept: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         kept.sort();
         assert_eq!(kept, ["cache.json", "libonnxruntime_providers_openvino_plugin.so", "libopenvino.so.2641", "libtbb.so.12", "third-party-programs.txt"]);
+    }
+
+    /// The Windows wheel gives up its DLLs the same way, the folder's own
+    /// entry and every NPU part left out.
+    #[test]
+    fn the_windows_openvino_wheel_gives_up_its_dlls() {
+        let wheel = zip_of(&[
+            ("onnxruntime_ep_openvino/", ""),
+            ("onnxruntime_ep_openvino/onnxruntime_providers_openvino_plugin.dll", "plugin"),
+            ("onnxruntime_ep_openvino/openvino.dll", "openvino"),
+            ("onnxruntime_ep_openvino/tbb12.dll", "tbb"),
+            ("onnxruntime_ep_openvino/openvino_runtime.manifest", "manifest"),
+            ("onnxruntime_ep_openvino/openvino_intel_npu_compiler.dll", "npu"),
+            ("onnxruntime_ep_openvino/openvino_intel_npu_plugin.dll", "npu"),
+            ("onnxruntime_ep_openvino/__init__.py", "py"),
+            ("onnxruntime_ep_openvino-1.8.1.dist-info/RECORD", "no"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let library = extract_addon(std::io::Cursor::new(wheel), dir.path(), &OPENVINO_ADDON_WINDOWS).unwrap();
+        assert_eq!(std::fs::read_to_string(library).unwrap(), "plugin");
+        let mut kept: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        kept.sort();
+        assert_eq!(kept, ["onnxruntime_providers_openvino_plugin.dll", "openvino.dll", "openvino_runtime.manifest", "tbb12.dll"]);
     }
 
     /// An NVIDIA wheel gives up its shared libraries by file name, and

@@ -52,17 +52,13 @@ pub enum RuntimeId {
 
 impl RuntimeId {
     /// The runtimes Settings › Hardware offers to download. DirectML is
-    /// not one: Windows ships it built in. OpenVINO is not offered on
-    /// Windows: its `onnxruntime-openvino` wheel there ships the provider
-    /// DLL without `openvino.dll` (Python loads that from the separate
-    /// `openvino` package), so the provider never registers and every
-    /// session would run on the CPU, where DirectML runs the same iGPU.
-    /// CUDA is offered on Windows too, as an add-on beside the built-in
-    /// DirectML (`is_addon`): DirectML fails models on an NVIDIA card that
-    /// CUDA runs, and is faster for others. On Linux, CUDA and OpenVINO
-    /// are add-ons. MIGraphX has a Linux wheel only.
+    /// not one: Windows ships it built in. CUDA and OpenVINO come as
+    /// add-ons on Windows and Linux (`is_addon`): beside DirectML, CUDA
+    /// runs models DirectML fails on an NVIDIA card and is faster for
+    /// others, and OpenVINO runs the models DirectML fails faster on an
+    /// Intel processor than Prunr's own. MIGraphX has a Linux wheel only.
     pub const OFFERED: &'static [RuntimeId] = if cfg!(all(windows, target_arch = "x86_64")) {
-        &[Self::Cuda]
+        &[Self::OpenVino, Self::Cuda]
     } else if cfg!(windows) {
         &[]
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
@@ -72,9 +68,9 @@ impl RuntimeId {
     };
 
     /// Whether it loads into the runtime the app ships, as a provider
-    /// add-on, rather than replacing it: CUDA on Windows, where the
-    /// built-in runtime keeps DirectML beside it and each model takes the
-    /// faster, and CUDA and OpenVINO on Linux.
+    /// add-on, rather than replacing it: CUDA and OpenVINO on Windows,
+    /// where the built-in runtime keeps DirectML beside them and each
+    /// model takes the fastest, and on Linux.
     pub fn is_addon(self) -> bool {
         self.addon().is_some()
     }
@@ -84,6 +80,7 @@ impl RuntimeId {
             Self::Cuda if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_WINDOWS),
             Self::Cuda if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(&ri::CUDA_ADDON_LINUX),
             Self::OpenVino if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(&ri::OPENVINO_ADDON_LINUX),
+            Self::OpenVino if cfg!(all(windows, target_arch = "x86_64")) => Some(&ri::OPENVINO_ADDON_WINDOWS),
             _ => None,
         }
     }
