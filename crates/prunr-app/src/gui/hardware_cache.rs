@@ -277,12 +277,12 @@ fn registry_bits() -> u128 {
 impl HardwareInstallCache {
     pub fn refresh() -> Self {
         use prunr_models::ModelId;
-        Self {
+        let mut installs = Self {
             openvino: RuntimeId::OpenVino.is_installed(),
             cuda: RuntimeId::Cuda.is_installed(),
             migraphx: RuntimeId::MiGraphX.is_installed(),
             nvidia_libraries: crate::runtime_install::nvidia_libraries_installed(),
-            addon_waits: RuntimeId::OFFERED.iter().any(|rt| rt.is_addon() && rt.is_installed()) && !prunr_core::ort_runtime::hosts_addons(),
+            addon_waits: false,
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
             built_in: prunr_core::ort_runtime::has_built_in(),
@@ -297,7 +297,9 @@ impl HardwareInstallCache {
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
             registry: registry_bits(),
             models_on_disk: prunr_models::on_demand_dir().map_or(0, |dir| disk_usage_in(&dir)),
-        }
+        };
+        installs.addon_waits = RuntimeId::addons().any(|rt| installs.has_runtime(rt)) && !prunr_core::ort_runtime::hosts_addons();
+        installs
     }
 
     /// Whether `id`'s weights are installed, as read at the last refresh.
