@@ -5,6 +5,7 @@
 use prunr_models::{Column, ModelId};
 
 use super::PrunrApp;
+use crate::bench::here::Step;
 use crate::gui::machine_test::{Ended, MachineTest};
 
 impl PrunrApp {
@@ -90,14 +91,14 @@ impl PrunrApp {
                 }
                 self.toasts.success(text);
             }
-            Ended::Stopped { during: Some(step) } if step.on_gpu() => {
-                tracing::warn!(model = ?step.model, column = ?step.column, "the computer test stopped while a model ran on the accelerator");
+            Ended::Stopped { during: Some(Step { model, column: Some(column), .. }) } => {
+                tracing::warn!(?model, ?column, "the computer test stopped while a model ran on the accelerator");
                 let text = format!(
                     "The test stopped while {} ran with {}, so it runs without it. Test again to finish the rest.",
-                    prunr_models::display_name(step.model),
-                    step.column.name(),
+                    prunr_models::display_name(model),
+                    column.name(),
                 );
-                self.keep_off_after_stop(ctx, step.model, step.column, text);
+                self.keep_off_after_stop(ctx, model, column, text);
             }
             Ended::Stopped { during } => {
                 tracing::warn!(model = ?during.map(|s| s.model), "the computer test stopped");

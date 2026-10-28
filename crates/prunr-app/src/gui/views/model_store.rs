@@ -76,7 +76,7 @@ enum CardTest<'a> {
 fn card_test<'a>(app: &PrunrApp, results: &'a TestResults, idle: bool, id: ModelId) -> CardTest<'a> {
     if let Some(test) = app.machine_test.as_ref().filter(|t| t.only() == Some(id)) {
         let step = test.step().filter(|s| s.model == id);
-        let on = step.filter(|s| s.on_gpu()).map_or(prunr_core::engine::CPU_NAME, |s| s.column.provider());
+        let on = step.and_then(|s| s.column).map_or(prunr_core::engine::CPU_NAME, prunr_models::Column::provider);
         return CardTest::Testing { on: super::fmt::engine(on), fraction: step.map_or(0.0, |s| s.fraction()) };
     }
     if !app.model_testable(id) {

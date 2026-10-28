@@ -65,10 +65,9 @@ pub(crate) fn render(ctx: &egui::Context, test: &MachineTest, engines: &str) -> 
 /// "BiRefNet-lite with CUDA", or "on the processor" while its CPU side runs.
 fn step_line(step: Step) -> String {
     let name = prunr_models::display_name(step.model);
-    if step.on_gpu() {
-        format!("{name} with {}", step.column.provider())
-    } else {
-        format!("{name} on the processor")
+    match step.column {
+        Some(column) => format!("{name} with {}", column.provider()),
+        None => format!("{name} on the processor"),
     }
 }
 
@@ -97,7 +96,7 @@ mod tests {
 
     #[test]
     fn the_lines_name_the_model_its_engine_and_its_turn() {
-        let step = |side| Step { index: 4, total: 13, model: ModelId::U2net, side, sides: 3, column: Column::Cuda };
+        let step = |side| Step { index: 4, total: 13, model: ModelId::U2net, side, sides: 3, column: (side > 0).then_some(Column::Cuda) };
         assert_eq!(step_line(step(2)), "U2Net with CUDA");
         assert_eq!(step_line(step(0)), "U2Net on the processor");
         assert_eq!(where_line(step(1), "the processor, DirectML and CUDA"), "Model 4 of 13 \u{00b7} the processor, DirectML and CUDA each in turn");
