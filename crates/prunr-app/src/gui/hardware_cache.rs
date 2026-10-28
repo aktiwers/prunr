@@ -177,6 +177,9 @@ impl TestResults {
     /// so its column says so.
     pub fn read(installs: &HardwareInstallCache) -> Self {
         prunr_core::ep_compat::refresh();
+        // Before the engines: a probe that answers in between leaves these
+        // results to be read again, not marked as read after it.
+        let after_probe = prunr_core::OrtEngine::probed();
         let mut engines: Vec<Engine> = prunr_core::engine::gpu_providers_now()
             .unwrap_or_default()
             .into_iter()
@@ -185,7 +188,6 @@ impl TestResults {
         if installs.cuda_offered() && !engines.iter().any(|e| e.name == prunr_core::engine::CUDA_NAME) {
             engines.push(Engine { name: prunr_core::engine::CUDA_NAME, installed: false });
         }
-        let after_probe = prunr_core::OrtEngine::probed();
         let installed = || prunr_models::REGISTRY.iter().map(|d| d.id).filter(|&id| installs.has_installed(id));
         let rows = installed()
             .filter_map(|id| {
