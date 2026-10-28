@@ -132,6 +132,41 @@ pub fn room_now(charge: Charge, provider: &str) -> Option<Room> {
     Some(Room { ram_mb, card_mb })
 }
 
+/// How much more of the card must be free than when a run ran short on
+/// it before the card is tried again: less is the same squeeze.
+const ROOM_GAINED_MB: u64 = 1024;
+
+/// Whether the card is still as short as when it held `then_mb` free
+/// (`now_mb` now): without a reading on either side, it is.
+pub(crate) fn still_short(then_mb: Option<u64>, now_mb: Option<u64>) -> bool {
+    !matches!((then_mb, now_mb), (Some(then), Some(now)) if now >= then + ROOM_GAINED_MB)
+}
+
+/// The models whose runs ran out of a card's memory in this process,
+/// even on its smallest tile, with what that card had free then.
+static RAN_SHORT: std::sync::Mutex<Vec<(ModelId, String, Option<u64>)>> = std::sync::Mutex::new(Vec::new());
+
+/// `id` ran out of memory on `provider`'s card: it runs on the processor
+/// until the card has more free.
+pub(crate) fn note_ran_short(id: ModelId, provider: &str) {
+    let free = card_free_mb(provider);
+    let mut notes = RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    notes.retain(|(model, on, _)| (*model, on.as_str()) != (id, provider));
+    notes.push((id, provider.to_string(), free));
+}
+
+/// Whether `id` ran out of `provider`'s card memory and the card has not
+/// gained room since; a note the card has outgrown is forgotten.
+pub fn ran_short(id: ModelId, provider: &str) -> bool {
+    let mut notes = RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(at) = notes.iter().position(|(model, on, _)| (*model, on.as_str()) == (id, provider)) else { return false };
+    if still_short(notes[at].2, card_free_mb(provider)) {
+        return true;
+    }
+    notes.remove(at);
+    false
+}
+
 /// Free memory on `provider`'s card now, in MB: CUDA's through NVML,
 /// DirectML's as Windows budgets it for this process; `None` for another,
 /// or no reading.

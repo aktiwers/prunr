@@ -205,13 +205,15 @@ pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(pru
     Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
 }
 
-/// Whether a run of `id` goes to the CPU: when `cpu_only`, or when its
-/// GPU provider's charge does not fit what is free and the CPU's does.
+/// Whether a run of `id` goes to the CPU: when `cpu_only`, when its GPU
+/// provider's charge does not fit what is free and the CPU's does, or
+/// when the card ran out of memory for it and has gained no room since.
 /// `Err`: it fits neither.
 pub fn runs_on_cpu(id: prunr_models::ModelId, cpu_only: bool) -> Result<bool, prunr_core::memory::Short> {
     let cpu = charge_and_room(id, true);
-    let asked = if cpu_only { cpu } else { charge_and_room(id, false) };
-    prunr_core::memory::falls_to_cpu(asked, cpu).map(|fell| fell || cpu_only)
+    let short = !cpu_only && prunr_core::memory::ran_short(id, prunr_core::memory::provider_now(id, false));
+    let asked = if cpu_only || short { cpu } else { charge_and_room(id, false) };
+    prunr_core::memory::falls_to_cpu(asked, cpu).map(|fell| fell || cpu_only || short)
 }
 
 /// A reading and when it was taken.

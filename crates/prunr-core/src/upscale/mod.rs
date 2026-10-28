@@ -140,11 +140,11 @@ pub fn upscale_rgba_with_engine(
             "model {:?} has no recommended_tile -- upscale cannot dispatch",
             descriptor.id
         )))?;
-    let tile_size = engine.upscale_tile().map_or(own_tile, |tile| tile.min(own_tile));
+    let tile_size = engine.upscale_tile(own_tile);
 
     let cfg = TilingConfig { tile_size, tile_multiple: descriptor.tile_size_multiple, overlap: knobs.tile_overlap(), align: tile_align(descriptor) };
     let (native, tile) = upscale_native_tiled(input, engine, knobs, cfg, progress, terminate)?;
-    engine.set_upscale_tile(tile);
+    engine.set_upscale_tile(tile, own_tile);
     Ok(fit_to_scale(native, input, scale))
 }
 
