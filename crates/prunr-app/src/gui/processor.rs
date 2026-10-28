@@ -183,10 +183,18 @@ fn ensure_warm_engine(
     key: WarmEngineKey,
     intra_threads: usize,
 ) -> Result<Arc<prunr_core::OrtEngine>, prunr_core::CoreError> {
-    if let Some(cached) = cached_warm_engine(slot, key) {
-        return Ok(cached);
-    }
     let model = key.model.into();
+    if let Some(cached) = cached_warm_engine(slot, key) {
+        // One built on the processor for a run the card had no room for
+        // goes back to the card once the card has room again.
+        let back_to_card = !key.cpu_only
+            && prunr_core::engine::runs_on_host_cpu(cached.active_provider())
+            && !prunr_core::engine::runs_on_host_cpu(prunr_core::memory::provider_now(model, false))
+            && prunr_models::descriptor(model).is_some_and(|descriptor| admitted(descriptor, false) == Ok(false));
+        if !back_to_card {
+            return Ok(cached);
+        }
+    }
     let on_cpu = match prunr_models::descriptor(model) {
         Some(descriptor) => admitted(descriptor, key.cpu_only).map_err(prunr_core::CoreError::Inference)?,
         None => key.cpu_only,

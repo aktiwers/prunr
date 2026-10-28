@@ -341,6 +341,9 @@ pub fn process_lama(
     // nothing: the fill goes to the processor from the start.
     let short = !cpu_only && crate::memory::ran_short(id, crate::memory::provider_for(id, false));
     if short {
+        if let Err(room) = crate::memory::fits_now(id, crate::engine::CPU_NAME) {
+            return Err(CoreError::Inference(format!("out of memory: the graphics card had no room for it, and the processor {room}")));
+        }
         progress.step(Step::OnTheProcessor);
     }
     let cpu_only = cpu_only || short;

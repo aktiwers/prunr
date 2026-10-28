@@ -1039,7 +1039,9 @@ pub fn retry_on_cpu<T>(
     }
     match on_engine() {
         Err(e) if on_card && e.is_out_of_memory() => {
-            crate::memory::note_ran_short(model, provider);
+            if e.is_card_out_of_memory() {
+                crate::memory::note_ran_short(model, provider);
+            }
             if let Err(short) = crate::memory::fits_now(model, CPU_NAME) {
                 tracing::warn!(?model, %e, %short, "out of graphics memory, and the processor has no room either");
                 return Err(e);
@@ -1737,22 +1739,34 @@ impl OrtEngine {
     /// model's `own`.
     pub(crate) fn upscale_tile(&self, own: u32) -> u32 {
         let fitted = *self.upscale_tile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        start_tile(own, fitted, || crate::memory::card_free_mb(self.active_provider()))
+        start_tile(own, fitted, || crate::memory::card_room_mb(self.active_provider()))
     }
 
-    /// An upscale on this engine ran whole on `tile`.
+    /// An upscale on this engine ran whole on `tile`. The card's room is
+    /// kept from when the tile first had to shrink, so gains add up.
     pub(crate) fn set_upscale_tile(&self, tile: u32, own: u32) {
-        let fitted = (tile < own).then(|| (tile, crate::memory::card_free_mb(self.active_provider())));
-        *self.upscale_tile.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fitted;
+        let mut fitted = self.upscale_tile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *fitted = fitted_after(*fitted, tile, own, || crate::memory::card_room_mb(self.active_provider()));
+    }
+}
+
+/// What an engine keeps after an image ran whole on `tile`: nothing at the
+/// model's `own` tile; a smaller one with the card's room, kept from when
+/// that tile was first needed.
+fn fitted_after(fitted: Option<(u32, Option<u64>)>, tile: u32, own: u32, room_now: impl FnOnce() -> Option<u64>) -> Option<(u32, Option<u64>)> {
+    match fitted {
+        _ if tile >= own => None,
+        Some((held, room)) if held == tile => Some((held, room)),
+        _ => Some((tile, room_now())),
     }
 }
 
 /// The tile to start at: `fitted`'s, a smaller one the last image fit and
-/// the card's free memory then, while `free_now` says the card has gained
-/// no room since; else `own`.
-fn start_tile(own: u32, fitted: Option<(u32, Option<u64>)>, free_now: impl FnOnce() -> Option<u64>) -> u32 {
+/// the card's room then, while `room_now` says the card has gained none
+/// since; else `own`.
+fn start_tile(own: u32, fitted: Option<(u32, Option<u64>)>, room_now: impl FnOnce() -> Option<u64>) -> u32 {
     match fitted {
-        Some((tile, then)) if crate::memory::still_short(then, free_now()) => tile,
+        Some((tile, then)) if crate::memory::still_short(then, room_now()) => tile,
         _ => own,
     }
 }
@@ -1901,6 +1915,18 @@ mod tests {
         let broken = || Err::<u8, _>(CoreError::Inference("Graph contains cycles".into()));
         assert!(super::retry_on_cpu(ModelId::Teed, card, &crate::Progress::none(), broken, || Ok(7)).is_err(), "not a memory failure");
         assert!(super::retry_on_cpu(ModelId::Migan, card, &crate::Progress::none(), oom, oom).is_err_and(|e| e.is_out_of_memory()), "out of memory on the processor too");
+    }
+
+    /// The card's room is kept from when a smaller tile was first needed,
+    /// so small gains image after image add up; the model's own tile
+    /// keeps nothing.
+    #[test]
+    fn a_smaller_tile_keeps_the_room_it_was_first_needed_at() {
+        let first = super::fitted_after(None, 256, 512, || Some(2_000));
+        assert_eq!(first, Some((256, Some(2_000))));
+        assert_eq!(super::fitted_after(first, 256, 512, || Some(2_600)), Some((256, Some(2_000))), "same tile: the first room stays");
+        assert_eq!(super::fitted_after(first, 128, 512, || Some(1_500)), Some((128, Some(1_500))), "a smaller one: its own room");
+        assert_eq!(super::fitted_after(first, 512, 512, || Some(9_000)), None);
     }
 
     /// An upscale starts at the smaller tile its last image fit while the
