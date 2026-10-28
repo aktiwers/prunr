@@ -451,10 +451,20 @@ impl Place {
     /// some fail by hanging or by taking the machine's memory.
     pub fn kept_off(self, remeasuring: bool) -> bool {
         match self {
-            Place::Cpu(Why::Fails(_)) => true,
+            Place::Cpu(_) if self.fails() => true,
             Place::Cpu(_) => !remeasuring,
             Place::There(_) | Place::Unmeasured => false,
         }
+    }
+
+    /// The model does not run on the accelerator.
+    pub fn fails(self) -> bool {
+        matches!(self, Place::Cpu(Why::Fails(_)))
+    }
+
+    /// The model runs on the accelerator, faster than on the CPU.
+    pub fn runs_there(self) -> bool {
+        matches!(self, Place::There(_))
     }
 }
 
@@ -2961,6 +2971,8 @@ mod tests {
             (Place::Cpu(Why::Fails("hangs")), true, true),
         ] {
             assert_eq!((place.kept_off(false), place.kept_off(true)), (kept, kept_while_measuring), "{place:?}");
+            assert_eq!(place.fails(), kept_while_measuring, "{place:?}");
+            assert_eq!(place.runs_there(), matches!(place, Place::There(_)), "{place:?}");
         }
     }
 

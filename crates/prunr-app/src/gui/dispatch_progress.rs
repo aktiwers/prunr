@@ -253,7 +253,7 @@ impl DispatchProgress {
         let parts: Vec<String> = outer.into_iter().chain(inner)
             .map(|(unit, n, total)| format!("{} {n} of {total}", unit.noun(1)))
             .collect();
-        (!parts.is_empty()).then(|| capitalise_first(&parts.join(" \u{b7} ")))
+        (!parts.is_empty()).then(|| crate::gui::views::fmt::capitalized(&parts.join(" \u{b7} ")))
     }
 
     /// Fraction in `0.0..=1.0` for the progress-bar fill. `None` when
@@ -365,14 +365,6 @@ impl DispatchProgressSlot {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<DispatchProgress>> {
         self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-fn capitalise_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
     }
 }
 

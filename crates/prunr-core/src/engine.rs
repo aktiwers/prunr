@@ -405,9 +405,8 @@ fn with_measured(
     mut places: prunr_models::Places,
     measured: [Option<prunr_models::Place>; prunr_models::Column::ALL.len()],
 ) -> prunr_models::Places {
-    use prunr_models::{Place, Why};
     for column in prunr_models::Column::ALL {
-        if matches!(places.get(column), Place::Cpu(Why::Fails(_))) {
+        if places.get(column).fails() {
             continue;
         }
         if let Some(place) = measured[column.index()] {
@@ -918,7 +917,7 @@ pub(crate) fn kept_after_a_run(model: prunr_models::ModelId, ep: EpKind, session
 
 /// Whether this machine's test ran `model` on `ep` and kept it there.
 fn ran_here(model: prunr_models::ModelId, ep: EpKind) -> bool {
-    column_for(model, ep.as_str()).is_some_and(|column| matches!(crate::ep_compat::measured_for(model)[column.index()], Some(prunr_models::Place::There(_))))
+    column_for(model, ep.as_str()).is_some_and(|column| crate::ep_compat::measured_for(model)[column.index()].is_some_and(prunr_models::Place::runs_there))
 }
 
 /// One run of `session` on zeros. An input it cannot fill (not a float

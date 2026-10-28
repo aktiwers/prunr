@@ -207,7 +207,7 @@ fn test_row(
     runs_on: &'static str,
 ) -> Option<TestRow> {
     let fails_by_registry = |column: prunr_models::Column| {
-        matches!(prunr_models::registry_places(model).get(column), prunr_models::Place::Cpu(prunr_models::Why::Fails(_)))
+        prunr_models::registry_places(model).get(column).fails()
     };
     if measured.iter().all(Option::is_none) {
         return None;

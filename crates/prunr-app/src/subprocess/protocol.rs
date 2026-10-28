@@ -1252,11 +1252,7 @@ mod tests {
     #[test]
     fn a_live_sessions_folder_is_kept_however_old() {
         let parent = tempfile::tempdir().unwrap();
-        #[cfg(unix)]
-        let waits = std::process::Command::new("sleep").arg("30").spawn();
-        #[cfg(windows)]
-        let waits = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
-        let mut other = waits.unwrap();
+        let mut other = crate::gui::tests::fixtures::idle_child();
         let live_dir = parent.path().join(format!("prunr-ipc-{}", other.id()));
         std::fs::create_dir_all(&live_dir).unwrap();
         let mut open = std::fs::File::options();

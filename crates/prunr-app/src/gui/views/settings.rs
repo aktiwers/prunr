@@ -667,7 +667,7 @@ fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, name: &str, inten
 fn cuda_offer_text(results: &TestResults, name: &str) -> String {
     let gains = super::fmt::and_list(results.rows.iter()
         .filter(|r| r.runs_on == prunr_core::engine::CPU_NAME)
-        .filter(|r| matches!(prunr_models::registry_places(r.model).get(prunr_models::Column::Cuda), prunr_models::Place::There(_)))
+        .filter(|r| prunr_models::registry_places(r.model).get(prunr_models::Column::Cuda).runs_there())
         .map(|r| prunr_models::display_name(r.model)));
     let others = super::fmt::and_list(results.installed());
     match (gains.is_empty(), others.is_empty()) {

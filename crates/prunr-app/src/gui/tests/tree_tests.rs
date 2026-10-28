@@ -448,10 +448,7 @@ fn a_store_card_tests_its_own_model() {
     assert!(!present.iter().any(|n| n == "Test Silueta"), "a measured one has nothing to test");
     assert!(!present.iter().any(|n| n == "Test BiRefNet-lite"), "installed, but no accelerator here would try it");
 
-    #[cfg(unix)]
-    let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
-    #[cfg(windows)]
-    let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("a process to stand in for the test");
+    let child = crate::gui::tests::fixtures::idle_child();
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child, Some(ModelId::U2net)));
     settle(&mut h);
     assert_all_controls_named(&h, "the Model Store while a model's test runs");
