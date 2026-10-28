@@ -83,3 +83,21 @@ fn shortcuts_that_act_on_the_image_wait_under_a_modal() {
     app.perform(Action::NextImage, &ctx);
     assert_eq!(app.batch.selected_index, 1, "with no modal up the arrow key acts");
 }
+
+/// Escape under a modal that Escape does not close (a file dialog, the
+/// reset confirm) leaves the work behind it alone: a running cut goes on.
+#[test]
+fn escape_under_a_modal_it_cannot_close_cancels_nothing_behind_it() {
+    use crate::gui::views::shortcuts::Action;
+    let ctx = egui::Context::default();
+    let mut app = PrunrApp::new_for_test();
+    let item = super::fixtures::push_test_item(&mut app, 1);
+    item.ticked = true;
+    super::fixtures::put_in(item, super::super::item::BatchStatus::Processing);
+    app.pending_reset_confirm = true;
+    app.perform(Action::Cancel, &ctx);
+    assert!(!app.processor.cancels.is_cancelled(1), "the cut goes on under the modal");
+    app.pending_reset_confirm = false;
+    app.perform(Action::Cancel, &ctx);
+    assert!(app.processor.cancels.is_cancelled(1), "with no modal up Escape cancels it");
+}
