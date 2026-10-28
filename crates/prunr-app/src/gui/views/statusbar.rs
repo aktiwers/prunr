@@ -204,11 +204,9 @@ fn model_engine<'a>(ctx: &egui::Context, app: &'a PrunrApp) -> &'a str {
         return "Checking";
     }
     let Some(model) = app.settings.model.to_model_id() else { return backend };
-    // The probe answers once per process, and the results are read again
-    // whenever what was measured changes.
-    let key = (model, std::sync::Arc::as_ptr(&app.test_results) as usize);
+    let key = engine_key(app, model);
     let id = egui::Id::new("statusbar_model_engine");
-    if let Some((_, engine)) = ctx.data(|d| d.get_temp::<((prunr_models::ModelId, usize), &'static str)>(id)).filter(|(k, _)| *k == key) {
+    if let Some((_, engine)) = ctx.data(|d| d.get_temp::<(EngineKey, &'static str)>(id)).filter(|(k, _)| *k == key) {
         return engine;
     }
     let engine = app.settings.engine_of(model);
@@ -216,9 +214,29 @@ fn model_engine<'a>(ctx: &egui::Context, app: &'a PrunrApp) -> &'a str {
     engine
 }
 
+/// What the chosen model's engine follows: the model, what was measured
+/// (the results are read again whenever it changes), and whether a worker
+/// reports an accelerator.
+type EngineKey = (prunr_models::ModelId, usize, bool);
+
+fn engine_key(app: &PrunrApp, model: prunr_models::ModelId) -> EngineKey {
+    (model, std::sync::Arc::as_ptr(&app.test_results) as usize, app.settings.is_gpu())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::gui::settings::{ComputeMode, SettingsModel};
+
+    /// The cached engine is read again when a worker reports the processor
+    /// after an accelerator, as when a model fell back.
+    #[test]
+    fn the_status_bars_engine_follows_a_fallback() {
+        let mut app = crate::gui::app::PrunrApp::new_for_test();
+        app.settings.active_backend = "DirectML".into();
+        let before = super::engine_key(&app, prunr_models::ModelId::Silueta);
+        app.settings.active_backend = "CPU".into();
+        assert_ne!(super::engine_key(&app, prunr_models::ModelId::Silueta), before);
+    }
 
     /// The status bar names the chosen model's engine: the user's CPU
     /// only first, the probe's wait, and with no model the runtime's own.
