@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ort::session::builder::SessionBuilder;
+use ort::AsPointer;
 use ort::session::Session;
 
 use crate::types::CoreError;
@@ -202,17 +203,64 @@ pub fn session_builder() -> Result<SessionBuilder, CoreError> {
     // Measured (4-core i7): LaMa 5.2 s -> 3.5 s alone,
     // LaMa + face restore 7.5 s -> 4.9 s, a Silueta cut-out 4.15 s -> 3.6 s;
     // an OpenVINO session is unchanged.
-    let builder = Session::builder(env)
+    let mut builder = Session::builder(env)
         .map_err(init)?
         .with_intra_op_spinning(false)
-        .map_err(|e| init(e.into()))?
-        // ort sets ORT's own device choice to MaxEfficiency, which puts a
-        // session naming no provider on an NPU when one is listed (the
-        // Windows ML runtime lists DirectML's). Prunr places each session
-        // itself, so one naming none stays on the CPU.
-        .with_auto_device(ort::session::builder::AutoDevicePolicy::Default)
         .map_err(|e| init(e.into()))?;
+    // ORT picks the provider of a session that names none, and ort sets
+    // that choice to MaxEfficiency, which takes an NPU when one is listed
+    // (the Windows ML runtime lists DirectML's); any of ORT's policies,
+    // its default too, takes a plugin's processor device over ORT's own
+    // CPU provider (OpenVINO's). Prunr places each session itself, so one
+    // naming none stays on ORT's CPU provider.
+    // SAFETY: the options are live, and the callback reads only what ORT
+    // hands it.
+    let status = unsafe { (ort::api().SessionOptionsSetEpSelectionPolicyDelegate)(builder.ptr_mut(), Some(ort_s_cpu), std::ptr::null_mut()) };
+    check(status).map_err(|e| CoreError::Inference(format!("ORT builder init failed: {e}")))?;
     without_optimizers(builder, &[])
+}
+
+/// ORT's choice of provider for a session that names none: ORT's own CPU
+/// provider, which ORT always lists.
+unsafe extern "system" fn ort_s_cpu(
+    ep_devices: *const *const ort::sys::OrtEpDevice,
+    num_devices: usize,
+    _model_metadata: *const ort::sys::OrtKeyValuePairs,
+    _runtime_metadata: *const ort::sys::OrtKeyValuePairs,
+    selected: *mut *const ort::sys::OrtEpDevice,
+    max_selected: usize,
+    num_selected: *mut usize,
+    _state: *mut std::ffi::c_void,
+) -> ort::sys::OrtStatusPtr {
+    // SAFETY: ORT hands `num_devices` live devices and room for
+    // `max_selected`, each name a NUL-terminated string it owns.
+    unsafe {
+        let devices = std::slice::from_raw_parts(ep_devices, num_devices);
+        let name = |device| std::ffi::CStr::from_ptr((ort::api().EpDevice_EpName)(device));
+        let cpu = devices.iter().copied().find(|&device| name(device).to_bytes() == CPU_PROVIDER.as_bytes());
+        *num_selected = 0;
+        if let Some(cpu) = cpu.filter(|_| max_selected > 0) {
+            *selected = cpu;
+            *num_selected = 1;
+        }
+    }
+    ort::sys::OrtStatusPtr::default()
+}
+
+/// ORT's name for its own CPU provider.
+const CPU_PROVIDER: &str = "CPUExecutionProvider";
+
+/// `status` as a result: ORT's error message, the status released.
+fn check(status: ort::sys::OrtStatusPtr) -> Result<(), String> {
+    if status.0.is_null() {
+        return Ok(());
+    }
+    // SAFETY: a non-null status is ORT's to read once and release.
+    unsafe {
+        let message = std::ffi::CStr::from_ptr((ort::api().GetErrorMessage)(status.0)).to_string_lossy().into_owned();
+        (ort::api().ReleaseStatus)(status.0);
+        Err(message)
+    }
 }
 
 /// `builder` with `extra` of ORT's optimizers turned off, and constant
