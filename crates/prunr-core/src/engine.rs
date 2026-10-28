@@ -611,17 +611,6 @@ fn disabled_optimizers_on(provider: &str) -> &'static [&'static str] {
 #[cfg(not(target_os = "macos"))]
 const OV_ENGINE_DEVICE: &str = "AUTO:GPU,CPU";
 
-/// The user's Intel GPU choice, read once per process.
-#[cfg(not(target_os = "macos"))]
-fn intel_gpu_chosen() -> bool {
-    static CHOSEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CHOSEN.get_or_init(|| {
-        let chosen = crate::ort_runtime::intel_gpu_chosen();
-        tracing::info!(chosen, "OpenVINO may use the Intel GPU");
-        chosen
-    })
-}
-
 #[cfg(not(target_os = "macos"))]
 impl EpSite<'_> {
     /// The OpenVINO device this site asks for, `intel_gpu` when the model
@@ -1136,7 +1125,7 @@ pub(crate) fn walk_ladder<S>(
 pub fn gpu_provider_names() -> Vec<String> {
     available_gpu_eps().iter().map(|&ep| match ep {
         #[cfg(not(target_os = "macos"))]
-        EpKind::OpenVino if intel_gpu_chosen() => prunr_models::Column::OpenVinoGpu.name().to_string(),
+        EpKind::OpenVino if crate::ort_runtime::openvino_may_use_graphics() => prunr_models::Column::OpenVinoGpu.name().to_string(),
         _ => ep.as_str().to_string(),
     }).collect()
 }
@@ -1715,7 +1704,7 @@ pub fn runs_on_host_cpu(provider: &str) -> bool {
 /// Whether OpenVINO engines in this process may use the Intel GPU.
 pub fn openvino_on_gpu() -> bool {
     #[cfg(not(target_os = "macos"))]
-    { intel_gpu_chosen() }
+    { crate::ort_runtime::openvino_may_use_graphics() }
     #[cfg(target_os = "macos")]
     { false }
 }

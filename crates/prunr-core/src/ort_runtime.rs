@@ -362,8 +362,11 @@ fn load_runtime(path: &Path, version: Option<&str>) -> Result<(), String> {
     }
     #[allow(clippy::disallowed_methods)] // the sanctioned init: guarded by the OnceLock in ensure_initialized
     let builder = ort::init_from(path).map_err(|e| format!("ort::init_from({}): {e}", path.display()))?;
-    if Addon::OpenVino.library().is_some() && version.is_some_and(takes_addons) {
-        create_env_for_openvino(openvino_devices(intel_gpu_chosen()))?;
+    // On Linux, where OpenVINO comes as an add-on, before one is
+    // installed too: one installed while the process runs registers into
+    // this environment. Without the plugin the filter names nothing.
+    if cfg!(target_os = "linux") && version.is_some_and(takes_addons) {
+        create_env_for_openvino(openvino_devices(openvino_may_use_graphics()))?;
     }
     let env = builder
         // Off, though `ort` turns it on. Windows reads only this: the
@@ -539,6 +542,18 @@ pub const INTEL_GPU_FILE: &str = "intel-gpu";
 /// Whether the user lets OpenVINO use the Intel GPU, read from disk now.
 pub fn intel_gpu_chosen() -> bool {
     intel_gpu_file().is_some_and(|file| file.is_file())
+}
+
+/// Whether OpenVINO may use the Intel GPU in this process: the user's
+/// choice as the process first read it, which the environment's device
+/// filter and every session go by alike.
+pub fn openvino_may_use_graphics() -> bool {
+    static CHOSEN: OnceLock<bool> = OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        let chosen = intel_gpu_chosen();
+        tracing::info!(chosen, "OpenVINO may use the Intel GPU");
+        chosen
+    })
 }
 
 /// The file whose presence lets OpenVINO use the Intel GPU, from each
@@ -1064,9 +1079,10 @@ mod tests {
     }
 
     /// A process using the OpenVINO add-on registers only its processor
-    /// part until the user lets it use the Intel graphics: unfiltered, it
-    /// loaded the graphics part and the system's OpenCL drivers, used or
-    /// not. `PRUNR_OPENVINO_ADDON` names the plugin.
+    /// part until the user lets it use the Intel graphics, whether the
+    /// add-on was there when the process started or installed while it
+    /// ran: unfiltered, it loaded the graphics part and the system's
+    /// OpenCL drivers, used or not. `PRUNR_OPENVINO_ADDON` names the plugin.
     #[cfg(target_os = "linux")]
     #[test]
     fn openvino_registers_only_the_devices_it_may_use() {
@@ -1079,18 +1095,29 @@ mod tests {
             eprintln!("SKIP: no runtime that takes add-ons");
             return;
         }
-        let home = tempfile::tempdir().expect("temp home");
-        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args(["--exact", "ort_runtime::tests::a_process_with_openvino_lists_its_processor_only", "--ignored"])
-            .env("ORT_DYLIB_PATH", loaded_dylib().expect("loaded"))
-            .env("PRUNR_OPENVINO_ADDON", plugin)
-            .env("HOME", home.path())
-            .env("XDG_DATA_HOME", home.path().join("data"))
-            .env("XDG_CACHE_HOME", home.path().join("cache"))
-            .output()
-            .expect("child runs");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+        for (installed, child_test) in [("at the start", "a_process_with_openvino_lists_its_processor_only"), ("later", "openvino_installed_later_lists_the_processor_only")] {
+            let home = tempfile::tempdir().expect("temp home");
+            let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &format!("ort_runtime::tests::{child_test}"), "--ignored"])
+                .env("ORT_DYLIB_PATH", loaded_dylib().expect("loaded"))
+                .env("PRUNR_OPENVINO_ADDON", &plugin)
+                .env("HOME", home.path())
+                .env("XDG_DATA_HOME", home.path().join("data"))
+                .env("XDG_CACHE_HOME", home.path().join("cache"))
+                .output()
+                .expect("child runs");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && stdout.contains("1 passed"), "installed {installed}: {stdout}{}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    /// The OpenVINO add-on's devices, registered in this process: each a
+    /// processor's.
+    #[cfg(target_os = "linux")]
+    fn openvino_lists_the_processor_only() {
+        assert!(register_addon(Addon::OpenVino), "the add-on registers");
+        let kinds: Vec<_> = addon_devices(Addon::OpenVino).iter().map(|d| d.hardware_device().ty()).collect();
+        assert!(kinds.iter().all(|&kind| kind == ort::memory::DeviceType::CPU), "{kinds:?}");
     }
 
     #[cfg(target_os = "linux")]
@@ -1099,9 +1126,16 @@ mod tests {
     fn a_process_with_openvino_lists_its_processor_only() {
         use_addon(Addon::OpenVino, std::env::var_os("PRUNR_OPENVINO_ADDON").expect("named").into());
         ensure_initialized().expect("the runtime loads");
-        assert!(register_addon(Addon::OpenVino), "the add-on registers");
-        let kinds: Vec<_> = addon_devices(Addon::OpenVino).iter().map(|d| d.hardware_device().ty()).collect();
-        assert!(kinds.iter().all(|&kind| kind == ort::memory::DeviceType::CPU), "{kinds:?}");
+        openvino_lists_the_processor_only();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run in a process of its own by openvino_registers_only_the_devices_it_may_use"]
+    fn openvino_installed_later_lists_the_processor_only() {
+        ensure_initialized().expect("the runtime loads");
+        use_addon(Addon::OpenVino, std::env::var_os("PRUNR_OPENVINO_ADDON").expect("named").into());
+        openvino_lists_the_processor_only();
     }
 
     #[test]
