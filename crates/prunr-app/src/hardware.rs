@@ -134,6 +134,22 @@ pub fn driver_identity() -> String {
     }
 }
 
+/// The NVIDIA card's name as its driver lists it: the first card by bus,
+/// read from a file the driver keeps, which wakes no card on a laptop the
+/// way NVML can.
+#[cfg(target_os = "linux")]
+fn nvidia_card_name() -> Option<String> {
+    let mut cards: Vec<std::path::PathBuf> = std::fs::read_dir("/proc/driver/nvidia/gpus").ok()?.flatten().map(|e| e.path().join("information")).collect();
+    cards.sort();
+    cards.iter().find_map(|card| model_named_in(&std::fs::read_to_string(card).ok()?))
+}
+
+/// The card's name in the driver's information file, its `Model:` line.
+#[cfg(any(target_os = "linux", test))]
+fn model_named_in(information: &str) -> Option<String> {
+    information.lines().find_map(|line| line.strip_prefix("Model:")).map(|name| name.trim().to_string()).filter(|name| !name.is_empty())
+}
+
 /// The Linux kernel's Intel graphics module is left out: its version
 /// moves with every kernel update, which would drop every provider's
 /// measurements, not only OpenVINO's.
@@ -303,7 +319,7 @@ fn detect_gpus(cpu_vendor: CpuVendor) -> GpuSlots {
     #[cfg(target_os = "linux")]
     {
         let (dgpu, igpu) = detect_gpus_linux(cpu_vendor);
-        let dgpu_name = (dgpu == Some(GpuVendor::Nvidia)).then(prunr_core::card_memory::cuda_card_name).flatten();
+        let dgpu_name = (dgpu == Some(GpuVendor::Nvidia)).then(nvidia_card_name).flatten();
         GpuSlots { dgpu, dgpu_name, igpu, suits_directml: false }
     }
     #[cfg(target_os = "macos")]
@@ -454,6 +470,14 @@ fn displays_from_lspci(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// The card's name is the driver's `Model:` line, trimmed.
+    #[test]
+    fn the_nvidia_card_is_named_as_its_driver_lists_it() {
+        let information = "Model: \t\t NVIDIA GeForce RTX 3060\nIRQ:   \t\t 161\nGPU UUID: \t GPU-4c1c\n";
+        assert_eq!(super::model_named_in(information).as_deref(), Some("NVIDIA GeForce RTX 3060"));
+        assert_eq!(super::model_named_in("IRQ: 161\nModel:   \n"), None);
+    }
+
     /// The Linux identity is the NVIDIA driver's and ROCm's versions,
     /// trimmed, in that order; the Intel graphics module is not in it.
     #[test]
