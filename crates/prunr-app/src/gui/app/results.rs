@@ -299,6 +299,9 @@ impl PrunrApp {
             self.toasts.outcome(outcome);
             self.runtime_install = None;
             if places_changed {
+                if let Some(&provider) = prunr_core::engine::gpu_providers_now().as_deref().and_then(<[_]>::first) {
+                    self.settings.accelerator_started(provider);
+                }
                 self.places_changed();
             } else {
                 self.refresh_install_cache();
