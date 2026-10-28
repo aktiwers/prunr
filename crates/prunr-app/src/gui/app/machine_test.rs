@@ -74,12 +74,7 @@ impl PrunrApp {
 
     /// Each frame: take in the test's progress, and its end.
     pub(crate) fn pump_machine_test(&mut self, ctx: &egui::Context) {
-        let Some(ended) = self.machine_test.as_mut().and_then(MachineTest::pump) else {
-            if self.machine_test.as_ref().is_some_and(MachineTest::ending) {
-                ctx.request_repaint_after(crate::gui::machine_test::EXIT_POLL);
-            }
-            return;
-        };
+        let Some(ended) = self.machine_test.as_mut().and_then(MachineTest::pump) else { return };
         let only = self.machine_test.take().and_then(|test| test.only());
         self.places_changed();
         if let (Ended::Finished { .. }, Some(model)) = (&ended, only) {
@@ -141,12 +136,7 @@ impl PrunrApp {
             return;
         }
         let idle = self.machine_idle();
-        let Some((id, column, ended)) = self.download_manager.pump_checks(idle) else {
-            if self.download_manager.check_ending() {
-                ctx.request_repaint_after(crate::gui::machine_test::EXIT_POLL);
-            }
-            return;
-        };
+        let Some((id, column, ended)) = self.download_manager.pump_checks(idle) else { return };
         let name = prunr_models::display_name(id);
         let accelerator = column.name();
         match ended {

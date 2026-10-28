@@ -7,7 +7,8 @@
 
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 use prunr_core::ep_compat::{Measured, PlaceKind};
 use prunr_models::{Column, ModelId};
@@ -36,13 +37,32 @@ pub(crate) struct MachineTest {
     /// The one model it tests (the Model Store's Test); `None` for the
     /// whole computer.
     only: Option<ModelId>,
-    /// Its output has closed and its process not yet ended.
-    ending: bool,
+    /// Set once its end is taken in: its reader stops waking the window.
+    over: Arc<AtomicBool>,
 }
 
-/// How often the window looks again for a test's process to end once its
-/// output has closed: nothing wakes it for that.
-pub(crate) const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often the reader wakes the window once the test's output has
+/// closed, until its process has ended and the window has seen it.
+const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Pass each event of the test's `output` on, waking the window; once the
+/// output closes, keep waking it every `EXIT_POLL` until `over`: a
+/// process may close its output before it can be waited on, and nothing
+/// else would wake the window to see it end.
+fn relay(output: impl BufRead, tx: &mpsc::Sender<Told>, wake: impl Fn(), over: &AtomicBool) {
+    for line in output.lines().map_while(Result::ok) {
+        if let Some(event) = Told::parse(&line) {
+            if tx.send(event).is_err() {
+                return;
+            }
+            wake();
+        }
+    }
+    while !over.load(Ordering::Relaxed) {
+        wake();
+        std::thread::sleep(EXIT_POLL);
+    }
+}
 
 /// A model the test measured: its time on the processor, and its fastest
 /// engine that gives the processor's picture.
@@ -92,21 +112,13 @@ impl MachineTest {
             .map_err(|e| format!("The test could not start: {e}"))?;
         let stdout = child.stdout.take().ok_or("The test could not start: no output")?;
         let (tx, told) = mpsc::channel();
+        let over = Arc::new(AtomicBool::new(false));
+        let reader_over = Arc::clone(&over);
         std::thread::Builder::new()
             .name("machine-test".into())
-            .spawn(move || {
-                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(event) = Told::parse(&line) {
-                        if tx.send(event).is_err() {
-                            break;
-                        }
-                        wake();
-                    }
-                }
-                wake();
-            })
+            .spawn(move || relay(std::io::BufReader::new(stdout), &tx, wake, &reader_over))
             .map_err(|e| format!("The test could not start: {e}"))?;
-        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, ending: false })
+        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, over })
     }
 
     /// A test of `only` (or the whole computer) whose process is `child`
@@ -114,7 +126,7 @@ impl MachineTest {
     #[cfg(test)]
     pub(crate) fn for_test(child: Child, only: Option<ModelId>) -> Self {
         let (_, told) = mpsc::channel();
-        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, ending: false }
+        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, over: Arc::default() }
     }
 
     pub(crate) fn step(&self) -> Option<Step> {
@@ -125,11 +137,6 @@ impl MachineTest {
         self.only
     }
 
-    /// Its output has closed and its process has yet to end: the window
-    /// looks again after `EXIT_POLL`.
-    pub(crate) fn ending(&self) -> bool {
-        self.ending
-    }
 
     /// It tests the whole computer, under a window of its own.
     pub(crate) fn whole_computer(&self) -> bool {
@@ -155,10 +162,10 @@ impl MachineTest {
         };
         // Its output closes as it ends; until then there is nothing to wait for.
         let exited = closed && self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
-        self.ending = closed && !exited;
         if !exited {
             return None;
         }
+        self.over.store(true, Ordering::Relaxed);
         Some(match self.finished.take() {
             Some(left_out) => Ended::Finished { left_out },
             None => Ended::Stopped { during: self.step },
@@ -181,6 +188,7 @@ impl Drop for MachineTest {
     /// Cancel, or close the app mid-test: the process stops; what it
     /// measured so far is already saved.
     fn drop(&mut self) {
+        self.over.store(true, Ordering::Relaxed);
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             std::thread::spawn(move || child.wait());
@@ -199,14 +207,22 @@ pub(crate) fn stopped_here() -> Measured {
 mod tests {
     use super::*;
 
-    /// A test whose output closed before its process ended is ending, and
-    /// is not over yet.
+    /// The reader passes each event on and wakes the window; once the
+    /// output closes it keeps waking it until the test is over, as the
+    /// process may end only later.
     #[test]
-    fn a_test_whose_output_closed_is_ending() {
-        let mut test = MachineTest::for_test(crate::gui::tests::fixtures::idle_child(), None);
-        assert!(!test.ending());
-        assert_eq!(test.pump(), None, "its process still runs");
-        assert!(test.ending());
+    fn the_reader_wakes_the_window_until_the_test_is_over() {
+        use std::sync::atomic::AtomicUsize;
+        let output = std::io::Cursor::new(format!("{}\nnot an event\n", Told::Finished { left_out: Vec::new() }.line()));
+        let (tx, told) = mpsc::channel();
+        let (wakes, over) = (AtomicUsize::new(0), AtomicBool::new(false));
+        relay(output, &tx, || {
+            if wakes.fetch_add(1, Ordering::Relaxed) == 3 {
+                over.store(true, Ordering::Relaxed);
+            }
+        }, &over);
+        assert_eq!(told.try_recv(), Ok(Told::Finished { left_out: Vec::new() }));
+        assert_eq!(wakes.load(Ordering::Relaxed), 4, "one for the event, then until over");
     }
 
     /// A model's line keeps the processor's time from any run, and the
