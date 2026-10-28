@@ -455,16 +455,17 @@ fn change<R>(edit: impl FnOnce(&mut Learned) -> R) -> R {
     static WRITING: Mutex<()> = Mutex::new(());
     let _writing = WRITING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = cache_path();
+    let scope = scope();
     let (out, learned) = {
         let mut store = locked();
         if let Some(path) = &path {
-            store.refresh_from(path, &scope());
+            store.refresh_from(path, || scope.clone());
         }
         let out = edit(&mut store.learned);
         (out, store.learned.clone())
     };
     if let Some(path) = path {
-        save_to(&path, &scope(), &learned);
+        save_to(&path, &scope, &learned);
         locked().stamp = stamp(&path);
     }
     out
@@ -476,16 +477,17 @@ fn change<R>(edit: impl FnOnce(&mut Learned) -> R) -> R {
 /// builds call it, never a frame.
 pub fn refresh() {
     let Some(path) = cache_path() else { return };
-    locked().refresh_from(&path, &scope());
+    locked().refresh_from(&path, scope);
 }
 
 impl Store {
-    fn refresh_from(&mut self, path: &Path, scope: &str) {
+    /// `scope` is asked for only when the file changed since it was read.
+    fn refresh_from(&mut self, path: &Path, scope: impl FnOnce() -> String) {
         let now = stamp(path);
         if now.is_none() || now == self.stamp {
             return;
         }
-        if let Some(learned) = self.load(path, scope) {
+        if let Some(learned) = self.load(path, &scope()) {
             self.learned = learned;
         }
     }
@@ -828,11 +830,11 @@ mod tests {
         let learned = Learned { failures: Failures::from([("DirectML::U2net".to_string(), "broke".to_string())]), ..Learned::default() };
         save_to(&path, "scope", &learned);
         let mut worker = Store { learned, stamp: stamp(&path) };
-        worker.refresh_from(&path, "scope");
+        worker.refresh_from(&path, || "scope".to_string());
         assert_eq!(worker.learned.failures.len(), 1, "an unchanged file keeps the list");
         std::thread::sleep(std::time::Duration::from_millis(20));
         save_to(&path, "scope", &Learned::default());
-        worker.refresh_from(&path, "scope");
+        worker.refresh_from(&path, || "scope".to_string());
         assert!(worker.learned.failures.is_empty(), "the other process's reset is taken in");
     }
 
