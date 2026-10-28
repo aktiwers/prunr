@@ -354,7 +354,7 @@ impl PrunrApp {
         }
     }
 
-    /// A Magic Brush click with By depth on: everything near that depth.
+    /// A Magic Brush click picking by Depth: everything near that depth.
     /// Before the image's map is there the click waits for it; the map
     /// is on its way, since the brush asks for the shown image's map,
     /// and `pump_depth` runs the click when it lands.

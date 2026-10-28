@@ -2679,7 +2679,7 @@ mod depth_tests {
         assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the map is there");
     }
 
-    /// A By depth click on an image whose map is not there yet waits for
+    /// A Depth pick on an image whose map is not there yet waits for
     /// the map and selects when it lands; the brush turned off meanwhile
     /// drops it.
     #[test]

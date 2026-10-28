@@ -302,14 +302,14 @@ fn the_tool_strip_follows_the_magic_brush() {
     assert_all_controls_named(&h, "magic brush panel");
 }
 
-/// Magic Brush's Depth switch trades Confidence for Range on the strip.
+/// Magic Brush's Depth choice trades Confidence for Range on the strip.
 #[test]
 fn the_magic_brush_strip_selects_by_depth() {
     let mut h = loaded();
     h.state_mut().hardware_install_cache.depth = true;
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
-    click(&mut h, "By depth");
+    click(&mut h, "Depth");
     assert!(h.state().settings.brush.magic_depth);
     let present = names(&h);
     assert!(present.iter().any(|n| n == "Range") && !present.iter().any(|n| n == "Confidence"), "{present:?}");
@@ -325,7 +325,7 @@ fn a_depth_knob_without_the_model_offers_the_store() {
     h.state_mut().hardware_install_cache = Default::default();
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
-    click(&mut h, "By depth");
+    click(&mut h, "Depth");
     assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
 
     let mut h = loaded();
