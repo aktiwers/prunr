@@ -1889,10 +1889,9 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     /// A run a card ran out of memory for goes on on the processor and
-    /// says so, and the next goes there at once while the card has gained
-    /// no room; any other failure, or a run already on the processor,
-    /// keeps its error. Each case its own model: the note is the
-    /// process's.
+    /// says so; any other failure, or a run already on the processor,
+    /// keeps its error. Each case its own model: the note on the card is
+    /// the process's.
     #[test]
     fn a_card_out_of_memory_goes_on_on_the_processor() {
         use crate::types::CoreError;
@@ -1904,8 +1903,6 @@ mod tests {
         assert_eq!(super::retry_on_cpu(ModelId::Silueta, card, &crate::Progress::new(sink.clone()), oom, || Ok(7)).ok(), Some(7));
         assert!(sink.updates().contains(&crate::ProgressUpdate::Step(crate::Step::OnTheProcessor)));
         crate::progress::check_contract(&sink.updates()).expect("it names its step");
-        let card_again = || -> Result<u8, CoreError> { panic!("tried the card that had no room") };
-        assert_eq!(super::retry_on_cpu(ModelId::Silueta, card, &crate::Progress::none(), card_again, || Ok(8)).ok(), Some(8), "the next goes to the processor");
         assert!(super::retry_on_cpu(ModelId::U2net, super::CPU_NAME, &crate::Progress::none(), oom, || Ok(7)).is_err(), "already on the processor");
         let broken = || Err::<u8, _>(CoreError::Inference("Graph contains cycles".into()));
         assert!(super::retry_on_cpu(ModelId::Teed, card, &crate::Progress::none(), broken, || Ok(7)).is_err(), "not a memory failure");

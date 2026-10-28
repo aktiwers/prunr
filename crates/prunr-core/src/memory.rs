@@ -144,26 +144,35 @@ pub(crate) fn still_short(then_mb: Option<u64>, now_mb: Option<u64>) -> bool {
 
 /// The models whose runs ran out of a card's memory in this process,
 /// even on its smallest tile, with what that card had free then.
-static RAN_SHORT: std::sync::Mutex<Vec<(ModelId, String, Option<u64>)>> = std::sync::Mutex::new(Vec::new());
+static RAN_SHORT: std::sync::Mutex<Vec<ShortNote>> = std::sync::Mutex::new(Vec::new());
+
+type ShortNote = (ModelId, String, u64);
 
 /// `id` ran out of memory on `provider`'s card: it runs on the processor
-/// until the card has more free.
+/// until the card has more free. A card whose memory cannot be read is
+/// tried again next time, as there is no telling when it has room.
 pub(crate) fn note_ran_short(id: ModelId, provider: &str) {
     let free = card_free_mb(provider);
-    let mut notes = RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    note_in(&mut RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner), id, provider, free);
+}
+
+fn note_in(notes: &mut Vec<ShortNote>, id: ModelId, provider: &str, free: Option<u64>) {
     notes.retain(|(model, on, _)| (*model, on.as_str()) != (id, provider));
-    notes.push((id, provider.to_string(), free));
+    if let Some(free) = free {
+        notes.push((id, provider.to_string(), free));
+    }
 }
 
 /// Whether `id` ran out of `provider`'s card memory and the card has not
-/// gained room since; a note the card has outgrown is forgotten.
+/// gained room since; a note the card has outgrown is forgotten. The card
+/// is read outside the lock.
 pub fn ran_short(id: ModelId, provider: &str) -> bool {
-    let mut notes = RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(at) = notes.iter().position(|(model, on, _)| (*model, on.as_str()) == (id, provider)) else { return false };
-    if still_short(notes[at].2, card_free_mb(provider)) {
+    let noted = |notes: &[ShortNote]| notes.iter().find(|(model, on, _)| (*model, on.as_str()) == (id, provider)).map(|note| note.2);
+    let Some(then) = noted(&RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) else { return false };
+    if still_short(Some(then), card_free_mb(provider)) {
         return true;
     }
-    notes.remove(at);
+    RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|note| *note != (id, provider.to_string(), then));
     false
 }
 
@@ -182,6 +191,20 @@ pub fn card_free_mb(provider: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run short of a card's memory is noted with what that card had
+    /// free, replacing an older note; without a reading nothing is noted,
+    /// and the card is tried again.
+    #[test]
+    fn a_card_that_ran_short_is_noted_only_with_a_reading() {
+        let mut notes = Vec::new();
+        note_in(&mut notes, ModelId::Silueta, "CUDA", Some(2_000));
+        note_in(&mut notes, ModelId::Silueta, "CUDA", Some(1_500));
+        assert_eq!(notes, [(ModelId::Silueta, "CUDA".to_string(), 1_500)]);
+        note_in(&mut notes, ModelId::Silueta, "CUDA", None);
+        assert!(notes.is_empty(), "no reading: the card is tried again");
+        assert!(still_short(Some(1_500), Some(2_000)) && !still_short(Some(1_500), Some(2_600)));
+    }
     use prunr_models::{Cost, Priced};
 
     fn needs(cuda: Priced) -> Needs {
