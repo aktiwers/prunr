@@ -39,6 +39,8 @@ pub(crate) enum StepKind {
     Colorize,
     Preset,
     Adjust,
+    /// Every stroke since the picture changed, drawn again.
+    Strokes,
 }
 
 impl StepKind {
@@ -55,6 +57,7 @@ impl StepKind {
             StepKind::Colorize => "Colorize",
             StepKind::Preset => "Preset",
             StepKind::Adjust => "Adjustment",
+            StepKind::Strokes => "Stroke adjustment",
         }
     }
 }
@@ -325,6 +328,8 @@ pub(crate) struct DocState {
     pub(crate) at: Instant,
     /// Which step this is (`next_step_id`): two can share an `at`.
     pub(crate) id: u64,
+    /// What the step did to the selection, for a replay of the strokes.
+    pub(crate) made: Option<super::selection_queue::SelectionMade>,
 }
 
 pub(crate) fn next_step_id() -> u64 {
@@ -394,8 +399,19 @@ impl DocState {
             faced: false,
             at: Instant::now(),
             id: next_step_id(),
+            made: None,
         }
     }
+}
+
+/// The strokes since the picture last changed (`strokes_since_picture`).
+#[derive(Clone)]
+pub(crate) struct StrokeHistory {
+    /// The step they start from, with its selection and edits.
+    pub(crate) from: u64,
+    pub(crate) selection: Option<StoredSelection>,
+    pub(crate) edits: Option<StoredSelection>,
+    pub(crate) ops: Vec<super::selection_queue::SelectionMade>,
 }
 
 pub(crate) struct Timeline {
@@ -441,6 +457,40 @@ impl Timeline {
     /// The state a redo goes to.
     pub(crate) fn next(&self) -> Option<&DocState> {
         self.states.get(self.cursor + 1)
+    }
+
+    /// The strokes since the picture last changed, up to the shown step,
+    /// to draw again: the step they start from and what each step after
+    /// it did. Steps that change only the settings pass through; any other
+    /// step without a record, or one that changed the picture, is where
+    /// they start. An earlier adjustment's history stands in for the steps
+    /// it redrew. `None` without a stroke to draw.
+    pub(crate) fn strokes_since_picture(&self) -> Option<StrokeHistory> {
+        use super::selection_queue::SelectionMade;
+        let mut ops = Vec::new();
+        for i in (0..=self.cursor).rev() {
+            let step = &self.states[i];
+            let start = match (&step.made, step.kind) {
+                (Some(SelectionMade::Adjusted { from, ops: redrawn }), _) => {
+                    ops.extend(redrawn.iter().rev().cloned());
+                    self.states.range(..i).find(|s| s.id == *from)?
+                }
+                (Some(made), _) => {
+                    ops.push(made.clone());
+                    continue;
+                }
+                (None, StepKind::Adjust | StepKind::Preset) if i > 0 => continue,
+                (None, _) => step,
+            };
+            ops.reverse();
+            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory {
+                from: start.id,
+                selection: start.selection.clone(),
+                edits: start.edits.clone(),
+                ops,
+            });
+        }
+        None
     }
 
     /// Fill in the shown state as a job it started lands: no new step.
@@ -569,6 +619,7 @@ mod tests {
             faced: false,
             at: Instant::now(),
             id: next_step_id(),
+            made: None,
         }
     }
 

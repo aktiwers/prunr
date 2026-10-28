@@ -316,6 +316,154 @@ fn the_latest_stroke_ends_with_the_next_step() {
     }
 }
 
+/// Image 9, a 32 × 32 Silueta cut-out to paint on.
+fn app_for_strokes() -> PrunrApp {
+    let mut app = app_with_model(SettingsModel::Silueta);
+    let item = push_test_item(&mut app, 9);
+    item.dimensions = (32, 32);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+    app
+}
+
+/// A Paint Brush stroke down column `x` at Size `size`, landed as the
+/// brush lands it.
+fn paint_down(app: &mut PrunrApp, x: f32, size: f32) {
+    use crate::gui::brush_state::{BrushState, StrokeDrawn};
+    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+    app.settings.brush.radius = size;
+    let mut brush = BrushState::default();
+    brush.begin_stroke(32, 32, prunr_core::brush::BrushShape::Circle, size);
+    brush.extend_stroke_with_radius(x, 4.0, size / 4.0);
+    brush.extend_stroke_with_radius(x, 28.0, size / 4.0);
+    let stamp = app.settings.brush.stamp();
+    let (mask, path) = brush.commit_stroke(stamp).expect("a stroke");
+    app.queue_selection_op(9, SelectionOp::Merge(std::sync::Arc::new(mask)), AfterLanding::Stroke(StrokeDrawn::painted(path, stamp)));
+    super::fixtures::settle_selection_edits(app);
+}
+
+/// With "all strokes" on, move the sliders by `change` and let the
+/// redraw land.
+fn adjust_all(app: &mut PrunrApp, change: impl FnOnce(&mut crate::gui::brush_state::BrushSettings)) {
+    app.brush_state.adjust_all = true;
+    app.adjust_strokes();
+    change(&mut app.settings.brush);
+    app.adjust_strokes();
+    super::fixtures::settle_selection_edits(app);
+}
+
+/// Each Paint Brush stroke's Size, as a redraw of every stroke reads them.
+fn stroke_sizes(app: &PrunrApp) -> Vec<f32> {
+    use crate::gui::brush_state::StrokeDrawn;
+    use crate::gui::selection_queue::SelectionMade;
+    app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| {
+        h.ops.iter().filter_map(|op| match op {
+            SelectionMade::Stroke(StrokeDrawn::Paint { size, .. }) => Some(*size),
+            _ => None,
+        }).collect()
+    })
+}
+
+/// "All strokes": a slider moves every stroke by as much as it moved,
+/// so they keep their differences; the drag fills in one undo step, and
+/// one undo takes it back.
+#[test]
+fn all_strokes_move_together_in_one_step() {
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    paint_down(&mut app, 24.0, 16.0);
+    let (steps, before, cells) = (app.batch.items[0].timeline.undo_steps(), app.batch.items[0].selection_hash, selected_cells(&app));
+    adjust_all(&mut app, |b| b.radius = 32.0);
+    assert_eq!(stroke_sizes(&app), [16.0, 32.0], "twice the size each");
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1);
+    app.settings.brush.radius = 48.0;
+    app.adjust_strokes();
+    super::fixtures::settle_selection_edits(&mut app);
+    assert_eq!(stroke_sizes(&app), [24.0, 48.0], "measured from where the drag began");
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "the drag fills in its one step");
+    assert!(selected_cells(&app) > cells);
+    app.handle_undo(&egui::Context::default());
+    assert_eq!(app.batch.items[0].selection_hash, before, "one undo, the strokes as they were");
+}
+
+/// A redraw of every stroke, with the values they have, gives back the
+/// very selection and cut-out edits shown: strokes, a fold into the
+/// cut-out, Invert and Clear between them.
+#[test]
+fn redrawing_every_stroke_as_it_is_changes_nothing() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::selection_queue::{apply, AfterLanding, Replay, SelState, SelectionOp};
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 6.0, 12.0);
+    app.queue_selection_op(9, SelectionOp::Bake { action: CutoutAction::Erase, feathered: None }, AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    paint_down(&mut app, 16.0, 8.0);
+    app.queue_selection_op(9, SelectionOp::Invert, AfterLanding::Nothing);
+    super::fixtures::settle_selection_edits(&mut app);
+    // Into the one column Invert left out, so it adds something.
+    paint_down(&mut app, 16.0, 20.0);
+    assert!(app.batch.clear_selection(9));
+    paint_down(&mut app, 12.0, 4.0);
+    let item = &app.batch.items[0];
+    let history = item.timeline.strokes_since_picture().expect("strokes to redraw");
+    let kinds: Vec<&str> = history.ops.iter().map(|op| match op {
+        crate::gui::selection_queue::SelectionMade::Stroke(_) => "stroke",
+        crate::gui::selection_queue::SelectionMade::Invert => "invert",
+        crate::gui::selection_queue::SelectionMade::Fold { .. } => "fold",
+        crate::gui::selection_queue::SelectionMade::Clear => "clear",
+        crate::gui::selection_queue::SelectionMade::Adjusted { .. } => "adjusted",
+    }).collect();
+    assert_eq!(kinds, ["stroke", "fold", "stroke", "invert", "stroke", "clear", "stroke"]);
+    let replay = Replay { from: history.from, selection: history.selection, edits: history.edits, ops: std::sync::Arc::new(history.ops), dims: (32, 32), source: None };
+    let made = apply(&SelectionOp::Replay(std::sync::Arc::new(replay)), &SelState::default());
+    assert_eq!(made.selection.as_ref().map(|s| s.content_hash()), item.selection_hash, "the same selection");
+    assert_eq!(made.edits.as_ref().map(|e| e.cells().to_vec()), item.edits.as_ref().map(|e| e.cells().to_vec()), "the same cut-out edits");
+}
+
+/// Each slider moves only the strokes it draws: Range moves a depth
+/// pick and leaves a Paint Brush stroke as it was.
+#[test]
+fn a_slider_moves_only_its_own_strokes() {
+    use crate::gui::brush_state::StrokeDrawn;
+    use crate::gui::selection_queue::{AfterLanding, SelectionMade, SelectionOp};
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
+    let drawn = StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 };
+    app.queue_selection_op(9, SelectionOp::Merge(std::sync::Arc::new(drawn.mask(32, 32))), AfterLanding::Stroke(drawn));
+    super::fixtures::settle_selection_edits(&mut app);
+    app.settings.brush.magic_depth_range = 0.05;
+    adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
+    let ops = app.batch.items[0].timeline.strokes_since_picture().expect("strokes").ops;
+    let range = ops.iter().find_map(|op| match op { SelectionMade::Stroke(StrokeDrawn::Depth { range, .. }) => Some(*range), _ => None });
+    assert!(range.is_some_and(|r| (r - 0.15).abs() < 1e-6), "{range:?}");
+    assert_eq!(stroke_sizes(&app), [8.0], "the paint stroke as it was");
+}
+
+/// Strokes made before the picture changed are not redrawn: a Process
+/// after them starts the strokes afresh.
+#[test]
+fn strokes_before_the_picture_changed_stay_as_they_are() {
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    app.batch.items[0].commit(StepKind::Process);
+    paint_down(&mut app, 24.0, 16.0);
+    assert_eq!(stroke_sizes(&app), [16.0]);
+}
+
+/// The latest stroke adjusted alone, then every stroke: the one adjusted
+/// moves on from its new value, the others from theirs.
+#[test]
+fn every_stroke_includes_the_latest_one_adjusted_alone() {
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    paint_down(&mut app, 24.0, 8.0);
+    app.settings.brush.radius = 16.0;
+    retune_lands(&mut app);
+    assert_eq!(stroke_sizes(&app), [8.0, 16.0]);
+    adjust_all(&mut app, |b| b.radius = 32.0);
+    assert_eq!(stroke_sizes(&app), [16.0, 32.0]);
+}
+
 /// A stroke committed under each active model: segmentation re-cuts at
 /// once; the eraser, upscale and colorize wait for the user's Process, and
 /// with no model nothing runs.

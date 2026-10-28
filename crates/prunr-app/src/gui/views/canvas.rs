@@ -156,7 +156,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             adjusts_last: app.batch.selected_item().and_then(crate::gui::item::BatchItem::retunable_tool) == Some(tool),
         };
         let depth_before = app.settings.brush.magic_depth;
-        let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
+        let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, &mut app.brush_state.adjust_all, facts);
         app.apply_brush_change(change.brush);
         if app.settings.brush.magic_depth && !depth_before {
             app.offer_depth_model(ui.ctx());

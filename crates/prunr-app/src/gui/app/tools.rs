@@ -137,6 +137,11 @@ impl PrunrApp {
             let item_id = done.item_id;
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.selection_state().same(&done.base) {
+                // Every stroke redrawn for a state the image has left: the
+                // next frame draws them again from what it shows.
+                if matches!(done.op, SelectionOp::Replay(_)) {
+                    continue;
+                }
                 tracing::info!(item_id, "selection edit made on a selection since changed; made again");
                 let current = item.selection_state();
                 // A fold reads the feathered plane of the selection it folds.
@@ -147,11 +152,16 @@ impl PrunrApp {
                 self.batch.selection_queue.rebase(item_id, op, done.after, current);
                 continue;
             }
-            let kind = match done.op {
-                SelectionOp::Merge(_) => StepKind::Stroke,
-                SelectionOp::Invert | SelectionOp::Bake { .. } => StepKind::Selection,
-            };
-            let changed = item.land_selection_state(done.made, done.hash, kind);
+            let (kind, made) = done.op.step(&done.after, style.edge_feather_px);
+            // A stroke adjustment fills in its one step while the slider moves.
+            let refill = matches!(done.op, SelectionOp::Replay(_)) && item.adjustment().is_some_and(|a| a.landed);
+            let changed = if refill { item.amend_selection_state(done.made, done.hash) } else { item.land_selection_state(done.made, done.hash, kind) };
+            if changed {
+                item.timeline.current_mut().made = made;
+            }
+            if let (true, SelectionOp::Replay(_), Some(adjusting)) = (changed, &done.op, item.adjusting.as_mut()) {
+                (adjusting.step, adjusting.landed) = (item.timeline.current().id, true);
+            }
             if let SelectionOp::Merge(stroke) = &done.op {
                 item.note_painted_during_erase(stroke);
             }
@@ -554,7 +564,8 @@ impl PrunrApp {
             match result.result {
                 Ok(DecodedSelection::Fresh { mask, output }) => {
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask queued");
-                    let drawn = StrokeDrawn::Magic { output, mode: result.mode, reading: result.reading };
+                    // Kept with the step: the best candidate alone, all a redraw reads.
+                    let drawn = StrokeDrawn::Magic { output: Arc::new(output.best_only()), mode: result.mode, reading: result.reading };
                     self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::Stroke(drawn));
                 }
                 Ok(DecodedSelection::ByDepth { mask, drawn }) => {
@@ -583,7 +594,53 @@ impl PrunrApp {
                 Err(err) => tracing::warn!(item_id = retune.item_id, %err, "stroke retune failed"),
             }
         }
-        self.maybe_retune_last_stroke();
+        self.adjust_strokes();
+    }
+
+    /// A brush slider moved: with "all strokes" on, every stroke on the
+    /// selected image since its picture changed is drawn again, moved by
+    /// as much as the slider moved; otherwise the latest stroke is.
+    pub(crate) fn adjust_strokes(&mut self) {
+        use crate::gui::selection_queue::{Replay, SelectionOp};
+        let now = self.settings.brush.stroke_values();
+        if !self.brush_state.adjust_all {
+            self.brush_state.seen = Some(now);
+            self.maybe_retune_last_stroke();
+            return;
+        }
+        let Some(idx) = self.batch.selected_idx_clamped() else { return };
+        let item_id = self.batch.items[idx].id;
+        // One redraw at a time, after the image's other edits and runs.
+        if !self.batch.items[idx].is_idle() || self.batch.selection_queue.is_pending(item_id) {
+            return;
+        }
+        let seen = self.brush_state.seen.replace(now);
+        let item = &mut self.batch.items[idx];
+        let (from, history) = match item.adjustment() {
+            Some(adjusting) if adjusting.drawn == now => return,
+            Some(adjusting) => (adjusting.from, Arc::clone(&adjusting.history)),
+            None => {
+                let Some(from) = seen.filter(|seen| *seen != now) else { return };
+                let Some(history) = item.timeline.strokes_since_picture() else { return };
+                (from, Arc::new(history))
+            }
+        };
+        let replay = Replay {
+            from: history.from,
+            selection: history.selection.clone(),
+            edits: history.edits.clone(),
+            ops: Arc::new(history.ops.iter().map(|op| op.adjusted(from, now)).collect()),
+            dims: item.dimensions,
+            source: item.source_rgba.clone(),
+        };
+        match item.adjustment() {
+            Some(adjusting) => adjusting.drawn = now,
+            None => {
+                let step = item.timeline.current().id;
+                item.adjusting = Some(crate::gui::item::StrokeAdjustment { from, drawn: now, history, step, landed: false });
+            }
+        }
+        self.queue_selection_op(item_id, SelectionOp::Replay(Arc::new(replay)), AfterLanding::Nothing);
     }
 
     /// The selected image's latest stroke and a slider of its brush moved:
@@ -598,7 +655,8 @@ impl PrunrApp {
         if !item.is_idle() {
             return;
         }
-        let Some((drawn, for_hash)) = item.retunable_stroke().and_then(|s| Some((s.drawn.at(&self.settings.brush)?, s.committed_hash))) else { return };
+        let to = self.settings.brush.stroke_values();
+        let Some((drawn, for_hash)) = item.retunable_stroke().and_then(|s| Some((s.drawn.at(to)?, s.committed_hash))) else { return };
         // Asked for only once a retune runs: a handle the job unpacks, not
         // a decode on every frame.
         let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
@@ -614,8 +672,11 @@ impl PrunrApp {
         let crate::gui::processor::Retuned { merged, hash, for_hash } = retuned;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let Some(last) = item.retunable_stroke().filter(|s| s.committed_hash == for_hash) else { return };
-        (last.drawn, last.committed_hash) = (drawn, hash);
-        if item.replace_selection_in_place(merged, hash) {
+        (last.drawn, last.committed_hash) = (drawn.clone(), hash);
+        let changed = item.replace_selection_in_place(merged, hash);
+        // The stroke's step records it as now drawn, for a later redraw of every stroke.
+        item.timeline.current_mut().made = Some(crate::gui::selection_queue::SelectionMade::Stroke(drawn));
+        if changed {
             self.apply_selection_to_active_model(item_id);
         }
     }

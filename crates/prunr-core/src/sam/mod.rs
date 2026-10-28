@@ -68,6 +68,13 @@ impl SamDecoderOutput {
     pub fn mask(&self, index: usize) -> &[f32] {
         &self.masks[index * SAM_MASK_CELLS..(index + 1) * SAM_MASK_CELLS]
     }
+
+    /// The best candidate alone, a third of the size: what a pick reads
+    /// from it again, the same as from the whole output.
+    pub fn best_only(&self) -> Self {
+        let best = self.best();
+        Self { masks: self.mask(best).to_vec(), iou_predictions: [self.iou_predictions[best], f32::NEG_INFINITY, f32::NEG_INFINITY] }
+    }
 }
 
 /// The logit a pixel must reach to count as selected at `confidence`,
@@ -224,6 +231,22 @@ struct Tap {
 
 #[cfg(test)]
 mod tests {
+
+    /// The best candidate kept alone reads as the whole output does, at
+    /// any confidence, with or without specks removed.
+    #[test]
+    fn the_best_candidate_alone_reads_as_the_whole_output() {
+        let cells = SAM_MASK_CELLS;
+        let masks: Vec<f32> = (0..3 * cells).map(|i| ((i % cells) % 256) as f32 / 32.0 - 4.0 + (i / cells) as f32).collect();
+        let output = SamDecoderOutput { masks, iou_predictions: [0.2, 0.9, 0.5] };
+        let alone = output.best_only();
+        assert_eq!(alone.masks.len(), cells);
+        for (confidence, remove_specks) in [(0.3, false), (0.5, true), (0.9, false)] {
+            let reading = MaskReading { confidence, remove_specks };
+            let read = |o: &SamDecoderOutput| decode_to_mask_artifact(o, 40, 30, reading, crate::selection::BrushMode::Add);
+            assert_eq!(read(&alone).cells(), read(&output).cells(), "{reading:?}");
+        }
+    }
     use super::*;
 
     fn plain(confidence: f32) -> MaskReading {

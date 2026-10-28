@@ -261,6 +261,11 @@ impl BrushSettings {
         prunr_core::MaskReading { confidence: self.magic_confidence_threshold, remove_specks: self.magic_remove_specks }
     }
 
+    /// The values a stroke is drawn with, which its brush's sliders set.
+    pub(crate) fn stroke_values(&self) -> StrokeValues {
+        StrokeValues { size: self.radius, hardness: self.hardness, opacity: self.strength, reading: self.magic_reading(), range: self.magic_depth_range }
+    }
+
     /// The settings that belong to a model rather than to the brush: the
     /// fill's Sharpen and scale, and the Stable Diffusion quality, prompt
     /// and seed. Expand region and Feather sit on the brush strips and
@@ -428,6 +433,17 @@ impl PaintPath {
     }
 }
 
+/// The slider values strokes are drawn with: the Paint Brush's Size,
+/// Hardness and Opacity, Magic Brush's reading and depth Range.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StrokeValues {
+    pub(crate) size: f32,
+    pub(crate) hardness: f32,
+    pub(crate) opacity: f32,
+    pub(crate) reading: prunr_core::MaskReading,
+    pub(crate) range: f32,
+}
+
 /// The latest stroke on an image as it was drawn, kept so its brush's
 /// sliders draw it again while it is the latest: a Magic Brush pick, a
 /// depth pick or a Paint Brush stroke, each with the values it has now.
@@ -445,19 +461,57 @@ impl StrokeDrawn {
         Self::Paint { path: std::sync::Arc::new(path), size, stamp }
     }
 
-    /// The stroke at `brush`'s values; `None` when they are the ones it
+    /// The stroke at the values `to`; `None` when they are the ones it
     /// has. Each keeps what made it (its mode, its pick, its path).
-    pub(crate) fn at(&self, brush: &BrushSettings) -> Option<Self> {
+    pub(crate) fn at(&self, to: StrokeValues) -> Option<Self> {
+        let drawn = self.with(|_| to.size, |_| to.hardness, |_| to.opacity, |_| to.reading, |_| to.range);
+        drawn.values_differ(self).then_some(drawn)
+    }
+
+    /// The stroke moved by as much as the sliders moved from `from` to
+    /// `to`: Size by the same factor, the others by the same amount within
+    /// their ranges, so strokes keep their differences.
+    pub(crate) fn adjusted(&self, from: StrokeValues, to: StrokeValues) -> Self {
+        let offset = |v: f32, a: f32, b: f32, range: std::ops::RangeInclusive<f32>| (v + b - a).clamp(*range.start(), *range.end());
+        self.with(
+            |size| (size * to.size / from.size.max(f32::EPSILON)).clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end()),
+            |hardness| offset(hardness, from.hardness, to.hardness, 0.0..=1.0),
+            |opacity| offset(opacity, from.opacity, to.opacity, 0.0..=1.0),
+            |reading| prunr_core::MaskReading {
+                confidence: offset(reading.confidence, from.reading.confidence, to.reading.confidence, 0.0..=1.0),
+                remove_specks: if from.reading.remove_specks == to.reading.remove_specks { reading.remove_specks } else { to.reading.remove_specks },
+            },
+            |range| offset(range, from.range, to.range, DEPTH_RANGE),
+        )
+    }
+
+    /// The stroke with each value of its kind replaced as given.
+    fn with(
+        &self,
+        size: impl Fn(f32) -> f32,
+        hardness: impl Fn(f32) -> f32,
+        opacity: impl Fn(f32) -> f32,
+        reading: impl Fn(prunr_core::MaskReading) -> prunr_core::MaskReading,
+        range: impl Fn(f32) -> f32,
+    ) -> Self {
         use std::sync::Arc;
         match self {
-            Self::Magic { output, mode, reading } => (brush.magic_reading() != *reading)
-                .then(|| Self::Magic { output: Arc::clone(output), mode: *mode, reading: brush.magic_reading() }),
-            Self::Depth { depth, around, mode, range } => (brush.magic_depth_range != *range)
-                .then(|| Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: brush.magic_depth_range }),
-            Self::Paint { path, size, stamp } => {
-                let now = Stamp { hardness: brush.hardness, strength: brush.strength, ..*stamp };
-                (brush.radius != *size || now != *stamp).then(|| Self::Paint { path: Arc::clone(path), size: brush.radius, stamp: now })
-            }
+            Self::Magic { output, mode, reading: r } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: reading(*r) },
+            Self::Depth { depth, around, mode, range: r } => Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: range(*r) },
+            Self::Paint { path, size: s, stamp } => Self::Paint {
+                path: Arc::clone(path),
+                size: size(*s),
+                stamp: Stamp { hardness: hardness(stamp.hardness), strength: opacity(stamp.strength), ..*stamp },
+            },
+        }
+    }
+
+    fn values_differ(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Magic { reading: a, .. }, Self::Magic { reading: b, .. }) => a != b,
+            (Self::Depth { range: a, .. }, Self::Depth { range: b, .. }) => a != b,
+            (Self::Paint { size: a, stamp: s, .. }, Self::Paint { size: b, stamp: t, .. }) => a != b || s != t,
+            _ => true,
         }
     }
 
@@ -483,6 +537,11 @@ impl StrokeDrawn {
 pub(crate) struct BrushState {
     enabled: bool,
     active: Option<ActiveStroke>,
+    /// The sliders adjust every stroke on the image, not the latest one.
+    /// Not saved: each start begins at the latest stroke.
+    pub(crate) adjust_all: bool,
+    /// The slider values last frame, so a move is seen with where it came from.
+    pub(crate) seen: Option<StrokeValues>,
 }
 
 /// A brush tool; the app keeps at most one on.

@@ -52,7 +52,7 @@ pub(crate) struct StripChange {
     pub try_another: bool,
 }
 
-pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> StripChange {
+pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, adjust_all: &mut bool, facts: StripFacts) -> StripChange {
     let mut strip = StripChange::default();
     let action_before = brush.cutout_action;
     let change = &mut strip.brush;
@@ -86,9 +86,13 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     if !two_rows {
                         change.committed |= second_knobs(ui, tool, brush, facts.model, fill_knobs);
                     }
-                    if facts.adjusts_last {
-                        let tag = ui.label(RichText::new("Last stroke").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
-                        chip::tooltip(tag, "Last stroke", "The sliders adjust your last stroke, and the strokes after it.", None);
+                    if facts.adjusts_last || *adjust_all {
+                        let reach = if *adjust_all { "All strokes" } else { "Last stroke" };
+                        let text = RichText::new(reach).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY);
+                        let resp = ui.add(egui::Button::new(text).frame(false));
+                        if chip::tooltip(resp, reach, ADJUST_REACH, None).clicked() {
+                            *adjust_all = !*adjust_all;
+                        }
                     }
                     ui.separator();
                     dots = Some(chip::tooltip(
@@ -118,7 +122,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
             ui.ctx().data_mut(|d| d.insert_temp(fit_id, framed.inner));
             if let Some(dots) = dots {
                 chip::flyout_under(Id::new(("tool_strip_more", tool.title())), &dots, strip_rect, |ui| {
-                    change.merge(panel(ui, tool, brush, facts));
+                    change.merge(panel(ui, tool, brush, adjust_all, facts));
                 });
             }
         });
@@ -137,10 +141,13 @@ fn try_another_label() -> &'static str {
     LABEL.get_or_init(|| format!("{}  Try another", egui_material_icons::icons::ICON_REFRESH.codepoint))
 }
 
-fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, facts: StripFacts) -> BrushChipOutcome {
+/// What the brushes' sliders adjust, said beside the switch.
+pub(super) const ADJUST_REACH: &str = "The sliders adjust your last stroke, or every stroke on this image since it last changed. The strokes after it are drawn with them too.";
+
+fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, adjust_all: &mut bool, facts: StripFacts) -> BrushChipOutcome {
     match tool {
-        Tool::Paint => brush_chip::flyout_body(ui, brush, facts.model),
-        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, facts.encoder_pending, facts.model),
+        Tool::Paint => brush_chip::flyout_body(ui, brush, adjust_all, facts.model),
+        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, adjust_all, facts.encoder_pending, facts.model),
     }
 }
 

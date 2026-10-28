@@ -641,6 +641,7 @@ impl BatchManager {
         item.invalidate_selection();
         if was_present {
             item.commit(super::timeline::StepKind::Selection);
+            item.timeline.current_mut().made = Some(super::selection_queue::SelectionMade::Clear);
         }
         was_present
     }

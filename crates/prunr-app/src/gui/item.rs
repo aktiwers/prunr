@@ -996,6 +996,8 @@ pub(crate) struct BatchItem {
     /// The latest stroke on this image, kept so its brush's sliders draw
     /// it again in place instead of needing another stroke.
     pub(crate) last_stroke: Option<LastStroke>,
+    /// Every stroke being adjusted at once, while a slider moves.
+    pub(crate) adjusting: Option<StrokeAdjustment>,
     /// A background pre-encode was refused (RAM gate or encoder error);
     /// not retried every frame. Cleared with the embedding.
     pub(crate) magic_preencode_refused: bool,
@@ -1034,6 +1036,18 @@ impl DepthPhotoKey {
     pub(crate) fn matches(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.base, &other.base) && Arc::ptr_eq(&self.depth, &other.depth) && self.look == other.look
     }
+}
+
+/// The image's strokes being drawn again as the sliders move, all at once.
+pub(crate) struct StrokeAdjustment {
+    /// The slider values it started from, and the ones last drawn.
+    pub(crate) from: crate::gui::brush_state::StrokeValues,
+    pub(crate) drawn: crate::gui::brush_state::StrokeValues,
+    /// The strokes as they stood before it.
+    pub(crate) history: Arc<super::timeline::StrokeHistory>,
+    /// The step it fills in once landed; before that, the step it began on.
+    pub(crate) step: u64,
+    pub(crate) landed: bool,
 }
 
 /// The latest stroke on an image and the selection it committed.
@@ -1251,6 +1265,16 @@ impl BatchItem {
         self.last_stroke.as_ref().filter(|_| self.last_stroke_holds()).map(|s| s.drawn.tool())
     }
 
+    /// The adjustment of every stroke under way, while nothing else has
+    /// happened since: its step is the one shown and the newest.
+    pub(crate) fn adjustment(&mut self) -> Option<&mut StrokeAdjustment> {
+        let (shown, newest) = (self.timeline.current().id, self.timeline.next().is_none());
+        if self.adjusting.as_ref().is_some_and(|a| a.step != shown || !newest) {
+            self.adjusting = None;
+        }
+        self.adjusting.as_mut()
+    }
+
     fn last_stroke_holds(&self) -> bool {
         self.last_stroke.as_ref().is_some_and(|s| {
             self.selection_hash == Some(s.committed_hash) && s.step == self.timeline.current().id && self.timeline.next().is_none()
@@ -1380,6 +1404,26 @@ impl BatchItem {
     /// its content `hash`) and edits it made, as one undo step of `kind`.
     /// False, and nothing changes, when it made what is already shown.
     pub(crate) fn land_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>, kind: StepKind) -> bool {
+        let changed = self.take_selection_state(made, hash);
+        if changed {
+            self.commit(kind);
+        }
+        changed
+    }
+
+    /// As `land_selection_state`, filling in the shown step instead of
+    /// making one: a stroke adjustment redrawn while the slider moves.
+    pub(crate) fn amend_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>) -> bool {
+        let changed = self.take_selection_state(made, hash);
+        if changed {
+            self.amend();
+        }
+        changed
+    }
+
+    /// Take the selection and edits an edit made; false, and nothing
+    /// changes, when it made what is already shown.
+    fn take_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>) -> bool {
         let same_edits = same_arc(made.edits.as_ref(), self.edits.as_ref());
         let same_selection = match made.selection {
             Some(_) => hash == self.selection_hash,
@@ -1399,7 +1443,6 @@ impl BatchItem {
             self.invalidate_selection();
         }
         self.drop_correction_cache();
-        self.commit(kind);
         true
     }
 
@@ -1443,6 +1486,7 @@ impl BatchItem {
             faced: shown.faced,
             at: std::time::Instant::now(),
             id: super::timeline::next_step_id(),
+            made: None,
         }
     }
 
@@ -1574,7 +1618,7 @@ impl BatchItem {
     /// Fold the working copy into the shown step: a job it started landed.
     pub(crate) fn amend(&mut self) {
         let shown = self.timeline.current();
-        let state = DocState { at: shown.at, id: shown.id, ..self.snapshot(shown.kind) };
+        let state = DocState { at: shown.at, id: shown.id, made: shown.made.clone(), ..self.snapshot(shown.kind) };
         *self.timeline.current_mut() = state;
     }
 
@@ -2893,6 +2937,7 @@ impl BatchItem {
             selection_texture: None,
             magic_brush_embedding: None,
             last_stroke: None,
+            adjusting: None,
             magic_preencode_refused: false,
             depth: None,
             depth_run: DepthRun::default(),
