@@ -29,6 +29,17 @@ pub fn seconds(ms: f32) -> String {
     }
 }
 
+/// An engine as a sentence says it: "the processor" for the CPU provider,
+/// else the provider's own name.
+pub fn engine(provider: &str) -> &str {
+    if provider == prunr_core::engine::CPU_NAME { "the processor" } else { provider }
+}
+
+/// An engine as a table names it: "Processor", or the provider's name.
+pub fn engine_heading(provider: &str) -> &str {
+    if provider == prunr_core::engine::CPU_NAME { "Processor" } else { provider }
+}
+
 /// `text` with its first letter capitalized: a phrase opening a sentence.
 pub fn capitalized(text: &str) -> String {
     let mut chars = text.chars();

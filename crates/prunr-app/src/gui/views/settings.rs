@@ -494,9 +494,8 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
             (None, None) => "none detected".to_string(),
         };
         kv(ui, "Graphics card", &gpu_label);
-        let engines = || ctx.test.engines.iter().filter(|e| e.installed).map(|e| e.name);
-        let key = if engines().count() > 1 { "Accelerators" } else { "Accelerator" };
-        kv(ui, key, &if engines().next().is_none() { "None".to_string() } else { super::fmt::and_list(engines()) });
+        let key = if ctx.test.installed().count() > 1 { "Accelerators" } else { "Accelerator" };
+        kv(ui, key, &if ctx.test.installed().next().is_none() { "None".to_string() } else { super::fmt::and_list(ctx.test.installed()) });
         let total_ram = hardware::total_ram_bytes();
         kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
 
@@ -605,7 +604,7 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
         }
         (None, true) => ("Partly tested. Every model it reached runs on the fastest that gives the same picture as the processor.".to_string(), None),
         (None, false) => {
-            let engines = super::fmt::and_list(std::iter::once("the processor").chain(results.engines.iter().filter(|e| e.installed).map(|e| e.name)));
+            let engines = &results.engines_said;
             let note = match results.what_changed() {
                 Some(what) => Cow::Owned(format!("Not tested since {what} changed: until then Prunr goes by our tests on similar hardware.")),
                 None => Cow::Borrowed("Not tested yet: until then Prunr goes by our tests on similar hardware."),
@@ -632,24 +631,21 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
     }
     let ui = rows.ui();
     if let Some(offer) = results.engines.iter().find(|e| !e.installed) {
-        cuda_offer(ui, ctx, results, offer.name, intent);
+        cuda_offer(ui, ctx, offer.name, intent);
     }
-    test_table(ui, ctx, results);
+    test_table(ui, ctx);
     ui.add_space(theme::SPACE_SM);
 }
 
 /// After a test on an NVIDIA card without CUDA: what CUDA would add, and
 /// Install.
-fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults, name: &str, intent: &mut Option<HardwareSectionIntent>) {
-    let text = cuda_offer_text(results, name);
-    let size = match ctx.installs.nvidia_libraries {
-        true => RuntimeId::Cuda.download_size(true),
-        false => std::borrow::Cow::Borrowed("2 GB"),
-    };
-    egui::Frame::NONE.fill(OFFER_FILL).corner_radius(12.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, name: &str, intent: &mut Option<HardwareSectionIntent>) {
+    let text = cuda_offer_text(&ctx.test, name);
+    let size = RuntimeId::Cuda.download_label(ctx.installs.nvidia_libraries);
+    egui::Frame::NONE.fill(OFFER_FILL).corner_radius(theme::ROW_ROUNDING).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            let label = format!("Install {name} ({size})");
+            let label = format!("{} ({size})", RuntimeId::Cuda.install_button_label());
             let button_width = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY).size().x + 48.0;
             ui.vertical(|ui| {
                 ui.set_width((ui.available_width() - button_width - theme::SPACE_MD).max(120.0));
@@ -673,7 +669,7 @@ fn cuda_offer_text(results: &TestResults, name: &str) -> String {
         .filter(|r| r.runs_on == prunr_core::engine::CPU_NAME)
         .filter(|r| matches!(prunr_models::registry_places(r.model).get(prunr_models::Column::Cuda), prunr_models::Place::There(_)))
         .map(|r| prunr_models::display_name(r.model)));
-    let others = super::fmt::and_list(results.engines.iter().filter(|e| e.installed).map(|e| e.name));
+    let others = super::fmt::and_list(results.installed());
     match (gains.is_empty(), others.is_empty()) {
         (false, false) => format!("Your NVIDIA graphics card can also use {name}. It runs {gains} on the card, which {others} cannot, and Prunr then picks the fastest for every model."),
         (false, true) => format!("Your NVIDIA graphics card can also use {name}. It runs {gains} on the card, and Prunr then picks the fastest for every model."),
@@ -689,8 +685,9 @@ const MODEL_COLUMN: f32 = 1.8;
 
 /// The test's times: a row per model, the processor and each engine, and
 /// where Prunr runs it, that engine's time in bright text.
-fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestResults) {
-    egui::Frame::NONE.fill(TABLE_FILL).corner_radius(12.0).inner_margin(egui::Margin { left: 18, right: 18, top: 6, bottom: 10 }).show(ui, |ui| {
+fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext) {
+    let results = &*ctx.test;
+    egui::Frame::NONE.fill(TABLE_FILL).corner_radius(theme::ROW_ROUNDING).inner_margin(egui::Margin { left: 18, right: 18, top: 6, bottom: 10 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let width = ui.available_width() / (results.engines.len() as f32 + 2.0 + MODEL_COLUMN);
         let widths = (width * MODEL_COLUMN, width);
@@ -701,13 +698,13 @@ fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestRes
             .chain(std::iter::once(plain("Prunr uses", true)));
         table_line(ui, widths, TABLE_ROW_HEIGHT - 6.0, header);
         for row in &results.rows {
-            let runs_on = if ctx.cpu_only { prunr_core::engine::CPU_NAME } else { row.runs_on };
-            let cpu = (row.cpu_ms.map_or(Cow::Borrowed("\u{2014}"), |ms| Cow::Owned(super::fmt::seconds(ms))), runs_on == prunr_core::engine::CPU_NAME);
+            let runs_on = row.engine(ctx.cpu_only);
+            let cpu = (row.cpu.as_ref().map_or(NO_TIME, |t| t.text.as_str()), runs_on == prunr_core::engine::CPU_NAME);
             let times = std::iter::once(cpu)
-                .chain(results.engines.iter().zip(&row.cells).map(|(e, &cell)| (cell_text(cell), e.name == runs_on)))
-                .map(|(text, used)| (text, if used { theme::GLOW } else { theme::TEXT_SECONDARY }, true, used));
+                .chain(results.engines.iter().zip(&row.cells).map(|(e, cell)| (cell_text(cell, e.installed), e.name == runs_on)))
+                .map(|(text, used)| (Cow::Borrowed(text), if used { theme::GLOW } else { theme::TEXT_SECONDARY }, true, used));
             let name = (Cow::Borrowed(prunr_models::display_name(row.model)), theme::TEXT_PRIMARY, false, false);
-            let uses = (Cow::Owned(format!("{} {}", ICON_CHECK.codepoint, engine_name(runs_on))), theme::TEXT_PRIMARY, true, false);
+            let uses = (Cow::Owned(format!("{} {}", ICON_CHECK.codepoint, super::fmt::engine_heading(runs_on))), theme::TEXT_PRIMARY, true, false);
             table_line(ui, widths, TABLE_ROW_HEIGHT, std::iter::once(name).chain(times).chain(std::iter::once(uses)));
         }
         ui.add_space(theme::SPACE_SM);
@@ -723,7 +720,7 @@ fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext, results: &TestRes
 
 /// One line of the table, a hairline under it: each cell `(text, colour,
 /// right-aligned, strong)`, the first `widths.0` wide, the rest `widths.1`.
-fn table_line(ui: &mut egui::Ui, widths: (f32, f32), height: f32, cells: impl Iterator<Item = (Cow<'static, str>, Color32, bool, bool)>) {
+fn table_line<'a>(ui: &mut egui::Ui, widths: (f32, f32), height: f32, cells: impl Iterator<Item = (Cow<'a, str>, Color32, bool, bool)>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         for (i, (text, color, right, strong)) in cells.enumerate() {
@@ -740,20 +737,17 @@ fn table_line(ui: &mut egui::Ui, widths: (f32, f32), height: f32, cells: impl It
     ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, theme::CARD_EDGE));
 }
 
-/// What a test found for a model on an engine, as the table says it.
-fn cell_text(cell: Cell) -> Cow<'static, str> {
-    match cell {
-        Cell::Time(ms) => Cow::Owned(super::fmt::seconds(ms)),
-        Cell::Fails => Cow::Borrowed("does not run"),
-        Cell::Differs => Cow::Borrowed("different picture"),
-        Cell::Untested => Cow::Borrowed("\u{2014}"),
-        Cell::NotInstalled => Cow::Borrowed("not installed"),
-    }
-}
+const NO_TIME: &str = "\u{2014}";
 
-/// "Processor" for the CPU provider, else the provider's own name.
-fn engine_name(provider: &str) -> &str {
-    if provider == prunr_core::engine::CPU_NAME { "Processor" } else { provider }
+/// What a test found for a model on an engine, as the table says it.
+fn cell_text(cell: &Cell, installed: bool) -> &str {
+    match cell {
+        _ if !installed => "not installed",
+        Cell::Time(time) => &time.text,
+        Cell::Fails => "does not run",
+        Cell::Differs => "different picture",
+        Cell::Untested => NO_TIME,
+    }
 }
 
 /// One runtime: its state, and Install, Uninstall or Cancel. One install

@@ -16,7 +16,7 @@ impl PrunrApp {
 
     /// Nothing else uses the machine: no work of the user's, and no test or
     /// check under way. A test, or a check, starts only then.
-    fn machine_idle(&self) -> bool {
+    pub(crate) fn machine_idle(&self) -> bool {
         self.machine_test.is_none() && !self.download_manager.checking() && !crate::gui::automation::state::busy(self)
     }
 
@@ -77,8 +77,7 @@ impl PrunrApp {
         let only = self.machine_test.take().and_then(|test| test.only());
         self.places_changed();
         if let (Ended::Finished { .. }, Some(model)) = (&ended, only) {
-            let on = prunr_core::memory::provider_now(model, self.settings.cpu_only());
-            let on = if on == prunr_core::engine::CPU_NAME { "the processor" } else { on };
+            let on = crate::gui::views::fmt::engine(self.settings.engine_of(model));
             self.toasts.success(format!("{} tested: it runs on {on} here.", prunr_models::display_name(model)));
             return;
         }
@@ -86,8 +85,8 @@ impl PrunrApp {
             Ended::Finished { left_out } => {
                 let mut text = "Test done: each model now runs on the fastest that gives the same picture. Settings › Hardware has the times.".to_string();
                 if !left_out.is_empty() {
-                    let names: Vec<&str> = left_out.iter().map(|&id| prunr_models::display_name(id)).collect();
-                    text += &format!(" Not tested, as each takes many minutes: {}.", names.join(", "));
+                    let names = crate::gui::views::fmt::and_list(left_out.iter().map(|&id| prunr_models::display_name(id)));
+                    text += &format!(" Not tested, as each takes many minutes: {names}.");
                 }
                 self.toasts.success(text);
             }

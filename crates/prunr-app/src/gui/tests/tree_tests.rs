@@ -116,34 +116,37 @@ fn the_hardware_page_names_every_runtime_control() {
 /// CUDA, the table offers it. Every control is named.
 #[test]
 fn the_computer_test_is_offered_with_an_accelerator() {
-    use crate::gui::hardware_cache::{Cell, Engine, HardwareInstallCache, TestResults, TestRow};
+    use crate::gui::hardware_cache::{Cell, Engine, HardwareInstallCache, TestResults, TestRow, Time};
     use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
     use crate::runtime_install::RuntimeId;
     use prunr_models::ModelId;
     use std::sync::Arc;
     let directml = Engine { name: "DirectML", installed: true };
-    let row = |model, cells: Vec<Cell>, runs_on| TestRow { model, cpu_ms: Some(670.0), cells, runs_on };
+    let time = |ms| Cell::Time(Time::of(ms));
+    let row = |model, cells: Vec<Cell>, runs_on| TestRow { model, cpu: Some(Time::of(670.0)), cells, runs_on };
     let tested = Arc::new(TestResults {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: true }],
-        rows: vec![row(ModelId::Silueta, vec![Cell::Time(40.0), Cell::Time(57.0)], "DirectML"), row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::Time(450.0)], "CUDA")],
+        rows: vec![row(ModelId::Silueta, vec![time(40.0), time(57.0)], "DirectML"), row(ModelId::BiRefNetLite, vec![Cell::Fails, time(450.0)], "CUDA")],
         ..Default::default()
     });
     let cancelled = Arc::new(TestResults { tested: None, ..(*tested).clone() });
     let without_cuda = Arc::new(TestResults {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: false }],
-        rows: vec![row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::NotInstalled], "CPU")],
+        rows: vec![row(ModelId::BiRefNetLite, vec![Cell::Fails, Cell::Untested], "CPU")],
         ..Default::default()
     });
     let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
     let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec![prunr_core::ep_compat::ScopePart::Drivers], ..Default::default() });
+    let offer = format!("{} ({})", RuntimeId::Cuda.install_button_label(), RuntimeId::Cuda.download_label(false));
+    let offer = offer.as_str();
     let shapes = [
-        ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", "Install CUDA (2 GB)"]),
+        ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", offer]),
         ("not tested since the driver changed", driver_changed, true, vec!["Test this computer"], vec!["Forget the test"]),
-        ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec!["Install CUDA (2 GB)"]),
+        ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec![offer]),
         ("cancelled after two models", cancelled, true, vec!["Test this computer", "Forget the test"], vec![]),
-        ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", "Install CUDA (2 GB)"], vec![]),
+        ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", offer], vec![]),
         ("no accelerator", tested, false, vec![], vec!["Test this computer", "Forget the test"]),
     ];
     for (shape, test, testable, present_names, absent_names) in shapes {
@@ -423,7 +426,7 @@ fn a_store_card_s_details_open_in_place() {
 /// covers the store. Every control is named.
 #[test]
 fn a_store_card_tests_its_own_model() {
-    use crate::gui::hardware_cache::{Cell, Engine, TestResults, TestRow};
+    use crate::gui::hardware_cache::{Cell, Engine, TestResults, TestRow, Time};
     use prunr_models::ModelId;
     let mut h = harness();
     {
@@ -432,9 +435,9 @@ fn a_store_card_tests_its_own_model() {
         app.test_results = std::sync::Arc::new(TestResults {
             tested: None,
             engines: vec![Engine { name: "CUDA", installed: true }],
-            rows: vec![TestRow { model: ModelId::Silueta, cpu_ms: Some(620.0), cells: vec![Cell::Time(40.0)], runs_on: "CUDA" }],
-            changed: Vec::new(),
+            rows: vec![TestRow { model: ModelId::Silueta, cpu: Some(Time::of(620.0)), cells: vec![Cell::Time(Time::of(40.0))], runs_on: "CUDA" }],
             testable: vec![ModelId::Silueta, ModelId::U2net],
+            ..Default::default()
         });
         app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
     }

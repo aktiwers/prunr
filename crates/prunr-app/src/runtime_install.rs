@@ -162,17 +162,27 @@ impl RuntimeId {
         }
     }
 
-    /// What installing it downloads, as its texts say it: the add-on
-    /// alone where NVIDIA's libraries are already here (`nvidia_here`).
-    pub fn download_size(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
+    /// What installing it downloads, as a button says it: the add-on alone
+    /// where NVIDIA's libraries are already here (`nvidia_here`).
+    pub fn download_label(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
         match self {
             Self::OpenVino => Cow::Borrowed("80 MB"),
             Self::Cuda => match self.addon() {
                 Some(addon) if nvidia_here => Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)),
-                _ => Cow::Borrowed("about 2 GB with NVIDIA's CUDA and cuDNN libraries"),
+                _ => Cow::Borrowed("about 2 GB"),
             },
             Self::MiGraphX => Cow::Borrowed("20 MB"),
+        }
+    }
+
+    /// `download_label`, as a sentence says it: what the download brings
+    /// beside the runtime.
+    pub fn download_size(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
+        let label = self.download_label(nvidia_here);
+        match self {
+            Self::Cuda if !(nvidia_here && self.is_addon()) => format!("{label} with NVIDIA's CUDA and cuDNN libraries").into(),
+            _ => label,
         }
     }
 

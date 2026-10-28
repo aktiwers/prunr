@@ -1459,7 +1459,7 @@ impl PrunrApp {
         self.render_discard_prompt(ctx);
         // A test of one model shows on its Model Store card instead.
         if let Some(test) = self.machine_test.as_ref().filter(|t| t.whole_computer()) {
-            if super::views::machine_test::render(ctx, test, &self.test_results.engines) {
+            if super::views::machine_test::render(ctx, test, &self.test_results.engines_said) {
                 self.cancel_machine_test();
             }
         }
