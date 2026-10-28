@@ -42,7 +42,7 @@ pub(crate) mod selection_queue;
 pub(crate) mod macos_quit;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub fn run() -> eframe::Result {
     // The GPU provider probe (DirectML starts a device) and the hardware

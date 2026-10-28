@@ -168,6 +168,14 @@ struct Learned {
     change_told: bool,
 }
 
+impl Learned {
+    /// A test, or Forget, leaves nothing changed since the test to say.
+    fn forget_change(&mut self) {
+        self.changed.clear();
+        self.change_told = false;
+    }
+}
+
 /// Where a test found a model runs on one accelerator, as the registry's
 /// `Place` says it, and the measurement behind it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -463,23 +471,22 @@ pub fn clear() -> usize {
 /// for its files on disk now. The engine asks every frame while a batch
 /// runs: one lock, and no key built when nothing was measured.
 pub fn measured_for(model: prunr_models::ModelId) -> [Option<prunr_models::Place>; prunr_models::Column::ALL.len()] {
-    let store = locked();
-    if store.learned.measured.is_empty() {
-        return [None; prunr_models::Column::ALL.len()];
-    }
-    let files = prunr_models::files_id(model);
-    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).and_then(Measured::place))
+    in_each_column(model, Measured::place)
 }
 
 /// What a test measured for `model` in each column, times included, for
 /// its files on disk now.
 pub fn measurements(model: prunr_models::ModelId) -> [Option<Measured>; prunr_models::Column::ALL.len()] {
+    in_each_column(model, |measured| Some(measured.clone()))
+}
+
+fn in_each_column<T>(model: prunr_models::ModelId, read: impl Fn(&Measured) -> Option<T>) -> [Option<T>; prunr_models::Column::ALL.len()] {
     let store = locked();
     if store.learned.measured.is_empty() {
-        return Default::default();
+        return std::array::from_fn(|_| None);
     }
     let files = prunr_models::files_id(model);
-    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).cloned())
+    prunr_models::Column::ALL.map(|column| store.learned.measured.get(&measured_key(column, model, &files)).and_then(&read))
 }
 
 /// When the last test finished, in seconds since 1970.
@@ -497,8 +504,7 @@ pub fn set_tested() {
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     change(|learned| {
         learned.tested = Some(now);
-        learned.changed.clear();
-        learned.change_told = false;
+        learned.forget_change();
     });
 }
 
@@ -507,8 +513,7 @@ pub fn set_tested() {
 pub fn clear_measured() -> usize {
     change(|learned| {
         learned.tested = None;
-        learned.changed.clear();
-        learned.change_told = false;
+        learned.forget_change();
         std::mem::take(&mut learned.measured).len()
     })
 }

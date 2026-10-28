@@ -70,3 +70,13 @@ pub(crate) fn settle_selection_edits(app: &mut crate::gui::app::PrunrApp) {
     }
     assert!(!app.batch.selection_queue.any_pending(), "the selection edits land");
 }
+
+/// A process that idles for half a minute: a stand-in for a test's or
+/// another instance's process.
+pub(crate) fn idle_child() -> std::process::Child {
+    #[cfg(unix)]
+    let child = std::process::Command::new("sleep").arg("30").spawn();
+    #[cfg(windows)]
+    let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+    child.expect("a process to stand in")
+}

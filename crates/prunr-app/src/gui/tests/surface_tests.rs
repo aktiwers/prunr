@@ -474,10 +474,7 @@ fn the_runtime_prompt_is_a_modal_that_escape_closes() {
 #[test]
 fn the_computer_test_holds_the_window_until_cancelled() {
     use egui_kittest::kittest::Queryable;
-    #[cfg(unix)]
-    let child = std::process::Command::new("sleep").arg("30").spawn().expect("a process to stand in for the test");
-    #[cfg(windows)]
-    let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("a process to stand in for the test");
+    let child = crate::gui::tests::fixtures::idle_child();
     #[cfg(target_os = "linux")]
     let pid = child.id();
     let mut h = loaded();
