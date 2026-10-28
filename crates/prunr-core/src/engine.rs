@@ -1039,8 +1039,15 @@ pub fn retry_on_cpu<T>(
     on_engine: impl FnOnce() -> Result<T, CoreError>,
     on_cpu: impl FnOnce() -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
+    let on_card = !runs_on_host_cpu(provider);
+    if on_card && crate::memory::ran_short(model, provider) {
+        tracing::info!(?model, provider, "the card had no room for it and has gained none: on the processor");
+        progress.step(crate::progress::Step::OnTheProcessor);
+        return on_cpu();
+    }
     match on_engine() {
-        Err(e) if !runs_on_host_cpu(provider) && e.is_out_of_memory() => {
+        Err(e) if on_card && e.is_out_of_memory() => {
+            crate::memory::note_ran_short(model, provider);
             if let Err(short) = crate::memory::fits_now(model, CPU_NAME) {
                 tracing::warn!(?model, %e, %short, "out of graphics memory, and the processor has no room either");
                 return Err(e);
@@ -1187,10 +1194,11 @@ pub struct OrtEngine {
     sessions: Sessions,
     pick: SessionPick,
     model_kind: ModelKind,
-    /// The tile an upscale on it last ran whole on (0: none yet): the next
-    /// starts there, so a card that ran out at the model's own tile is not
-    /// tried at it again for every image.
-    upscale_tile: std::sync::atomic::AtomicU32,
+    /// A smaller tile than the model's own an upscale on it last ran whole
+    /// on, and the card's free memory then: the next starts there, so a
+    /// card that ran out at the model's own tile is not tried at it again
+    /// for every image, until the card has gained room.
+    upscale_tile: Mutex<Option<(u32, Option<u64>)>>,
 }
 
 /// One session, one per input size, or a model cut into parts that run
@@ -1730,13 +1738,28 @@ impl OrtEngine {
         &self.pick.provider
     }
 
-    /// The tile an upscale on this engine last ran whole on.
-    pub(crate) fn upscale_tile(&self) -> Option<u32> {
-        Some(self.upscale_tile.load(std::sync::atomic::Ordering::Relaxed)).filter(|&tile| tile > 0)
+    /// The tile an upscale on this engine starts at: the smaller one its
+    /// last image fit, while the card has gained no room since; else the
+    /// model's `own`.
+    pub(crate) fn upscale_tile(&self, own: u32) -> u32 {
+        let fitted = *self.upscale_tile.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        start_tile(own, fitted, || crate::memory::card_free_mb(self.active_provider()))
     }
 
-    pub(crate) fn set_upscale_tile(&self, tile: u32) {
-        self.upscale_tile.store(tile, std::sync::atomic::Ordering::Relaxed);
+    /// An upscale on this engine ran whole on `tile`.
+    pub(crate) fn set_upscale_tile(&self, tile: u32, own: u32) {
+        let fitted = (tile < own).then(|| (tile, crate::memory::card_free_mb(self.active_provider())));
+        *self.upscale_tile.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fitted;
+    }
+}
+
+/// The tile to start at: `fitted`'s, a smaller one the last image fit and
+/// the card's free memory then, while `free_now` says the card has gained
+/// no room since; else `own`.
+fn start_tile(own: u32, fitted: Option<(u32, Option<u64>)>, free_now: impl FnOnce() -> Option<u64>) -> u32 {
+    match fitted {
+        Some((tile, then)) if crate::memory::still_short(then, free_now()) => tile.min(own),
+        _ => own,
     }
 }
 
@@ -1866,22 +1889,39 @@ pub(crate) fn apply_ort_graph_cache<'a>(
 #[cfg(test)]
 mod tests {
     /// A run a card ran out of memory for goes on on the processor and
-    /// says so; any other failure, or a run already on the processor,
-    /// keeps its error.
+    /// says so, and the next goes there at once while the card has gained
+    /// no room; any other failure, or a run already on the processor,
+    /// keeps its error. Each case its own model: the note is the
+    /// process's.
     #[test]
     fn a_card_out_of_memory_goes_on_on_the_processor() {
         use crate::types::CoreError;
+        use prunr_models::ModelId;
         use std::sync::Arc;
         let oom = || Err::<u8, _>(CoreError::Inference("CUDA error: out of memory".into()));
-        let (model, card) = (prunr_models::ModelId::Silueta, "CUDAExecutionProvider");
+        let card = "CUDAExecutionProvider";
         let sink = Arc::new(crate::progress::RecordingSink::default());
-        assert_eq!(super::retry_on_cpu(model, card, &crate::Progress::new(sink.clone()), oom, || Ok(7)).ok(), Some(7));
+        assert_eq!(super::retry_on_cpu(ModelId::Silueta, card, &crate::Progress::new(sink.clone()), oom, || Ok(7)).ok(), Some(7));
         assert!(sink.updates().contains(&crate::ProgressUpdate::Step(crate::Step::OnTheProcessor)));
         crate::progress::check_contract(&sink.updates()).expect("it names its step");
-        assert!(super::retry_on_cpu(model, super::CPU_NAME, &crate::Progress::none(), oom, || Ok(7)).is_err(), "already on the processor");
+        let card_again = || -> Result<u8, CoreError> { panic!("tried the card that had no room") };
+        assert_eq!(super::retry_on_cpu(ModelId::Silueta, card, &crate::Progress::none(), card_again, || Ok(8)).ok(), Some(8), "the next goes to the processor");
+        assert!(super::retry_on_cpu(ModelId::U2net, super::CPU_NAME, &crate::Progress::none(), oom, || Ok(7)).is_err(), "already on the processor");
         let broken = || Err::<u8, _>(CoreError::Inference("Graph contains cycles".into()));
-        assert!(super::retry_on_cpu(model, card, &crate::Progress::none(), broken, || Ok(7)).is_err(), "not a memory failure");
-        assert!(super::retry_on_cpu(model, card, &crate::Progress::none(), oom, oom).is_err_and(|e| e.is_out_of_memory()), "out of memory on the processor too");
+        assert!(super::retry_on_cpu(ModelId::Teed, card, &crate::Progress::none(), broken, || Ok(7)).is_err(), "not a memory failure");
+        assert!(super::retry_on_cpu(ModelId::Migan, card, &crate::Progress::none(), oom, oom).is_err_and(|e| e.is_out_of_memory()), "out of memory on the processor too");
+    }
+
+    /// An upscale starts at the smaller tile its last image fit while the
+    /// card has gained less than a gigabyte, or there is no reading.
+    #[test]
+    fn a_smaller_tile_holds_until_the_card_gains_room() {
+        assert_eq!(super::start_tile(512, None, || Some(9_000)), 512);
+        assert_eq!(super::start_tile(512, Some((128, Some(2_000))), || Some(2_500)), 128);
+        assert_eq!(super::start_tile(512, Some((128, Some(2_000))), || Some(3_100)), 512, "a GB more is free");
+        assert_eq!(super::start_tile(512, Some((128, None)), || Some(9_000)), 128, "no reading then");
+        assert_eq!(super::start_tile(512, Some((256, Some(2_000))), || None), 256, "no reading now");
+        assert_eq!(super::start_tile(256, Some((512, Some(2_000))), || Some(2_000)), 256, "never above the model's own");
     }
     use super::*;
 
