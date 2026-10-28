@@ -423,13 +423,18 @@ impl Store {
     }
 
     /// `load_from`, and a drop written back at once under this scope, so
-    /// what changed is said once and kept until the next test.
+    /// what changed is said once and kept until the next test. The stamp
+    /// is the one before the read: a write by another process while it
+    /// reads is read at the next refresh, not taken as read.
     fn load(&mut self, path: &Path, scope: &str) -> Option<Learned> {
+        let read_at = stamp(path);
         let (learned, dropped) = load_from(path, scope)?;
-        if dropped {
+        self.stamp = if dropped {
             save_to(path, scope, &learned);
-        }
-        self.stamp = stamp(path);
+            stamp(path)
+        } else {
+            read_at
+        };
         Some(learned)
     }
 }
