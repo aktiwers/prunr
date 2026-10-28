@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 /// The ONNX Runtime version of the accelerator builds the runtime store
 /// offers (OpenVINO, CUDA). Their wheels lag the plain one: OpenVINO's
 /// stop at 1.24.1, and CUDA's need CUDA 13 from 1.27.
-/// The pykeio/ort `api-23` feature refuses a runtime older than 1.23 at
+/// The pykeio/ort `api-24` feature refuses a runtime older than 1.24 at
 /// load.
 ///
 /// **Upper bound:** past the 1.x line the ABI is expected to change; a
