@@ -895,7 +895,7 @@ impl PrunrApp {
         if self.runtime_prompt_evaluated { return; }
         self.runtime_prompt_evaluated = true;
         let Some(rt) = crate::hardware::profile().recommended_runtime() else { return };
-        if rt.is_installed() { return; }
+        if self.hardware_install_cache.has_runtime(rt) { return; }
         if self.settings.is_runtime_prompt_snoozed(rt) { return; }
         self.runtime_prompt = Some(rt);
     }
@@ -1715,6 +1715,20 @@ mod field_list_tests {
         assert!(text.contains("libcublasLt.so.12") && text.contains("Settings › Hardware"), "{text}");
         app.tell_gpu_start_failure(Some(&failure));
         assert_eq!(app.toasts.len_for_test(), before + 1, "once");
+    }
+
+    /// The first-launch prompt offers the recommended runtime only while
+    /// the app's record of installs lacks it: a test app has every
+    /// runtime, whatever the computer running the test has installed.
+    #[test]
+    fn the_runtime_prompt_goes_by_the_apps_record_of_installs() {
+        let mut app = super::PrunrApp::new_for_test();
+        app.maybe_evaluate_runtime_prompt();
+        assert_eq!(app.runtime_prompt, None, "every runtime is installed");
+        let mut bare = super::PrunrApp::new_for_test();
+        bare.hardware_install_cache = Default::default();
+        bare.maybe_evaluate_runtime_prompt();
+        assert_eq!(bare.runtime_prompt, crate::hardware::profile().recommended_runtime(), "none is");
     }
 
     #[test]
