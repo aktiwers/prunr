@@ -377,14 +377,10 @@ pub fn remeasure_places() {
     let _ = REMEASURE.set(());
 }
 
-/// Why `model` runs on the CPU rather than `ep`: its place there, or a
+/// Why `model` runs on the CPU rather than `ep`: its place there (while
+/// places are measured again, `remeasuring`, only a failing one), or a
 /// provider that cannot serve its kind of session.
-fn kept_off(model: prunr_models::ModelId, ep: EpKind) -> Option<prunr_models::Why> {
-    kept_off_as(model, ep, remeasuring())
-}
-
-/// `kept_off` with places measured again (`remeasuring`) or not.
-fn kept_off_as(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<prunr_models::Why> {
+fn kept_off(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<prunr_models::Why> {
     if compiles_per_shape(model, ep) {
         return Some(COMPILES_PER_SHAPE);
     }
@@ -431,10 +427,6 @@ pub fn column_for(model: prunr_models::ModelId, provider: &str) -> Option<prunr_
     prunr_models::column_in(&places_here(model), model, provider, openvino_on_gpu(), remeasuring())
 }
 
-/// `column_for` as a test of this computer reads it, in any process.
-pub fn column_in_a_test(model: prunr_models::ModelId, provider: &str) -> Option<prunr_models::Column> {
-    prunr_models::column_in(&places_here(model), model, provider, openvino_on_gpu(), true)
-}
 
 /// Whether OpenVINO runs `model` on the Intel graphics here.
 #[cfg(not(target_os = "macos"))]
@@ -830,7 +822,7 @@ fn cpu_provider() -> ExecutionProviderDispatch {
 
 /// Whether, and why, the ladder passes `ep` over for these weights.
 pub(crate) fn skip_reason(model: prunr_models::ModelId, weights: Weights, ep: EpKind) -> Option<Skip> {
-    if let Some(why) = kept_off(model, ep) {
+    if let Some(why) = kept_off(model, ep, remeasuring()) {
         Some(Skip::KeptOff(why))
     } else if crate::ep_compat::is_known_failure(ep, model, weights, asks_intel_gpu(ep, model)) {
         Some(Skip::FailedBefore)
@@ -1090,12 +1082,8 @@ fn fp16_eps(id: prunr_models::ModelId, eps: &[EpKind]) -> Vec<EpKind> {
 
 /// Why a GPU session of `model` passes `ep` over for every weights it
 /// tries (`None`: it tries `ep`).
-fn gpu_skip(model: prunr_models::ModelId, ep: EpKind) -> Option<Skip> {
-    gpu_skip_as(model, ep, remeasuring())
-}
-
-fn gpu_skip_as(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<Skip> {
-    if let Some(why) = kept_off_as(model, ep, remeasuring) {
+fn gpu_skip(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Option<Skip> {
+    if let Some(why) = kept_off(model, ep, remeasuring) {
         return Some(Skip::KeptOff(why));
     }
     let intel_gpu = asks_intel_gpu(ep, model);
@@ -1120,25 +1108,31 @@ pub fn shrink_cuda_pool() -> Option<&'static ort::session::RunOptions> {
 /// The first GPU provider a session of `model` tries, as the ladder walks
 /// them; `None`: it runs on the CPU.
 pub(crate) fn first_gpu_provider(model: prunr_models::ModelId, cpu_only: bool) -> Option<&'static str> {
-    gpu_eps_for(model, cpu_only).into_iter().find(|&ep| gpu_skip(model, ep).is_none()).map(|ep| ep.as_str())
+    gpu_eps_for(model, cpu_only).into_iter().find(|&ep| gpu_skip(model, ep, remeasuring()).is_none()).map(|ep| ep.as_str())
 }
 
 /// Each GPU provider the loaded runtime offers, in the order a session of
 /// `model` tries them, with why it would pass one over (`None`: it would
 /// try it).
 pub fn gpu_ladder(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
-    ladder_as(model, remeasuring())
+    ladder(model, remeasuring())
 }
 
-/// `gpu_ladder` as a test of this computer walks it, in any process: the
-/// places Prunr's own tests keep on the CPU are tried again
-/// (`remeasure_places`).
-pub fn gpu_ladder_in_a_test(model: prunr_models::ModelId) -> Vec<(&'static str, Option<Skip>)> {
-    ladder_as(model, true)
+/// What a test of this computer runs `model` on, in the order it tries
+/// them: each GPU provider it would not pass over, with the column its
+/// time goes in. A test tries again the places Prunr's own tests keep on
+/// the CPU (`remeasure_places`), and this reads them so in any process.
+pub fn tries_in_a_test(model: prunr_models::ModelId) -> Vec<(&'static str, prunr_models::Column)> {
+    let places = places_here(model);
+    ladder(model, true)
+        .into_iter()
+        .filter(|(_, skip)| skip.is_none())
+        .filter_map(|(provider, _)| Some((provider, prunr_models::column_in(&places, model, provider, openvino_on_gpu(), true)?)))
+        .collect()
 }
 
-fn ladder_as(model: prunr_models::ModelId, remeasuring: bool) -> Vec<(&'static str, Option<Skip>)> {
-    gpu_eps_for(model, false).into_iter().map(|ep| (ep.as_str(), gpu_skip_as(model, ep, remeasuring))).collect()
+fn ladder(model: prunr_models::ModelId, remeasuring: bool) -> Vec<(&'static str, Option<Skip>)> {
+    gpu_eps_for(model, false).into_iter().map(|ep| (ep.as_str(), gpu_skip(model, ep, remeasuring))).collect()
 }
 
 /// The weights file a session loaded: the model's own (FP32 for
@@ -2301,8 +2295,8 @@ mod tests {
                 continue;
             }
             assert_eq!(prunr_models::registry_places(d.id).get(Column::OpenVino), Place::Cpu(why));
-            assert!(kept_off_as(d.id, EpKind::OpenVino, false).is_some(), "{:?}", d.id);
-            assert_eq!(kept_off_as(d.id, EpKind::OpenVino, true).is_some(), matches!(why, Why::Fails(_)), "{:?}: {why:?}", d.id);
+            assert!(kept_off(d.id, EpKind::OpenVino, false).is_some(), "{:?}", d.id);
+            assert_eq!(kept_off(d.id, EpKind::OpenVino, true).is_some(), matches!(why, Why::Fails(_)), "{:?}: {why:?}", d.id);
             seen += 1;
         }
         assert!(seen > 0);
@@ -2697,7 +2691,7 @@ mod tests {
         assert_eq!(declared.map_err(|w| w.reason()), Err(line.clone()));
         let none = walk_ladder("", model, Weights::Fp32, &[], |_| -> Result<(), Miss> { unreachable!() });
         assert_eq!(none.map_err(|w| w.reason()), Err("No GPU EPs available on this platform".to_string()));
-        assert_eq!(gpu_skip(model, EpKind::OpenVino), Some(Skip::KeptOff(why)));
+        assert_eq!(gpu_skip(model, EpKind::OpenVino, remeasuring()), Some(Skip::KeptOff(why)));
         assert_eq!(
             Walk::without_a_try(model, Weights::Fp32, &[EpKind::OpenVino]).map(|w| w.reason()),
             Some(line),

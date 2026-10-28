@@ -83,7 +83,7 @@ fn card_test<'a>(app: &PrunrApp, results: &'a TestResults, idle: bool, id: Model
     if !app.model_testable(id) {
         return CardTest::Off;
     }
-    let Some(row) = results.rows.iter().find(|r| r.model == id) else {
+    let Some(row) = results.row(id) else {
         return CardTest::Untested { ready: idle, partly: false };
     };
     if !row.complete {
