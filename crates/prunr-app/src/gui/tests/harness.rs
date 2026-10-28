@@ -111,6 +111,16 @@ pub(super) fn names<S>(harness: &Harness<'_, S>) -> Vec<String> {
     tree(harness).iter().filter(|n| n.is_control()).filter_map(|n| n.name.clone()).collect()
 }
 
+/// Every text the window shows, controls' names and labels alike.
+pub(super) fn texts<S>(harness: &Harness<'_, S>) -> Vec<String> {
+    tree(harness).iter().flat_map(|n| [n.name.clone(), n.value.clone()]).flatten().collect()
+}
+
+/// Whether the control named `name` is there and enabled.
+pub(super) fn enabled<S>(harness: &Harness<'_, S>, name: &str) -> bool {
+    tree(harness).iter().any(|n| n.is_control() && n.name.as_deref() == Some(name) && !n.disabled)
+}
+
 /// Every control in the tree has a readable name. Fails with the list of
 /// nameless controls: an icon-only button, an unlabelled slider.
 pub(super) fn assert_all_controls_named<S>(harness: &Harness<'_, S>, surface: &str) {

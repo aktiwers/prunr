@@ -4,8 +4,8 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 use super::harness::{
-    assert_all_controls_named, click, harness, harness_builder, loaded, loaded_with, names, new_app,
-    settle, tree,
+    assert_all_controls_named, click, enabled, harness, harness_builder, loaded, loaded_with, names, new_app,
+    settle, texts, tree,
 };
 use crate::gui::app::PrunrApp;
 use crate::gui::views::settings::SettingsTab;
@@ -142,14 +142,14 @@ fn the_computer_test_is_offered_with_an_accelerator() {
     let offer = format!("{} ({})", RuntimeId::Cuda.install_button_label(), RuntimeId::Cuda.download_label(false));
     let offer = offer.as_str();
     let shapes = [
-        ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", offer]),
-        ("not tested since the driver changed", driver_changed, true, vec!["Test this computer"], vec!["Forget the test"]),
-        ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec![offer]),
-        ("cancelled after two models", cancelled, true, vec!["Test this computer", "Forget the test"], vec![]),
-        ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", offer], vec![]),
-        ("no accelerator", tested, false, vec![], vec!["Test this computer", "Forget the test"]),
+        ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", offer], Some("Not tested yet")),
+        ("not tested since the driver changed", driver_changed, true, vec!["Test this computer"], vec!["Forget the test"], Some("Not tested since the graphics driver changed")),
+        ("tested", Arc::clone(&tested), true, vec!["Test this computer", "Forget the test"], vec![offer], None),
+        ("cancelled after two models", cancelled, true, vec!["Test this computer", "Forget the test"], vec![], None),
+        ("tested without CUDA", without_cuda, true, vec!["Test this computer", "Forget the test", offer], vec![], None),
+        ("no accelerator", tested, false, vec![], vec!["Test this computer", "Forget the test"], None),
     ];
-    for (shape, test, testable, present_names, absent_names) in shapes {
+    for (shape, test, testable, present_names, absent_names, note) in shapes {
         let ctx = HardwareSectionContext {
             offered: RuntimeId::OFFERED,
             installs: HardwareInstallCache::default(),
@@ -170,6 +170,9 @@ fn the_computer_test_is_offered_with_an_accelerator() {
         }
         for name in absent_names {
             assert!(!present.iter().any(|n| n == name), "{shape}: {name} shown: {present:?}");
+        }
+        if let Some(note) = note {
+            assert!(texts(&harness).iter().any(|t| t.starts_with(note)), "{shape}: no note {note:?}");
         }
     }
 }
@@ -437,6 +440,7 @@ fn a_store_card_tests_its_own_model() {
             engines: vec![Engine { name: "CUDA", installed: true }],
             rows: vec![TestRow { model: ModelId::Silueta, cpu: Some(Time::of(620.0)), cells: vec![Cell::Time(Time::of(40.0))], runs_on: "CUDA" }],
             testable: vec![ModelId::Silueta, ModelId::U2net],
+            after_probe: true,
             ..Default::default()
         });
         app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
@@ -447,6 +451,8 @@ fn a_store_card_tests_its_own_model() {
     assert!(present.iter().any(|n| n == "Test U2Net"), "an installed model never measured here: {present:?}");
     assert!(!present.iter().any(|n| n == "Test Silueta"), "a measured one has nothing to test");
     assert!(!present.iter().any(|n| n == "Test BiRefNet-lite"), "installed, but no accelerator here would try it");
+    assert!(enabled(&h, "Test U2Net"), "nothing else uses the machine");
+    assert!(texts(&h).iter().any(|t| t == "Fastest here: CUDA, 0.04 s"), "{:?}", texts(&h));
 
     let child = crate::gui::tests::fixtures::idle_child();
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child, Some(ModelId::U2net)));

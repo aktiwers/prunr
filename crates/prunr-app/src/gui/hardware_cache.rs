@@ -53,6 +53,10 @@ pub(crate) struct TestResults {
     pub testable: Vec<prunr_models::ModelId>,
     /// "the processor, DirectML and CUDA": what a test times each model on.
     pub engines_said: String,
+    /// Read once the accelerator probe had answered: before, the engines
+    /// and what a test would time are not known, and asking would wait
+    /// for a graphics driver.
+    pub after_probe: bool,
 }
 
 /// An engine of this computer's: one this process runs models on, or
@@ -175,6 +179,7 @@ impl TestResults {
         if installs.cuda_offered() && !engines.iter().any(|e| e.name == prunr_core::engine::CUDA_NAME) {
             engines.push(Engine { name: prunr_core::engine::CUDA_NAME, installed: false });
         }
+        let after_probe = prunr_core::OrtEngine::probed();
         let installed = || prunr_models::REGISTRY.iter().map(|d| d.id).filter(|&id| installs.has_installed(id));
         let rows = installed()
             .filter_map(|id| {
@@ -187,8 +192,9 @@ impl TestResults {
             engines,
             rows,
             changed: prunr_core::ep_compat::changed_since_test(),
-            testable: installed().filter(|&id| crate::bench::here::times(id)).collect(),
+            testable: if after_probe { installed().filter(|&id| crate::bench::here::times(id)).collect() } else { Vec::new() },
             engines_said: String::new(),
+            after_probe,
         };
         results.engines_said = crate::gui::views::fmt::and_list(std::iter::once(crate::gui::views::fmt::engine(prunr_core::engine::CPU_NAME)).chain(results.installed()));
         results
