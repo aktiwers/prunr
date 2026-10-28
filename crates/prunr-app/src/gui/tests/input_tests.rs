@@ -57,3 +57,29 @@ fn f1_opens_settings_on_shortcuts_and_closes_it_again() {
     app.perform(Action::Shortcuts, &ctx);
     assert!(app.show_settings && app.settings_tab == SettingsTab::Shortcuts, "from another tab it switches, not closes");
 }
+
+/// A modal owns the keyboard: under it only what closes or switches it
+/// acts; the arrow keys, Undo, Delete and the rest wait for it.
+#[test]
+fn shortcuts_that_act_on_the_image_wait_under_a_modal() {
+    use crate::gui::views::shortcuts::Action;
+    let ctx = egui::Context::default();
+    let mut app = PrunrApp::new_for_test();
+    super::fixtures::push_test_item(&mut app, 1);
+    super::fixtures::push_test_item(&mut app, 2);
+    let radius = app.settings.brush.radius;
+    for (modal, open) in [("settings", (|a: &mut PrunrApp| a.show_settings = true) as fn(&mut PrunrApp)), ("cli_help", |a| a.show_cli_help = true)] {
+        open(&mut app);
+        assert_eq!(app.open_modals(), [modal]);
+        for action in [Action::NextImage, Action::ToggleQueue, Action::ToggleAdjustments, Action::BrushLarger, Action::FitToWindow] {
+            app.perform(action, &ctx);
+        }
+        assert_eq!(app.batch.selected_index, 0, "{modal}: the arrow key waits");
+        assert!(!app.sidebar_hidden && !app.adjustments_hidden && !app.zoom_state.pending_fit_zoom, "{modal}: the panels stay");
+        assert_eq!(app.settings.brush.radius, radius, "{modal}: the brush stays");
+        app.perform(Action::Cancel, &ctx);
+        assert!(app.open_modals().is_empty(), "{modal}: Escape closes it");
+    }
+    app.perform(Action::NextImage, &ctx);
+    assert_eq!(app.batch.selected_index, 1, "with no modal up the arrow key acts");
+}

@@ -319,6 +319,9 @@ impl PrunrApp {
         if self.machine_test.is_some() && action != Action::Screenshot {
             return;
         }
+        if self.any_modal_open() && !action.works_over_modals() {
+            return;
+        }
         // Selection actions share the action bar's gate; Copy with no
         // selection is the whole-image copy.
         let selection_idx = |app: &Self, action: SelectionAction| {
