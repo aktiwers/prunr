@@ -157,6 +157,31 @@ pub fn loaded_dylib() -> Option<&'static Path> {
     LOADED.get().map(PathBuf::as_path)
 }
 
+/// Set on a child process (a worker, a test) to the runtime its parent
+/// loaded. A runtime chosen in Settings takes effect when the app
+/// restarts; a child that loaded it before would read the store as
+/// another setup's and drop what the app learned.
+const PARENT_RUNTIME_ENV: &str = "PRUNR_PARENT_RUNTIME";
+
+/// `command`, a child of this process, loads the runtime this process
+/// loaded.
+pub fn same_runtime_for(command: &mut std::process::Command) {
+    if let Some(path) = loaded_dylib() {
+        command.env(PARENT_RUNTIME_ENV, path);
+    }
+}
+
+/// `candidates` with the parent's runtime first, from where it is: the
+/// built-in one, or a store install.
+fn parent_first(mut candidates: Vec<(PathBuf, DylibSource)>, parent: Option<PathBuf>, bundled: Option<&Path>) -> Vec<(PathBuf, DylibSource)> {
+    if let Some(parent) = parent {
+        candidates.retain(|(path, _)| *path != parent);
+        let source = if bundled == Some(parent.as_path()) { DylibSource::Bundled } else { DylibSource::RuntimeStore };
+        candidates.insert(0, (parent, source));
+    }
+    candidates
+}
+
 pub(crate) fn tag_for(version: Option<&str>, len: u64, modified: u64) -> String {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in len.to_le_bytes().into_iter().chain(modified.to_le_bytes()) {
@@ -272,7 +297,11 @@ fn candidates() -> Result<Vec<(PathBuf, DylibSource)>, String> {
     let candidates = match env_override() {
         Some(path) if !path.is_file() => return Err(format!("ORT_DYLIB_PATH={} is not a file", path.display())),
         Some(path) => vec![(path, DylibSource::EnvVar)],
-        None => runtime_candidates(prunr_models::runtime_store_dir().as_deref(), bundled_dylib(), BUILT_IN_HAS_GPU),
+        None => {
+            let (store, bundled) = (prunr_models::runtime_store_dir(), bundled_dylib());
+            let parent = std::env::var_os(PARENT_RUNTIME_ENV).map(PathBuf::from).filter(|p| p.is_file());
+            parent_first(runtime_candidates(store.as_deref(), bundled.clone(), BUILT_IN_HAS_GPU), parent, bundled.as_deref())
+        }
     };
     if candidates.is_empty() {
         return Err(not_found());
@@ -758,6 +787,21 @@ mod tests {
         assert!(source[init..built].contains(".with_telemetry(false)"), "telemetry must be switched off where the environment is built");
     }
     use super::*;
+
+    /// A child loads its parent's runtime first, from where it is, ahead
+    /// of the preference the parent may have changed since it started.
+    #[test]
+    fn a_child_loads_its_parents_runtime_first() {
+        let store = PathBuf::from("/store/openvino-1.24.1-linux-x64/libonnxruntime.so");
+        let bundled = PathBuf::from("/app/runtime/libonnxruntime.so");
+        let usual = vec![(bundled.clone(), DylibSource::Bundled), (store.clone(), DylibSource::RuntimeStore)];
+        assert_eq!(parent_first(usual.clone(), None, Some(&bundled)), usual);
+        assert_eq!(
+            parent_first(usual.clone(), Some(store.clone()), Some(&bundled)),
+            [(store.clone(), DylibSource::RuntimeStore), (bundled.clone(), DylibSource::Bundled)],
+        );
+        assert_eq!(parent_first(usual, Some(bundled.clone()), Some(&bundled))[0], (bundled, DylibSource::Bundled));
+    }
 
     /// The add-ons go into a runtime as new as they are built for.
     #[test]

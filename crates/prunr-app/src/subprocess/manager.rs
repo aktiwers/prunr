@@ -157,7 +157,9 @@ impl SubprocessManager {
         // inputs before spawning. `ipc_temp_dir()`'s init-time sweep owns cleanup.
         let exe = worker_exe()?;
 
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        prunr_core::ort_runtime::same_runtime_for(&mut command);
+        let mut child = command
             .arg("--worker")
             .args(["--worker-of", WORKER_VERSION])
             .stdin(Stdio::piped())
