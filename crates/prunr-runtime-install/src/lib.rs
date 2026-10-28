@@ -51,8 +51,11 @@ pub struct AddOn {
     /// The library inside the archive: at its root, or in `folder`.
     pub library: &'static str,
     /// The archive's folder the library loads its own libraries from,
-    /// kept whole beside it; `None` when the library comes alone.
+    /// kept beside it; `None` when the library comes alone.
     pub folder: Option<&'static str>,
+    /// The beginnings of the names in `folder` left out: parts the app
+    /// never loads.
+    pub left_out: &'static [&'static str],
     pub packing: Packing,
 }
 
@@ -82,6 +85,7 @@ pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
     size_bytes: 238_621_368,
     library: "onnxruntime_providers_cuda.dll",
     folder: None,
+    left_out: &[],
     packing: Packing::Zip,
 };
 
@@ -95,12 +99,15 @@ pub const CUDA_ADDON_LINUX: AddOn = AddOn {
     size_bytes: 436_640_825,
     library: "libonnxruntime_providers_cuda.so",
     folder: None,
+    left_out: &[],
     packing: Packing::TarGz,
 };
 
 /// Intel's OpenVINO provider as a plugin, built against ONNX Runtime 1.30.
 /// It brings OpenVINO 2026.4.1 with oneTBB and hwloc in its folder, and
-/// finds them there; the Intel graphics also need Intel's own driver.
+/// finds them there; the Intel graphics also need Intel's own driver. Its
+/// NPU part is left out: the app names the processor and the graphics
+/// only, so OpenVINO never loads it.
 pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
     version: "1.8.1",
     url: "https://files.pythonhosted.org/packages/88/01/4e72a8a65b584f01d6e59eb453bae397b82b2e51df1b5c94efa05e17800b/onnxruntime_ep_openvino-1.8.1-py3-none-manylinux_2_28_x86_64.whl",
@@ -108,6 +115,7 @@ pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
     size_bytes: 52_587_628,
     library: "libonnxruntime_providers_openvino_plugin.so",
     folder: Some("onnxruntime_ep_openvino"),
+    left_out: &["libopenvino_intel_npu"],
     packing: Packing::Zip,
 };
 
@@ -610,15 +618,16 @@ pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn
 }
 
 /// What `name` in `addon`'s archive is written as, when it is kept: the
-/// library, and with a `folder` each file in it, except a script and the
-/// library's copies under its versioned names.
+/// library, and with a `folder` each file in it, except a script, the
+/// library's copies under its versioned names and the parts left out.
 fn addon_file(addon: &AddOn, name: &str) -> Option<String> {
     let Some(folder) = addon.folder else {
         return (name == addon.library).then(|| name.to_string());
     };
     let file = name.strip_prefix(folder)?.strip_prefix('/')?;
     let library_copy = file.strip_prefix(addon.library).is_some_and(|rest| rest.starts_with('.'));
-    (one_segment(file) && !file.ends_with(".py") && !library_copy).then(|| file.to_string())
+    let left_out = addon.left_out.iter().any(|part| file.starts_with(part));
+    (one_segment(file) && !file.ends_with(".py") && !library_copy && !left_out).then(|| file.to_string())
 }
 
 /// `archive`'s files that `rename` keeps, flat in `target_dir`; the path
@@ -1062,8 +1071,8 @@ mod tests {
     }
 
     /// The OpenVINO add-on's wheel gives up its folder flat, with one copy
-    /// of the plugin: not its scripts, its package record, another folder,
-    /// or a name that would leave the install.
+    /// of the plugin: not its scripts, its NPU part, its package record,
+    /// another folder, or a name that would leave the install.
     #[test]
     fn a_folder_addon_gives_up_its_folder_flat() {
         let wheel = zip_of(&[
@@ -1073,6 +1082,7 @@ mod tests {
             ("onnxruntime_ep_openvino/libonnxruntime_providers_openvino_plugin.so.1.8.1", "copy"),
             ("onnxruntime_ep_openvino/libopenvino.so.2641", "openvino"),
             ("onnxruntime_ep_openvino/libtbb.so.12", "tbb"),
+            ("onnxruntime_ep_openvino/libopenvino_intel_npu_plugin.so", "npu"),
             ("onnxruntime_ep_openvino/cache.json", "{}"),
             ("onnxruntime_ep_openvino/third-party-programs.txt", "notices"),
             ("onnxruntime_ep_openvino/sub/libopenvino.so.2641", "no"),
