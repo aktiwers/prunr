@@ -10,7 +10,7 @@ use super::brush_state::Trail;
 /// cannot be cancelled).
 pub(crate) const ENCODE_SETTLE: Duration = Duration::from_millis(250);
 
-/// A By depth click made before the image's depth map was there; it runs
+/// A Depth pick made before the image's depth map was there; it runs
 /// when the map lands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PendingDepthClick {

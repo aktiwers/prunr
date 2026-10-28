@@ -172,13 +172,20 @@ fn region_knobs(ui: &mut Ui, s: &mut BrushSettings) -> bool {
     brush_chip::feather_row(ui, s).commit | expand
 }
 
+/// What a Magic Brush click picks, which its slider then tunes.
+const PICK_BY: [chip::Choice<bool>; 2] = [
+    chip::Choice { value: false, name: "Object", description: "Pick the object under the click; Confidence sets how sure it must be", enabled: true },
+    chip::Choice { value: true, name: "Depth", description: "Pick everything about as far away as the click; Range sets how far around it", enabled: true },
+];
+
 fn magic_knobs(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
     let mut committed = brush_chip::mode_buttons(ui, model, s);
+    ui.separator();
+    committed |= chip::choice_buttons(ui, &PICK_BY, &mut s.magic_depth);
     if s.magic_depth {
         committed |= chip::slider_row_f32(ui, "Range", &mut s.magic_depth_range, DEPTH_RANGE, false, |v| fmt::plain(v, 2)).commit;
     } else {
         committed |= chip::slider_row_f32(ui, "Confidence", &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit;
     }
-    let depth = chip::inline_switch(ui, "By depth", &mut s.magic_depth);
-    committed | depth.commit
+    committed
 }
