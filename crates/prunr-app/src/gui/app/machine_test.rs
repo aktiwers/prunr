@@ -79,7 +79,13 @@ impl PrunrApp {
         self.places_changed();
         if let (Ended::Finished { .. }, Some(model)) = (&ended, only) {
             let on = crate::gui::views::fmt::engine(self.settings.engine_of(model));
-            self.toasts.success(format!("{} tested: it runs on {on} here.", prunr_models::display_name(model)));
+            match model_tested(&self.test_results, model, on) {
+                Ok(text) => self.toasts.success(text),
+                Err(text) => {
+                    tracing::warn!(?model, "the model's test left an accelerator untimed");
+                    self.toasts.warning(text)
+                }
+            };
             return;
         }
         match ended {
@@ -190,9 +196,32 @@ fn check_found(name: &str, accelerator: &str, place: prunr_models::Place) -> Str
     }
 }
 
+/// What a finished test of `model` alone says: where it now runs (`on`),
+/// or, when it was not timed on every accelerator, that its card offers
+/// Test again.
+fn model_tested(results: &crate::gui::hardware_cache::TestResults, model: ModelId, on: &str) -> Result<String, String> {
+    let name = prunr_models::display_name(model);
+    match results.rows.iter().find(|r| r.model == model) {
+        Some(row) if row.complete => Ok(format!("{name} tested: it runs on {on} here.")),
+        _ => Err(format!("{name} could not be timed everywhere this time, so its card offers Test again. The log has the details.")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prunr_models::ModelId;
+
+    /// A model's test is said done only once it was timed on every
+    /// accelerator: a run that saved nothing, or not everywhere, says so.
+    #[test]
+    fn a_models_test_is_done_only_when_timed_everywhere() {
+        use crate::gui::hardware_cache::{TestResults, TestRow};
+        let row = |complete| TestRow { model: ModelId::U2net, cpu: None, cells: Vec::new(), runs_on: "CUDA", complete };
+        let results = |rows| TestResults { rows, ..Default::default() };
+        assert_eq!(super::model_tested(&results(vec![row(true)]), ModelId::U2net, "CUDA"), Ok("U2Net tested: it runs on CUDA here.".to_string()));
+        assert!(super::model_tested(&results(vec![row(false)]), ModelId::U2net, "CUDA").is_err(), "partly timed");
+        assert!(super::model_tested(&results(Vec::new()), ModelId::U2net, "CUDA").is_err(), "nothing saved");
+    }
 
     /// A model the accelerator refuses or breaks on is not said to give a
     /// wrong result: four on DirectML were, and none had run.

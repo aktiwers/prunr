@@ -63,8 +63,9 @@ enum CardTest<'a> {
     /// Nothing to offer: not installed, not a model the test runs, or no
     /// accelerator to test.
     Off,
-    /// Never measured here; `ready` while nothing else uses the machine.
-    Untested { ready: bool },
+    /// Never measured here, or on some accelerators only (`partly`);
+    /// `ready` while nothing else uses the machine.
+    Untested { ready: bool, partly: bool },
     /// Its test runs: on what now, and how far.
     Testing { on: &'static str, fraction: f32 },
     /// Measured: the engine it runs on, and its time there.
@@ -83,8 +84,11 @@ fn card_test<'a>(app: &PrunrApp, results: &'a TestResults, idle: bool, id: Model
         return CardTest::Off;
     }
     let Some(row) = results.rows.iter().find(|r| r.model == id) else {
-        return CardTest::Untested { ready: idle };
+        return CardTest::Untested { ready: idle, partly: false };
     };
+    if !row.complete {
+        return CardTest::Untested { ready: idle, partly: true };
+    }
     let on = row.engine(app.settings.cpu_only());
     CardTest::Tested { on: super::fmt::engine(on), time: row.time_on(&results.engines, on).map(|t| t.text.as_str()) }
 }
@@ -364,9 +368,9 @@ fn test_line(ui: &mut egui::Ui, desc: &ModelDescriptor, test: CardTest, engines:
     let mut clicked = None;
     match test {
         CardTest::Off => {}
-        CardTest::Untested { ready } => {
+        CardTest::Untested { ready, partly } => {
             ui.horizontal(|ui| {
-                ui.label(text("Not tested on this computer.", theme::ADVISORY_TEXT));
+                ui.label(text(if partly { "Partly tested on this computer." } else { "Not tested on this computer." }, theme::ADVISORY_TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let reason = (!ready).then_some("Waits until the current work is done.");
                     let resp = super::chip::gated(ui, reason, |ui| button(ui, ButtonKind::Secondary, "Test"));
