@@ -339,6 +339,19 @@ pub(crate) struct SelectionEditDone {
     pub(crate) cut: Option<image::RgbaImage>,
 }
 
+/// `mask` feathered by `px` against the photo `source`; `None` for no
+/// feather, or no photo to feather against.
+pub(crate) fn feathered(
+    mask: &prunr_core::selection::MaskArtifact,
+    source: Option<&image::RgbaImage>,
+    px: u32,
+) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
+    match (px, source) {
+        (0, _) | (_, None) => None,
+        (px, Some(src)) => Some(std::sync::Arc::new(prunr_core::selection::refine::feather_edges(mask, src, px))),
+    }
+}
+
 /// What a selection texture bakes in; the overlay is a single textured
 /// quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -395,12 +408,7 @@ impl SelectionStyle {
         mask: &prunr_core::selection::MaskArtifact,
         source: Option<&image::RgbaImage>,
     ) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
-        match (self.edge_feather_px, source) {
-            (0, _) | (_, None) => None,
-            (px, Some(src)) => Some(std::sync::Arc::new(
-                prunr_core::selection::refine::feather_edges(mask, src, px),
-            )),
-        }
+        feathered(mask, source, self.edge_feather_px)
     }
 
     /// The style as drawn at `zoom` (screen points per image pixel): an

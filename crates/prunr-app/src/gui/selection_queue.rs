@@ -38,6 +38,96 @@ pub(crate) enum SelectionOp {
     /// The selection folded into the cut-out's edits as `action` says,
     /// and cleared; `feathered` is the plane the overlay shows, when built.
     Bake { action: CutoutAction, feathered: Option<Arc<MaskArtifact>> },
+    /// The image's strokes drawn again from where they started.
+    Replay(Arc<Replay>),
+}
+
+impl SelectionOp {
+    /// The step the edit makes once landed, and what a replay of the
+    /// strokes records of it; a fold went through a feather of
+    /// `feather_px` when it had its feathered plane.
+    pub(crate) fn step(&self, after: &AfterLanding, feather_px: u32) -> (super::timeline::StepKind, Option<SelectionMade>) {
+        use super::timeline::StepKind;
+        match self {
+            Self::Merge(_) => (StepKind::Stroke, match after {
+                AfterLanding::Stroke(drawn) => Some(SelectionMade::Stroke(drawn.clone())),
+                AfterLanding::Nothing => None,
+            }),
+            Self::Invert => (StepKind::Selection, Some(SelectionMade::Invert)),
+            Self::Bake { action, feathered } => {
+                let feather_px = if feathered.is_some() { feather_px } else { 0 };
+                (StepKind::Selection, Some(SelectionMade::Fold { action: *action, feather_px }))
+            }
+            Self::Replay(replay) => (StepKind::Strokes, Some(SelectionMade::Adjusted { from: replay.from, ops: Arc::clone(&replay.ops) })),
+        }
+    }
+}
+
+/// What a step did to the selection: the record a replay of the image's
+/// strokes redoes. A selection step without one stops a replay there.
+#[derive(Clone)]
+pub(crate) enum SelectionMade {
+    Stroke(super::brush_state::StrokeDrawn),
+    Invert,
+    /// Folded into the cut-out's edits through a feather of `feather_px`.
+    Fold { action: CutoutAction, feather_px: u32 },
+    Clear,
+    /// Every stroke since step `from` drawn again with new values: `ops`
+    /// is that history as it stands now.
+    Adjusted { from: u64, ops: Arc<Vec<SelectionMade>> },
+}
+
+impl SelectionMade {
+    /// A stroke moved as the sliders moved from `from` to `to`; anything
+    /// else as it was.
+    pub(crate) fn adjusted(&self, from: super::brush_state::StrokeValues, to: super::brush_state::StrokeValues) -> Self {
+        match self {
+            Self::Stroke(drawn) => Self::Stroke(drawn.adjusted(from, to)),
+            other => other.clone(),
+        }
+    }
+}
+
+/// The image's strokes since its picture last changed, to draw again:
+/// the step they start from, its selection and edits, and what each step
+/// after it did.
+#[derive(Clone)]
+pub(crate) struct Replay {
+    pub(crate) from: u64,
+    pub(crate) selection: Option<super::timeline::StoredSelection>,
+    pub(crate) edits: Option<super::timeline::StoredSelection>,
+    pub(crate) ops: Arc<Vec<SelectionMade>>,
+    pub(crate) dims: (u32, u32),
+    /// The photo a fold's feather follows.
+    pub(crate) source: Option<Arc<image::RgbaImage>>,
+}
+
+impl Replay {
+    /// The planes the steps make, from the ones they started from; the
+    /// stored ones are unpacked here, on the edit thread.
+    fn make(&self) -> SelState {
+        let start = SelState {
+            selection: self.selection.as_ref().and_then(|s| s.load()),
+            edits: self.edits.as_ref().and_then(|e| e.load()),
+        };
+        self.done(start, &self.ops)
+    }
+
+    /// `ops` done over `start` in order; each fold feathered as it was
+    /// when it was made, an earlier adjustment's history in its place.
+    fn done(&self, start: SelState, ops: &[SelectionMade]) -> SelState {
+        let (w, h) = self.dims;
+        ops.iter().fold(start, |state, op| match op {
+            SelectionMade::Stroke(drawn) => merged(&state, drawn.mask(w, h)),
+            SelectionMade::Invert => apply(&SelectionOp::Invert, &state),
+            SelectionMade::Fold { action, feather_px } => {
+                let feathered = state.selection.as_deref().and_then(|s| super::background_io::feathered(s, self.source.as_deref(), *feather_px));
+                apply(&SelectionOp::Bake { action: *action, feathered }, &state)
+            }
+            SelectionMade::Clear => SelState { selection: None, edits: state.edits },
+            SelectionMade::Adjusted { ops, .. } => self.done(state, ops),
+        })
+    }
 }
 
 /// What happens once an edit has landed, besides the step it records.
@@ -189,10 +279,7 @@ impl SelectionQueue {
 /// its own.
 pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
     match op {
-        SelectionOp::Merge(stroke) => SelState {
-            selection: Some(Arc::new(super::processor::merge_stroke(base.selection.clone(), (**stroke).clone()))),
-            edits: base.edits.clone(),
-        },
+        SelectionOp::Merge(stroke) => merged(base, (**stroke).clone()),
         SelectionOp::Invert => SelState {
             selection: base.selection.as_ref().map(|s| Arc::new(s.invert())),
             edits: base.edits.clone(),
@@ -212,6 +299,15 @@ pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
             };
             SelState { selection: None, edits }
         }
+        SelectionOp::Replay(replay) => replay.make(),
+    }
+}
+
+/// `stroke` merged into `base`'s selection.
+fn merged(base: &SelState, stroke: MaskArtifact) -> SelState {
+    SelState {
+        selection: Some(Arc::new(super::processor::merge_stroke(base.selection.clone(), stroke))),
+        edits: base.edits.clone(),
     }
 }
 

@@ -70,11 +70,12 @@ const FILL_SCALES: [chip::Choice<FillScale>; 4] = [
 ];
 
 /// The Paint Brush panel: what the strip does not show.
-pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, model: SettingsModel) -> BrushChipOutcome {
+pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, adjust_all: &mut bool, model: SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     if chip::popover_header(ui, "Paint Brush", Some(("Reset the brush", false))) {
         outcome.reset_brush_requested = true;
     }
+    adjust_all_row(ui, adjust_all);
     outcome.committed |= chip::choice_row(ui, "Shape", &BRUSH_SHAPES, &mut s.shape);
     if shows(model, Surface::FillRegionKnobs) {
         // Sharpen displays as 0-100% on a 0-2 internal range.
@@ -98,6 +99,13 @@ pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSe
     feather.commit
 }
 
+
+/// The switch for what the sliders adjust, the same in both brushes'
+/// panels and the strip.
+pub(super) fn adjust_all_row(ui: &mut Ui, adjust_all: &mut bool) {
+    chip::toggle_row(ui, "Adjust all strokes", adjust_all);
+    super::hint(ui, super::tool_strip::ADJUST_REACH);
+}
 
 /// The eraser's Expand region slider, in the flyout and the tool strip.
 pub(super) fn expand_region_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {

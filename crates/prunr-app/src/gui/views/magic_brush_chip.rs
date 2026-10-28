@@ -10,9 +10,10 @@ use crate::gui::views::chip;
 use super::brush_chip::BrushChipOutcome;
 
 /// `encoder_pending` shows a spinner while the encoder runs.
-pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, encoder_pending: bool, model: crate::gui::settings::SettingsModel) -> BrushChipOutcome {
+pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, adjust_all: &mut bool, encoder_pending: bool, model: crate::gui::settings::SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
     chip::popover_header(ui, "Magic Brush", None);
+    super::brush_chip::adjust_all_row(ui, adjust_all);
 
     if encoder_pending {
         ui.horizontal(|ui| {
