@@ -77,8 +77,7 @@ fn main() {
     }
 
     if let Err(e) = prunr_core::ort_runtime::ensure_initialized() {
-        tracing::error!(%e, "ORT runtime init failed");
-        std::process::exit(2);
+        fail_to_start(&cli, "Prunr could not load its AI engine. Installing Prunr again restores it.", &e, 2);
     }
 
     if cli.worker {
@@ -113,9 +112,23 @@ fn main() {
         tracing::info!(log_file = %log, "debug mode — tracing at prunr=debug, tee to file");
     }
     if let Err(e) = gui::run() {
-        tracing::error!(%e, "GUI launch failed");
-        std::process::exit(1);
+        fail_to_start(&cli, "Prunr could not open its window. Updating the graphics driver may help.", &e.to_string(), 1);
     }
+}
+
+/// Exits with `code`, after a dialog when the run opens the window:
+/// there is no terminal to read the log in.
+fn fail_to_start(cli: &Cli, what: &str, detail: &str, code: i32) -> ! {
+    tracing::error!(%detail, what, "could not start");
+    if cli.opens_the_window() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Prunr could not start")
+            .set_description(format!("{what}\n\nDetails: {detail}"))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+    std::process::exit(code);
 }
 
 /// Initialize the global tracing subscriber.
