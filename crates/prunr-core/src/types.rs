@@ -28,6 +28,14 @@ impl CoreError {
 
     /// A run or session that ran out of memory: a smaller piece of work,
     /// or the processor, may fit.
+    /// Out of the card's memory, not the system's (`ep_compat::is_card_out_of_memory`).
+    pub fn is_card_out_of_memory(&self) -> bool {
+        match self {
+            CoreError::Model(m) | CoreError::Inference(m) => crate::ep_compat::is_card_out_of_memory(m),
+            _ => false,
+        }
+    }
+
     pub fn is_out_of_memory(&self) -> bool {
         match self {
             CoreError::Model(m) | CoreError::Inference(m) => crate::ep_compat::is_out_of_memory(m),

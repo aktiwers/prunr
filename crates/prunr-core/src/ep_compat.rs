@@ -129,6 +129,14 @@ pub fn is_transient(error: &str) -> bool {
 
 /// Error text of a run or session that ran out of memory, the card's or
 /// the system's: a smaller piece of work, or the processor, may fit.
+/// `is_out_of_memory`, of the card's memory rather than the system's: a
+/// failed allocation in the host's C++ runtime names no card.
+pub(crate) fn is_card_out_of_memory(error: &str) -> bool {
+    const HOST: &[&str] = &["bad_alloc", "bad allocation"];
+    let lower = error.to_ascii_lowercase();
+    is_out_of_memory(error) && !HOST.iter().any(|m| lower.contains(m))
+}
+
 pub(crate) fn is_out_of_memory(error: &str) -> bool {
     const MARKS: &[&str] = &["out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate"];
     let error = error.to_ascii_lowercase();
@@ -645,6 +653,8 @@ mod tests {
         for other in ["887A0005 The GPU device instance has been suspended.", "Graph contains cycles"] {
             assert!(!is_out_of_memory(other), "{other}");
         }
+        assert!(is_card_out_of_memory("CUDA error: out of memory") && is_card_out_of_memory("HRESULT 0x8007000E"));
+        assert!(!is_card_out_of_memory("Exception during initialization: bad allocation"), "the system's memory, not the card's");
     }
 
     /// A failure holds only for the runtime build and drivers it happened

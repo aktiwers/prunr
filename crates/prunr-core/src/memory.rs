@@ -149,11 +149,11 @@ static RAN_SHORT: std::sync::Mutex<Vec<ShortNote>> = std::sync::Mutex::new(Vec::
 type ShortNote = (ModelId, String, u64);
 
 /// `id` ran out of memory on `provider`'s card: it runs on the processor
-/// until the card has more free. A card whose memory cannot be read is
+/// until the card has more room. A card whose memory cannot be read is
 /// tried again next time, as there is no telling when it has room.
 pub(crate) fn note_ran_short(id: ModelId, provider: &str) {
-    let free = card_free_mb(provider);
-    note_in(&mut RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner), id, provider, free);
+    let room = card_room_mb(provider);
+    note_in(&mut RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner), id, provider, room);
 }
 
 fn note_in(notes: &mut Vec<ShortNote>, id: ModelId, provider: &str, free: Option<u64>) {
@@ -169,11 +169,24 @@ fn note_in(notes: &mut Vec<ShortNote>, id: ModelId, provider: &str, free: Option
 pub fn ran_short(id: ModelId, provider: &str) -> bool {
     let noted = |notes: &[ShortNote]| notes.iter().find(|(model, on, _)| (*model, on.as_str()) == (id, provider)).map(|note| note.2);
     let Some(then) = noted(&RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)) else { return false };
-    if still_short(Some(then), card_free_mb(provider)) {
+    if still_short(Some(then), card_room_mb(provider)) {
         return true;
     }
     RAN_SHORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|note| *note != (id, provider.to_string(), then));
     false
+}
+
+/// The card memory this process could have on `provider`'s card, in MB:
+/// what is free and what it holds already (CUDA), or what Windows budgets
+/// it (DirectML). Unlike what is free, it does not grow when this
+/// process lets a session go, only when others free the card. `None`
+/// for another provider, or no reading.
+pub fn card_room_mb(provider: &str) -> Option<u64> {
+    match provider {
+        crate::engine::CUDA_NAME => crate::card_memory::cuda_card_memory().map(|card| card.free_mb + crate::card_memory::process_card_mb(std::process::id()).unwrap_or(0)),
+        crate::engine::DIRECTML_NAME => crate::card_memory::directml_card_memory().map(|card| card.total_mb),
+        _ => None,
+    }
 }
 
 /// Free memory on `provider`'s card now, in MB: CUDA's through NVML,
