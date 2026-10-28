@@ -539,18 +539,14 @@ fn run_install(
     // The runtime just installed is the one the user wants next start;
     // an add-on starts now, in the runtime already loaded, when that is
     // as new as the add-on (Prunr's own), else at the next start, in it.
-    let started = if rt.is_addon() {
+    let choice = if rt.is_addon() { RuntimeChoice::BuiltIn } else { RuntimeChoice::Store(rt) };
+    if let Err(e) = prefer(choice) {
+        tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the runtime it needs as preferred");
+    }
+    let started = rt.is_addon().then(|| {
         use_installed_addons();
-        if let Err(e) = prefer(RuntimeChoice::BuiltIn) {
-            tracing::warn!(%e, "could not prefer the built-in runtime for the add-on");
-        }
         prunr_core::ort_runtime::hosts_addons().then(start_addon)
-    } else {
-        if let Err(e) = prefer(RuntimeChoice::Store(rt)) {
-            tracing::warn!(runtime = rt.settings_key(), %e, "could not mark the new runtime as preferred");
-        }
-        None
-    };
+    }).flatten();
 
     let _ = tx.send(InstallEvent::Done { install_dir, started });
     Ok(())

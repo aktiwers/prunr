@@ -1,6 +1,5 @@
 //! The app under the AccessKit test harness: real widgets, found by name.
 
-use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 use super::harness::{
@@ -264,9 +263,7 @@ fn stable_diffusion_settings_show_only_with_an_sd_eraser_installed() {
     use crate::gui::hardware_cache::HardwareInstallCache;
     use crate::gui::settings::SettingsModel;
     let mut harness = harness();
-    let line_of = |harness: &Harness<'_, PrunrApp>, name: &str| {
-        harness.query_all_by(|n| n.value().is_some_and(|v| v.starts_with(name)) || n.label().is_some_and(|l| l.starts_with(name))).next().is_some()
-    };
+    let line_of = |harness: &Harness<'_, PrunrApp>, name: &str| texts(harness).iter().any(|t| t.starts_with(name));
     let rorem_only = HardwareInstallCache::with_models(&[SettingsModel::RoremInpaint]);
     for (installs, shown) in [(HardwareInstallCache::default(), false), (HardwareInstallCache::all_installed(), true), (rorem_only, true)] {
         let app = harness.state_mut();

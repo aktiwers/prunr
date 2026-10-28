@@ -299,8 +299,9 @@ impl PrunrApp {
             self.toasts.outcome(outcome);
             self.runtime_install = None;
             if places_changed {
-                if let Some(&provider) = prunr_core::engine::gpu_providers_now().as_deref().and_then(<[_]>::first) {
-                    self.settings.accelerator_started(provider);
+                // One the probe found stays: DirectML beside CUDA.
+                if let Some(&provider) = prunr_core::engine::gpu_providers_now().as_deref().and_then(<[_]>::first).filter(|_| !self.settings.is_gpu()) {
+                    self.settings.note_backend(provider.to_string());
                 }
                 self.places_changed();
             } else {

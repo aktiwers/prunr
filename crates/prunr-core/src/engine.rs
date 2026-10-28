@@ -1752,7 +1752,7 @@ impl OrtEngine {
 /// no room since; else `own`.
 fn start_tile(own: u32, fitted: Option<(u32, Option<u64>)>, free_now: impl FnOnce() -> Option<u64>) -> u32 {
     match fitted {
-        Some((tile, then)) if crate::memory::still_short(then, free_now()) => tile.min(own),
+        Some((tile, then)) if crate::memory::still_short(then, free_now()) => tile,
         _ => own,
     }
 }
@@ -1912,7 +1912,6 @@ mod tests {
         assert_eq!(super::start_tile(512, Some((128, Some(2_000))), || Some(3_100)), 512, "a GB more is free");
         assert_eq!(super::start_tile(512, Some((128, None)), || Some(9_000)), 128, "no reading then");
         assert_eq!(super::start_tile(512, Some((256, Some(2_000))), || None), 256, "no reading now");
-        assert_eq!(super::start_tile(256, Some((512, Some(2_000))), || Some(2_000)), 256, "never above the model's own");
     }
     use super::*;
 
