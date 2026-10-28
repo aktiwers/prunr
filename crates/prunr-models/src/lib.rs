@@ -833,7 +833,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
     ModelDescriptor {
         id: ModelId::Silueta,
         display_name: "Silueta",
-        description: "Fast and tiny — pick when speed matters more than edge fidelity.",
+        description: "Small and built in: works without a download. Rougher edges than U2Net.",
         category: ModelCategory::Segmentation,
         source: ModelSource::Bundled {
             license: LicenseInfo {
