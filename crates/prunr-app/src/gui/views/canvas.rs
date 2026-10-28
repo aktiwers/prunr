@@ -889,21 +889,25 @@ fn draw_checkerboard(ui: &egui::Ui, bounds: Rect, dark: bool) {
     let tex = checker_texture(ui.ctx(), dark);
     let tile_px = CHECKER_TEX_TILES as f32 * theme::CHECKER_SIZE; // screen-space size of one tile
     let painter = ui.painter();
+    checker_tiles(bounds, ui.clip_rect(), tile_px, |tile_rect, uv_max| {
+        painter.image(tex.id(), tile_rect, Rect::from_min_max(Pos2::ZERO, uv_max), Color32::WHITE);
+    });
+}
 
-    let mut y = bounds.min.y;
-    while y < bounds.max.y {
-        let mut x = bounds.min.x;
+/// Each checker tile of `bounds` that `clip` shows, with the share of the
+/// texture it draws (less at the image's edge). Tiles stay anchored to
+/// `bounds.min`, so the pattern moves with the image; zoomed in, the
+/// image runs far past the window and its unseen tiles are skipped.
+fn checker_tiles(bounds: Rect, clip: Rect, tile_px: f32, mut tile: impl FnMut(Rect, Pos2)) {
+    let shown = bounds.intersect(clip);
+    let first = |shown_min: f32, origin: f32| origin + ((shown_min - origin) / tile_px).floor().max(0.0) * tile_px;
+    let mut y = first(shown.min.y, bounds.min.y);
+    while y < shown.max.y {
         let row_h = tile_px.min(bounds.max.y - y);
-        while x < bounds.max.x {
+        let mut x = first(shown.min.x, bounds.min.x);
+        while x < shown.max.x {
             let col_w = tile_px.min(bounds.max.x - x);
-            let tile_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(col_w, row_h));
-            // UV: fraction of tile actually visible (for edge tiles that are clipped)
-            let uv_max = Pos2::new(col_w / tile_px, row_h / tile_px);
-            painter.image(
-                tex.id(), tile_rect,
-                Rect::from_min_max(Pos2::ZERO, uv_max),
-                Color32::WHITE,
-            );
+            tile(Rect::from_min_size(Pos2::new(x, y), Vec2::new(col_w, row_h)), Pos2::new(col_w / tile_px, row_h / tile_px));
             x += tile_px;
         }
         y += tile_px;
@@ -927,6 +931,29 @@ mod tests {
         assert!(near(pts[FACE_SEGMENTS / 4], 10.0 + 200.0, 140.0), "{:?}", pts[FACE_SEGMENTS / 4]);
         let turned = FaceArea { angle: std::f32::consts::FRAC_PI_2, ..upright };
         assert!(near(face_outline(turned, shown)[0], 10.0 + 200.0, 120.0), "a quarter turn");
+    }
+
+    /// Zoomed in, the checkerboard draws the tiles the window shows, not
+    /// the image's tens of thousands; they keep their place on the image.
+    #[test]
+    fn the_checkerboard_draws_only_what_the_window_shows() {
+        let tiles = |bounds: Rect, clip: Rect| {
+            let mut drawn = Vec::new();
+            checker_tiles(bounds, clip, 256.0, |rect, uv| drawn.push((rect, uv)));
+            drawn
+        };
+        let window = Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0));
+        let zoomed = Rect::from_min_size(Pos2::new(-50_000.0, -30_000.0), Vec2::new(120_000.0, 80_000.0));
+        let drawn = tiles(zoomed, window);
+        assert!(drawn.len() <= 6 * 5, "{} tiles", drawn.len());
+        assert!(drawn.iter().all(|(r, _)| ((r.min.x - zoomed.min.x) / 256.0).fract() == 0.0), "anchored to the image");
+        let union = drawn.iter().fold(Rect::NOTHING, |u, (r, _)| u.union(*r));
+        assert!(union.contains_rect(window), "the window is covered: {union:?}");
+        let fitted = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(600.0, 300.0));
+        let drawn = tiles(fitted, window);
+        assert_eq!(drawn.len(), 3 * 2, "a fitted image draws all of its own");
+        assert_eq!(drawn.last().map(|(_, uv)| *uv), Some(Pos2::new(88.0 / 256.0, 44.0 / 256.0)), "the edge tile draws its share");
+        assert!(tiles(fitted, Rect::from_min_size(Pos2::new(2000.0, 0.0), Vec2::splat(100.0))).is_empty(), "off screen");
     }
 
     /// Tile repeats a picture at its own pixel size over the image, as
