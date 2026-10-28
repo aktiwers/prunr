@@ -337,6 +337,13 @@ pub fn process_lama(
     if mask_is_empty(mask) {
         return Ok(Filled::full(image.clone()));
     }
+    // A card that ran short of memory for it has no session built for
+    // nothing: the fill goes to the processor from the start.
+    let short = !cpu_only && crate::memory::ran_short(id, crate::memory::provider_for(id, false));
+    if short {
+        progress.step(Step::OnTheProcessor);
+    }
+    let cpu_only = cpu_only || short;
     progress.step(Step::LoadingModel);
     let session = LamaSession::get(id, cpu_only)?;
     let fill = |session: &Arc<LamaSession>, on_cpu: bool| {
