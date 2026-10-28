@@ -144,6 +144,11 @@ impl DownloadManager {
         None
     }
 
+    /// A check whose output closed and whose process has yet to end.
+    pub(crate) fn check_ending(&self) -> bool {
+        self.checking.as_ref().is_some_and(|(_, _, check)| check.ending())
+    }
+
     /// The window the download threads wake with each event.
     pub(crate) fn wake(&self, ctx: &egui::Context) {
         let _ = self.progress_tx.repaint.set(ctx.clone());

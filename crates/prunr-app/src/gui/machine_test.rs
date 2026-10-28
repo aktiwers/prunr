@@ -36,7 +36,13 @@ pub(crate) struct MachineTest {
     /// The one model it tests (the Model Store's Test); `None` for the
     /// whole computer.
     only: Option<ModelId>,
+    /// Its output has closed and its process not yet ended.
+    ending: bool,
 }
+
+/// How often the window looks again for a test's process to end once its
+/// output has closed: nothing wakes it for that.
+pub(crate) const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A model the test measured: its time on the processor, and its fastest
 /// engine that gives the processor's picture.
@@ -100,7 +106,7 @@ impl MachineTest {
                 wake();
             })
             .map_err(|e| format!("The test could not start: {e}"))?;
-        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only })
+        Ok(Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, ending: false })
     }
 
     /// A test of `only` (or the whole computer) whose process is `child`
@@ -108,7 +114,7 @@ impl MachineTest {
     #[cfg(test)]
     pub(crate) fn for_test(child: Child, only: Option<ModelId>) -> Self {
         let (_, told) = mpsc::channel();
-        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only }
+        Self { child: Some(child), told, step: None, finished: None, measured: Vec::new(), only, ending: false }
     }
 
     pub(crate) fn step(&self) -> Option<Step> {
@@ -117,6 +123,12 @@ impl MachineTest {
 
     pub(crate) fn only(&self) -> Option<ModelId> {
         self.only
+    }
+
+    /// Its output has closed and its process has yet to end: the window
+    /// looks again after `EXIT_POLL`.
+    pub(crate) fn ending(&self) -> bool {
+        self.ending
     }
 
     /// It tests the whole computer, under a window of its own.
@@ -143,6 +155,7 @@ impl MachineTest {
         };
         // Its output closes as it ends; until then there is nothing to wait for.
         let exited = closed && self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
+        self.ending = closed && !exited;
         if !exited {
             return None;
         }
@@ -185,6 +198,16 @@ pub(crate) fn stopped_here() -> Measured {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test whose output closed before its process ended is ending, and
+    /// is not over yet.
+    #[test]
+    fn a_test_whose_output_closed_is_ending() {
+        let mut test = MachineTest::for_test(crate::gui::tests::fixtures::idle_child(), None);
+        assert!(!test.ending());
+        assert_eq!(test.pump(), None, "its process still runs");
+        assert!(test.ending());
+    }
 
     /// A model's line keeps the processor's time from any run, and the
     /// fastest engine whose picture matched: never one that differs, nor
