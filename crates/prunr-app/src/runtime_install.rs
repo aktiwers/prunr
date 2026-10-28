@@ -208,6 +208,12 @@ impl RuntimeId {
         format!("Not installed ({}).{why}", self.download_size(nvidia_here))
     }
 
+    /// Settings › Hardware's line for an add-on installed while an older
+    /// runtime from the Runtime Store is loaded.
+    pub fn waiting_line(self) -> &'static str {
+        "Installed. It starts once Prunr runs on its own runtime (Built in, under Runtime) after a restart."
+    }
+
     /// Settings › Hardware's line once it is installed.
     pub fn installed_line(self) -> &'static str {
         match self {

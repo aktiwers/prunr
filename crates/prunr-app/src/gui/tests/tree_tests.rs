@@ -177,6 +177,36 @@ fn the_computer_test_is_offered_with_an_accelerator() {
     }
 }
 
+/// CUDA installed while an older runtime from the Runtime Store is loaded
+/// says it waits for Prunr's own, not that it is in use.
+#[test]
+fn an_add_on_says_when_it_waits_for_prunrs_own_runtime() {
+    use crate::gui::hardware_cache::HardwareInstallCache;
+    use crate::gui::views::settings::{render_page_hardware, HardwareSectionContext};
+    use crate::runtime_install::RuntimeId;
+    if !RuntimeId::Cuda.is_addon() {
+        return;
+    }
+    for (waits, line) in [(true, RuntimeId::Cuda.waiting_line()), (false, RuntimeId::Cuda.installed_line())] {
+        let mut installs = HardwareInstallCache::default();
+        (installs.cuda, installs.nvidia_libraries, installs.addon_waits) = (true, true, waits);
+        let ctx = HardwareSectionContext {
+            offered: RuntimeId::OFFERED,
+            installs,
+            installing: None,
+            sd_margin_mb: 2048,
+            cpu_only: false,
+            test: Default::default(),
+            gpu_failure: None,
+            testable: false,
+            test_waits: false,
+        };
+        let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });
+        harness.run_steps(2);
+        assert!(texts(&harness).iter().any(|t| t == line), "waits {waits}: {line:?} missing");
+    }
+}
+
 /// The NVIDIA libraries are offered whenever the CUDA runtime lacks its
 /// own copy, whatever the system has: Download then, Cancel while they
 /// install, neither once they are there or without a CUDA runtime.
