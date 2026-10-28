@@ -1731,13 +1731,8 @@ impl Processor {
                     &progress,
                     Some(&run_options_for_thread),
                 );
-                // Smaller tiles on the card first (`upscale_rgba_with_engine`),
-                // then the processor, when it has the room.
-                let on_gpu = !prunr_core::engine::runs_on_host_cpu(engine_for_thread.active_provider());
-                prunr_core::engine::retry_on_cpu(on_gpu, &progress, || upscale(&engine_for_thread), |e| {
-                    if prunr_core::memory::fits_now(model_id, prunr_core::engine::CPU_NAME).is_err() {
-                        return Err(e);
-                    }
+                // Smaller tiles on the card first, then the processor.
+                prunr_core::engine::retry_on_cpu(model_id, engine_for_thread.active_provider(), &progress, || upscale(&engine_for_thread), || {
                     let on_cpu = ensure_warm_engine(&engine_slot, WarmEngineKey { model: cache_model_kind, cpu_only: true }, intra_threads)?;
                     upscale(&on_cpu)
                 })

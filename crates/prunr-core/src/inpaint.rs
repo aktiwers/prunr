@@ -349,13 +349,7 @@ pub fn process_lama(
     };
     // Its tiles are one fixed size, so a card short of memory for them
     // leaves the fill to the processor.
-    let on_gpu = !crate::engine::runs_on_host_cpu(&session.pick.provider);
-    crate::engine::retry_on_cpu(on_gpu, progress, || fill(&session, cpu_only), |e| {
-        if crate::memory::fits_now(id, crate::engine::CPU_NAME).is_err() {
-            return Err(e);
-        }
-        fill(&LamaSession::get(id, true)?, true)
-    })
+    crate::engine::retry_on_cpu(id, &session.pick.provider, progress, || fill(&session, cpu_only), || fill(&LamaSession::get(id, true)?, true))
 }
 
 /// Fill `mask` through `fill` at `scale`, region by region: each region

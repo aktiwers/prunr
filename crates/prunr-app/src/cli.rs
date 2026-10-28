@@ -684,9 +684,12 @@ pub fn run_remove(args: &Cli) -> i32 {
     code
 }
 
-/// One upscale as the app runs it: denoise, the model, Refine, faces.
+/// One upscale as the app runs it: denoise, the model (on the processor
+/// when the card runs out of memory), Refine, faces.
 struct UpscaleJob<'a> {
     engine: &'a prunr_core::OrtEngine,
+    /// Built the first time the card runs out of memory.
+    on_cpu: Option<prunr_core::OrtEngine>,
     model: prunr_models::ModelId,
     scale: prunr_core::OutputScale,
     refine: prunr_core::upscale::Refine,
@@ -710,8 +713,16 @@ impl UpscaleJob<'_> {
             return Err(format!("too large to upscale: needs about {} of free memory, {} is free", format_byte_size(needed), format_byte_size(free)));
         }
         let progress = prunr_core::Progress::none();
-        let raw = prunr_core::upscale::upscale_rgba_with_engine(&model_input, self.engine, self.model, self.scale.factor(), &progress, None)
-            .map_err(|e| format!("upscale failed: {e}"))?;
+        let (model, factor, engine, on_cpu) = (self.model, self.scale.factor(), self.engine, &mut self.on_cpu);
+        let upscale = |engine: &prunr_core::OrtEngine| prunr_core::upscale::upscale_rgba_with_engine(&model_input, engine, model, factor, &progress, None);
+        let raw = prunr_core::engine::retry_on_cpu(model, engine.active_provider(), &progress, || upscale(engine), || {
+            let cpu = match on_cpu {
+                Some(cpu) => cpu,
+                None => on_cpu.insert(prunr_core::OrtEngine::for_model(model, prunr_core::batch::ort_intra_threads(1), true)?),
+            };
+            upscale(cpu)
+        })
+        .map_err(|e| format!("upscale failed: {e}"))?;
         let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
         let mut out = std::sync::Arc::unwrap_or_clone(shown);
         if let Some((restorer, blend)) = self.faces.as_mut() {
@@ -781,7 +792,7 @@ fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
             return 1;
         }
     };
-    let mut job = UpscaleJob { engine: &engine, model, scale, refine, denoise: args.denoise, faces };
+    let mut job = UpscaleJob { engine: &engine, on_cpu: None, model, scale, refine, denoise: args.denoise, faces };
     run_each_input(args, &format!("_x{}.png", scale.factor()), "Upscaling", |img| job.run(img))
 }
 
