@@ -48,6 +48,7 @@ impl PrunrApp {
         self.pump_upscale_results(ctx);
         self.pump_colorize_results(ctx);
         self.pump_sam_results(ctx);
+        self.pump_stroke_retunes();
         self.pump_faces();
         self.pump_depth(ctx);
         self.pump_download_manager(ctx);
@@ -2703,7 +2704,7 @@ mod depth_tests {
             assert!(std::time::Instant::now() < deadline, "the click never ran");
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        assert!(matches!(result.result, Ok(DecodedSelection::ByDepth(_))), "selected by depth");
+        assert!(matches!(result.result, Ok(DecodedSelection::ByDepth { .. })), "selected by depth");
 
         app.batch.items[0].depth = None;
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);

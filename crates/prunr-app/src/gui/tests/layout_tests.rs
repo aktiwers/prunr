@@ -155,6 +155,7 @@ fn the_toolbar_layout_settles_at_every_width() {
 fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
     crate::gui::automation::record::turn_on();
     let mut harness = with_a_done_image(width, model);
+    with_a_latest_stroke(harness.state_mut(), tool);
     settle(&mut harness);
     let title = match tool {
         Tool::Paint => "Paint Brush",
@@ -176,6 +177,9 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
             return Some(format!("the strip keeps re-laying out: {settled:?} then {:?}", fit(&harness)));
         }
     }
+    if !tree(&harness).iter().any(|n| n.name.as_deref() == Some("Last stroke")) {
+        return Some("no Last stroke tag over a latest stroke".to_string());
+    }
     let all = controls(&harness, |_| true);
     let rect_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, r)| *r);
     let canvas_right = rect_of("Select all")?[0];
@@ -196,6 +200,30 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
         return Some(format!("clipped: {clip:?}"));
     }
     first_overlap(&strip).map(|v| v.detail)
+}
+
+/// Give image 1 a latest stroke of `tool`, so the strip shows its widest:
+/// with the tag saying its sliders adjust that stroke.
+fn with_a_latest_stroke(app: &mut PrunrApp, tool: Tool) {
+    use crate::gui::brush_state::{BrushState, StrokeDrawn};
+    let (mask, drawn) = match tool {
+        Tool::Paint => {
+            let mut brush = BrushState::default();
+            brush.begin_stroke(64, 64, prunr_core::brush::BrushShape::Circle, app.settings.brush.radius);
+            brush.extend_stroke_with_radius(32.0, 32.0, 4.0);
+            let (mask, path) = brush.commit_stroke(app.settings.brush.stamp()).expect("a stroke");
+            (mask, StrokeDrawn::painted(path, app.settings.brush.stamp()))
+        }
+        Tool::Magic => {
+            let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(2, 2, vec![0.0, 0.0, 1.0, 1.0]));
+            let drawn = StrokeDrawn::Depth { around: 0.0, depth, mode: prunr_core::selection::BrushMode::Add, range: app.settings.brush.magic_depth_range };
+            (drawn.mask(64, 64), drawn)
+        }
+    };
+    app.batch.commit_selection(1, mask, crate::gui::timeline::StepKind::Stroke);
+    if let Some(item) = app.batch.find_by_id_mut(1) {
+        item.keep_last_stroke(drawn);
+    }
 }
 
 /// The brush strip stays on the canvas at every width, and its layout

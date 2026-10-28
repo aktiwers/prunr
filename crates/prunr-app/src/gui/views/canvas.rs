@@ -153,6 +153,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             model: app.settings.model,
             encoder_pending: app.magic_brush_preparing(),
             reroll_refusal: app.reroll_refusal(),
+            adjusts_last: app.batch.selected_item().and_then(crate::gui::item::BatchItem::retunable_tool) == Some(tool),
         };
         let depth_before = app.settings.brush.magic_depth;
         let change = super::tool_strip::render(ui, canvas_rect, tool, &mut app.settings.brush, facts);
@@ -261,12 +262,14 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, stamp, item, img_rect)
     };
     draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
-    if let BrushAction::Committed(stroke_mask) = action {
+    if let BrushAction::Committed(stroke_mask, path) = action {
+        use crate::gui::selection_queue::{AfterLanding, SelectionOp};
         let item_id = app.batch.items[idx].id;
 
         tracing::info!(item_id, "brush stroke committed; merging into the selection");
-        let op = crate::gui::selection_queue::SelectionOp::Merge(std::sync::Arc::new(stroke_mask));
-        app.queue_selection_op(item_id, op, crate::gui::selection_queue::AfterLanding::Nothing);
+        // An eraser's region fills once drawn: its sliders set the next one.
+        let after = if selection_strokes { AfterLanding::Stroke(crate::gui::brush_state::StrokeDrawn::painted(path, stamp)) } else { AfterLanding::Nothing };
+        app.queue_selection_op(item_id, SelectionOp::Merge(std::sync::Arc::new(stroke_mask)), after);
     }
 }
 

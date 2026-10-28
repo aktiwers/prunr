@@ -44,14 +44,9 @@ pub(crate) enum SelectionOp {
 #[derive(Clone)]
 pub(crate) enum AfterLanding {
     Nothing,
-    /// A Magic Brush click: its decode is kept for a Confidence retune.
-    MagicDecode {
-        output: Arc<prunr_core::sam::SamDecoderOutput>,
-        mode: prunr_core::selection::BrushMode,
-        reading: prunr_core::MaskReading,
-    },
-    /// A Magic Brush "By depth" stroke: no decode to retune.
-    ByDepth,
+    /// A stroke of a brush whose sliders can draw it again while it is
+    /// the latest.
+    Stroke(super::brush_state::StrokeDrawn),
 }
 
 /// What the worker is sent: an edit, or word that an image's chain is
