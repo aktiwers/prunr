@@ -48,8 +48,11 @@ pub struct AddOn {
     pub url: &'static str,
     pub sha256: &'static str,
     pub size_bytes: u64,
-    /// The library inside the archive, at its root.
+    /// The library inside the archive: at its root, or in `folder`.
     pub library: &'static str,
+    /// The archive's folder the library loads its own libraries from,
+    /// kept whole beside it; `None` when the library comes alone.
+    pub folder: Option<&'static str>,
     pub packing: Packing,
 }
 
@@ -78,6 +81,7 @@ pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
     sha256: "ba698427418129d0215c1d51367a1a97995cc1eed56056479288e3245d19947c",
     size_bytes: 238_621_368,
     library: "onnxruntime_providers_cuda.dll",
+    folder: None,
     packing: Packing::Zip,
 };
 
@@ -90,7 +94,21 @@ pub const CUDA_ADDON_LINUX: AddOn = AddOn {
     sha256: "22cfe716fad99d338cad73e325611f8ba59eb9b0d1932c43701ac998a5037ff3",
     size_bytes: 436_640_825,
     library: "libonnxruntime_providers_cuda.so",
+    folder: None,
     packing: Packing::TarGz,
+};
+
+/// Intel's OpenVINO provider as a plugin, built against ONNX Runtime 1.30.
+/// It brings OpenVINO 2026.4.1 with oneTBB and hwloc in its folder, and
+/// finds them there; the Intel graphics also need Intel's own driver.
+pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
+    version: "1.8.1",
+    url: "https://files.pythonhosted.org/packages/88/01/4e72a8a65b584f01d6e59eb453bae397b82b2e51df1b5c94efa05e17800b/onnxruntime_ep_openvino-1.8.1-py3-none-manylinux_2_28_x86_64.whl",
+    sha256: "3832643158c8c187fcab6db661cde2a8c06a2b3559d95d0f2411ac0e51c5e924",
+    size_bytes: 52_587_628,
+    library: "libonnxruntime_providers_openvino_plugin.so",
+    folder: Some("onnxruntime_ep_openvino"),
+    packing: Packing::Zip,
 };
 
 /// Host runtime identifier — `linux-x64`, `macos-arm64`, etc. `unknown`
@@ -582,11 +600,30 @@ pub fn extract_wheel(archive: impl Read + Seek, target_dir: &Path) -> Result<Pat
 /// Extract `addon`'s library from its release `archive` into
 /// `target_dir`; the library's path.
 pub fn extract_addon(archive: impl Read + Seek, target_dir: &Path, addon: &AddOn) -> Result<PathBuf, String> {
-    let keep = |name: &str| (name == addon.library).then(|| name.to_string());
+    let keep = |name: &str| addon_file(addon, name);
     match addon.packing {
         Packing::Zip => extract_library(archive, target_dir, keep, addon.library),
         Packing::TarGz => extract_flat_tar_gz(archive, target_dir, keep).and_then(|_| library_in(target_dir, addon.library)),
     }
+}
+
+/// What `name` in `addon`'s archive is written as, when it is kept: the
+/// library, and with a `folder` each file in it, except a script and the
+/// library's copies under its versioned names. The same path-traversal
+/// guard as `repackage_target_filename`.
+fn addon_file(addon: &AddOn, name: &str) -> Option<String> {
+    let file = match addon.folder {
+        Some(folder) => name.strip_prefix(folder)?.strip_prefix('/')?,
+        None => name,
+    };
+    let library_copy = file.strip_prefix(addon.library).is_some_and(|rest| rest.starts_with('.'));
+    let in_folder = addon.folder.is_some()
+        && !matches!(file, "" | "." | "..")
+        && !file.contains('/')
+        && !file.contains('\\')
+        && !file.ends_with(".py")
+        && !library_copy;
+    (file == addon.library || in_folder).then(|| file.to_string())
 }
 
 /// `archive`'s files that `rename` keeps, flat in `target_dir`; the path
@@ -1028,6 +1065,33 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         let without = tar_gz_of(&[("version.json", "{}")]);
         assert!(extract_addon(std::io::Cursor::new(without), empty.path(), &CUDA_ADDON_LINUX).is_err_and(|e| e.contains("missing")));
+    }
+
+    /// The OpenVINO add-on's wheel gives up its folder flat, with one copy
+    /// of the plugin: not its scripts, its package record, another folder,
+    /// or a name that would leave the install.
+    #[test]
+    fn a_folder_addon_gives_up_its_folder_flat() {
+        let wheel = zip_of(&[
+            ("onnxruntime_ep_openvino/__init__.py", "py"),
+            ("onnxruntime_ep_openvino/libonnxruntime_providers_openvino_plugin.so", "plugin"),
+            ("onnxruntime_ep_openvino/libonnxruntime_providers_openvino_plugin.so.1", "copy"),
+            ("onnxruntime_ep_openvino/libonnxruntime_providers_openvino_plugin.so.1.8.1", "copy"),
+            ("onnxruntime_ep_openvino/libopenvino.so.2641", "openvino"),
+            ("onnxruntime_ep_openvino/libtbb.so.12", "tbb"),
+            ("onnxruntime_ep_openvino/cache.json", "{}"),
+            ("onnxruntime_ep_openvino/third-party-programs.txt", "notices"),
+            ("onnxruntime_ep_openvino/sub/libopenvino.so.2641", "no"),
+            ("onnxruntime_ep_openvino/..", "no"),
+            ("onnxruntime_ep_openvino-1.8.1.dist-info/RECORD", "no"),
+            ("libonnxruntime_providers_openvino_plugin.so", "no"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let library = extract_addon(std::io::Cursor::new(wheel), dir.path(), &OPENVINO_ADDON_LINUX).unwrap();
+        assert_eq!(std::fs::read_to_string(library).unwrap(), "plugin");
+        let mut kept: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        kept.sort();
+        assert_eq!(kept, ["cache.json", "libonnxruntime_providers_openvino_plugin.so", "libopenvino.so.2641", "libtbb.so.12", "third-party-programs.txt"]);
     }
 
     /// An NVIDIA wheel gives up its shared libraries by file name, and
