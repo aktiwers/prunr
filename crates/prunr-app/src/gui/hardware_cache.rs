@@ -77,6 +77,9 @@ pub(crate) struct TestRow {
     pub cells: Vec<Cell>,
     /// The provider it runs on while the accelerators are on.
     pub runs_on: &'static str,
+    /// Measured on every accelerator a test tries it on; a cancelled or
+    /// failed run leaves some untimed.
+    pub complete: bool,
 }
 
 impl TestRow {
@@ -184,7 +187,9 @@ impl TestResults {
         let rows = installed()
             .filter_map(|id| {
                 let measured = prunr_core::ep_compat::measurements(id);
-                test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))
+                let mut row = test_row(id, &engines, &measured, |p| prunr_core::engine::column_for(id, p), prunr_core::memory::provider_now(id, false))?;
+                row.complete = after_probe && crate::bench::here::columns_in_a_test(id).iter().all(|c| measured[c.index()].is_some());
+                Some(row)
             })
             .collect();
         let mut results = Self {
@@ -227,7 +232,7 @@ fn test_row(
         })
         .collect();
     let cpu = measured.iter().flatten().find_map(|m| m.cpu_ms).map(Time::of);
-    Some(TestRow { model, cpu, cells, runs_on })
+    Some(TestRow { model, cpu, cells, runs_on, complete: false })
 }
 
 /// Bytes the downloaded models take in `dir`, multi-part bundles included.

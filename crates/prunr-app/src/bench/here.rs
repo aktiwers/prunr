@@ -69,6 +69,11 @@ fn tried_here(id: ModelId) -> Vec<&'static str> {
     super::tried(&prunr_core::engine::gpu_ladder(id))
 }
 
+/// The columns a test measures `id` in: one per accelerator it tries.
+pub(crate) fn columns_in_a_test(id: ModelId) -> Vec<Column> {
+    super::tried(&prunr_core::engine::gpu_ladder_in_a_test(id)).into_iter().filter_map(|p| prunr_core::engine::column_in_a_test(id, p)).collect()
+}
+
 /// `column_of` as a test reads it, which tries again the places Prunr's
 /// own tests keep on the CPU: the same answer in the app and in the
 /// test's own process.

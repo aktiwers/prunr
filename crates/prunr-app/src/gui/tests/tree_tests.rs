@@ -123,7 +123,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
     use std::sync::Arc;
     let directml = Engine { name: "DirectML", installed: true };
     let time = |ms| Cell::Time(Time::of(ms));
-    let row = |model, cells: Vec<Cell>, runs_on| TestRow { model, cpu: Some(Time::of(670.0)), cells, runs_on };
+    let row = |model, cells: Vec<Cell>, runs_on| TestRow { model, cpu: Some(Time::of(670.0)), cells, runs_on, complete: true };
     let tested = Arc::new(TestResults {
         tested: Some(1),
         engines: vec![directml, Engine { name: "CUDA", installed: true }],
@@ -424,8 +424,8 @@ fn a_store_card_s_details_open_in_place() {
 }
 
 /// The Model Store offers Test on an installed model this computer never
-/// measured, and none on a measured one, nor on one a test would not time
-/// here; while a model's own test runs, its card has Cancel and no window
+/// measured or measured on some accelerators only, and none on a measured
+/// one, nor on one a test would not time here; while a model's own test runs, its card has Cancel and no window
 /// covers the store. Every control is named.
 #[test]
 fn a_store_card_tests_its_own_model() {
@@ -438,8 +438,11 @@ fn a_store_card_tests_its_own_model() {
         app.test_results = std::sync::Arc::new(TestResults {
             tested: None,
             engines: vec![Engine { name: "CUDA", installed: true }],
-            rows: vec![TestRow { model: ModelId::Silueta, cpu: Some(Time::of(620.0)), cells: vec![Cell::Time(Time::of(40.0))], runs_on: "CUDA" }],
-            testable: vec![ModelId::Silueta, ModelId::U2net],
+            rows: vec![
+                TestRow { model: ModelId::Silueta, cpu: Some(Time::of(620.0)), cells: vec![Cell::Time(Time::of(40.0))], runs_on: "CUDA", complete: true },
+                TestRow { model: ModelId::Migan, cpu: Some(Time::of(970.0)), cells: vec![Cell::Untested], runs_on: "CPU", complete: false },
+            ],
+            testable: vec![ModelId::Silueta, ModelId::U2net, ModelId::Migan],
             after_probe: true,
             ..Default::default()
         });
@@ -453,6 +456,8 @@ fn a_store_card_tests_its_own_model() {
     assert!(!present.iter().any(|n| n == "Test BiRefNet-lite"), "installed, but no accelerator here would try it");
     assert!(enabled(&h, "Test U2Net"), "nothing else uses the machine");
     assert!(texts(&h).iter().any(|t| t == "Fastest here: CUDA, 0.04 s"), "{:?}", texts(&h));
+    assert!(present.iter().any(|n| n == "Test Eraser (MI-GAN)"), "a test cancelled before every accelerator offers Test again");
+    assert!(texts(&h).iter().any(|t| t == "Partly tested on this computer."));
 
     let child = crate::gui::tests::fixtures::idle_child();
     h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child, Some(ModelId::U2net)));
