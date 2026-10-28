@@ -993,10 +993,9 @@ pub(crate) struct BatchItem {
     /// Cached SAM 2 image embedding, filled whenever Magic Brush is active
     /// and this item is selected. Invalidated on source change.
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
-    /// The last Magic Brush stroke decoded on this image, kept so the
-    /// Confidence knob re-thresholds it in place instead of needing
-    /// another click.
-    pub(crate) last_decode: Option<LastDecode>,
+    /// The latest stroke on this image, kept so its brush's sliders draw
+    /// it again in place instead of needing another stroke.
+    pub(crate) last_stroke: Option<LastStroke>,
     /// A background pre-encode was refused (RAM gate or encoder error);
     /// not retried every frame. Cleared with the embedding.
     pub(crate) magic_preencode_refused: bool,
@@ -1037,13 +1036,14 @@ impl DepthPhotoKey {
     }
 }
 
-/// The logits of a Magic Brush stroke and how they were applied.
-pub(crate) struct LastDecode {
-    pub(crate) output: Arc<prunr_core::sam::SamDecoderOutput>,
-    pub(crate) mode: prunr_core::selection::BrushMode,
-    /// The selection hash the stroke committed.
+/// The latest stroke on an image and the selection it committed.
+pub(crate) struct LastStroke {
+    pub(crate) drawn: crate::gui::brush_state::StrokeDrawn,
+    /// The selection the stroke committed: another author changing it
+    /// ends the retune.
     pub(crate) committed_hash: u64,
-    pub(crate) reading: prunr_core::MaskReading,
+    /// The undo step the stroke made, which a retune amends.
+    pub(crate) step: u64,
 }
 
 /// A selection overlay texture and what it was built from. `shown` is
@@ -1106,7 +1106,7 @@ impl BatchItem {
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
-        self.last_decode = None;
+        self.last_stroke = None;
         super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take()));
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
@@ -1234,14 +1234,34 @@ impl BatchItem {
         }
     }
 
-    /// The last decode while its stroke still owns the selection; any
-    /// other author changing the selection ends the retune.
-    pub(crate) fn retunable_decode(&mut self) -> Option<&mut LastDecode> {
-        let hash = self.selection_hash;
-        if self.last_decode.as_ref().is_some_and(|ld| hash != Some(ld.committed_hash)) {
-            self.last_decode = None;
+    /// The latest stroke while it may be drawn again: it still owns the
+    /// selection, and its step is the one shown and the newest, so the
+    /// retune amends that step and merges onto the one before it. Any
+    /// other change (another stroke or author, undo, a step of any kind)
+    /// ends it.
+    pub(crate) fn retunable_stroke(&mut self) -> Option<&mut LastStroke> {
+        if !self.last_stroke_holds() {
+            self.last_stroke = None;
         }
-        self.last_decode.as_mut()
+        self.last_stroke.as_mut()
+    }
+
+    /// The brush that drew the latest stroke, while its sliders redraw it.
+    pub(crate) fn retunable_tool(&self) -> Option<crate::gui::brush_state::Tool> {
+        self.last_stroke.as_ref().filter(|_| self.last_stroke_holds()).map(|s| s.drawn.tool())
+    }
+
+    fn last_stroke_holds(&self) -> bool {
+        self.last_stroke.as_ref().is_some_and(|s| {
+            self.selection_hash == Some(s.committed_hash) && s.step == self.timeline.current().id && self.timeline.next().is_none()
+        })
+    }
+
+    /// Keep the stroke that just landed as the latest: drawn again while
+    /// it owns the selection and its step.
+    pub(crate) fn keep_last_stroke(&mut self, drawn: crate::gui::brush_state::StrokeDrawn) {
+        let step = self.timeline.current().id;
+        self.last_stroke = self.selection_hash.map(|committed_hash| LastStroke { drawn, committed_hash, step });
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
@@ -1250,7 +1270,7 @@ impl BatchItem {
         self.selection_hash = None;
         self.selection_texture = None;
         self.selection_tex_pending = None;
-        self.last_decode = None;
+        self.last_stroke = None;
     }
 
     /// Where the image is, derived: a cut under way, a failure with
@@ -1383,8 +1403,8 @@ impl BatchItem {
         true
     }
 
-    /// The selection the shown step replaced, the base a Confidence
-    /// retune of the last stroke merges onto.
+    /// The selection the shown step replaced, the base a retune of the
+    /// latest stroke merges onto.
     pub(crate) fn pre_stroke_selection(&self) -> Option<Region> {
         self.timeline.previous()?.selection.clone().map(Region::Stored)
     }
@@ -2872,7 +2892,7 @@ impl BatchItem {
             selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,
-            last_decode: None,
+            last_stroke: None,
             magic_preencode_refused: false,
             depth: None,
             depth_run: DepthRun::default(),

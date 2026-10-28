@@ -18,8 +18,8 @@ const MIN_SCREEN_RADIUS_PX: f32 = 2.0;
 /// dispatch / cache-invalidation path.
 pub(crate) enum BrushAction {
     /// User finished a stroke: the signed, soft stroke at source-image
-    /// resolution, ready to merge into the item's selection.
-    Committed(prunr_core::selection::MaskArtifact),
+    /// resolution, ready to merge into the item's selection, and its path.
+    Committed(prunr_core::selection::MaskArtifact, crate::gui::brush_state::PaintPath),
     /// User clicked or moved without committing a stroke yet.
     None,
 }
@@ -79,9 +79,9 @@ pub(crate) fn handle_input(
     if primary_pressed {
         if let Some(p) = pointer_on_img {
             tracing::debug!(model_w, model_h, "brush press — begin stroke");
-            brush_state.begin_stroke(model_w, model_h, settings.shape);
+            brush_state.begin_stroke(model_w, model_h, settings.shape, screen_radius);
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius), stamp);
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
             brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
@@ -89,15 +89,15 @@ pub(crate) fn handle_input(
     if primary_down && brush_state.has_active_stroke() {
         if let Some(p) = pointer_on_img {
             let m = screen_to_model(p, img_rect, model_w, model_h);
-            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius), stamp);
+            brush_state.extend_stroke_with_radius(m.x, m.y, model_radius_for(screen_radius));
             brush_state.record_trail_stamp(p.x, p.y, screen_radius);
         }
     }
 
     if primary_released && brush_state.has_active_stroke() {
-        if let Some(correction) = brush_state.commit_stroke(stamp) {
+        if let Some((correction, path)) = brush_state.commit_stroke(stamp) {
             tracing::debug!("brush release — commit");
-            return BrushAction::Committed(correction);
+            return BrushAction::Committed(correction, path);
         }
     }
 

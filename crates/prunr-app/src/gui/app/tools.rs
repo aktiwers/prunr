@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::timeline::StepKind;
 use crate::gui::views::selection_action_bar::SelectionAction;
-use crate::gui::brush_state::Tool;
+use crate::gui::brush_state::{StrokeDrawn, Tool};
 use crate::gui::item::BatchItem;
 use crate::gui::selection_queue::{AfterLanding, SelectionOp};
 use super::PrunrApp;
@@ -155,13 +155,9 @@ impl PrunrApp {
             if let SelectionOp::Merge(stroke) = &done.op {
                 item.note_painted_during_erase(stroke);
             }
-            // A click that added nothing leaves the last retunable one as it was.
-            match done.after {
-                AfterLanding::MagicDecode { output, mode, reading } if changed => {
-                    item.last_decode = item.selection_hash.map(|committed_hash| crate::gui::item::LastDecode { output, mode, committed_hash, reading });
-                }
-                AfterLanding::ByDepth if changed => item.last_decode = None,
-                _ => {}
+            // A stroke that changed nothing leaves the latest one as it was.
+            if let (true, AfterLanding::Stroke(drawn)) = (changed, done.after) {
+                item.keep_last_stroke(drawn);
             }
             if changed {
                 self.apply_selection_to_active_model(item_id);
@@ -547,19 +543,6 @@ impl PrunrApp {
             }
         }
 
-        for retune in self.processor.pump_sam_retune_results() {
-            self.magic_brush_state.rethreshold_in_flight = false;
-            match retune.result {
-                // A selection change landing after a run started on the
-                // image would make that run's result stale.
-                Ok(_) if self.batch.find_by_id(retune.item_id).is_some_and(|i| !i.is_idle()) => {
-                    tracing::info!(item_id = retune.item_id, "Magic Brush retune dropped: a run started on the image");
-                }
-                Ok(crate::gui::processor::Retuned { merged, hash, for_hash }) => self.apply_rethreshold(retune.item_id, merged, hash, retune.reading, for_hash),
-                Err(err) => tracing::warn!(item_id = retune.item_id, %err, "Magic Brush retune failed"),
-            }
-        }
-        self.maybe_rethreshold_last_stroke();
         let decoder_results = self.processor.pump_sam_decoder_results();
         for result in decoder_results {
             // A selection is a step: one landing after a run started on the
@@ -571,11 +554,11 @@ impl PrunrApp {
             match result.result {
                 Ok(DecodedSelection::Fresh { mask, output }) => {
                     tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask queued");
-                    let after = AfterLanding::MagicDecode { output, mode: result.mode, reading: result.reading };
-                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), after);
+                    let drawn = StrokeDrawn::Magic { output, mode: result.mode, reading: result.reading };
+                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::Stroke(drawn));
                 }
-                Ok(DecodedSelection::ByDepth(mask)) => {
-                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::ByDepth);
+                Ok(DecodedSelection::ByDepth { mask, drawn }) => {
+                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::Stroke(drawn));
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
@@ -585,48 +568,54 @@ impl PrunrApp {
         }
     }
 
-    /// The selected image's last stroke still owns the selection and the
-    /// Confidence knob moved: re-threshold its logits at the new value.
-    pub(crate) fn maybe_rethreshold_last_stroke(&mut self) {
-        if self.magic_brush_state.rethreshold_in_flight {
+    /// The latest stroke redrawn at its brush's values lands; one for a
+    /// stroke that is no longer the latest, or on an image a run started
+    /// on, is dropped. Then the next slider change is drawn.
+    pub(crate) fn pump_stroke_retunes(&mut self) {
+        for retune in self.processor.pump_stroke_retunes() {
+            match retune.result {
+                // A selection change landing after a run started on the
+                // image would make that run's result stale.
+                Ok(_) if self.batch.find_by_id(retune.item_id).is_some_and(|i| !i.is_idle()) => {
+                    tracing::info!(item_id = retune.item_id, "stroke retune dropped: a run started on the image");
+                }
+                Ok(retuned) => self.apply_retune(retune.item_id, retuned, retune.drawn),
+                Err(err) => tracing::warn!(item_id = retune.item_id, %err, "stroke retune failed"),
+            }
+        }
+        self.maybe_retune_last_stroke();
+    }
+
+    /// The selected image's latest stroke and a slider of its brush moved:
+    /// draw it again at the new values.
+    pub(crate) fn maybe_retune_last_stroke(&mut self) {
+        if self.processor.retune_in_flight() {
             return;
         }
-        let want = self.settings.brush.magic_reading();
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
         // A retune is a selection change; it waits for a run on the image.
         if !item.is_idle() {
             return;
         }
-        let Some((output, mode, reading, for_hash)) = item.retunable_decode().map(|ld| (Arc::clone(&ld.output), ld.mode, ld.reading, ld.committed_hash)) else { return };
-        if reading == want {
-            return;
-        }
+        let Some((drawn, for_hash)) = item.retunable_stroke().and_then(|s| Some((s.drawn.at(&self.settings.brush)?, s.committed_hash))) else { return };
         // Asked for only once a retune runs: a handle the job unpacks, not
         // a decode on every frame.
         let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
-        self.processor.dispatch_sam_rethreshold(crate::gui::processor::SamRethresholdRequest {
-            item_id, output, mode,
-            source_dims, reading: want, base, for_hash,
+        self.processor.dispatch_stroke_retune(crate::gui::processor::StrokeRetuneRequest {
+            item_id, drawn, source_dims, base, for_hash,
         });
-        self.magic_brush_state.rethreshold_in_flight = true;
     }
 
-    /// Swap the last stroke's selection for its re-thresholded version,
-    /// replaced in place so the stroke's undo entry stays the one entry.
-    /// Only while the stroke it retunes is still the last one: a retune
-    /// for an older click lands on nothing.
-    pub(crate) fn apply_rethreshold(&mut self, item_id: u64, merged: Arc<prunr_core::selection::MaskArtifact>, hash: u64, reading: prunr_core::MaskReading, for_hash: u64) {
+    /// Swap the latest stroke's selection for its redrawn one, replaced in
+    /// place so the stroke's undo entry stays the one entry. Only while it
+    /// is still the latest: a retune of an older one lands on nothing.
+    fn apply_retune(&mut self, item_id: u64, retuned: crate::gui::processor::Retuned, drawn: StrokeDrawn) {
+        let crate::gui::processor::Retuned { merged, hash, for_hash } = retuned;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        if item.retunable_decode().is_none_or(|ld| ld.committed_hash != for_hash) {
-            return;
-        }
-        let changed = item.replace_selection_in_place(merged, hash);
-        if let Some(ld) = item.last_decode.as_mut() {
-            ld.reading = reading;
-            ld.committed_hash = hash;
-        }
-        if changed {
+        let Some(last) = item.retunable_stroke().filter(|s| s.committed_hash == for_hash) else { return };
+        (last.drawn, last.committed_hash) = (drawn, hash);
+        if item.replace_selection_in_place(merged, hash) {
             self.apply_selection_to_active_model(item_id);
         }
     }

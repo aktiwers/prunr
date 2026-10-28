@@ -41,6 +41,8 @@ pub(crate) struct StripFacts {
     pub encoder_pending: bool,
     /// Why "Try another" can't run now (`None`: it can).
     pub reroll_refusal: Option<&'static str>,
+    /// The sliders redraw the image's latest stroke, which this brush drew.
+    pub adjusts_last: bool,
 }
 
 /// What the strip asks of the app this frame.
@@ -83,6 +85,10 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     };
                     if !two_rows {
                         change.committed |= second_knobs(ui, tool, brush, facts.model, fill_knobs);
+                    }
+                    if facts.adjusts_last {
+                        let tag = ui.label(RichText::new("Last stroke").size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+                        chip::tooltip(tag, "Last stroke", "The sliders adjust your last stroke, and the strokes after it.", None);
                     }
                     ui.separator();
                     dots = Some(chip::tooltip(

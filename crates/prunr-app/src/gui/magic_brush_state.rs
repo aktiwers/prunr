@@ -39,9 +39,6 @@ pub(crate) struct MagicBrushState {
     pub(crate) pending_depth_click: Option<PendingDepthClick>,
     /// In the order they were made, all on the shown image.
     pub(crate) pending_sam_picks: Vec<PendingSamPick>,
-    /// A re-threshold is on the pool; the next Confidence value waits for
-    /// its result so a drag never queues more than one.
-    pub(crate) rethreshold_in_flight: bool,
     /// An encode is in flight for the current item; cleared when its
     /// embedding lands.
     encoder_pending: bool,

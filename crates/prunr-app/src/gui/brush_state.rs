@@ -385,29 +385,98 @@ impl Trail {
 
 }
 
-/// Mid-drag stroke buffer at the active item's model resolution.
+/// Mid-drag stroke at the active item's model resolution: its path,
+/// drawn when it is committed.
 struct ActiveStroke {
-    grid: MaskArtifact,
-    /// Set the first time the stamp runs against `grid`. Lets
-    /// `commit_stroke` skip an O(W·H) any-nonzero scan on click-without-drag.
-    dirty: bool,
+    width: u32,
+    height: u32,
     trail: Trail,
-    /// Stroke-time snapshot of the brush shape — pinned at begin_stroke
-    /// so a mid-stroke shape switch doesn't desync the grid.
-    shape: BrushShape,
-    /// Line-tool state: present iff `shape == Line`. Tracks the press +
-    /// most recent positions so `commit_stroke` can paint one segment.
-    line: Option<LineState>,
-    /// The last Circle / Square sample: the next one paints the segment
-    /// from here, since a fast drag samples the pointer far apart.
-    last: Option<(f32, f32)>,
+    path: PaintPath,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct LineState {
-    first: (f32, f32),
-    last: (f32, f32),
-    radius: f32,
+/// A Paint Brush stroke as it was drawn: its shape (pinned when it
+/// began), each pointer sample's position and radius in source pixels,
+/// and the Size it was drawn at. The stroke and a redraw at another Size
+/// are both drawn by `render`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PaintPath {
+    shape: BrushShape,
+    /// A Line keeps its press and its latest sample.
+    samples: Vec<(f32, f32, f32)>,
+    size: f32,
+}
+
+impl PaintPath {
+    /// The stroke on a `width` × `height` grid at `size`, its radii scaled
+    /// from the Size it was drawn at, with `stamp`. Each sample paints the
+    /// segment from the one before, since a fast drag samples the pointer
+    /// far apart.
+    pub(crate) fn render(&self, width: u32, height: u32, size: f32, stamp: Stamp) -> MaskArtifact {
+        let mut grid = MaskArtifact::new_empty(width, height);
+        let scale = size / self.size.max(f32::EPSILON);
+        let mut last = None;
+        for &(x, y, radius) in &self.samples {
+            let r = radius * scale;
+            match (self.shape, last.replace((x, y))) {
+                (BrushShape::Square, None) => paint_square(&mut grid, x, y, r, stamp),
+                (BrushShape::Square, Some((lx, ly))) => paint_square_line(&mut grid, lx, ly, x, y, r, stamp),
+                (_, None) => paint_circle(&mut grid, x, y, r, stamp),
+                (_, Some((lx, ly))) => paint_line(&mut grid, lx, ly, x, y, r, stamp),
+            }
+        }
+        grid
+    }
+}
+
+/// The latest stroke on an image as it was drawn, kept so its brush's
+/// sliders draw it again while it is the latest: a Magic Brush pick, a
+/// depth pick or a Paint Brush stroke, each with the values it has now.
+#[derive(Clone)]
+pub(crate) enum StrokeDrawn {
+    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading },
+    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32 },
+    Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp },
+}
+
+impl StrokeDrawn {
+    /// A Paint Brush stroke just drawn with `stamp`.
+    pub(crate) fn painted(path: PaintPath, stamp: Stamp) -> Self {
+        let size = path.size;
+        Self::Paint { path: std::sync::Arc::new(path), size, stamp }
+    }
+
+    /// The stroke at `brush`'s values; `None` when they are the ones it
+    /// has. Each keeps what made it (its mode, its pick, its path).
+    pub(crate) fn at(&self, brush: &BrushSettings) -> Option<Self> {
+        use std::sync::Arc;
+        match self {
+            Self::Magic { output, mode, reading } => (brush.magic_reading() != *reading)
+                .then(|| Self::Magic { output: Arc::clone(output), mode: *mode, reading: brush.magic_reading() }),
+            Self::Depth { depth, around, mode, range } => (brush.magic_depth_range != *range)
+                .then(|| Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: brush.magic_depth_range }),
+            Self::Paint { path, size, stamp } => {
+                let now = Stamp { hardness: brush.hardness, strength: brush.strength, ..*stamp };
+                (brush.radius != *size || now != *stamp).then(|| Self::Paint { path: Arc::clone(path), size: brush.radius, stamp: now })
+            }
+        }
+    }
+
+    /// The stroke's own mask on a `width` × `height` image.
+    pub(crate) fn mask(&self, width: u32, height: u32) -> MaskArtifact {
+        match self {
+            Self::Magic { output, mode, reading } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
+            Self::Depth { depth, around, mode, range } => prunr_core::depth::select_by_depth(depth, width, height, *around, *range, *mode),
+            Self::Paint { path, size, stamp } => path.render(width, height, *size, *stamp),
+        }
+    }
+
+    /// The brush that drew it.
+    pub(crate) fn tool(&self) -> Tool {
+        match self {
+            Self::Magic { .. } | Self::Depth { .. } => Tool::Magic,
+            Self::Paint { .. } => Tool::Paint,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -443,19 +512,18 @@ impl BrushState {
         self.active.is_some()
     }
 
-    pub fn begin_stroke(&mut self, width: u32, height: u32, shape: BrushShape) {
+    /// A stroke of `shape` at Size `size` begins on a `width` × `height` image.
+    pub fn begin_stroke(&mut self, width: u32, height: u32, shape: BrushShape, size: f32) {
         self.active = Some(ActiveStroke {
-            grid: MaskArtifact::new_empty(width, height),
-            dirty: false,
+            width,
+            height,
             trail: Trail::default(),
-            shape,
-            line: None,
-            last: None,
+            path: PaintPath { shape, samples: Vec::new(), size },
         });
     }
 
     pub fn active_shape(&self) -> Option<BrushShape> {
-        self.active.as_ref().map(|a| a.shape)
+        self.active.as_ref().map(|a| a.path.shape)
     }
 
     /// Record a screen-space stamp for the stroke trail.
@@ -475,52 +543,25 @@ impl BrushState {
 
     /// Extend the active stroke at model-space coordinates. Caller
     /// converts screen→model so screen-radius confusion can't reach
-    /// the grid. Line strokes wait for `commit_stroke` to paint.
-    pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32, stamp: Stamp) {
+    /// the grid. A Line keeps only its press and the latest sample.
+    pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
         let Some(active) = self.active.as_mut() else { return };
-        match active.shape {
-            BrushShape::Circle => {
-                match active.last.replace((x, y)) {
-                    Some((lx, ly)) => paint_line(&mut active.grid, lx, ly, x, y, radius, stamp),
-                    None => paint_circle(&mut active.grid, x, y, radius, stamp),
-                }
-                active.dirty = true;
-            }
-            BrushShape::Square => {
-                match active.last.replace((x, y)) {
-                    Some((lx, ly)) => paint_square_line(&mut active.grid, lx, ly, x, y, radius, stamp),
-                    None => paint_square(&mut active.grid, x, y, radius, stamp),
-                }
-                active.dirty = true;
-            }
-            BrushShape::Line => {
-                let entry = active.line.get_or_insert(LineState {
-                    first: (x, y),
-                    last: (x, y),
-                    radius,
-                });
-                entry.last = (x, y);
-                entry.radius = radius;
-            }
+        let samples = &mut active.path.samples;
+        if active.path.shape == BrushShape::Line && samples.len() == 2 {
+            samples[1] = (x, y, radius);
+        } else if samples.last() != Some(&(x, y, radius)) {
+            samples.push((x, y, radius));
         }
     }
 
-    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<MaskArtifact> {
-        let mut active = self.active.take()?;
-        if let Some(line) = active.line {
-            paint_line(
-                &mut active.grid,
-                line.first.0, line.first.1,
-                line.last.0, line.last.1,
-                line.radius,
-                stamp,
-            );
-            active.dirty = true;
-        }
-        if !active.dirty {
+    /// The finished stroke drawn with `stamp`, and its path; `None` when
+    /// it was never extended.
+    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<(MaskArtifact, PaintPath)> {
+        let active = self.active.take()?;
+        if active.path.samples.is_empty() {
             return None;
         }
-        Some(active.grid)
+        Some((active.path.render(active.width, active.height, active.path.size, stamp), active.path))
     }
 
 }
@@ -784,8 +825,8 @@ mod tests {
     fn disabling_drops_the_active_stroke() {
         let mut s = BrushState::default();
         s.enable();
-        s.begin_stroke(64, 64, BrushShape::Circle);
-        s.extend_stroke_with_radius(32.0, 32.0, 8.0, default_stamp());
+        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
         assert!(s.has_active_stroke());
         s.disable();
         assert!(!s.has_active_stroke());
@@ -797,10 +838,10 @@ mod tests {
     fn a_fast_stroke_is_continuous_between_samples() {
         for shape in [BrushShape::Circle, BrushShape::Square] {
             let mut s = BrushState::default();
-            s.begin_stroke(64, 64, shape);
-            s.extend_stroke_with_radius(4.0, 30.0, 2.0, default_stamp());
-            s.extend_stroke_with_radius(60.0, 30.0, 2.0, default_stamp());
-            let c = s.commit_stroke(default_stamp()).expect("populated stroke");
+            s.begin_stroke(64, 64, shape, 2.0);
+            s.extend_stroke_with_radius(4.0, 30.0, 2.0);
+            s.extend_stroke_with_radius(60.0, 30.0, 2.0);
+            let (c, _) = s.commit_stroke(default_stamp()).expect("populated stroke");
             let gaps = (4..=60).filter(|&x| c.cells()[30 * 64 + x] == 0).count();
             assert_eq!(gaps, 0, "{shape:?} left {gaps} unpainted cells between the samples");
         }
@@ -809,7 +850,7 @@ mod tests {
     #[test]
     fn extend_without_begin_is_no_op() {
         let mut s = BrushState::default();
-        s.extend_stroke_with_radius(10.0, 10.0, 8.0, default_stamp());
+        s.extend_stroke_with_radius(10.0, 10.0, 8.0);
         assert!(!s.has_active_stroke());
         assert!(s.commit_stroke(default_stamp()).is_none());
     }
@@ -817,7 +858,7 @@ mod tests {
     #[test]
     fn empty_stroke_commit_returns_none() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64, BrushShape::Circle);
+        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
         // No extend_stroke calls — buffer stays empty.
         assert!(s.commit_stroke(default_stamp()).is_none());
         assert!(!s.has_active_stroke(), "commit should clear active stroke");
@@ -826,9 +867,9 @@ mod tests {
     #[test]
     fn populated_stroke_commit_returns_correction() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64, BrushShape::Circle);
-        s.extend_stroke_with_radius(32.0, 32.0, 8.0, default_stamp());
-        let c = s.commit_stroke(default_stamp()).expect("populated stroke");
+        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
+        s.extend_stroke_with_radius(32.0, 32.0, 8.0);
+        let (c, _) = s.commit_stroke(default_stamp()).expect("populated stroke");
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
         assert!(c.has_selected_region());

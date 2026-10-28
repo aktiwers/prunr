@@ -16,7 +16,7 @@ pub enum BrushShape {
 }
 
 /// Stamp parameters shared by every paint primitive.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stamp {
     /// 0.0 = full smoothstep falloff, 1.0 = hard edges.
     pub hardness: f32,
