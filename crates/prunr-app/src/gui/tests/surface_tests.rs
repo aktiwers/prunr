@@ -169,7 +169,10 @@ fn the_tool_strip_follows_the_paint_brush() {
 
 /// Over the image a brush draws its own cursor, so the system's (an
 /// arrow, or a cross on GNOME) is hidden there and only there: over the
-/// strip floating on the image, and off the image, it shows.
+/// strip floating on the image, and off the image, it shows. Zoomed in,
+/// the image reaches under the toolbar, where the canvas shows none of
+/// it: the toolbar keeps the system's cursor there too, and a press on
+/// it starts no stroke.
 #[test]
 fn a_brush_over_the_image_hides_the_system_cursor() {
     for magic in [false, true] {
@@ -196,6 +199,20 @@ fn a_brush_over_the_image_hides_the_system_cursor() {
         };
         assert_eq!(cursor(&mut h, egui::pos2(600.0, 480.0)), egui::CursorIcon::None, "magic {magic}: over the image");
         assert_ne!(cursor(&mut h, egui::pos2(40.0, 25.0)), egui::CursorIcon::None, "magic {magic}: over the toolbar");
+        h.state_mut().zoom_state.zoom = 8.0;
+        h.run_steps(2);
+        assert_eq!(cursor(&mut h, egui::pos2(600.0, 480.0)), egui::CursorIcon::None, "magic {magic}: zoomed, over the image");
+        assert_ne!(cursor(&mut h, egui::pos2(40.0, 25.0)), egui::CursorIcon::None, "magic {magic}: zoomed, the image under the toolbar");
+        let second_row = {
+            use egui_kittest::kittest::Queryable;
+            let chip = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Model") && n.role() == egui::accesskit::Role::Button).rect();
+            egui::pos2(chip.max.x + 40.0, chip.center().y)
+        };
+        assert_ne!(cursor(&mut h, second_row), egui::CursorIcon::None, "magic {magic}: zoomed, the image under the second row");
+        press(&mut h, second_row, true);
+        let stroking = h.state().brush_state.has_active_stroke() || !h.state().magic_brush_state.active_stroke.is_empty();
+        press(&mut h, second_row, false);
+        assert!(!stroking, "magic {magic}: a press on the toolbar starts no stroke on the image under it");
     }
 }
 
