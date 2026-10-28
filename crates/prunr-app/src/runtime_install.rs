@@ -389,7 +389,7 @@ impl RuntimeChoice {
     pub fn description(self) -> &'static str {
         match self {
             Self::BuiltIn if prunr_core::ort_runtime::BUILT_IN_HAS_GPU => "DirectML: any DirectX 12 graphics card, else the processor",
-            Self::BuiltIn => "Prunr's own: CUDA on the NVIDIA card, else the processor",
+            Self::BuiltIn => "Prunr's own: the processor, and CUDA when installed",
             Self::Store(RuntimeId::OpenVino) => "Tuned for Intel processors and graphics",
             Self::Store(RuntimeId::Cuda) => "NVIDIA graphics cards",
             Self::Store(RuntimeId::MiGraphX) => "AMD graphics cards",
@@ -446,6 +446,12 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     let dir = runtime.checked_install_dir()?;
     if !dir.exists() {
         return Ok(Uninstalled::Now); // already absent — nothing to do
+    }
+    // Installing the add-on made Prunr's own runtime the choice; where
+    // that runtime has no accelerator of its own, one chosen from the
+    // store before comes back.
+    if runtime.is_addon() && !prunr_core::ort_runtime::BUILT_IN_HAS_GPU {
+        prunr_core::ort_runtime::forget_preferred_runtime(prunr_core::ort_runtime::PREFER_BUILT_IN);
     }
     if runtime.is_addon() && prunr_core::ort_runtime::cuda_addon_registered() {
         let mark = runtime.removal_mark().ok_or("could not resolve user data dir")?;
