@@ -80,3 +80,12 @@ pub(crate) fn idle_child() -> std::process::Child {
     let child = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
     child.expect("a process to stand in")
 }
+
+/// A process that ends at once.
+pub(crate) fn quick_child() -> std::process::Child {
+    #[cfg(unix)]
+    let child = std::process::Command::new("true").spawn();
+    #[cfg(windows)]
+    let child = std::process::Command::new("cmd").args(["/C", "exit", "0"]).spawn();
+    child.expect("a process that ends at once")
+}
