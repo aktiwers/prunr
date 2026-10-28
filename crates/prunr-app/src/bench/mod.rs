@@ -842,9 +842,27 @@ impl Run for LamaRun<'_> {
 
     fn run(&mut self) -> Result<Output, String> {
         let Inputs { photo, mask, .. } = self.inputs;
-        prunr_core::inpaint::process_lama(photo, mask, self.id, self.cpu_only, prunr_core::inpaint::FillScale::Auto, &prunr_core::Progress::none())
-            .map(|filled| Output::Picture(filled.rgba.into()))
-            .map_err(|e| e.to_string())
+        let went = std::sync::Arc::new(WentToProcessor::default());
+        let filled = prunr_core::inpaint::process_lama(photo, mask, self.id, self.cpu_only, prunr_core::inpaint::FillScale::Auto, &prunr_core::Progress::new(went.clone()))
+            .map_err(|e| e.to_string())?;
+        if went.0.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("out of memory on the graphics card; the fill finished on the processor".to_string());
+        }
+        Ok(Output::Picture(filled.rgba.into()))
+    }
+}
+
+/// Notes a run that went on on the processor when the card ran out of
+/// memory: its time is the processor's, not the accelerator's it is
+/// measured for.
+#[derive(Default)]
+struct WentToProcessor(std::sync::atomic::AtomicBool);
+
+impl prunr_core::progress::ProgressSink for WentToProcessor {
+    fn report(&self, update: prunr_core::ProgressUpdate) {
+        if update == prunr_core::ProgressUpdate::Step(prunr_core::Step::OnTheProcessor) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -1027,6 +1045,20 @@ mod tests {
         );
         let ladder = [("OpenVINO", Some(Skip::KeptOff(WHY))), ("DirectML", None), ("CUDA", None)];
         assert_eq!(first_tried(&ladder), Some("DirectML"), "the GPU side's memory is checked where it lands first");
+    }
+
+    /// A fill the card ran out of memory for and the processor finished
+    /// is no time on the card: the run says so, as a passing failure the
+    /// store keeps nothing for.
+    #[test]
+    fn a_fill_finished_on_the_processor_is_no_time_on_the_card() {
+        use prunr_core::progress::ProgressSink;
+        let went = WentToProcessor::default();
+        went.report(prunr_core::ProgressUpdate::Step(prunr_core::Step::Erasing));
+        assert!(!went.0.load(std::sync::atomic::Ordering::Relaxed));
+        went.report(prunr_core::ProgressUpdate::Step(prunr_core::Step::OnTheProcessor));
+        assert!(went.0.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(prunr_core::ep_compat::is_transient("out of memory on the graphics card; the fill finished on the processor"));
     }
 
     /// Every stage counts the sides its model's passes give, the GPU ones
