@@ -567,22 +567,24 @@ impl PrunrApp {
         }
         let now = self.settings.stroke_values();
         let seen = self.brush_state.seen.replace((item_id, now));
-        let reach = self.brush_state.reach;
+        let (reach, tool) = (self.brush_state.reach, self.active_tool());
         let item = &mut self.batch.items[idx];
-        // An adjustment lasts while its image stays selected and its reach on.
-        if seen.is_none_or(|(id, _)| id != item_id) || item.adjustment().is_some_and(|a| a.reach != reach) {
+        // An adjustment lasts while its image stays selected, and its reach
+        // and its brush on: a strip's sliders draw its own brush's strokes.
+        if seen.is_none_or(|(id, _)| id != item_id) || item.adjustment().is_some_and(|a| a.reach != reach || Some(a.tool) != tool) {
             item.adjusting = None;
         }
+        let Some(tool) = tool else { return };
         if item.adjusting.is_none() {
             let strokes = match reach {
                 StrokeReach::Next => None,
-                StrokeReach::Last => item.timeline.latest_stroke(),
-                StrokeReach::All => item.timeline.strokes_since_picture(),
+                StrokeReach::Last => item.timeline.latest_stroke(tool),
+                StrokeReach::All => item.timeline.strokes_since_picture().filter(|h| h.latest_of(tool).is_some()),
             };
             let moved_from = seen.filter(|&(id, from)| id == item_id && from != now).map(|(_, from)| from);
             let (Some(from), Some(strokes)) = (moved_from, strokes) else { return };
-            let (shown, step) = (Arc::clone(&strokes.ops), item.timeline.current().id);
-            item.adjusting = Some(StrokeAdjustment { reach, from, strokes, shown, step, landed: reach == StrokeReach::Last });
+            let (shown, step, landed) = (Arc::clone(&strokes.ops), item.timeline.current().id, strokes.own_step);
+            item.adjusting = Some(StrokeAdjustment { reach, tool, from, strokes, shown, step, landed });
         }
         let Some(adjusting) = item.adjustment() else { return };
         let strokes = adjusting.at(now);
