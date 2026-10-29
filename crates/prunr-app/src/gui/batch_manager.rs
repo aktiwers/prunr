@@ -636,14 +636,10 @@ impl BatchManager {
     /// Drop the selection on the named item (Esc, Clear button) as an
     /// undo step. Returns true if there was one.
     pub(crate) fn clear_selection(&mut self, item_id: u64) -> bool {
+        use super::selection_queue::{Made, SelState, SelectionMade};
         let Some(item) = self.find_by_id_mut(item_id) else { return false };
-        let was_present = item.selection_mask.is_some();
-        item.invalidate_selection();
-        if was_present {
-            item.commit(super::timeline::StepKind::Selection);
-            item.timeline.current_mut().made = Some(super::selection_queue::SelectionMade::Clear);
-        }
-        was_present
+        let cleared = SelState { selection: None, edits: item.edits.clone() };
+        item.land_selection_state(cleared, None, Some(super::timeline::StepKind::Selection), Some(Made::One(SelectionMade::Clear)))
     }
 
 

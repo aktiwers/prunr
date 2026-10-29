@@ -1,7 +1,7 @@
 //! Brushes and selections against the app: which active model re-cuts on a
 //! committed selection (`LivePreview::is_pending_for`), how strokes sit on
-//! the undo timeline, the live preview's tensor reuse, the Magic Brush
-//! retune and embedding cache, the cut-out switch (Restore / Erase /
+//! the undo timeline, the live preview's tensor reuse, strokes drawn
+//! again as the sliders move, the Magic Brush embedding cache, the cut-out switch (Restore / Erase /
 //! Select) and its correction cache, and what a model switch leaves
 //! correctable.
 //!
@@ -124,104 +124,41 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
     assert!(app.processor.live_preview.is_pending_for(7), "the re-cut is queued");
 }
 
-/// An image (id 9) whose last stroke is a Magic Brush decode kept for a
-/// retune: logits ramp left to right, so a higher confidence keeps fewer
-/// columns. Returns the stroke's selection hash.
-fn app_with_a_retunable_stroke() -> (PrunrApp, u64) {
+/// Queue `drawn` on image `item_id` as its brush does, and land it.
+fn land(app: &mut PrunrApp, item_id: u64, drawn: crate::gui::brush_state::StrokeDrawn) {
+    let dims = app.batch.find_by_id(item_id).expect("the image").dimensions;
+    app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, kept: true });
+    super::fixtures::settle_selection_edits(app);
+}
+
+/// Image 9 (`dims`, on Silueta) with `drawn` landed: the latest stroke.
+fn app_with_landed_stroke(drawn: crate::gui::brush_state::StrokeDrawn, dims: (u32, u32)) -> PrunrApp {
+    let mut app = app_with_model(SettingsModel::Silueta);
+    push_test_item(&mut app, 9).dimensions = dims;
+    land(&mut app, 9, drawn);
+    app
+}
+
+/// An image (id 9) whose latest stroke is a Magic Brush pick whose
+/// logits ramp left to right, so a higher confidence keeps fewer
+/// columns. Returns the pick's selection hash.
+fn app_with_a_magic_pick() -> (PrunrApp, u64) {
     use crate::gui::brush_state::StrokeDrawn;
-    use prunr_core::selection::BrushMode;
-    use std::sync::Arc;
+    let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
+    let mut masks = vec![-9.0f32; 3 * m * m];
+    masks.iter_mut().take(m * m).enumerate().for_each(|(i, v)| *v = -4.0 + 8.0 * (i % m) as f32 / (m - 1) as f32);
+    let decoded = prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] };
+    let output = std::sync::Arc::new(decoded.best_only());
     let mut app = app_with_model(SettingsModel::Silueta);
     app.settings.brush.magic_confidence_threshold = 0.5;
     let item = push_test_item(&mut app, 9);
     item.dimensions = (8, 8);
     give_tensor(item);
-    app.commit_selection_and_dispatch(9, make_mask(8, 8), StepKind::Stroke);
-    let first_hash = app.batch.items[0].selection_hash.unwrap();
-    assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
-
-    // Logits ramp left→right: a higher confidence keeps fewer columns.
-    let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
-    let mut masks = vec![-9.0f32; 3 * m * m];
-    for y in 0..m {
-        for x in 0..m {
-            masks[y * m + x] = -4.0 + 8.0 * x as f32 / (m - 1) as f32;
-        }
-    }
-    let output = Arc::new(prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] });
     let reading = app.settings.brush.magic_reading();
-    app.batch.items[0].keep_last_stroke(StrokeDrawn::Magic { output, mode: BrushMode::Add, reading });
-    (app, first_hash)
-}
-
-/// Moving the Confidence knob re-thresholds the last Magic Brush stroke
-/// from its kept logits: the selection changes, the stroke keeps its single
-/// undo entry, and the retune follows the selection it committed.
-#[test]
-fn confidence_change_retunes_the_last_stroke_in_place() {
-    let (mut app, first_hash) = app_with_a_retunable_stroke();
-    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
-    assert!(app.processor.retune_in_flight());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.processor.retune_in_flight() {
-        assert!(std::time::Instant::now() < deadline, "re-threshold never landed");
-        app.pump_stroke_retunes();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-
-    let item = &app.batch.items[0];
-    let new_hash = item.selection_hash.unwrap();
-    assert_ne!(new_hash, first_hash, "the selection follows the knob");
-    assert_eq!(item.timeline.undo_steps(), 1, "still one undo step for the stroke");
-    let last = item.last_stroke.as_ref().unwrap();
-    assert_eq!(last.committed_hash, new_hash);
-    assert!(matches!(&last.drawn, crate::gui::brush_state::StrokeDrawn::Magic { reading, .. } if (reading.confidence - 0.9).abs() < 1e-6));
-    // The retuned selection keeps only the right-hand columns.
-    let sel = item.selection_mask.as_ref().unwrap();
-    assert!(sel.cells()[7] != 0 && sel.cells()[0] == 0);
-
-    // The speck switch retunes the last stroke the same way.
-    app.adjust_strokes();
-    assert!(!app.processor.retune_in_flight(), "nothing changed, nothing to retune");
-    slide(&mut app, |b| b.magic_remove_specks = !b.magic_remove_specks);
-    assert!(app.processor.retune_in_flight(), "flipping Remove specks retunes the last stroke");
-}
-
-/// A retune that lands while a run holds the image is dropped and the
-/// knob stays alive: none starts while the image is busy, and the next
-/// change retunes once it is free.
-#[test]
-fn a_retune_on_a_busy_image_leaves_the_knob_alive() {
-    use crate::gui::item::Engine;
-    let (mut app, first_hash) = app_with_a_retunable_stroke();
-    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
-    assert!(app.processor.retune_in_flight());
-    app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.processor.retune_in_flight() {
-        assert!(std::time::Instant::now() < deadline, "the knob went dead: its retune never ended");
-        app.pump_stroke_retunes();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    assert_eq!(app.batch.items[0].selection_hash, Some(first_hash), "dropped: a run holds the image");
-
-    slide(&mut app, |b| b.magic_confidence_threshold = 0.8);
-    assert!(!app.processor.retune_in_flight(), "none starts while the run holds it");
-    app.batch.items[0].abandon_job();
-    app.adjust_strokes();
-    assert!(app.processor.retune_in_flight(), "the image free, the knob retunes");
-}
-
-/// Image 9 (16 × 16, on Silueta) with `drawn`, the stroke `mask`, landed
-/// as its brush lands it: the latest stroke.
-fn app_with_landed_stroke(mask: prunr_core::selection::MaskArtifact, drawn: crate::gui::brush_state::StrokeDrawn) -> PrunrApp {
-    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
-    let mut app = app_with_model(SettingsModel::Silueta);
-    let item = push_test_item(&mut app, 9);
-    item.dimensions = (16, 16);
-    app.queue_selection_op(9, SelectionOp::Merge(std::sync::Arc::new(mask)), AfterLanding::Stroke(drawn));
-    super::fixtures::settle_selection_edits(&mut app);
-    app
+    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading });
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
+    let hash = app.batch.items[0].selection_hash.expect("the pick");
+    (app, hash)
 }
 
 /// Move the brush sliders by `change`, a frame seeing them before and after.
@@ -231,19 +168,62 @@ fn slide(app: &mut PrunrApp, change: impl FnOnce(&mut crate::gui::brush_state::B
     app.adjust_strokes();
 }
 
-/// Run the latest stroke's retune to its landing.
-fn retune_lands(app: &mut PrunrApp) {
-    assert!(app.processor.retune_in_flight(), "a slider moved: the stroke is drawn again");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while app.processor.retune_in_flight() {
-        assert!(std::time::Instant::now() < deadline, "the retune never landed");
-        app.pump_stroke_retunes();
-        std::thread::sleep(std::time::Duration::from_millis(5));
+/// A redraw was asked for: let it land.
+fn redraw_lands(app: &mut PrunrApp) {
+    assert!(app.batch.selection_queue.any_pending(), "a slider moved: the strokes are drawn again");
+    super::fixtures::settle_selection_edits(app);
+}
+
+/// The shown step's stroke, as it records it.
+fn latest(app: &PrunrApp) -> Option<crate::gui::brush_state::StrokeDrawn> {
+    use crate::gui::selection_queue::{Made, SelectionMade};
+    match &app.batch.items[0].timeline.current().made {
+        Some(Made::One(SelectionMade::Stroke(drawn))) => Some(drawn.clone()),
+        _ => None,
     }
 }
 
 fn selected_cells(app: &PrunrApp) -> usize {
     app.batch.items[0].selection_mask.as_ref().map_or(0, |m| m.cells().iter().filter(|&&c| c != 0).count())
+}
+
+/// Moving Confidence draws the latest Magic Brush pick again from its
+/// logits: the selection changes, the pick keeps its single undo step
+/// and records the new value. Remove specks does the same.
+#[test]
+fn confidence_redraws_the_latest_pick_in_place() {
+    use crate::gui::brush_state::StrokeDrawn;
+    let (mut app, first_hash) = app_with_a_magic_pick();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
+    redraw_lands(&mut app);
+    let item = &app.batch.items[0];
+    assert_ne!(item.selection_hash, Some(first_hash), "the selection follows the slider");
+    assert_eq!(item.timeline.undo_steps(), 1, "still one undo step for the pick");
+    assert!(matches!(latest(&app), Some(StrokeDrawn::Magic { reading, .. }) if (reading.confidence - 0.9).abs() < 1e-6));
+    let sel = item.selection_mask.as_ref().unwrap();
+    assert!(sel.cells()[7] != 0 && sel.cells()[0] == 0, "only the right-hand columns");
+
+    app.adjust_strokes();
+    assert!(!app.batch.selection_queue.any_pending(), "nothing moved, nothing redrawn");
+    slide(&mut app, |b| b.magic_remove_specks = !b.magic_remove_specks);
+    assert!(app.batch.selection_queue.any_pending(), "flipping Remove specks redraws the pick");
+}
+
+/// A slider moved while a run holds the image redraws nothing then, and
+/// draws the move once the image is free.
+#[test]
+fn a_slider_moved_on_a_busy_image_redraws_once_it_is_free() {
+    use crate::gui::item::Engine;
+    let (mut app, first_hash) = app_with_a_magic_pick();
+    app.adjust_strokes();
+    app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
+    app.settings.brush.magic_confidence_threshold = 0.9;
+    app.adjust_strokes();
+    assert!(!app.batch.selection_queue.any_pending(), "none starts while the run holds it");
+    app.batch.items[0].abandon_job();
+    app.adjust_strokes();
+    redraw_lands(&mut app);
+    assert_ne!(app.batch.items[0].selection_hash, Some(first_hash));
 }
 
 /// A Paint Brush stroke and a Magic Brush depth pick are each drawn
@@ -252,67 +232,57 @@ fn selected_cells(app: &PrunrApp) -> usize {
 /// for the brush that drew it.
 #[test]
 fn each_brush_redraws_its_latest_stroke_in_place() {
-    use crate::gui::brush_state::{BrushState, StrokeDrawn};
-    use prunr_core::brush::BrushShape;
-
-    let mut brush = BrushState::default();
+    use crate::gui::brush_state::StrokeDrawn;
     let settings = crate::gui::brush_state::BrushSettings { radius: 2.0, hardness: 1.0, strength: 1.0, ..Default::default() };
-    brush.begin_stroke(16, 16, BrushShape::Circle, settings.radius);
-    brush.extend_stroke_with_radius(2.0, 8.0, 1.0);
-    brush.extend_stroke_with_radius(14.0, 8.0, 1.0);
-    let (mask, path) = brush.commit_stroke(settings.stamp()).expect("a stroke");
-    let mut app = app_with_landed_stroke(mask, StrokeDrawn::painted(path, settings.stamp()));
+    let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Circle, settings.radius, &[(2.0, 8.0, 1.0), (14.0, 8.0, 1.0)], settings.stamp());
+    let mut app = app_with_landed_stroke(drawn, (16, 16));
     app.settings.brush = settings;
     let (steps, before) = (app.batch.items[0].timeline.undo_steps(), selected_cells(&app));
-    assert!(matches!(app.batch.items[0].retunable_stroke().map(|s| &s.drawn), Some(StrokeDrawn::Paint { .. })));
+    assert!(matches!(latest(&app), Some(StrokeDrawn::Paint { .. })));
     app.adjust_strokes();
-    assert!(!app.processor.retune_in_flight(), "the values it was drawn with: nothing to redraw");
+    assert!(!app.batch.selection_queue.any_pending(), "the values it was drawn with: nothing to redraw");
     slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
-    assert!(!app.processor.retune_in_flight(), "another brush's slider leaves it");
+    assert!(!app.batch.selection_queue.any_pending(), "another brush's slider leaves it");
     slide(&mut app, |b| b.radius = 4.0);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     assert!(selected_cells(&app) > before, "Size doubled the stroke: {} cells, {before} before", selected_cells(&app));
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "still the stroke's one step");
     slide(&mut app, |b| b.strength = 0.5);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     let opacity = app.batch.items[0].selection_mask.as_ref().unwrap().cells()[8 * 16 + 8].unsigned_abs();
     assert!(opacity > 0 && opacity < prunr_core::selection::FULL.unsigned_abs(), "Opacity halves it: {opacity}");
 
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(16, 16, (0..256).map(|i| (i % 16) as f32 / 15.0).collect()));
     let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 };
-    let mut app = app_with_landed_stroke(drawn.mask(16, 16), drawn);
+    let mut app = app_with_landed_stroke(drawn, (16, 16));
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
-    assert!(matches!(app.batch.items[0].retunable_stroke().map(|s| &s.drawn), Some(StrokeDrawn::Depth { .. })));
+    assert!(matches!(latest(&app), Some(StrokeDrawn::Depth { .. })));
     slide(&mut app, |b| b.magic_depth_range = 0.3);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     assert!(selected_cells(&app) > before, "a wider Range picks more: {} cells, {before} before", selected_cells(&app));
 }
 
 /// A stroke stays the one its sliders redraw only while its step is the
 /// one shown and the newest: another step after it, or an undo, ends it,
-/// so a retune never writes into a step the stroke did not make.
+/// so a redraw never writes into a step the stroke did not make.
 #[test]
 fn the_latest_stroke_ends_with_the_next_step() {
-    use crate::gui::brush_state::{BrushState, StrokeDrawn};
-    let land = || {
-        let mut brush = BrushState::default();
+    let land_one = || {
         let settings = crate::gui::brush_state::BrushSettings { radius: 2.0, ..Default::default() };
-        brush.begin_stroke(16, 16, prunr_core::brush::BrushShape::Circle, settings.radius);
-        brush.extend_stroke_with_radius(8.0, 8.0, 1.0);
-        let (mask, path) = brush.commit_stroke(settings.stamp()).expect("a stroke");
-        let mut app = app_with_landed_stroke(mask, StrokeDrawn::painted(path, settings.stamp()));
+        let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Circle, settings.radius, &[(8.0, 8.0, 1.0)], settings.stamp());
+        let mut app = app_with_landed_stroke(drawn, (16, 16));
         app.settings.brush = settings;
         app
     };
-    let mut after_a_step = land();
+    let mut after_a_step = land_one();
     after_a_step.batch.items[0].commit(StepKind::Adjust);
-    let mut undone = land();
+    let mut undone = land_one();
     undone.handle_undo(&egui::Context::default());
     for (case, mut app) in [("another step", after_a_step), ("an undo", undone)] {
-        assert!(app.batch.items[0].retunable_stroke().is_none(), "{case}");
+        assert!(app.batch.items[0].timeline.latest_stroke().is_none(), "{case}");
         slide(&mut app, |b| b.radius = 5.0);
-        assert!(!app.processor.retune_in_flight(), "{case}: nothing redrawn");
+        assert!(!app.batch.selection_queue.any_pending(), "{case}: nothing redrawn");
     }
 }
 
@@ -332,26 +302,17 @@ fn paint_down(app: &mut PrunrApp, x: f32, size: f32) {
 }
 
 fn paint_down_on(app: &mut PrunrApp, item_id: u64, x: f32, size: f32) {
-    use crate::gui::brush_state::{BrushState, StrokeDrawn};
-    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
     app.settings.brush.radius = size;
-    let mut brush = BrushState::default();
-    brush.begin_stroke(32, 32, prunr_core::brush::BrushShape::Circle, size);
-    brush.extend_stroke_with_radius(x, 4.0, size / 4.0);
-    brush.extend_stroke_with_radius(x, 28.0, size / 4.0);
-    let stamp = app.settings.brush.stamp();
-    let (mask, path) = brush.commit_stroke(stamp).expect("a stroke");
-    app.queue_selection_op(item_id, SelectionOp::Merge(std::sync::Arc::new(mask)), AfterLanding::Stroke(StrokeDrawn::painted(path, stamp)));
-    super::fixtures::settle_selection_edits(app);
+    let samples = [(x, 4.0, size / 4.0), (x, 28.0, size / 4.0)];
+    let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Circle, size, &samples, app.settings.brush.stamp());
+    land(app, item_id, drawn);
 }
 
 /// With "all strokes" on, move the sliders by `change` and let the
 /// redraw land.
 fn adjust_all(app: &mut PrunrApp, change: impl FnOnce(&mut crate::gui::brush_state::BrushSettings)) {
     app.brush_state.reach = crate::gui::brush_state::StrokeReach::All;
-    app.adjust_strokes();
-    change(&mut app.settings.brush);
-    app.adjust_strokes();
+    slide(app, change);
     super::fixtures::settle_selection_edits(app);
 }
 
@@ -389,35 +350,65 @@ fn all_strokes_move_together_in_one_step() {
     assert_eq!(app.batch.items[0].selection_hash, before, "one undo, the strokes as they were");
 }
 
+/// A slider that draws none of the strokes redraws nothing: Confidence
+/// over Paint Brush strokes makes no step.
+#[test]
+fn a_slider_none_of_the_strokes_have_redraws_nothing() {
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    let steps = app.batch.items[0].timeline.undo_steps();
+    app.brush_state.reach = crate::gui::brush_state::StrokeReach::All;
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
+    assert!(!app.batch.selection_queue.any_pending(), "nothing to draw again");
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps);
+}
+
+/// A redraw made for a selection the image has since left is dropped,
+/// and the next frame draws the sliders' values again from what it shows.
+#[test]
+fn a_redraw_dropped_for_a_state_left_is_drawn_again() {
+    use crate::gui::brush_state::StrokeDrawn;
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    slide(&mut app, |b| b.radius = 16.0);
+    assert!(app.batch.selection_queue.any_pending());
+    let item = &mut app.batch.items[0];
+    item.selection_mask = item.selection_mask.as_deref().cloned().map(std::sync::Arc::new);
+    super::fixtures::settle_selection_edits(&mut app);
+    assert!(matches!(latest(&app), Some(StrokeDrawn::Paint { size, .. }) if size == 8.0), "dropped");
+    app.adjust_strokes();
+    redraw_lands(&mut app);
+    assert!(matches!(latest(&app), Some(StrokeDrawn::Paint { size, .. }) if size == 16.0), "drawn again");
+}
+
 /// A redraw of every stroke, with the values they have, gives back the
 /// very selection and cut-out edits shown: strokes, a fold into the
 /// cut-out, Invert and Clear between them.
 #[test]
 fn redrawing_every_stroke_as_it_is_changes_nothing() {
     use crate::gui::brush_state::CutoutAction;
-    use crate::gui::selection_queue::{apply, AfterLanding, Replay, SelState, SelectionOp};
+    use crate::gui::selection_queue::{apply, Replay, SelState, SelectionMade, SelectionOp};
     let mut app = app_for_strokes();
     paint_down(&mut app, 6.0, 12.0);
-    app.queue_selection_op(9, SelectionOp::Bake { action: CutoutAction::Erase, feathered: None }, AfterLanding::Nothing);
+    app.queue_selection_op(9, SelectionOp::Bake { action: CutoutAction::Erase, feathered: None });
     super::fixtures::settle_selection_edits(&mut app);
     paint_down(&mut app, 16.0, 8.0);
-    app.queue_selection_op(9, SelectionOp::Invert, AfterLanding::Nothing);
+    app.queue_selection_op(9, SelectionOp::Invert);
     super::fixtures::settle_selection_edits(&mut app);
     // Into the one column Invert left out, so it adds something.
     paint_down(&mut app, 16.0, 20.0);
     assert!(app.batch.clear_selection(9));
     paint_down(&mut app, 12.0, 4.0);
     let item = &app.batch.items[0];
-    let history = item.timeline.strokes_since_picture().expect("strokes to redraw");
-    let kinds: Vec<&str> = history.ops.iter().map(|op| match op {
-        crate::gui::selection_queue::SelectionMade::Stroke(_) => "stroke",
-        crate::gui::selection_queue::SelectionMade::Invert => "invert",
-        crate::gui::selection_queue::SelectionMade::Fold { .. } => "fold",
-        crate::gui::selection_queue::SelectionMade::Clear => "clear",
-        crate::gui::selection_queue::SelectionMade::Adjusted { .. } => "adjusted",
+    let strokes = item.timeline.strokes_since_picture().expect("strokes to redraw");
+    let kinds: Vec<&str> = strokes.ops.iter().map(|op| match op {
+        SelectionMade::Stroke(_) => "stroke",
+        SelectionMade::Invert => "invert",
+        SelectionMade::Fold { .. } => "fold",
+        SelectionMade::Clear => "clear",
     }).collect();
     assert_eq!(kinds, ["stroke", "fold", "stroke", "invert", "stroke", "clear", "stroke"]);
-    let replay = Replay { from: history.from, selection: history.selection, edits: history.edits, ops: std::sync::Arc::new(history.ops), dims: (32, 32), source: None };
+    let replay = Replay { strokes, alone: false, dims: (32, 32), source: None };
     let made = apply(&SelectionOp::Replay(std::sync::Arc::new(replay)), &SelState::default());
     assert_eq!(made.selection.as_ref().map(|s| s.content_hash()), item.selection_hash, "the same selection");
     assert_eq!(made.edits.as_ref().map(|e| e.cells().to_vec()), item.edits.as_ref().map(|e| e.cells().to_vec()), "the same cut-out edits");
@@ -428,13 +419,11 @@ fn redrawing_every_stroke_as_it_is_changes_nothing() {
 #[test]
 fn a_slider_moves_only_its_own_strokes() {
     use crate::gui::brush_state::StrokeDrawn;
-    use crate::gui::selection_queue::{AfterLanding, SelectionMade, SelectionOp};
+    use crate::gui::selection_queue::SelectionMade;
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
-    let drawn = StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 };
-    app.queue_selection_op(9, SelectionOp::Merge(std::sync::Arc::new(drawn.mask(32, 32))), AfterLanding::Stroke(drawn));
-    super::fixtures::settle_selection_edits(&mut app);
+    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 });
     app.settings.brush.magic_depth_range = 0.05;
     adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
     let ops = app.batch.items[0].timeline.strokes_since_picture().expect("strokes").ops;
@@ -462,7 +451,7 @@ fn every_stroke_includes_the_latest_one_adjusted_alone() {
     paint_down(&mut app, 8.0, 8.0);
     paint_down(&mut app, 24.0, 8.0);
     slide(&mut app, |b| b.radius = 16.0);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     assert_eq!(stroke_sizes(&app), [8.0, 16.0]);
     adjust_all(&mut app, |b| b.radius = 32.0);
     assert_eq!(stroke_sizes(&app), [16.0, 32.0]);
@@ -478,19 +467,18 @@ fn next_leaves_the_latest_stroke_to_the_sliders_moved_after() {
     paint_down(&mut app, 8.0, 8.0);
     app.brush_state.reach = StrokeReach::Next;
     slide(&mut app, |b| b.radius = 16.0);
-    assert!(!app.processor.retune_in_flight(), "the next stroke only");
+    assert!(!app.batch.selection_queue.any_pending(), "the next stroke only");
     app.brush_state.reach = StrokeReach::Last;
     app.adjust_strokes();
-    assert!(!app.processor.retune_in_flight(), "switching redraws nothing");
+    assert!(!app.batch.selection_queue.any_pending(), "switching redraws nothing");
     slide(&mut app, |b| b.hardness = 0.5);
-    retune_lands(&mut app);
-    let drawn = app.batch.items[0].retunable_stroke().map(|s| s.drawn.clone());
+    redraw_lands(&mut app);
     assert!(
-        matches!(drawn, Some(StrokeDrawn::Paint { size, stamp, .. }) if size == 8.0 && stamp.hardness == 0.5),
+        matches!(latest(&app), Some(StrokeDrawn::Paint { size, stamp, .. }) if size == 8.0 && stamp.hardness == 0.5),
         "the Hardness moved, the Size as drawn",
     );
     slide(&mut app, |b| b.radius = 24.0);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     assert_eq!(stroke_sizes(&app), [24.0], "a Size moved now takes the stroke with it");
 }
 
@@ -506,10 +494,10 @@ fn another_image_keeps_its_latest_stroke_as_drawn() {
     paint_down(&mut app, 8.0, 8.0);
     app.batch.select_item(0);
     slide(&mut app, |b| b.radius = 16.0);
-    retune_lands(&mut app);
+    redraw_lands(&mut app);
     app.batch.select_item(1);
     app.adjust_strokes();
-    assert!(!app.processor.retune_in_flight(), "the other image's stroke is not redrawn");
+    assert!(!app.batch.selection_queue.any_pending(), "the other image's stroke is not redrawn");
 }
 
 /// A stroke committed under each active model: segmentation re-cuts at
@@ -1124,13 +1112,19 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
     assert!(item.hot_seg_tensor().is_some(), "a step whose cutter is not known is re-cut as before");
 }
 
+/// A Paint Brush dot on cell `i` of an 8 × 8 image.
+fn dot(i: usize) -> crate::gui::selection_queue::SelectionOp {
+    let (x, y) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
+    let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, y, 0.5)], super::fixtures::HARD);
+    crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims: (8, 8), kept: false }
+}
+
 /// Selection edits run off the UI thread in order: two strokes queued
 /// before either lands build on each other and land as two steps; a run
 /// waits for them; an undo pressed meanwhile undoes the last stroke once
 /// it has landed.
 #[test]
 fn queued_strokes_land_in_order_and_an_undo_waits_for_them() {
-    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
     use std::sync::Arc;
     let ctx = egui::Context::default();
     let mut app = app_with_model(SettingsModel::None);
@@ -1138,14 +1132,9 @@ fn queued_strokes_land_in_order_and_an_undo_waits_for_them() {
     item.dimensions = (8, 8);
     item.source_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
     app.batch.select_item(0);
-    let stroke = |x: usize| {
-        let mut cells = vec![0i8; 64];
-        cells[x] = prunr_core::selection::FULL;
-        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
-    };
     let steps = app.batch.items[0].timeline.undo_steps();
-    app.queue_selection_op(1, SelectionOp::Merge(stroke(0)), AfterLanding::Nothing);
-    app.queue_selection_op(1, SelectionOp::Merge(stroke(9)), AfterLanding::Nothing);
+    app.queue_selection_op(1, dot(0));
+    app.queue_selection_op(1, dot(9));
     assert_eq!(app.run_refusal(&app.batch.items[0]), Some(crate::gui::capability::Reason::FinishingSelection), "a run waits");
     app.handle_undo(&ctx);
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "the undo waits too");
@@ -1161,15 +1150,11 @@ fn queued_strokes_land_in_order_and_an_undo_waits_for_them() {
 /// the queue against what it shows now: the stroke is not lost.
 #[test]
 fn an_edit_on_a_changed_selection_is_made_again() {
-    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
-    use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::None);
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     app.batch.select_item(0);
-    let mut cells = vec![0i8; 64];
-    cells[3] = prunr_core::selection::FULL;
-    app.queue_selection_op(1, SelectionOp::Merge(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))), AfterLanding::Nothing);
+    app.queue_selection_op(1, dot(3));
     // The selection changes while the stroke is being merged.
     app.batch.items[0].commit_selection_mask(make_mask(8, 8).into(), StepKind::Selection);
     super::fixtures::settle_selection_edits(&mut app);
@@ -1182,30 +1167,25 @@ fn an_edit_on_a_changed_selection_is_made_again() {
 /// queued on a selection changed under them all land, the queue settles.
 #[test]
 fn strokes_settle_on_no_op_and_changed_selections() {
-    use crate::gui::selection_queue::{AfterLanding, SelectionOp};
-    use std::sync::Arc;
     let mut app = app_with_model(SettingsModel::None);
     let item = push_test_item(&mut app, 1);
     item.dimensions = (8, 8);
     app.batch.select_item(0);
-    let stroke = |x: usize| {
-        let mut cells = vec![0i8; 64];
-        cells[x] = prunr_core::selection::FULL;
-        Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells))
-    };
-    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
+    app.queue_selection_op(1, dot(5));
     super::fixtures::settle_selection_edits(&mut app);
     let steps = app.batch.items[0].timeline.undo_steps();
     // The same stroke again adds nothing; one queued after it builds on it.
-    app.queue_selection_op(1, SelectionOp::Merge(stroke(5)), AfterLanding::Nothing);
-    app.queue_selection_op(1, SelectionOp::Merge(stroke(6)), AfterLanding::Nothing);
+    app.queue_selection_op(1, dot(5));
+    app.queue_selection_op(1, dot(6));
     super::fixtures::settle_selection_edits(&mut app);
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "one step: the second stroke");
     // Three strokes, and the selection changes under them.
     for x in [10, 11, 12] {
-        app.queue_selection_op(1, SelectionOp::Merge(stroke(x)), AfterLanding::Nothing);
+        app.queue_selection_op(1, dot(x));
     }
-    app.batch.items[0].commit_selection_mask(stroke(40), StepKind::Selection);
+    let mut cells = vec![0i8; 64];
+    cells[40] = prunr_core::selection::FULL;
+    app.batch.items[0].commit_selection_mask(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells)), StepKind::Selection);
     super::fixtures::settle_selection_edits(&mut app);
     let cells = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
     assert!([10, 11, 12, 40].iter().all(|&x| cells[x] != 0), "every stroke landed on the new selection");

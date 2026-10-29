@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::timeline::StepKind;
 use crate::gui::views::selection_action_bar::SelectionAction;
-use crate::gui::brush_state::{StrokeDrawn, Tool};
+use crate::gui::brush_state::{StrokeReach, Tool};
 use crate::gui::item::BatchItem;
-use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+use crate::gui::selection_queue::SelectionOp;
 use super::PrunrApp;
 
 impl PrunrApp {
@@ -119,9 +119,9 @@ impl PrunrApp {
         depth || state.pending_sam_picks.len() != held
     }
 
-    pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding) {
+    pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp) {
         let Some(current) = self.batch.find_by_id(item_id).map(BatchItem::selection_state) else { return };
-        self.batch.selection_queue.push(item_id, op, after, current);
+        self.batch.selection_queue.push(item_id, op, current);
     }
 
     /// The selection edits made since the last frame land, in order: each
@@ -129,17 +129,20 @@ impl PrunrApp {
     /// the image has left goes back in the queue against what it shows
     /// now. Undo / redo held for the queue run once it is empty.
     pub(crate) fn land_selection_edits(&mut self, ctx: &egui::Context) {
-        use crate::gui::selection_queue::SelectionOp;
         let style = self.selection_style();
         let mut landed = false;
         for done in self.batch.selection_queue.take_done() {
             landed = true;
             let item_id = done.item_id;
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+            let replay = match &done.op {
+                SelectionOp::Replay(replay) => Some(Arc::clone(replay)),
+                _ => None,
+            };
             if !item.selection_state().same(&done.base) {
-                // Every stroke redrawn for a state the image has left: the
-                // next frame draws them again from what it shows.
-                if matches!(done.op, SelectionOp::Replay(_)) {
+                // Strokes redrawn for a state the image has left: the next
+                // frame draws them again from what it shows.
+                if replay.is_some() {
                     continue;
                 }
                 tracing::info!(item_id, "selection edit made on a selection since changed; made again");
@@ -149,25 +152,21 @@ impl PrunrApp {
                     SelectionOp::Bake { action, .. } => SelectionOp::Bake { action, feathered: item.feathered_selection(style) },
                     op => op,
                 };
-                self.batch.selection_queue.rebase(item_id, op, done.after, current);
+                self.batch.selection_queue.rebase(item_id, op, current);
                 continue;
             }
-            let (kind, made) = done.op.step(&done.after, style.edge_feather_px);
+            let (kind, record) = done.op.step(style.edge_feather_px);
             // A stroke adjustment fills in its one step while the slider moves.
-            let refill = matches!(done.op, SelectionOp::Replay(_)) && item.adjustment().is_some_and(|a| a.landed);
-            let changed = if refill { item.amend_selection_state(done.made, done.hash) } else { item.land_selection_state(done.made, done.hash, kind) };
-            if changed {
-                item.timeline.current_mut().made = made;
+            let fills_in = replay.is_some() && item.adjustment().is_some_and(|a| a.landed);
+            let changed = item.land_selection_state(done.made, done.hash, (!fills_in).then_some(kind), record);
+            if let (Some(replay), Some(adjusting)) = (replay, item.adjusting.as_mut()) {
+                adjusting.shown = Arc::clone(&replay.strokes.ops);
+                if changed {
+                    (adjusting.step, adjusting.landed) = (item.timeline.current().id, true);
+                }
             }
-            if let (true, SelectionOp::Replay(_), Some(adjusting)) = (changed, &done.op, item.adjusting.as_mut()) {
-                (adjusting.step, adjusting.landed) = (item.timeline.current().id, true);
-            }
-            if let SelectionOp::Merge(stroke) = &done.op {
-                item.note_painted_during_erase(stroke);
-            }
-            // A stroke that changed nothing leaves the latest one as it was.
-            if let (true, AfterLanding::Stroke(drawn)) = (changed, done.after) {
-                item.keep_last_stroke(drawn);
+            if let Some(patch) = done.stroke {
+                item.note_painted_during_erase(patch);
             }
             if changed {
                 self.apply_selection_to_active_model(item_id);
@@ -216,7 +215,7 @@ impl PrunrApp {
             };
             if let Some(fold) = fold {
                 let feathered = self.batch.items[idx].feathered_selection(self.selection_style());
-                self.queue_selection_op(item_id, SelectionOp::Bake { action: fold, feathered }, AfterLanding::Nothing);
+                self.queue_selection_op(item_id, SelectionOp::Bake { action: fold, feathered });
                 ctx.request_repaint();
                 return;
             }
@@ -230,7 +229,7 @@ impl PrunrApp {
             SelectionAction::Cut => self.start_selection_edit(idx, SelectionEdit::CopyAndCut),
             SelectionAction::Invert => {
                 if self.batch.items[idx].selection_mask.is_some() {
-                    self.queue_selection_op(item_id, SelectionOp::Invert, AfterLanding::Nothing);
+                    self.queue_selection_op(item_id, SelectionOp::Invert);
                 }
                 ctx.request_repaint();
             }
@@ -380,8 +379,6 @@ impl PrunrApp {
             at: ((at.0 + 0.5) / w as f32, (at.1 + 0.5) / h as f32),
             range: self.settings.brush.magic_depth_range,
             mode,
-            source_dims: dims,
-            reading: self.settings.brush.magic_reading(),
         });
     }
 
@@ -503,7 +500,7 @@ impl PrunrApp {
     /// Select with SAM: at once when `embedding` is there, else when the
     /// image's embedding lands. The decoder run takes the mode as it was
     /// at the click, so a mode change while SAM runs cannot re-polarise
-    /// the result; Confidence alone may change later and re-threshold.
+    /// the result.
     pub(crate) fn pick_with_sam(
         &mut self,
         item_id: u64,
@@ -515,13 +512,11 @@ impl PrunrApp {
             self.magic_brush_state.pending_sam_picks.push(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode });
             return;
         };
-        let source_dims = self.batch.find_by_id(item_id).map(|i| i.dimensions).unwrap_or((0, 0));
         self.processor.dispatch_sam_decoder(crate::gui::processor::SamDecodeRequest {
             item_id,
             embedding,
             prompt,
             mode,
-            source_dims,
             reading: self.settings.brush.magic_reading(),
             cpu_only: self.settings.cpu_only(),
         });
@@ -530,7 +525,6 @@ impl PrunrApp {
     /// Keep the selected image's embedding current, then drain SAM encoder
     /// and decoder results from the background rayon threads.
     pub(crate) fn pump_sam_results(&mut self, ctx: &egui::Context) {
-        use crate::gui::processor::DecodedSelection;
         let encoder_results = self.processor.pump_sam_encoder_results();
         for result in encoder_results {
             self.magic_brush_state.set_encoder_pending(false);
@@ -562,14 +556,10 @@ impl PrunrApp {
                 continue;
             }
             match result.result {
-                Ok(DecodedSelection::Fresh { mask, output }) => {
-                    tracing::info!(item_id = result.item_id, mode = ?result.mode, "SAM decoder mask queued");
-                    // Kept with the step: the best candidate alone, all a redraw reads.
-                    let drawn = StrokeDrawn::Magic { output: Arc::new(output.best_only()), mode: result.mode, reading: result.reading };
-                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::Stroke(drawn));
-                }
-                Ok(DecodedSelection::ByDepth { mask, drawn }) => {
-                    self.queue_selection_op(result.item_id, SelectionOp::Merge(Arc::new(mask)), AfterLanding::Stroke(drawn));
+                Ok(drawn) => {
+                    let Some(dims) = self.batch.find_by_id(result.item_id).map(|i| i.dimensions) else { continue };
+                    tracing::info!(item_id = result.item_id, "Magic Brush pick queued");
+                    self.queue_selection_op(result.item_id, SelectionOp::Stroke { drawn, dims, kept: true });
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
@@ -579,117 +569,46 @@ impl PrunrApp {
         }
     }
 
-    /// The latest stroke redrawn at its brush's values lands; one for a
-    /// stroke that is no longer the latest, or on an image a run started
-    /// on, is dropped. Then the next slider change is drawn.
-    pub(crate) fn pump_stroke_retunes(&mut self) {
-        for retune in self.processor.pump_stroke_retunes() {
-            match retune.result {
-                // A selection change landing after a run started on the
-                // image would make that run's result stale.
-                Ok(_) if self.batch.find_by_id(retune.item_id).is_some_and(|i| !i.is_idle()) => {
-                    tracing::info!(item_id = retune.item_id, "stroke retune dropped: a run started on the image");
-                }
-                Ok(retuned) => self.apply_retune(retune.item_id, retuned, retune.drawn),
-                Err(err) => tracing::warn!(item_id = retune.item_id, %err, "stroke retune failed"),
-            }
-        }
-        self.adjust_strokes();
-    }
-
-    /// A brush slider moved on the selected image: its latest stroke
-    /// takes the new value, or every stroke since its picture changed
-    /// moves by as much, or (Next) only the strokes after it are drawn
-    /// with it.
+    /// A brush slider moved on the selected image: with Last stroke on,
+    /// the latest stroke takes the moved slider's value; with All strokes
+    /// on, every stroke since the picture changed moves by as much. Either
+    /// is drawn again from the step the strokes start from, after the
+    /// image's runs and other edits, filling in one step as the slider
+    /// moves.
     pub(crate) fn adjust_strokes(&mut self) {
-        use crate::gui::brush_state::StrokeReach;
-        let now = self.settings.brush.stroke_values();
-        if self.brush_state.reach == StrokeReach::All {
-            return self.adjust_every_stroke(now);
-        }
-        let moved = self.brush_state.seen.replace(now).filter(|from| *from != now);
-        if let (StrokeReach::Last, Some(from)) = (self.brush_state.reach, moved) {
-            if let Some(last) = self.batch.selected_idx_clamped().and_then(|idx| self.batch.items[idx].retunable_stroke()) {
-                last.wanted = last.wanted.moved(from, now);
-            }
-        }
-        self.maybe_retune_last_stroke();
-    }
-
-    /// Every stroke on the selected image since its picture changed drawn
-    /// again, moved by as much as the sliders moved since the drag began.
-    fn adjust_every_stroke(&mut self, now: crate::gui::brush_state::StrokeValues) {
-        use crate::gui::selection_queue::{Replay, SelectionOp};
+        use crate::gui::item::StrokeAdjustment;
+        use crate::gui::selection_queue::{any_differ, Replay};
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item_id = self.batch.items[idx].id;
-        // One redraw at a time, after the image's other edits and runs.
-        if !self.batch.items[idx].is_idle() || self.batch.selection_queue.is_pending(item_id) {
+        if !self.batch.items[idx].is_idle() || self.selection_edit_pending(item_id) {
             return;
         }
-        let seen = self.brush_state.seen.replace(now);
+        let now = self.settings.brush.stroke_values();
+        let seen = self.brush_state.seen.replace((item_id, now));
+        let reach = self.brush_state.reach;
         let item = &mut self.batch.items[idx];
-        let (from, history) = match item.adjustment() {
-            Some(adjusting) if adjusting.drawn == now => return,
-            Some(adjusting) => (adjusting.from, Arc::clone(&adjusting.history)),
-            None => {
-                let Some(from) = seen.filter(|seen| *seen != now) else { return };
-                let Some(history) = item.timeline.strokes_since_picture() else { return };
-                (from, Arc::new(history))
-            }
-        };
-        let replay = Replay {
-            from: history.from,
-            selection: history.selection.clone(),
-            edits: history.edits.clone(),
-            ops: Arc::new(history.ops.iter().map(|op| op.adjusted(from, now)).collect()),
-            dims: item.dimensions,
-            source: item.source_rgba.clone(),
-        };
-        match item.adjustment() {
-            Some(adjusting) => adjusting.drawn = now,
-            None => {
-                let step = item.timeline.current().id;
-                item.adjusting = Some(crate::gui::item::StrokeAdjustment { from, drawn: now, history, step, landed: false });
-            }
+        // An adjustment lasts while its image stays selected and its reach on.
+        if seen.is_none_or(|(id, _)| id != item_id) || item.adjustment().is_some_and(|a| a.reach != reach) {
+            item.adjusting = None;
         }
-        self.queue_selection_op(item_id, SelectionOp::Replay(Arc::new(replay)), AfterLanding::Nothing);
-    }
-
-    /// The selected image's latest stroke wants other values: draw it
-    /// again with them.
-    fn maybe_retune_last_stroke(&mut self) {
-        if self.processor.retune_in_flight() {
+        if item.adjusting.is_none() {
+            let strokes = match reach {
+                StrokeReach::Next => None,
+                StrokeReach::Last => item.timeline.latest_stroke(),
+                StrokeReach::All => item.timeline.strokes_since_picture(),
+            };
+            let moved_from = seen.filter(|&(id, from)| id == item_id && from != now).map(|(_, from)| from);
+            let (Some(from), Some(strokes)) = (moved_from, strokes) else { return };
+            let (shown, step) = (Arc::clone(&strokes.ops), item.timeline.current().id);
+            item.adjusting = Some(StrokeAdjustment { reach, from, strokes, shown, step, landed: reach == StrokeReach::Last });
+        }
+        let Some(adjusting) = item.adjustment() else { return };
+        let strokes = adjusting.at(now);
+        if !any_differ(&strokes.ops, &adjusting.shown) {
             return;
         }
-        let Some(idx) = self.batch.selected_idx_clamped() else { return };
-        let item = &mut self.batch.items[idx];
-        // A retune is a selection change; it waits for a run on the image.
-        if !item.is_idle() {
-            return;
-        }
-        let Some((drawn, for_hash)) = item.retunable_stroke().filter(|s| s.wanted.values_differ(&s.drawn)).map(|s| (s.wanted.clone(), s.committed_hash)) else { return };
-        // Asked for only once a retune runs: a handle the job unpacks, not
-        // a decode on every frame.
-        let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());
-        self.processor.dispatch_stroke_retune(crate::gui::processor::StrokeRetuneRequest {
-            item_id, drawn, source_dims, base, for_hash,
-        });
-    }
-
-    /// Swap the latest stroke's selection for its redrawn one, replaced in
-    /// place so the stroke's undo entry stays the one entry. Only while it
-    /// is still the latest: a retune of an older one lands on nothing.
-    fn apply_retune(&mut self, item_id: u64, retuned: crate::gui::processor::Retuned, drawn: StrokeDrawn) {
-        let crate::gui::processor::Retuned { merged, hash, for_hash } = retuned;
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
-        let Some(last) = item.retunable_stroke().filter(|s| s.committed_hash == for_hash) else { return };
-        (last.drawn, last.committed_hash) = (drawn.clone(), hash);
-        let changed = item.replace_selection_in_place(merged, hash);
-        // The stroke's step records it as now drawn, for a later redraw of every stroke.
-        item.timeline.current_mut().made = Some(crate::gui::selection_queue::SelectionMade::Stroke(drawn));
-        if changed {
-            self.apply_selection_to_active_model(item_id);
-        }
+        let replay = Replay { strokes, alone: reach == StrokeReach::Last, dims: item.dimensions, source: item.source_rgba.clone() };
+        self.queue_selection_op(item_id, SelectionOp::Replay(Arc::new(replay)));
     }
 }
 

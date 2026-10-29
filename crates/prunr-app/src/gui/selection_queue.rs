@@ -11,7 +11,8 @@ use std::sync::{mpsc, Arc};
 
 use prunr_core::selection::MaskArtifact;
 
-use super::brush_state::CutoutAction;
+use super::brush_state::{CutoutAction, StrokeDrawn};
+use super::timeline::StrokeHistory;
 
 /// An image's selection and its cut-out edits: what an edit starts from
 /// and makes.
@@ -31,14 +32,15 @@ impl SelState {
 
 #[derive(Clone)]
 pub(crate) enum SelectionOp {
-    /// A stroke, painted or decoded, merged into the selection: Add grows
-    /// it, Subtract carves it away.
-    Merge(Arc<MaskArtifact>),
+    /// A stroke drawn here on a `dims` image and merged into the
+    /// selection: Add grows it, Subtract carves it away. `kept`: its step
+    /// records it, for its brush's sliders to draw it again.
+    Stroke { drawn: StrokeDrawn, dims: (u32, u32), kept: bool },
     Invert,
     /// The selection folded into the cut-out's edits as `action` says,
     /// and cleared; `feathered` is the plane the overlay shows, when built.
     Bake { action: CutoutAction, feathered: Option<Arc<MaskArtifact>> },
-    /// The image's strokes drawn again from where they started.
+    /// Strokes drawn again from the step they start from.
     Replay(Arc<Replay>),
 }
 
@@ -46,19 +48,45 @@ impl SelectionOp {
     /// The step the edit makes once landed, and what a replay of the
     /// strokes records of it; a fold went through a feather of
     /// `feather_px` when it had its feathered plane.
-    pub(crate) fn step(&self, after: &AfterLanding, feather_px: u32) -> (super::timeline::StepKind, Option<SelectionMade>) {
+    pub(crate) fn step(&self, feather_px: u32) -> (super::timeline::StepKind, Option<Made>) {
         use super::timeline::StepKind;
         match self {
-            Self::Merge(_) => (StepKind::Stroke, match after {
-                AfterLanding::Stroke(drawn) => Some(SelectionMade::Stroke(drawn.clone())),
-                AfterLanding::Nothing => None,
-            }),
-            Self::Invert => (StepKind::Selection, Some(SelectionMade::Invert)),
+            Self::Stroke { drawn, kept, .. } => (StepKind::Stroke, kept.then(|| Made::One(SelectionMade::Stroke(drawn.clone())))),
+            Self::Invert => (StepKind::Selection, Some(Made::One(SelectionMade::Invert))),
             Self::Bake { action, feathered } => {
                 let feather_px = if feathered.is_some() { feather_px } else { 0 };
-                (StepKind::Selection, Some(SelectionMade::Fold { action: *action, feather_px }))
+                (StepKind::Selection, Some(Made::One(SelectionMade::Fold { action: *action, feather_px })))
             }
-            Self::Replay(replay) => (StepKind::Strokes, Some(SelectionMade::Adjusted { from: replay.from, ops: Arc::clone(&replay.ops) })),
+            Self::Replay(replay) => (StepKind::Strokes, Some(replay.record())),
+        }
+    }
+}
+
+/// One thing a step did to the selection, as a replay of the strokes
+/// redoes it.
+#[derive(Clone)]
+pub(crate) enum SelectionMade {
+    Stroke(StrokeDrawn),
+    Invert,
+    /// Folded into the cut-out's edits through a feather of `feather_px`.
+    Fold { action: CutoutAction, feather_px: u32 },
+    Clear,
+}
+
+impl SelectionMade {
+    /// A stroke as `change` makes it; anything else as it was.
+    pub(crate) fn changed(&self, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        match self {
+            Self::Stroke(drawn) => Self::Stroke(change(drawn)),
+            other => other.clone(),
+        }
+    }
+
+    /// Whether a redraw of one in place of the other would change it.
+    fn differs(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stroke(a), Self::Stroke(b)) => a.values() != b.values(),
+            _ => false,
         }
     }
 }
@@ -66,58 +94,48 @@ impl SelectionOp {
 /// What a step did to the selection: the record a replay of the image's
 /// strokes redoes. A selection step without one stops a replay there.
 #[derive(Clone)]
-pub(crate) enum SelectionMade {
-    Stroke(super::brush_state::StrokeDrawn),
-    Invert,
-    /// Folded into the cut-out's edits through a feather of `feather_px`.
-    Fold { action: CutoutAction, feather_px: u32 },
-    Clear,
-    /// Every stroke since step `from` drawn again with new values: `ops`
-    /// is that history as it stands now.
-    Adjusted { from: u64, ops: Arc<Vec<SelectionMade>> },
+pub(crate) enum Made {
+    One(SelectionMade),
+    /// Every stroke since step `from` drawn again: `ops` is that history
+    /// as it stands now.
+    Redrawn { from: u64, ops: Arc<Vec<SelectionMade>> },
 }
 
-impl SelectionMade {
-    /// A stroke moved as the sliders moved from `from` to `to`; anything
-    /// else as it was.
-    pub(crate) fn adjusted(&self, from: super::brush_state::StrokeValues, to: super::brush_state::StrokeValues) -> Self {
-        match self {
-            Self::Stroke(drawn) => Self::Stroke(drawn.adjusted(from, to)),
-            other => other.clone(),
-        }
-    }
+/// Whether any of `ops` would draw differently from `shown`.
+pub(crate) fn any_differ(ops: &[SelectionMade], shown: &[SelectionMade]) -> bool {
+    ops.iter().zip(shown).any(|(a, b)| a.differs(b))
 }
 
-/// The image's strokes since its picture last changed, to draw again:
-/// the step they start from, its selection and edits, and what each step
-/// after it did.
-#[derive(Clone)]
+/// Strokes to draw again on a `dims` image: from where they started, each
+/// as it is to be drawn now.
 pub(crate) struct Replay {
-    pub(crate) from: u64,
-    pub(crate) selection: Option<super::timeline::StoredSelection>,
-    pub(crate) edits: Option<super::timeline::StoredSelection>,
-    pub(crate) ops: Arc<Vec<SelectionMade>>,
+    pub(crate) strokes: StrokeHistory,
+    /// The step it fills in is that one stroke's own, not a new one.
+    pub(crate) alone: bool,
     pub(crate) dims: (u32, u32),
     /// The photo a fold's feather follows.
     pub(crate) source: Option<Arc<image::RgbaImage>>,
 }
 
 impl Replay {
-    /// The planes the steps make, from the ones they started from; the
-    /// stored ones are unpacked here, on the edit thread.
-    fn make(&self) -> SelState {
-        let start = SelState {
-            selection: self.selection.as_ref().and_then(|s| s.load()),
-            edits: self.edits.as_ref().and_then(|e| e.load()),
-        };
-        self.done(start, &self.ops)
+    /// What the step it lands on records.
+    fn record(&self) -> Made {
+        match (self.alone, self.strokes.ops.first()) {
+            (true, Some(op)) => Made::One(op.clone()),
+            _ => Made::Redrawn { from: self.strokes.from, ops: Arc::clone(&self.strokes.ops) },
+        }
     }
 
-    /// `ops` done over `start` in order; each fold feathered as it was
-    /// when it was made, an earlier adjustment's history in its place.
-    fn done(&self, start: SelState, ops: &[SelectionMade]) -> SelState {
+    /// The planes the steps make, from the ones they started from, each
+    /// fold feathered as it was when it was made; the stored planes are
+    /// unpacked here, on the edit thread.
+    fn make(&self) -> SelState {
         let (w, h) = self.dims;
-        ops.iter().fold(start, |state, op| match op {
+        let start = SelState {
+            selection: self.strokes.selection.as_ref().and_then(|s| s.load()),
+            edits: self.strokes.edits.as_ref().and_then(|e| e.load()),
+        };
+        self.strokes.ops.iter().fold(start, |state, op| match op {
             SelectionMade::Stroke(drawn) => merged(&state, drawn.mask(w, h)),
             SelectionMade::Invert => apply(&SelectionOp::Invert, &state),
             SelectionMade::Fold { action, feather_px } => {
@@ -125,18 +143,8 @@ impl Replay {
                 apply(&SelectionOp::Bake { action: *action, feathered }, &state)
             }
             SelectionMade::Clear => SelState { selection: None, edits: state.edits },
-            SelectionMade::Adjusted { ops, .. } => self.done(state, ops),
         })
     }
-}
-
-/// What happens once an edit has landed, besides the step it records.
-#[derive(Clone)]
-pub(crate) enum AfterLanding {
-    Nothing,
-    /// A stroke of a brush whose sliders can draw it again while it is
-    /// the latest.
-    Stroke(super::brush_state::StrokeDrawn),
 }
 
 /// What the worker is sent: an edit, or word that an image's chain is
@@ -149,20 +157,19 @@ enum Msg {
 struct Job {
     item_id: u64,
     op: SelectionOp,
-    after: AfterLanding,
     /// `None`: the image's previous edit's output.
     base: Option<SelState>,
 }
 
 /// An edit made: what it was built from and what it makes, with the new
-/// selection's content hash.
+/// selection's content hash and, for a stroke, the mask it drew.
 pub(crate) struct Done {
     pub(crate) item_id: u64,
     pub(crate) op: SelectionOp,
-    pub(crate) after: AfterLanding,
     pub(crate) base: SelState,
     pub(crate) made: SelState,
     pub(crate) hash: Option<u64>,
+    pub(crate) stroke: Option<super::item::StrokePatch>,
 }
 
 pub(crate) struct SelectionQueue {
@@ -199,10 +206,12 @@ impl SelectionQueue {
                         }
                     };
                     let base = job.base.unwrap_or_else(|| last.get(&job.item_id).cloned().unwrap_or_default());
-                    let made = apply(&job.op, &base);
+                    // A panic makes nothing, so the image is not left waiting on it.
+                    let (made, stroke) = crate::panics::caught("a selection edit", || made_by(&job.op, &base))
+                        .unwrap_or_else(|| (base.clone(), None));
                     let hash = made.selection.as_ref().map(|s| s.content_hash());
                     last.insert(job.item_id, made.clone());
-                    let _ = done_tx.send(Done { item_id: job.item_id, op: job.op, after: job.after, base, made, hash });
+                    let _ = done_tx.send(Done { item_id: job.item_id, op: job.op, base, made, hash, stroke });
                     if let Some(ctx) = wake.get() {
                         ctx.request_repaint();
                     }
@@ -219,21 +228,21 @@ impl SelectionQueue {
 
     /// Queue `op` on the image showing `current`; it builds on the image's
     /// edits still pending, if any.
-    pub(crate) fn push(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, current: SelState) {
+    pub(crate) fn push(&mut self, item_id: u64, op: SelectionOp, current: SelState) {
         let chained = self.pending.get(&item_id).is_some_and(|&n| n > 0);
-        self.send(item_id, op, after, (!chained).then_some(current));
+        self.send(item_id, op, (!chained).then_some(current));
     }
 
     /// Queue `op` again, on `current`, the state the image shows now: an
     /// edit made on a state the image has left. The edits still pending
     /// for it chain on this one in turn, so the queue settles.
-    pub(crate) fn rebase(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, current: SelState) {
-        self.send(item_id, op, after, Some(current));
+    pub(crate) fn rebase(&mut self, item_id: u64, op: SelectionOp, current: SelState) {
+        self.send(item_id, op, Some(current));
     }
 
-    fn send(&mut self, item_id: u64, op: SelectionOp, after: AfterLanding, base: Option<SelState>) {
+    fn send(&mut self, item_id: u64, op: SelectionOp, base: Option<SelState>) {
         *self.pending.entry(item_id).or_default() += 1;
-        let _ = self.tx.send(Msg::Job(Job { item_id, op, after, base }));
+        let _ = self.tx.send(Msg::Job(Job { item_id, op, base }));
     }
 
     /// The edits made since the last frame, in order; each is no longer
@@ -274,12 +283,25 @@ impl SelectionQueue {
     }
 }
 
+/// `op` on `base`, and where a stroke painted, for an erase filling
+/// meanwhile.
+fn made_by(op: &SelectionOp, base: &SelState) -> (SelState, Option<super::item::StrokePatch>) {
+    match op {
+        SelectionOp::Stroke { drawn, dims: (w, h), .. } => {
+            let stroke = drawn.mask(*w, *h);
+            let patch = super::item::StrokePatch::of(&stroke);
+            (merged(base, stroke), patch)
+        }
+        op => (apply(op, base), None),
+    }
+}
+
 /// `op` on `base`. Peak working set: the new plane (1 B/px, 12 MB at
-/// 12 MP) beside the inputs it reads; Bake's correction build documents
-/// its own.
+/// 12 MP) beside the inputs it reads, and a stroke's own mask; Bake's
+/// correction build documents its own.
 pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
     match op {
-        SelectionOp::Merge(stroke) => merged(base, (**stroke).clone()),
+        SelectionOp::Stroke { drawn, dims: (w, h), .. } => merged(base, drawn.mask(*w, *h)),
         SelectionOp::Invert => SelState {
             selection: base.selection.as_ref().map(|s| Arc::new(s.invert())),
             edits: base.edits.clone(),
@@ -333,12 +355,13 @@ mod tests {
     /// first's output, in order; the image is pending until both land.
     #[test]
     fn quick_strokes_build_on_each_other_in_order() {
-        use prunr_core::selection::FULL;
         let mut queue = SelectionQueue::new();
-        let first = plane(&[FULL, 0, 0]);
-        let second = plane(&[0, 0, FULL]);
-        queue.push(1, SelectionOp::Merge(Arc::clone(&first)), AfterLanding::Nothing, SelState::default());
-        queue.push(1, SelectionOp::Merge(Arc::clone(&second)), AfterLanding::Nothing, SelState::default());
+        let at = |x: f32| {
+            let drawn = super::super::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, 0.5, 0.5)], super::super::tests::fixtures::HARD);
+            SelectionOp::Stroke { drawn, dims: (3, 1), kept: true }
+        };
+        queue.push(1, at(0.5), SelState::default());
+        queue.push(1, at(2.5), SelState::default());
         assert!(queue.is_pending(1));
         let done = wait(&mut queue, 2);
         assert_eq!(done.len(), 2);
@@ -354,7 +377,7 @@ mod tests {
     #[test]
     fn a_done_chain_holds_no_planes() {
         let mut queue = SelectionQueue::new();
-        queue.push(1, SelectionOp::Invert, AfterLanding::Nothing, SelState { selection: Some(plane(&[0, 0])), edits: None });
+        queue.push(1, SelectionOp::Invert, SelState { selection: Some(plane(&[0, 0])), edits: None });
         let done = wait(&mut queue, 1);
         let made = done[0].made.selection.clone().expect("inverted");
         drop(done);
@@ -387,7 +410,7 @@ mod tests {
     fn an_action_waits_for_the_queue() {
         use super::super::views::shortcuts::Action;
         let mut queue = SelectionQueue::new();
-        queue.push(1, SelectionOp::Invert, AfterLanding::Nothing, SelState { selection: Some(plane(&[0])), edits: None });
+        queue.push(1, SelectionOp::Invert, SelState { selection: Some(plane(&[0])), edits: None });
         queue.defer(Action::Undo, vec![1]);
         queue.defer(Action::Redo, vec![2]);
         assert!(queue.take_deferred(|_| false).is_empty(), "held while its image is pending, and the one after it too");

@@ -378,22 +378,11 @@ pub(crate) fn magic_brush_masks(sessions: &SamSessions, photo: &image::RgbaImage
     Ok(masks)
 }
 
-/// Result from a background SAM decoder thread, or a human-readable error.
+/// A Magic Brush pick from a background thread: the stroke to draw and
+/// merge, or a human-readable error.
 pub(crate) struct SamDecoderResult {
     pub(crate) item_id: u64,
-    pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) reading: prunr_core::MaskReading,
-    pub(crate) result: Result<DecodedSelection, String>,
-}
-
-pub(crate) enum DecodedSelection {
-    /// A click or stroke: the prompt's mask, still to be merged onto the
-    /// current selection, with the logits it came from so a Confidence
-    /// change can re-threshold the same stroke without the decoder.
-    Fresh { mask: prunr_core::selection::MaskArtifact, output: Arc<prunr_core::sam::SamDecoderOutput> },
-    /// A click with Depth on: the depth band's mask, still to be merged,
-    /// and the pick a Range change draws again.
-    ByDepth { mask: prunr_core::selection::MaskArtifact, drawn: super::brush_state::StrokeDrawn },
+    pub(crate) result: Result<super::brush_state::StrokeDrawn, String>,
 }
 
 /// A Magic Brush click with Depth on, captured at click time like
@@ -405,34 +394,6 @@ pub(crate) struct DepthSelectRequest {
     pub(crate) at: (f32, f32),
     pub(crate) range: f32,
     pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) source_dims: (u32, u32),
-    pub(crate) reading: prunr_core::MaskReading,
-}
-
-/// A re-threshold: already merged onto the pre-stroke selection and
-/// hashed on the pool, ready to replace the stroke's selection.
-pub(crate) struct Retuned {
-    pub(crate) merged: Arc<prunr_core::selection::MaskArtifact>,
-    pub(crate) hash: u64,
-    pub(crate) for_hash: u64,
-}
-
-pub(crate) struct StrokeRetuneResult {
-    pub(crate) item_id: u64,
-    pub(crate) drawn: super::brush_state::StrokeDrawn,
-    pub(crate) result: Result<Retuned, String>,
-}
-
-/// Draw the latest stroke again at its brush's values now.
-pub(crate) struct StrokeRetuneRequest {
-    pub(crate) item_id: u64,
-    pub(crate) drawn: super::brush_state::StrokeDrawn,
-    pub(crate) source_dims: (u32, u32),
-    /// The selection the stroke was merged onto, read on the job's thread.
-    pub(crate) base: Option<super::item::Region>,
-    /// The selection the stroke committed: the retune replaces it only
-    /// while it is still that stroke's.
-    pub(crate) for_hash: u64,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
@@ -459,7 +420,6 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) embedding: Arc<prunr_core::sam::SamEmbedding>,
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
     pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) source_dims: (u32, u32),
     pub(crate) reading: prunr_core::MaskReading,
     pub(crate) cpu_only: bool,
 }
@@ -890,10 +850,6 @@ pub(crate) struct Processor {
     colorize: RunSlot<ColorizeResult>,
     sam_encoded: Chan<SamEncoderResult>,
     sam_decoded: Chan<SamDecoderResult>,
-    stroke_retuned: Chan<StrokeRetuneResult>,
-    /// A retune is on the pool; the next slider value waits for its
-    /// result so a drag never queues more than one.
-    retune_in_flight: bool,
     /// Magic Brush picks selecting, per image: each answers exactly once.
     picks_selecting: HashMap<u64, u32>,
     sam_sessions: SamSessionSlot,
@@ -961,8 +917,6 @@ impl Processor {
             colorize: RunSlot::new(),
             sam_encoded: Chan::default(),
             sam_decoded: Chan::default(),
-            stroke_retuned: Chan::default(),
-            retune_in_flight: false,
             picks_selecting: HashMap::new(),
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
@@ -1034,17 +988,12 @@ impl Processor {
     }
 
     /// A Magic Brush click with Depth on: everything near the clicked
-    /// depth, made on the pool and landing like a decoded stroke.
+    /// depth, landing like a decoded pick.
     pub(crate) fn dispatch_depth_select(&mut self, req: DepthSelectRequest) {
         self.note_pick(req.item_id);
-        let tx = self.sam_decoded.tx.clone();
-        rayon::spawn(move || {
-            let (w, h) = req.source_dims;
-            let around = req.depth.at(req.at.0, req.at.1);
-            let drawn = super::brush_state::StrokeDrawn::Depth { depth: Arc::clone(&req.depth), around, mode: req.mode, range: req.range };
-            let result = caught(|| drawn.mask(w, h)).map(|mask| DecodedSelection::ByDepth { mask, drawn });
-            let _ = tx.send(SamDecoderResult { item_id: req.item_id, mode: req.mode, reading: req.reading, result });
-        });
+        let around = req.depth.at(req.at.0, req.at.1);
+        let drawn = super::brush_state::StrokeDrawn::Depth { depth: req.depth, around, mode: req.mode, range: req.range };
+        let _ = self.sam_decoded.tx.send(SamDecoderResult { item_id: req.item_id, result: Ok(drawn) });
     }
 
     fn note_pick(&mut self, item_id: u64) {
@@ -2036,64 +1985,23 @@ impl Processor {
         self.sam_sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
     }
 
-    /// No admission gate: the decoder is ~20 MB. The mask is built on the
-    /// worker too, so the UI thread only merges it; the logits come back
-    /// for re-thresholding.
+    /// No admission gate: the decoder is ~20 MB. The pick comes back as
+    /// its best candidate's logits, all a mask or a redraw reads.
     pub(crate) fn dispatch_sam_decoder(&mut self, req: SamDecodeRequest) {
         self.note_pick(req.item_id);
         let tx = self.sam_decoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            let (w, h) = req.source_dims;
             let started = std::time::Instant::now();
             let result = caught(|| ensure_sam_sessions(&sessions, req.cpu_only)
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
-                    let decoded = started.elapsed();
-                    let mask = prunr_core::sam::decode_to_mask_artifact(&out, w, h, req.reading, req.mode);
-                    tracing::debug!(
-                        item_id = req.item_id,
-                        decoder_ms = decoded.as_millis() as u64,
-                        mask_ms = (started.elapsed() - decoded).as_millis() as u64,
-                        "SAM decoder ran"
-                    );
-                    DecodedSelection::Fresh { mask, output: Arc::new(out) }
+                    tracing::debug!(item_id = req.item_id, decoder_ms = started.elapsed().as_millis() as u64, "SAM decoder ran");
+                    super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading }
                 }))
                 .unwrap_or_else(Err);
-            let _ = tx.send(SamDecoderResult {
-                item_id: req.item_id, mode: req.mode, reading: req.reading, result,
-            });
+            let _ = tx.send(SamDecoderResult { item_id: req.item_id, result });
         });
-    }
-
-    /// Draw the latest stroke again on the pool, merge it onto the
-    /// pre-stroke selection and hash it there, so the UI thread only swaps
-    /// the plane in. Every retune answers, a panic included.
-    pub(crate) fn dispatch_stroke_retune(&mut self, req: StrokeRetuneRequest) {
-        self.retune_in_flight = true;
-        let tx = self.stroke_retuned.tx.clone();
-        rayon::spawn(move || {
-            let StrokeRetuneRequest { item_id, drawn, source_dims: (w, h), base, for_hash } = req;
-            let result = caught(|| {
-                let base = base.as_ref().and_then(super::item::Region::load);
-                let merged = Arc::new(merge_stroke(base, drawn.mask(w, h)));
-                let hash = merged.content_hash();
-                Retuned { merged, hash, for_hash }
-            });
-            let _ = tx.send(StrokeRetuneResult { item_id, drawn, result });
-        });
-    }
-
-    pub(crate) fn pump_stroke_retunes(&mut self) -> Vec<StrokeRetuneResult> {
-        let done = self.stroke_retuned.drain();
-        if !done.is_empty() {
-            self.retune_in_flight = false;
-        }
-        done
-    }
-
-    pub(crate) fn retune_in_flight(&self) -> bool {
-        self.retune_in_flight
     }
 
     pub(crate) fn pump_sam_encoder_results(&mut self) -> Vec<SamEncoderResult> {

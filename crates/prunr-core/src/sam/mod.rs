@@ -231,6 +231,11 @@ struct Tap {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn plain(confidence: f32) -> MaskReading {
+        MaskReading { confidence, remove_specks: false }
+    }
 
     /// The best candidate kept alone reads as the whole output does, at
     /// any confidence, with or without specks removed.
@@ -246,11 +251,6 @@ mod tests {
             let read = |o: &SamDecoderOutput| decode_to_mask_artifact(o, 40, 30, reading, crate::selection::BrushMode::Add);
             assert_eq!(read(&alone).cells(), read(&output).cells(), "{reading:?}");
         }
-    }
-    use super::*;
-
-    fn plain(confidence: f32) -> MaskReading {
-        MaskReading { confidence, remove_specks: false }
     }
 
     /// Measured on a real stroke: where SAM is unsure its logits dither

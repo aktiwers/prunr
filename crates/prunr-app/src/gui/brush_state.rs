@@ -390,11 +390,8 @@ impl Trail {
 
 }
 
-/// Mid-drag stroke at the active item's model resolution: its path,
-/// drawn when it is committed.
+/// Mid-drag stroke: its path, drawn once committed, off the UI thread.
 struct ActiveStroke {
-    width: u32,
-    height: u32,
     trail: Trail,
     path: PaintPath,
 }
@@ -444,9 +441,9 @@ pub(crate) struct StrokeValues {
     pub(crate) range: f32,
 }
 
-/// The latest stroke on an image as it was drawn, kept so its brush's
-/// sliders draw it again while it is the latest: a Magic Brush pick, a
-/// depth pick or a Paint Brush stroke, each with the values it has now.
+/// A stroke as it was drawn, kept with its undo step so its brush's
+/// sliders can draw it again: a Magic Brush pick, a depth pick or a
+/// Paint Brush stroke, each with the values it has now.
 #[derive(Clone)]
 pub(crate) enum StrokeDrawn {
     Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading },
@@ -455,77 +452,36 @@ pub(crate) enum StrokeDrawn {
 }
 
 impl StrokeDrawn {
-    /// A Paint Brush stroke just drawn with `stamp`.
     pub(crate) fn painted(path: PaintPath, stamp: Stamp) -> Self {
         let size = path.size;
         Self::Paint { path: std::sync::Arc::new(path), size, stamp }
     }
 
-    /// The stroke with each slider that moved from `from` to `to` at its
-    /// new value, the others as it has them. Each keeps what made it (its
-    /// mode, its pick, its path).
-    pub(crate) fn moved(&self, from: StrokeValues, to: StrokeValues) -> Self {
-        self.with(
-            |size| moved_to(size, from.size, to.size),
-            |hardness| moved_to(hardness, from.hardness, to.hardness),
-            |opacity| moved_to(opacity, from.opacity, to.opacity),
-            |reading| prunr_core::MaskReading {
-                confidence: moved_to(reading.confidence, from.reading.confidence, to.reading.confidence),
-                remove_specks: moved_to(reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
-            },
-            |range| moved_to(range, from.range, to.range),
-        )
+    /// The values it is drawn with; those its brush has no slider for
+    /// read as `UNUSED`.
+    pub(crate) fn values(&self) -> StrokeValues {
+        match self {
+            Self::Magic { reading, .. } => StrokeValues { reading: *reading, ..UNUSED },
+            Self::Depth { range, .. } => StrokeValues { range: *range, ..UNUSED },
+            Self::Paint { size, stamp, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, ..UNUSED },
+        }
     }
 
-    /// The stroke moved by as much as the sliders moved from `from` to
-    /// `to`: Size by the same factor, the others by the same amount within
-    /// their ranges, so strokes keep their differences.
-    pub(crate) fn adjusted(&self, from: StrokeValues, to: StrokeValues) -> Self {
-        let offset = |v: f32, a: f32, b: f32, range: std::ops::RangeInclusive<f32>| (v + b - a).clamp(*range.start(), *range.end());
-        self.with(
-            |size| (size * to.size / from.size.max(f32::EPSILON)).clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end()),
-            |hardness| offset(hardness, from.hardness, to.hardness, 0.0..=1.0),
-            |opacity| offset(opacity, from.opacity, to.opacity, 0.0..=1.0),
-            |reading| prunr_core::MaskReading {
-                confidence: offset(reading.confidence, from.reading.confidence, to.reading.confidence, 0.0..=1.0),
-                remove_specks: moved_to(reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
-            },
-            |range| offset(range, from.range, to.range, DEPTH_RANGE),
-        )
-    }
-
-    /// The stroke with each value of its kind replaced as given.
-    fn with(
-        &self,
-        size: impl Fn(f32) -> f32,
-        hardness: impl Fn(f32) -> f32,
-        opacity: impl Fn(f32) -> f32,
-        reading: impl Fn(prunr_core::MaskReading) -> prunr_core::MaskReading,
-        range: impl Fn(f32) -> f32,
-    ) -> Self {
+    /// The stroke drawn at `values`, keeping what made it (its mode, its
+    /// pick, its path).
+    pub(crate) fn at(&self, values: StrokeValues) -> Self {
         use std::sync::Arc;
         match self {
-            Self::Magic { output, mode, reading: r } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: reading(*r) },
-            Self::Depth { depth, around, mode, range: r } => Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: range(*r) },
-            Self::Paint { path, size: s, stamp } => Self::Paint {
+            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading },
+            Self::Depth { depth, around, mode, .. } => Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range },
+            Self::Paint { path, stamp, .. } => Self::Paint {
                 path: Arc::clone(path),
-                size: size(*s),
-                stamp: Stamp { hardness: hardness(stamp.hardness), strength: opacity(stamp.strength), ..*stamp },
+                size: values.size,
+                stamp: Stamp { hardness: values.hardness, strength: values.opacity, ..*stamp },
             },
         }
     }
 
-    /// Whether a redraw of one at the other's values would change it.
-    pub(crate) fn values_differ(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Magic { reading: a, .. }, Self::Magic { reading: b, .. }) => a != b,
-            (Self::Depth { range: a, .. }, Self::Depth { range: b, .. }) => a != b,
-            (Self::Paint { size: a, stamp: s, .. }, Self::Paint { size: b, stamp: t, .. }) => a != b || s != t,
-            _ => true,
-        }
-    }
-
-    /// The stroke's own mask on a `width` × `height` image.
     pub(crate) fn mask(&self, width: u32, height: u32) -> MaskArtifact {
         match self {
             Self::Magic { output, mode, reading } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
@@ -535,8 +491,49 @@ impl StrokeDrawn {
     }
 }
 
-/// `value` where a slider moved from `from` to `to`: where it went, or
-/// as it was when it did not move.
+/// The values of the sliders a stroke's brush does not have.
+const UNUSED: StrokeValues = StrokeValues {
+    size: 0.0,
+    hardness: 0.0,
+    opacity: 0.0,
+    reading: prunr_core::MaskReading { confidence: 0.0, remove_specks: false },
+    range: 0.0,
+};
+
+impl StrokeValues {
+    /// Each value whose slider moved from `from` to `to` where the slider
+    /// went; the others as they are.
+    pub(crate) fn moved(self, from: Self, to: Self) -> Self {
+        Self {
+            size: moved_to(self.size, from.size, to.size),
+            hardness: moved_to(self.hardness, from.hardness, to.hardness),
+            opacity: moved_to(self.opacity, from.opacity, to.opacity),
+            reading: prunr_core::MaskReading {
+                confidence: moved_to(self.reading.confidence, from.reading.confidence, to.reading.confidence),
+                remove_specks: moved_to(self.reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
+            },
+            range: moved_to(self.range, from.range, to.range),
+        }
+    }
+
+    /// Each value moved by as much as its slider moved from `from` to
+    /// `to`: Size by the same factor, the others by the same amount within
+    /// their ranges, so strokes keep their differences.
+    pub(crate) fn adjusted(self, from: Self, to: Self) -> Self {
+        let offset = |v: f32, a: f32, b: f32, range: std::ops::RangeInclusive<f32>| (v + b - a).clamp(*range.start(), *range.end());
+        Self {
+            size: (self.size * to.size / from.size.max(f32::EPSILON)).clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end()),
+            hardness: offset(self.hardness, from.hardness, to.hardness, 0.0..=1.0),
+            opacity: offset(self.opacity, from.opacity, to.opacity, 0.0..=1.0),
+            reading: prunr_core::MaskReading {
+                confidence: offset(self.reading.confidence, from.reading.confidence, to.reading.confidence, 0.0..=1.0),
+                remove_specks: moved_to(self.reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
+            },
+            range: offset(self.range, from.range, to.range, DEPTH_RANGE),
+        }
+    }
+}
+
 fn moved_to<T: PartialEq>(value: T, from: T, to: T) -> T {
     if from == to { value } else { to }
 }
@@ -559,7 +556,6 @@ impl StrokeReach {
         }
     }
 
-    /// The one after it, round: Next, Last, All.
     pub(crate) fn following(self) -> Self {
         match self {
             Self::Next => Self::Last,
@@ -575,8 +571,9 @@ pub(crate) struct BrushState {
     active: Option<ActiveStroke>,
     /// Not saved: each start adjusts the latest stroke.
     pub(crate) reach: StrokeReach,
-    /// The slider values last frame, so a move is seen with where it came from.
-    pub(crate) seen: Option<StrokeValues>,
+    /// The selected image and the slider values last frame, so a move is
+    /// seen with where it came from, on that image only.
+    pub(crate) seen: Option<(u64, StrokeValues)>,
 }
 
 /// A brush tool; the app keeps at most one on.
@@ -606,11 +603,8 @@ impl BrushState {
         self.active.is_some()
     }
 
-    /// A stroke of `shape` at Size `size` begins on a `width` × `height` image.
-    pub fn begin_stroke(&mut self, width: u32, height: u32, shape: BrushShape, size: f32) {
+    pub fn begin_stroke(&mut self, shape: BrushShape, size: f32) {
         self.active = Some(ActiveStroke {
-            width,
-            height,
             trail: Trail::default(),
             path: PaintPath { shape, samples: Vec::new(), size },
         });
@@ -637,7 +631,7 @@ impl BrushState {
 
     /// Extend the active stroke at model-space coordinates. Caller
     /// converts screen→model so screen-radius confusion can't reach
-    /// the grid. A Line keeps only its press and the latest sample.
+    /// the grid.
     pub fn extend_stroke_with_radius(&mut self, x: f32, y: f32, radius: f32) {
         let Some(active) = self.active.as_mut() else { return };
         let samples = &mut active.path.samples;
@@ -648,14 +642,9 @@ impl BrushState {
         }
     }
 
-    /// The finished stroke drawn with `stamp`, and its path; `None` when
-    /// it was never extended.
-    pub fn commit_stroke(&mut self, stamp: Stamp) -> Option<(MaskArtifact, PaintPath)> {
-        let active = self.active.take()?;
-        if active.path.samples.is_empty() {
-            return None;
-        }
-        Some((active.path.render(active.width, active.height, active.path.size, stamp), active.path))
+    /// The finished stroke's path; `None` when it was never extended.
+    pub fn commit_stroke(&mut self) -> Option<PaintPath> {
+        self.active.take().map(|active| active.path).filter(|path| !path.samples.is_empty())
     }
 
 }
@@ -919,7 +908,7 @@ mod tests {
     fn disabling_drops_the_active_stroke() {
         let mut s = BrushState::default();
         s.enable();
-        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
+        s.begin_stroke(BrushShape::Circle, 8.0);
         s.extend_stroke_with_radius(32.0, 32.0, 8.0);
         assert!(s.has_active_stroke());
         s.disable();
@@ -932,10 +921,10 @@ mod tests {
     fn a_fast_stroke_is_continuous_between_samples() {
         for shape in [BrushShape::Circle, BrushShape::Square] {
             let mut s = BrushState::default();
-            s.begin_stroke(64, 64, shape, 2.0);
+            s.begin_stroke(shape, 2.0);
             s.extend_stroke_with_radius(4.0, 30.0, 2.0);
             s.extend_stroke_with_radius(60.0, 30.0, 2.0);
-            let (c, _) = s.commit_stroke(default_stamp()).expect("populated stroke");
+            let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp()).mask(64, 64);
             let gaps = (4..=60).filter(|&x| c.cells()[30 * 64 + x] == 0).count();
             assert_eq!(gaps, 0, "{shape:?} left {gaps} unpainted cells between the samples");
         }
@@ -946,24 +935,24 @@ mod tests {
         let mut s = BrushState::default();
         s.extend_stroke_with_radius(10.0, 10.0, 8.0);
         assert!(!s.has_active_stroke());
-        assert!(s.commit_stroke(default_stamp()).is_none());
+        assert!(s.commit_stroke().is_none());
     }
 
     #[test]
     fn empty_stroke_commit_returns_none() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
+        s.begin_stroke(BrushShape::Circle, 8.0);
         // No extend_stroke calls — buffer stays empty.
-        assert!(s.commit_stroke(default_stamp()).is_none());
+        assert!(s.commit_stroke().is_none());
         assert!(!s.has_active_stroke(), "commit should clear active stroke");
     }
 
     #[test]
     fn populated_stroke_commit_returns_correction() {
         let mut s = BrushState::default();
-        s.begin_stroke(64, 64, BrushShape::Circle, 8.0);
+        s.begin_stroke(BrushShape::Circle, 8.0);
         s.extend_stroke_with_radius(32.0, 32.0, 8.0);
-        let (c, _) = s.commit_stroke(default_stamp()).expect("populated stroke");
+        let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp()).mask(64, 64);
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
         assert!(c.has_selected_region());

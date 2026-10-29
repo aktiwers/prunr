@@ -176,7 +176,7 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
             return Some(format!("the strip keeps re-laying out: {settled:?} then {:?}", fit(&harness)));
         }
     }
-    if !tree(&harness).iter().any(|n| n.name.as_deref() == Some("Last stroke")) {
+    if !names(&harness).iter().any(|n| n == "Last stroke") {
         return Some("no tag saying what the sliders adjust".to_string());
     }
     let all = controls(&harness, |_| true);
