@@ -47,6 +47,7 @@ use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 
 use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
+use crate::inpaint_blend::Band;
 use crate::sysmem::process_rss_mb;
 use crate::types::CoreError;
 
@@ -124,6 +125,11 @@ pub struct SdInpaintRequest {
     /// ("differential diffusion"); 0 pastes the fill with a hard edge.
     #[serde(default)]
     pub soft_edge_px: f32,
+    /// With a soft edge, its width at each pixel of the mask in place of
+    /// `soft_edge_px`: a region whose parts were painted with their own.
+    /// Never sent: the worker reads it from the mask file.
+    #[serde(skip)]
+    pub soft_edge_band: Option<Arc<GrayImage>>,
 }
 
 /// How the SD pipeline runs, built at dispatch (`plan_tuning`) from the
@@ -327,6 +333,7 @@ impl Default for SdInpaintRequest {
             tuning: SdTuning::default(),
             fill_scale: Default::default(),
             soft_edge_px: 0.0,
+            soft_edge_band: None,
         }
     }
 }
@@ -385,9 +392,9 @@ pub fn process_inpaint_with(
     // One session for every region the fill scale fills on its own. The
     // fit reads the tall crop as the RAM gate above left it.
     // A scaled-down region's Feather band is that much narrower.
-    let out = crate::inpaint::fill_at_scale(image, mask, req.fill_scale, fit(&req), progress, |img, m, at, progress| {
-        let scaled = SdInpaintRequest { soft_edge_px: req.soft_edge_px * at, ..req.clone() };
-        paint_regions(&bundle, &vae, img, m, &scaled, progress)
+    let out = crate::inpaint::fill_at_scale(image, mask, req.soft_edge_band.as_deref(), req.fill_scale, fit(&req), progress, |img, m, band, at, progress| {
+        let scaled = SdInpaintRequest { soft_edge_px: req.soft_edge_px * at, soft_edge_band: None, ..req.clone() };
+        paint_regions(&bundle, &vae, img, m, band, &scaled, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     tracing::info!(
@@ -405,24 +412,26 @@ fn paint_regions(
     vae: &VaeBackend,
     image: &RgbaImage,
     mask: &GrayImage,
+    band: Option<&GrayImage>,
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
     let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
-    paint_regions_with(image, mask, max_side, progress, |crop, crop_mask, crop_progress| {
-        run_one_tile(bundle, vae, crop, crop_mask, req, crop_progress)
+    paint_regions_with(image, mask, band, max_side, progress, |crop, crop_mask, crop_band, crop_progress| {
+        run_one_tile(bundle, vae, crop, crop_mask, crop_band, req, crop_progress)
     })
 }
 
 /// `paint_regions` with the filler passed in: `fill` gets each crop or
-/// tile, its mask, and a handle framed on where it sits, so what it
-/// reports of its own pixels lands there.
+/// tile, its mask and per-pixel band, and a handle framed on where it
+/// sits, so what it reports of its own pixels lands there.
 fn paint_regions_with(
     image: &RgbaImage,
     mask: &GrayImage,
+    band: Option<&GrayImage>,
     max_side: u32,
     progress: &crate::progress::Progress,
-    mut fill: impl FnMut(&RgbaImage, &GrayImage, &crate::progress::Progress) -> Result<RgbaImage, CoreError>,
+    mut fill: impl FnMut(&RgbaImage, &GrayImage, Option<&GrayImage>, &crate::progress::Progress) -> Result<RgbaImage, CoreError>,
 ) -> Result<RgbaImage, CoreError> {
     use crate::progress::{TileRect, Unit};
     let components = mask_regions(mask);
@@ -456,9 +465,10 @@ fn paint_regions_with(
             start(tile_idx);
             let cropped_img = image::imageops::crop_imm(&out, x, y, w, h).to_image();
             let cropped_mask = image::imageops::crop_imm(mask, x, y, w, h).to_image();
+            let cropped_band = band.map(|band| image::imageops::crop_imm(band, x, y, w, h).to_image());
             // A failed region fails the run: left as it was, it would read
             // as a finished erase.
-            let painted = fill(&cropped_img, &cropped_mask, &progress.within((x, y, w, h), (img_w, img_h)))?;
+            let painted = fill(&cropped_img, &cropped_mask, cropped_band.as_ref(), &progress.within((x, y, w, h), (img_w, img_h)))?;
             match tile {
                 Some(tile) => blend_tile(&mut out, &painted, tile),
                 None => image::imageops::replace(&mut out, &painted, x as i64, y as i64),
@@ -795,6 +805,7 @@ fn run_one_tile(
     vae: &VaeBackend,
     image: &RgbaImage,
     mask: &GrayImage,
+    band: Option<&GrayImage>,
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
@@ -818,7 +829,10 @@ fn run_one_tile(
     }
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
-    let soft = (req.soft_edge_px >= 1.0).then(|| edge_ramp(&padded_mask, req.soft_edge_px));
+    let soft = (req.soft_edge_px >= 1.0).then(|| match band {
+        Some(band) => edge_ramp(&padded_mask, Band::PerPixel(&crate::formats::pad_mirrored(band, pw, ph))),
+        None => edge_ramp(&padded_mask, Band::Uniform(req.soft_edge_px)),
+    });
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent, photo_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
             let cond_h = prompted.then(|| s.spawn(|| text_embedding_f16(bundle, &prompt)));
@@ -2196,12 +2210,13 @@ fn gaussian(rng: &mut ChaCha8Rng, n: usize) -> Vec<f32> {
     (0..n).map(|_| StandardNormal.sample(rng)).collect()
 }
 
-/// How far in from the region's edge each pixel lies, over `width_px`:
-/// 0 outside, rising from the edge to 1 at `width_px` in. `fill_region`
-/// grows by 4-neighbour steps, so the distance is counted the same way
-/// (city-block): everything painted lies more than the Feather in and is
-/// filled in full, whatever its shape; only the Feather band fades.
-fn edge_ramp(mask: &GrayImage, width_px: f32) -> Vec<f32> {
+/// How far in from the region's edge each pixel lies, over its band: 0
+/// outside, rising from the edge to 1 at the band's width in; a pixel
+/// with no band is filled in full. `fill_region` grows by 4-neighbour
+/// steps, so the distance is counted the same way (city-block):
+/// everything painted lies more than the Feather in and is filled in
+/// full, whatever its shape; only the Feather band fades.
+fn edge_ramp(mask: &GrayImage, band: Band) -> Vec<f32> {
     let (w, h) = (mask.width() as usize, mask.height() as usize);
     let far = (w + h) as u32;
     let mut d: Vec<u32> = mask.as_raw().iter().map(|&v| if v > IN_HOLE { far } else { 0 }).collect();
@@ -2219,9 +2234,15 @@ fn edge_ramp(mask: &GrayImage, width_px: f32) -> Vec<f32> {
             if y + 1 < h { d[i] = d[i].min(d[i + w] + 1); }
         }
     }
-    // The region's outermost pixels lie 1 in; the band's innermost `width_px`.
-    let span = (width_px - 1.0).max(1.0);
-    d.iter().map(|&d| if d == 0 { 0.0 } else { ((d as f32 - 1.0) / span).clamp(0.0, 1.0) }).collect()
+    // The region's outermost pixels lie 1 in; the band's innermost its width.
+    d.iter().enumerate().map(|(i, &d)| {
+        let width = band.at(i);
+        match d {
+            0 => 0.0,
+            _ if width < 1.0 => 1.0,
+            d => ((d as f32 - 1.0) / (width - 1.0).max(1.0)).clamp(0.0, 1.0),
+        }
+    }).collect()
 }
 
 /// One value per latent cell: the mean of `value` over its 8×8 block of a
@@ -3207,7 +3228,7 @@ mod tests {
     #[test]
     fn each_crop_previews_where_it_sits_in_the_photo() {
         use crate::progress::{check_contract, Progress, ProgressUpdate, RecordingSink, Step as ProgressStep};
-        let fake_fill = |crop: &RgbaImage, _: &GrayImage, p: &Progress| {
+        let fake_fill = |crop: &RgbaImage, _: &GrayImage, _: Option<&GrayImage>, p: &Progress| {
             let (w, h) = crop.dimensions();
             p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![9; (pw * ph * 4) as usize]);
             Ok(crop.clone())
@@ -3225,7 +3246,7 @@ mod tests {
             mask.put_pixel(x, y, Luma([255]));
         }
         let sink = Arc::new(RecordingSink::default());
-        paint_regions_with(&image, &mask, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
+        paint_regions_with(&image, &mask, None, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
         // At half size: the strip's three tiles at x 0, 384, 688, then the
         // square's crop at (688, 388).
         assert_eq!(places(&sink.updates()), vec![
@@ -3243,8 +3264,8 @@ mod tests {
         }
         let sink = Arc::new(RecordingSink::default());
         let fit = crate::inpaint::Fit { long: 448, short: 448 };
-        crate::inpaint::fill_at_scale(&photo, &hole, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, _, p| {
-            paint_regions_with(img, m, SD_TILE, p, fake_fill)
+        crate::inpaint::fill_at_scale(&photo, &hole, None, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, band, _, p| {
+            paint_regions_with(img, m, band, SD_TILE, p, fake_fill)
         }).expect("fill");
         let found = places(&sink.updates());
         assert_eq!(found.len(), 1, "{found:?}");
@@ -3417,12 +3438,29 @@ mod tests {
     #[test]
     fn the_edge_ramp_rises_from_the_edge_to_the_core() {
         let mask = GrayImage::from_fn(64, 8, |x, _| Luma([if x >= 16 { 255 } else { 0 }]));
-        let ramp = edge_ramp(&mask, 8.0);
+        let ramp = edge_ramp(&mask, Band::Uniform(8.0));
         let at = |x: usize| ramp[4 * 64 + x];
         assert_eq!(at(10), 0.0, "outside");
         assert!(at(16) < 0.2, "at the edge: {}", at(16));
         assert!(at(20) > at(17) && at(20) < 1.0, "rising");
         assert_eq!(at(40), 1.0, "the core");
+    }
+
+    /// The soft edge rises over each pixel's own band: one width for every
+    /// pixel ramps as that width does, and a part with no band is filled
+    /// in full up to its edge.
+    #[test]
+    fn the_edge_ramp_follows_each_pixels_band() {
+        let mask = GrayImage::from_fn(64, 8, |x, _| Luma([if x >= 16 { 255 } else { 0 }]));
+        let same = GrayImage::from_pixel(64, 8, Luma([8]));
+        assert_eq!(edge_ramp(&mask, Band::PerPixel(&same)), edge_ramp(&mask, Band::Uniform(8.0)));
+        let hard_then_soft = GrayImage::from_fn(64, 8, |_, y| Luma([if y < 4 { 0 } else { 8 }]));
+        let ramp = edge_ramp(&mask, Band::PerPixel(&hard_then_soft));
+        let soft = edge_ramp(&mask, Band::Uniform(8.0));
+        for x in 16..64 {
+            assert_eq!(ramp[x], 1.0, "row 0, x {x}: no band, filled in full");
+            assert_eq!(ramp[6 * 64 + x], soft[6 * 64 + x], "row 6, x {x}: its own band");
+        }
     }
 
     /// Whatever its shape, everything painted is filled in full: only the
@@ -3437,7 +3475,7 @@ mod tests {
                     Luma([if dx * dx + dy * dy <= radius * radius { 255 } else { 0 }])
                 });
                 let region = crate::inpaint_blend::fill_region(&painted, grow, feather);
-                let ramp = edge_ramp(&region, feather);
+                let ramp = edge_ramp(&region, Band::Uniform(feather));
                 let least = painted.as_raw().iter().zip(&ramp).filter(|(&p, _)| p > 127).map(|(_, &r)| r).fold(1.0f32, f32::min);
                 assert_eq!(least, 1.0, "grow {grow}, feather {feather}, radius {radius}");
                 let outer = region.as_raw().iter().zip(&ramp).filter(|(&m, _)| m > 127).map(|(_, &r)| r).fold(1.0f32, f32::min);
