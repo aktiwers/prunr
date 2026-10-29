@@ -48,6 +48,67 @@ pub const SEAM_BLEND_EPSILON: f32 = 1e-3;
 pub const DEFAULT_GROW_PX: f32 = 2.0;
 pub const DEFAULT_EDGE_BLEND_PX: f32 = 4.0;
 
+/// How wide the band is over which a fill fades into the photo: one width
+/// for the whole region, or a width per pixel, in whole pixels, where the
+/// parts of the region were painted with their own.
+#[derive(Clone, Copy, Debug)]
+pub enum Band<'a> {
+    Uniform(f32),
+    /// The size of the region's mask.
+    PerPixel(&'a GrayImage),
+}
+
+impl Band<'_> {
+    /// The width at pixel `i` of the image.
+    #[inline]
+    pub fn at(&self, i: usize) -> f32 {
+        match self {
+            Self::Uniform(px) => *px,
+            Self::PerPixel(map) => map.as_raw()[i] as f32,
+        }
+    }
+
+    /// The widest band anywhere: the margin a blend works within.
+    pub fn widest(&self) -> f32 {
+        match self {
+            Self::Uniform(px) => *px,
+            Self::PerPixel(map) => map.as_raw().par_iter().copied().max().unwrap_or(0) as f32,
+        }
+    }
+
+    /// Whether it fits a `dims` mask.
+    fn fits(&self, dims: (u32, u32)) -> bool {
+        match self {
+            Self::Uniform(_) => true,
+            Self::PerPixel(map) => map.dimensions() == dims,
+        }
+    }
+}
+
+/// A hole and its per-pixel band in one grey image, as a mask file holds
+/// them: 0 outside the hole, 255 less the band inside (bands to 127 px).
+pub fn pack_band(hole: &GrayImage, band: &GrayImage) -> GrayImage {
+    GrayImage::from_fn(hole.width(), hole.height(), |x, y| {
+        let inside = hole.get_pixel(x, y).0[0] >= 128;
+        image::Luma([if inside { 255 - band.get_pixel(x, y).0[0].min(127) } else { 0 }])
+    })
+}
+
+/// The hole a packed mask holds, and its per-pixel band; no band when the
+/// mask holds the hole alone (every pixel of it 255).
+pub fn unpack_band(packed: GrayImage) -> (GrayImage, Option<GrayImage>) {
+    if packed.as_raw().iter().all(|&v| v == 0 || v == 255) {
+        return (packed, None);
+    }
+    let band = GrayImage::from_fn(packed.width(), packed.height(), |x, y| {
+        let v = packed.get_pixel(x, y).0[0];
+        image::Luma([if v >= 128 { 255 - v } else { 0 }])
+    });
+    let mut hole = packed;
+    hole.pixels_mut().for_each(|p| p.0[0] = if p.0[0] >= 128 { 255 } else { 0 });
+    (hole, Some(band))
+}
+
 /// The region a fill replaces: what was painted, grown by `grow_px`, then
 /// by the `edge_blend_px` ring the fill fades into the photo over. The
 /// ring lies outside the grown region, so the blend never reaches the
@@ -183,8 +244,8 @@ pub fn color_match_inpainted(
 /// Color-correct the fill point by point along its edge: at each fill
 /// pixel within `ring_px` of the edge, the photo's mean just outside less
 /// the fill's mean just inside (one `ring_px` box), spread over the whole
-/// region by push-pull interpolation and faded out over `reach_px` from
-/// the edge. A region bordering different surroundings (dark hair on one
+/// region by push-pull interpolation and faded out from the edge over the
+/// `edge_colour_reach` of each pixel's `band`. A region bordering different surroundings (dark hair on one
 /// side, pale sky on the other) then meets each, which one mean shift for
 /// the region cannot; the fade keeps a difference that is content, not
 /// cast (an edge across a face), from spreading through the fill.
@@ -192,7 +253,7 @@ pub fn color_match_inpainted(
 /// Leaves `inpainted` as it is when the mask is empty, dimensions
 /// disagree, or no fill pixel has photo within `ring_px`.
 ///
-/// Peak working set, n = mask bbox plus `max(ring_px, reach_px)` (f32):
+/// Peak working set, n = mask bbox plus `max(ring_px, reach)` (f32):
 /// while the offsets are measured, the inside mask, its box share, the
 /// edge weight, the fade, the offset and two reused scratch planes (7 n);
 /// while one channel spreads, the inside mask, weight, fade and offset
@@ -209,15 +270,17 @@ pub fn match_colour_along_edge(
     source: &RgbaImage,
     mask: &GrayImage,
     ring_px: u32,
-    reach_px: u32,
+    band: Band,
 ) {
     if ring_px == 0
         || inpainted.dimensions() != source.dimensions()
         || source.dimensions() != mask.dimensions()
+        || !band.fits(mask.dimensions())
     {
         return;
     }
-    let Some(bbox) = mask_bbox(mask, 128, ring_px.max(reach_px) + 1) else {
+    let widest_reach = edge_colour_reach(band.widest());
+    let Some(bbox) = mask_bbox(mask, 128, ring_px.max(widest_reach) + 1) else {
         return;
     };
     let (bw, n) = (bbox.w as usize, bbox.area());
@@ -241,10 +304,8 @@ pub fn match_colour_along_edge(
         return;
     }
     // 1 at the edge, where the fill box is half inside, to 0 once the
-    // `reach_px` box lies wholly in the fill.
-    let fade: Vec<f32> = box_filter(&inside, bbox.w, bbox.h, reach_px.max(1)).iter()
-        .map(|&share| ((1.0 - share) * 2.0).clamp(0.0, 1.0))
-        .collect();
+    // pixel's reach box lies wholly in the fill.
+    let fade = edge_fade(&inside, bbox, img_w, band);
     let (mut plane, mut sum) = (vec![0.0f32; n], vec![0.0f32; n]); // reused per channel
     let mut offset = vec![0.0f32; n];
     for c in 0..3 {
@@ -278,6 +339,35 @@ pub fn match_colour_along_edge(
                 }
             });
     }
+}
+
+/// The along-edge colour correction's fade over `bbox`, at each fill pixel
+/// (`inside`): 1 at the edge, where its reach box is half in the fill, to
+/// 0 once the box lies wholly in it. One box filter per reach the band
+/// has; while it is built, a byte and an f32 per pixel besides the fade.
+fn edge_fade(inside: &[f32], bbox: Bbox, img_w: usize, band: Band) -> Vec<f32> {
+    let fade_of = |share: f32| ((1.0 - share) * 2.0).clamp(0.0, 1.0);
+    if let Band::Uniform(px) = band {
+        return box_filter(inside, bbox.w, bbox.h, edge_colour_reach(px).max(1)).into_iter().map(fade_of).collect();
+    }
+    let bw = bbox.w as usize;
+    // Band widths are whole pixels under 256, so their reaches fit a byte.
+    let reach: Vec<u8> = (0..inside.len())
+        .map(|i| edge_colour_reach(band.at((bbox.y as usize + i / bw) * img_w + bbox.x as usize + i % bw)) as u8)
+        .collect();
+    let mut reaches: Vec<u8> = reach.iter().zip(inside).filter(|(_, &i)| i > 0.5).map(|(&r, _)| r).collect();
+    reaches.sort_unstable();
+    reaches.dedup();
+    let mut fade = vec![0.0f32; inside.len()];
+    for r in reaches {
+        let share = box_filter(inside, bbox.w, bbox.h, (r as u32).max(1));
+        for ((f, &at), &s) in fade.iter_mut().zip(&reach).zip(&share) {
+            if at == r {
+                *f = fade_of(s);
+            }
+        }
+    }
+    fade
 }
 
 /// Fill the gaps of `value` (known where `weight` > 0) smoothly from the
@@ -331,25 +421,29 @@ fn push_pull(value: &[f32], weight: &[f32], w: usize, h: usize) -> Vec<f32> {
 /// inpaint (deep interior). Outside the mask, output is left unchanged
 /// (the caller's compose step has already painted source there).
 ///
-/// Leaves `inpainted` as it is when the mask is empty or dimensions
-/// disagree. Works on the mask bbox plus a `radius + ceil(band_px) + 2`
-/// margin.
+/// The band is how far in the blend reaches, at each pixel its own.
+///
+/// Leaves `inpainted` as it is when the mask is empty, no pixel has a
+/// band, or dimensions disagree. Works on the mask bbox plus a `radius +
+/// ceil(widest band) + 2` margin.
 pub fn seam_guided_blend(
     inpainted: &mut RgbaImage,
     source: &RgbaImage,
     mask: &GrayImage,
     radius: u32,
     epsilon: f32,
-    band_px: f32,
+    band: Band,
 ) {
-    if band_px <= 0.0
+    let widest = band.widest();
+    if widest <= 0.0
         || radius == 0
         || inpainted.dimensions() != source.dimensions()
         || source.dimensions() != mask.dimensions()
+        || !band.fits(mask.dimensions())
     {
         return;
     }
-    let margin = radius + band_px.ceil() as u32 + 2;
+    let margin = radius + widest.ceil() as u32 + 2;
     let Some(bbox) = mask_bbox(mask, 128, margin) else {
         return;
     };
@@ -374,8 +468,6 @@ pub fn seam_guided_blend(
     let mut mean_gg = vec![0.0f32; n];
     let mut mean_a = vec![0.0f32; n];
     let mut mean_b = vec![0.0f32; n];
-
-    let inv_band = 1.0 / band_px;
 
     for c in 0..3 {
         load_channel(source, bbox, c, &mut guide);
@@ -431,7 +523,7 @@ pub fn seam_guided_blend(
         // Writing channel `c` in place is safe: no later channel reads it.
         composite_channel(
             inpainted, source, bbox, c, crop_mask_raw,
-            &dist, &mean_a, &mean_b, inv_band,
+            &dist, &mean_a, &mean_b, band,
         );
     }
 }
@@ -462,7 +554,7 @@ fn composite_channel(
     dist: &[f32],
     mean_a: &[f32],
     mean_b: &[f32],
-    inv_band: f32,
+    band: Band,
 ) {
     let src = source.as_raw();
     let sw = source.width() as usize;
@@ -486,8 +578,9 @@ fn composite_channel(
             let g = src[(row_in_full + x) * 4 + channel] as f32;
             let q = mean_a[i] * g + mean_b[i];
             // Blend weight: 0 at the seam (use guided), 1 deep in mask
-            // (use raw inpaint already in `out`).
-            let w = (dist[i] * inv_band).clamp(0.0, 1.0);
+            // (use raw inpaint already in `out`); no band, no blend.
+            let width = band.at(row_in_full + x);
+            let w = if width > 0.0 { (dist[i] * (1.0 / width)).clamp(0.0, 1.0) } else { 1.0 };
             let pix_off = ((row_in_full + x) * 4 + channel) as isize;
             unsafe {
                 let p = dp.0.offset(pix_off);
@@ -524,22 +617,22 @@ pub fn edge_colour_reach(feather_px: f32) -> u32 {
 
 /// The one post-process pipeline for every fill — color match →
 /// seam-guided blend → optional sharpen — so order and constants can't
-/// drift between callers. `mask` is the [`fill_region`];
-/// `feather_px <= 0.0` skips the blend, `sharpen <= 0.0` the sharpen.
+/// drift between callers. `mask` is the [`fill_region`] and `band` its
+/// Feather; no band skips the blend, `sharpen <= 0.0` the sharpen.
 pub fn finalize_inpaint(
     mut raw: RgbaImage,
     source: &RgbaImage,
     mask: &GrayImage,
-    feather_px: f32,
+    band: Band,
     sharpen: f32,
     colour: EdgeColour,
 ) -> RgbaImage {
     match colour {
-        EdgeColour::AlongEdge => match_colour_along_edge(&mut raw, source, mask, COLOR_MATCH_RING_PX, edge_colour_reach(feather_px)),
+        EdgeColour::AlongEdge => match_colour_along_edge(&mut raw, source, mask, COLOR_MATCH_RING_PX, band),
         EdgeColour::WholeArea => color_match_inpainted(&mut raw, source, mask, COLOR_MATCH_RING_PX),
         EdgeColour::Off => {}
     }
-    seam_guided_blend(&mut raw, source, mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, feather_px);
+    seam_guided_blend(&mut raw, source, mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, band);
     crate::inpaint::sharpen_inpainted(&mut raw, mask, sharpen);
     raw
 }
@@ -591,7 +684,7 @@ mod tests {
         let src = RgbaImage::from_fn(w, h, |x, _| if x < w / 2 { Rgba([200, 40, 40, 255]) } else { Rgba([40, 40, 200, 255]) });
         let mask = GrayImage::from_fn(w, h, |x, y| Luma([if (10..70).contains(&x) && (10..30).contains(&y) { 255 } else { 0 }]));
         let fill = RgbaImage::from_fn(w, h, |x, y| if mask.get_pixel(x, y).0[0] >= 128 { Rgba([120, 120, 120, 255]) } else { *src.get_pixel(x, y) });
-        let along = applied(&fill, |f| match_colour_along_edge(f, &src, &mask, COLOR_MATCH_RING_PX, 6));
+        let along = applied(&fill, |f| match_colour_along_edge(f, &src, &mask, COLOR_MATCH_RING_PX, Band::Uniform(12.0)));
         let whole = applied(&fill, |f| color_match_inpainted(f, &src, &mask, COLOR_MATCH_RING_PX));
         let off = |img: &RgbaImage, x, want: [u8; 4]| {
             let p = img.get_pixel(x, 11).0;
@@ -626,7 +719,7 @@ mod tests {
         for mask in [empty_mask(64, 64), empty_mask(32, 32), GrayImage::from_pixel(64, 64, Luma([255]))] {
             assert_eq!(applied(&inp, |o| color_match_inpainted(o, &src, &mask, 8)), inp, "{:?}", mask.dimensions());
         }
-        let out = applied(&inp, |o| seam_guided_blend(o, &src, &empty_mask(64, 64), 4, 1e-3, 8.0));
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &empty_mask(64, 64), 4, 1e-3, Band::Uniform(8.0)));
         assert_eq!(out, inp, "seam blend, no mask");
     }
 
@@ -693,7 +786,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, Band::Uniform(8.0)));
         let edge = out.get_pixel(16, 32);
         assert!(
             edge[0] > 60,
@@ -729,7 +822,7 @@ mod tests {
             let (dx, dy) = (x as f32 - 700.0, y as f32 - 700.0);
             Luma([if dx * dx + dy * dy < 600.0 * 600.0 { 255 } else { 0 }])
         });
-        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, DEFAULT_EDGE_BLEND_PX));
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, SEAM_BLEND_RADIUS, SEAM_BLEND_EPSILON, Band::Uniform(DEFAULT_EDGE_BLEND_PX)));
         for (x, y, px) in out.enumerate_pixels() {
             for (c, lo, hi) in [(0, 180, 200), (1, 150, 170), (2, 80, 100)] {
                 assert!((lo..=hi).contains(&px[c]), "({x}, {y}) channel {c} = {}", px[c]);
@@ -753,7 +846,7 @@ mod tests {
                 mask.put_pixel(x, y, Luma([255]));
             }
         }
-        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, 8.0));
+        let out = applied(&inp, |o| seam_guided_blend(o, &src, &mask, 4, 1e-3, Band::Uniform(8.0)));
         // Pixel near the inside seam (right/bottom of mask) should be
         // lifted toward source. Pixels at the actual image corner have
         // less context so we don't assert on (0,0).
@@ -768,6 +861,95 @@ mod tests {
         assert_eq!(outside[0], 200);
     }
 
+    /// A photo and a fill that differ everywhere, and a hole painted at
+    /// `squares` (x, y, side).
+    fn fill_case(n: u32, squares: &[(u32, u32, u32)]) -> (RgbaImage, RgbaImage, GrayImage) {
+        let src = RgbaImage::from_fn(n, n, |x, y| Rgba([(x * 5 % 251) as u8, (y * 3 % 241) as u8, ((x + y) % 199) as u8, 255]));
+        let raw = RgbaImage::from_fn(n, n, |x, y| Rgba([(x * 11 % 233) as u8, 60 + (y % 50) as u8, 200 - (x % 90) as u8, 255]));
+        let mask = GrayImage::from_fn(n, n, |x, y| {
+            let inside = squares.iter().any(|&(sx, sy, side)| (sx..sx + side).contains(&x) && (sy..sy + side).contains(&y));
+            Luma([if inside { 255 } else { 0 }])
+        });
+        (src, raw, mask)
+    }
+
+    /// One band width for every pixel fills exactly as that width for the
+    /// whole region does, with every way of matching colours.
+    #[test]
+    fn a_band_the_same_everywhere_fills_as_one_width() {
+        let (src, raw, mask) = fill_case(96, &[(20, 24, 40)]);
+        for width in [0u8, 3, 8, 21] {
+            let map = GrayImage::from_pixel(96, 96, Luma([width]));
+            for colour in [EdgeColour::AlongEdge, EdgeColour::WholeArea, EdgeColour::Off] {
+                let one = finalize_inpaint(raw.clone(), &src, &mask, Band::Uniform(width as f32), 0.0, colour);
+                let each = finalize_inpaint(raw.clone(), &src, &mask, Band::PerPixel(&map), 0.0, colour);
+                assert!(one == each, "width {width}, {colour:?}");
+            }
+        }
+    }
+
+    /// Each part of a region fades over its own band: two holes far apart,
+    /// one hard and one soft, blend as each would alone.
+    #[test]
+    fn each_part_of_a_region_fades_over_its_own_band() {
+        let (src, raw, mask) = fill_case(160, &[(12, 12, 30), (100, 100, 40)]);
+        let mut map = GrayImage::new(160, 160);
+        for (x, y, p) in map.enumerate_pixels_mut() {
+            p.0[0] = if x < 80 && y < 80 { 2 } else { 14 };
+        }
+        let both = finalize_inpaint(raw.clone(), &src, &mask, Band::PerPixel(&map), 0.0, EdgeColour::Off);
+        let hard = finalize_inpaint(raw.clone(), &src, &mask, Band::Uniform(2.0), 0.0, EdgeColour::Off);
+        assert!(both != hard, "the soft part blends further in than a hard one");
+        for (width, part) in [(2.0, (0, 0, 80)), (14.0, (80, 80, 80))] {
+            let alone = finalize_inpaint(raw.clone(), &src, &mask, Band::Uniform(width), 0.0, EdgeColour::Off);
+            let (x0, y0, side) = part;
+            for y in y0..y0 + side {
+                for x in x0..x0 + side {
+                    assert_eq!(both.get_pixel(x, y), alone.get_pixel(x, y), "({x}, {y}) with a {width} px band");
+                }
+            }
+        }
+    }
+
+    /// The colour correction fades over each pixel's own reach: where the
+    /// band is wide, it reaches further into the fill.
+    #[test]
+    fn the_colour_fade_reaches_as_far_as_each_band() {
+        let (_, _, mask) = fill_case(64, &[(8, 8, 48)]);
+        let bbox = mask_bbox(&mask, 128, 30).expect("a hole");
+        let inside: Vec<f32> = (0..bbox.area()).map(|i| {
+            let (x, y) = (bbox.x + i as u32 % bbox.w, bbox.y + i as u32 / bbox.w);
+            if mask.get_pixel(x, y).0[0] >= 128 { 1.0 } else { 0.0 }
+        }).collect();
+        let narrow = edge_fade(&inside, bbox, 64, Band::Uniform(8.0));
+        let wide = edge_fade(&inside, bbox, 64, Band::Uniform(40.0));
+        let mut map = GrayImage::from_pixel(64, 64, Luma([8]));
+        for (x, _, p) in map.enumerate_pixels_mut() {
+            if x >= 32 { p.0[0] = 40; }
+        }
+        let mixed = edge_fade(&inside, bbox, 64, Band::PerPixel(&map));
+        for (i, &inside) in inside.iter().enumerate() {
+            if inside > 0.5 {
+                let x = bbox.x + i as u32 % bbox.w;
+                let want = if x < 32 { narrow[i] } else { wide[i] };
+                assert_eq!(mixed[i], want, "pixel {i}");
+            }
+        }
+    }
+
+    /// A mask file carries the hole and each pixel's band; a mask without
+    /// one reads back as the hole alone.
+    #[test]
+    fn a_packed_mask_holds_the_hole_and_its_band() {
+        let hole = GrayImage::from_fn(8, 1, |x, _| Luma([if x >= 2 { 255 } else { 0 }]));
+        let band = GrayImage::from_fn(8, 1, |x, _| Luma([[0, 9, 0, 3, 12, 40, 127, 200][x as usize]]));
+        let (back, read) = unpack_band(pack_band(&hole, &band));
+        assert_eq!(back, hole);
+        let read = read.expect("a band");
+        assert_eq!(read.as_raw(), &vec![0, 0, 0, 3, 12, 40, 127, 127], "outside reads 0; a band past 127 px is 127");
+        assert_eq!(unpack_band(hole.clone()), (hole, None));
+    }
+
     /// Edge blend 0 is no blend at all: the fill is only colour-matched.
     #[test]
     fn edge_blend_zero_leaves_the_fill_unblended() {
@@ -780,7 +962,7 @@ mod tests {
         } }
         let mut matched = raw.clone();
         color_match_inpainted(&mut matched, &src, &mask, COLOR_MATCH_RING_PX);
-        assert_eq!(finalize_inpaint(raw, &src, &mask, 0.0, 0.0, EdgeColour::WholeArea), matched);
+        assert_eq!(finalize_inpaint(raw, &src, &mask, Band::Uniform(0.0), 0.0, EdgeColour::WholeArea), matched);
     }
 
     /// The fill region is the painted one grown by Expand and then by the
@@ -809,7 +991,7 @@ mod tests {
         let raw = solid(64, 64, [100, 100, 100, 255]);
         let region = fill_region(&painted, 0.0, 12.0);
         for colour in [EdgeColour::AlongEdge, EdgeColour::WholeArea, EdgeColour::Off] {
-            let out = finalize_inpaint(raw.clone(), &src, &region, 12.0, 0.0, colour);
+            let out = finalize_inpaint(raw.clone(), &src, &region, Band::Uniform(12.0), 0.0, colour);
             let brightest = (24..40).flat_map(|y| (24..40).map(move |x| (x, y)))
                 .map(|(x, y)| out.get_pixel(x, y)[0])
                 .max().unwrap();

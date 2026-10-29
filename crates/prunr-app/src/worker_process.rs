@@ -915,15 +915,20 @@ pub fn run_worker() -> ! {
                     let result = stroke_answer(|| -> Result<(image::RgbaImage, f32), String> {
                         let image: image::RgbaImage = read_image(&image_path)
                             .ok_or_else(|| "read source: missing or short".to_string())?;
-                        let mask: image::GrayImage = read_image(&mask_path)
+                        let packed: image::GrayImage = read_image(&mask_path)
                             .ok_or_else(|| "read mask: missing or short".to_string())?;
+                        // Strokes painted with their own Feather send a band per pixel.
+                        let (mask, band) = prunr_core::inpaint_blend::unpack_band(packed);
+                        let band = band.map(Arc::new);
+                        let sd_req = sd_req.map(|r| prunr_core::inpaint_sd::SdInpaintRequest { soft_edge_band: band.clone(), ..r });
                         let filled = prunr_core::inpaint::process_inpaint_with(
                             &image, &mask, model_id, sd_req.clone(),
                             sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
                         ).map_err(|e| e.message())?;
                         progress.step(prunr_core::Step::Blending);
+                        let band = band.as_deref().map_or(prunr_core::inpaint_blend::Band::Uniform(feather_px), prunr_core::inpaint_blend::Band::PerPixel);
                         Ok((prunr_core::inpaint_blend::finalize_inpaint(
-                            filled.rgba, &image, &mask, feather_px, sharpen, edge_colour,
+                            filled.rgba, &image, &mask, band, sharpen, edge_colour,
                         ), filled.scale))
                     });
                     drop(_cleanup);

@@ -955,6 +955,7 @@ mod tests {
                 tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512, cpu_only: true, mem: prunr_core::inpaint_sd::SdMemPlan { memory_pattern: Some(false), device_initializers: true, intra_threads: 4 } },
                 fill_scale: prunr_core::inpaint::FillScale::Quarter,
                 soft_edge_px: 22.0,
+                soft_edge_band: None,
             }),
             feather_px: 4.5,
             sharpen: 0.6,
