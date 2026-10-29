@@ -332,7 +332,7 @@ fn cell(ui: &mut Ui, cell: Cell, name_width: f32, knobs: &mut Knobs) {
         Cell::Hardness => chip::slider_cell_f32(ui, "Hardness", name_width, &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit,
         Cell::Opacity => chip::slider_cell_f32(ui, "Opacity", name_width, &mut s.strength, 0.0..=1.0, false, fmt::percent).commit,
         Cell::SelectionFeather => {
-            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.edge_feather, 0.0..=20.0, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
+            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.edge_feather, crate::gui::brush_state::FEATHER_RANGE, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
         }
         Cell::Expand => chip::slider_cell_f32(ui, "Expand region", name_width, &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0)).commit,
         Cell::FillFeather => {

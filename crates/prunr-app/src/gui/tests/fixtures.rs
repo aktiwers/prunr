@@ -77,7 +77,7 @@ pub(crate) fn painted(
     for &(x, y, radius) in samples {
         brush.extend_stroke_with_radius(x, y, radius);
     }
-    crate::gui::brush_state::StrokeDrawn::painted(brush.commit_stroke().expect("a stroke"), stamp)
+    crate::gui::brush_state::StrokeDrawn::painted(brush.commit_stroke().expect("a stroke"), stamp, 0.0)
 }
 
 /// Land every selection edit queued so far, as frames would.

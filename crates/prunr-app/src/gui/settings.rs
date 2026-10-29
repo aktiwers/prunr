@@ -167,6 +167,26 @@ impl Settings {
         self.model.erases_with(self.brush.cutout_action)
     }
 
+    /// The Feather a new selection stroke is drawn with: the brush's,
+    /// where its strip offers it; an eraser feathers its fill instead.
+    pub(crate) fn stroke_feather(&self) -> f32 {
+        use crate::gui::knob_catalog::{shows, Surface};
+        if shows(self.model, Surface::SelectionStrokes) { self.brush.edge_feather } else { 0.0 }
+    }
+
+    /// The values a stroke is drawn with, which its brush's sliders set.
+    pub(crate) fn stroke_values(&self) -> super::brush_state::StrokeValues {
+        let b = &self.brush;
+        super::brush_state::StrokeValues {
+            size: b.radius,
+            hardness: b.hardness,
+            opacity: b.strength,
+            reading: b.magic_reading(),
+            range: b.magic_depth_range,
+            feather: self.stroke_feather(),
+        }
+    }
+
     /// Config file path: ~/.config/prunr/settings.json (Linux),
     /// ~/Library/Application Support/prunr/settings.json (macOS),
     /// %APPDATA%/prunr/settings.json (Windows).
@@ -750,6 +770,23 @@ mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
     use prunr_core::LineMode;
+
+    /// A selection stroke is drawn with the brush's Feather; under an
+    /// eraser, whose strip feathers the fill instead, a stroke has none.
+    #[test]
+    fn only_a_selection_stroke_takes_the_brush_feather() {
+        let mut s = Settings::default();
+        s.brush.edge_feather = 6.0;
+        for model in SettingsModel::ALL {
+            let selects = crate::gui::knob_catalog::shows(model, crate::gui::knob_catalog::Surface::SelectionStrokes);
+            s.model = model;
+            assert_eq!(s.stroke_values().feather, if selects { 6.0 } else { 0.0 }, "{model:?}");
+        }
+        s.model = SettingsModel::Silueta;
+        assert_eq!(s.stroke_feather(), 6.0);
+        s.model = SettingsModel::Inpaint;
+        assert_eq!(s.stroke_feather(), 0.0, "an eraser");
+    }
 
     /// A settings file that is no JSON starts from the defaults and is
     /// kept beside it; the person is told.

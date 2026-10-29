@@ -105,12 +105,11 @@ impl PrunrApp {
         // `batch.items` mutably so `build_preview_inputs` can hold the
         // run's start on the item for the drag session.
         let role = self.settings.model.role();
-        let style = self.selection_style();
         let action = self.settings.brush.cutout_action;
         let batch = &mut self.batch;
         let wait = self.processor.live_preview.tick(|id, kind| {
             let item = batch.find_by_id_mut(id).ok_or(crate::gui::capability::Verdict::Never(crate::gui::capability::Reason::Removed))?;
-            Self::build_preview_inputs(item, kind, role, style, action)
+            Self::build_preview_inputs(item, kind, role, action)
         });
         // If a future dispatch is waiting, schedule a repaint when the
         // debounce elapses so tick() can fire on its own.
@@ -149,7 +148,6 @@ impl PrunrApp {
         item: &mut BatchItem,
         kind: PreviewKind,
         role: crate::gui::knob_catalog::ModelRole,
-        style: crate::gui::background_io::SelectionStyle,
         action: crate::gui::brush_state::CutoutAction,
     ) -> Result<crate::gui::live_preview::DispatchInputs, crate::gui::capability::Verdict> {
         use crate::gui::capability::{check, ItemFacts, Need, Reason, Verdict};
@@ -258,7 +256,7 @@ impl PrunrApp {
         });
         // Without a seg tensor the correction has nothing to apply to
         // (filter-only path).
-        let correction = seg_model.and_then(|_| item.correction(style, action));
+        let correction = seg_model.and_then(|_| item.correction(action));
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
         let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
         Ok(DispatchInputs {

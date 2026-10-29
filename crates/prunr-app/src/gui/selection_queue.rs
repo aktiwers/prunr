@@ -32,31 +32,28 @@ impl SelState {
 
 #[derive(Clone)]
 pub(crate) enum SelectionOp {
-    /// A stroke drawn here on a `dims` image and merged into the
-    /// selection: Add grows it, Subtract carves it away. Its step records
-    /// it, for its brush's sliders to draw it again.
-    Stroke { drawn: StrokeDrawn, dims: (u32, u32) },
+    /// A stroke drawn here on a `dims` image, its edge feathered against
+    /// the photo `source`, and merged into the selection: Add grows it,
+    /// Subtract carves it away. Its step records it, for its brush's
+    /// sliders to draw it again.
+    Stroke { drawn: StrokeDrawn, dims: (u32, u32), source: Option<Arc<image::RgbaImage>> },
     Invert,
     /// The selection folded into the cut-out's edits as `action` says,
-    /// and cleared; `feathered` is the plane the overlay shows, when built.
-    Bake { action: CutoutAction, feathered: Option<Arc<MaskArtifact>> },
+    /// and cleared.
+    Bake { action: CutoutAction },
     /// Strokes drawn again from the step they start from.
     Replay(Arc<Replay>),
 }
 
 impl SelectionOp {
     /// The step the edit makes once landed, and what a replay of the
-    /// strokes records of it; a fold went through a feather of
-    /// `feather_px` when it had its feathered plane.
-    pub(crate) fn step(&self, feather_px: u32) -> (super::timeline::StepKind, Option<Made>) {
+    /// strokes records of it.
+    pub(crate) fn step(&self) -> (super::timeline::StepKind, Option<Made>) {
         use super::timeline::StepKind;
         match self {
             Self::Stroke { drawn, .. } => (StepKind::Stroke, Some(Made::One(SelectionMade::Stroke(drawn.clone())))),
             Self::Invert => (StepKind::Selection, Some(Made::One(SelectionMade::Invert))),
-            Self::Bake { action, feathered } => {
-                let feather_px = if feathered.is_some() { feather_px } else { 0 };
-                (StepKind::Selection, Some(Made::One(SelectionMade::Fold { action: *action, feather_px })))
-            }
+            Self::Bake { action } => (StepKind::Selection, Some(Made::One(SelectionMade::Fold { action: *action }))),
             Self::Replay(replay) => (StepKind::Strokes, Some(replay.record())),
         }
     }
@@ -68,8 +65,8 @@ impl SelectionOp {
 pub(crate) enum SelectionMade {
     Stroke(StrokeDrawn),
     Invert,
-    /// Folded into the cut-out's edits through a feather of `feather_px`.
-    Fold { action: CutoutAction, feather_px: u32 },
+    /// Folded into the cut-out's edits.
+    Fold { action: CutoutAction },
     Clear,
 }
 
@@ -113,7 +110,7 @@ pub(crate) struct Replay {
     /// The step it fills in is that one stroke's own, not a new one.
     pub(crate) alone: bool,
     pub(crate) dims: (u32, u32),
-    /// The photo a fold's feather follows.
+    /// The photo each stroke's feather follows.
     pub(crate) source: Option<Arc<image::RgbaImage>>,
 }
 
@@ -126,9 +123,8 @@ impl Replay {
         }
     }
 
-    /// The planes the steps make, from the ones they started from, each
-    /// fold feathered as it was when it was made; the stored planes are
-    /// unpacked here, on the edit thread.
+    /// The planes the steps make, from the ones they started from; the
+    /// stored planes are unpacked here, on the edit thread.
     fn make(&self) -> SelState {
         let (w, h) = self.dims;
         let start = SelState {
@@ -136,12 +132,9 @@ impl Replay {
             edits: self.strokes.edits.as_ref().and_then(|e| e.load()),
         };
         self.strokes.ops.iter().fold(start, |state, op| match op {
-            SelectionMade::Stroke(drawn) => merged(&state, drawn.mask(w, h)),
+            SelectionMade::Stroke(drawn) => merged(&state, drawn.mask(w, h, self.source.as_deref())),
             SelectionMade::Invert => apply(&SelectionOp::Invert, &state),
-            SelectionMade::Fold { action, feather_px } => {
-                let feathered = state.selection.as_deref().and_then(|s| super::background_io::feathered(s, self.source.as_deref(), *feather_px));
-                apply(&SelectionOp::Bake { action: *action, feathered }, &state)
-            }
+            SelectionMade::Fold { action } => apply(&SelectionOp::Bake { action: *action }, &state),
             SelectionMade::Clear => SelState { selection: None, edits: state.edits },
         })
     }
@@ -287,8 +280,8 @@ impl SelectionQueue {
 /// meanwhile.
 fn made_by(op: &SelectionOp, base: &SelState) -> (SelState, Option<super::item::StrokePatch>) {
     match op {
-        SelectionOp::Stroke { drawn, dims: (w, h), .. } => {
-            let stroke = drawn.mask(*w, *h);
+        SelectionOp::Stroke { drawn, dims: (w, h), source } => {
+            let stroke = drawn.mask(*w, *h, source.as_deref());
             let patch = super::item::StrokePatch::of(&stroke);
             (merged(base, stroke), patch)
         }
@@ -301,12 +294,12 @@ fn made_by(op: &SelectionOp, base: &SelState) -> (SelState, Option<super::item::
 /// correction build documents its own.
 pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
     match op {
-        SelectionOp::Stroke { drawn, dims: (w, h), .. } => merged(base, drawn.mask(*w, *h)),
+        SelectionOp::Stroke { drawn, dims: (w, h), source } => merged(base, drawn.mask(*w, *h, source.as_deref())),
         SelectionOp::Invert => SelState {
             selection: base.selection.as_ref().map(|s| Arc::new(s.invert())),
             edits: base.edits.clone(),
         },
-        SelectionOp::Bake { action, feathered } => {
+        SelectionOp::Bake { action } => {
             let Some(selection) = base.selection.clone() else { return base.clone() };
             // A blank selection folds in nothing: the edits stay as they are.
             if selection.is_blank() {
@@ -314,10 +307,7 @@ pub(crate) fn apply(op: &SelectionOp, base: &SelState) -> SelState {
             }
             let edits = match action {
                 CutoutAction::Select => base.edits.clone(),
-                action => {
-                    let shown = feathered.clone().unwrap_or(selection);
-                    Some(Arc::new(super::item::apply_selection(base.edits.as_deref(), &shown, *action)))
-                }
+                action => Some(Arc::new(super::item::apply_selection(base.edits.as_deref(), &selection, *action))),
             };
             SelState { selection: None, edits }
         }
@@ -358,7 +348,7 @@ mod tests {
         let mut queue = SelectionQueue::new();
         let at = |x: f32| {
             let drawn = super::super::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, 0.5, 0.5)], super::super::tests::fixtures::HARD);
-            SelectionOp::Stroke { drawn, dims: (3, 1) }
+            SelectionOp::Stroke { drawn, dims: (3, 1), source: None }
         };
         queue.push(1, at(0.5), SelState::default());
         queue.push(1, at(2.5), SelState::default());
@@ -394,13 +384,13 @@ mod tests {
     fn a_bake_folds_the_selection_into_the_edits() {
         use prunr_core::selection::FULL;
         let base = SelState { selection: Some(plane(&[FULL, 0])), edits: None };
-        let erased = apply(&SelectionOp::Bake { action: CutoutAction::Erase, feathered: None }, &base);
+        let erased = apply(&SelectionOp::Bake { action: CutoutAction::Erase }, &base);
         assert!(erased.selection.is_none() && erased.edits.is_some());
-        let kept = apply(&SelectionOp::Bake { action: CutoutAction::Select, feathered: None }, &base);
+        let kept = apply(&SelectionOp::Bake { action: CutoutAction::Select }, &base);
         assert!(kept.selection.is_none() && kept.edits.is_none());
         let edits = plane(&[-FULL, 0]);
         let blank = SelState { selection: Some(plane(&[0, 0])), edits: Some(Arc::clone(&edits)) };
-        let folded = apply(&SelectionOp::Bake { action: CutoutAction::Erase, feathered: None }, &blank);
+        let folded = apply(&SelectionOp::Bake { action: CutoutAction::Erase }, &blank);
         assert!(folded.selection.is_none() && folded.edits.is_some_and(|e| Arc::ptr_eq(&e, &edits)), "a blank selection folds in nothing");
     }
 

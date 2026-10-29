@@ -316,7 +316,7 @@ mod tests {
         let mut item = BatchItem::new(1, "gone.jpg".into(), ImageSource::Bytes(Arc::new(Vec::new())), (4, 4), Default::default(), String::new());
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
-        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: crate::gui::brush_state::CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: crate::gui::brush_state::CutoutAction::Restore };
         let key = || DragKey::of(&item, spec);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("gone.prunr.png");

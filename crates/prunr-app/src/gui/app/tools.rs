@@ -46,20 +46,14 @@ impl PrunrApp {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         // A cut-out re-cuts at once; the eraser's region waits for Process;
         // elsewhere the selection only feeds Delete / Copy / Cut.
-        if !self.settings.model.edits_cutout() {
-            return;
-        }
-        // With Feather on, the feathered plane is built off the UI thread
-        // and its landing re-cuts; cutting now would flash the hard edge.
-        let waits_for_feather = self.settings.brush.edge_feather >= 0.5 && self.batch.items[idx].selection_mask.is_some();
-        if !waits_for_feather {
+        if self.settings.model.edits_cutout() {
             self.rerun_with_strokes(idx);
         }
     }
 
-    /// Re-cut a shown cut-out with its selection: when a result lands with a
+    /// Re-cut a shown cut-out with its selection when a result lands with a
     /// selection kept across Process (part of that run, so no step of its
-    /// own), and when the selection's feathered plane lands.
+    /// own).
     pub(crate) fn recut_with_selection(&mut self, item_id: u64) {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         let item = &self.batch.items[idx];
@@ -129,7 +123,6 @@ impl PrunrApp {
     /// the image has left goes back in the queue against what it shows
     /// now. Undo / redo held for the queue run once it is empty.
     pub(crate) fn land_selection_edits(&mut self, ctx: &egui::Context) {
-        let style = self.selection_style();
         let mut landed = false;
         for done in self.batch.selection_queue.take_done() {
             landed = true;
@@ -147,15 +140,10 @@ impl PrunrApp {
                 }
                 tracing::info!(item_id, "selection edit made on a selection since changed; made again");
                 let current = item.selection_state();
-                // A fold reads the feathered plane of the selection it folds.
-                let op = match done.op {
-                    SelectionOp::Bake { action, .. } => SelectionOp::Bake { action, feathered: item.feathered_selection(style) },
-                    op => op,
-                };
-                self.batch.selection_queue.rebase(item_id, op, current);
+                self.batch.selection_queue.rebase(item_id, done.op, current);
                 continue;
             }
-            let (kind, record) = done.op.step(style.edge_feather_px);
+            let (kind, record) = done.op.step();
             // A stroke adjustment fills in its one step while the slider moves.
             let fills_in = replay.is_some() && item.adjustment().is_some_and(|a| a.landed);
             let changed = item.land_selection_state(done.made, done.hash, (!fills_in).then_some(kind), record);
@@ -214,8 +202,7 @@ impl PrunrApp {
                 SelectionAction::Copy | SelectionAction::Invert => None,
             };
             if let Some(fold) = fold {
-                let feathered = self.batch.items[idx].feathered_selection(self.selection_style());
-                self.queue_selection_op(item_id, SelectionOp::Bake { action: fold, feathered });
+                self.queue_selection_op(item_id, SelectionOp::Bake { action: fold });
                 ctx.request_repaint();
                 return;
             }
@@ -279,16 +266,12 @@ impl PrunrApp {
     }
 
     /// Make a selection Delete / Cut / Copy off the UI thread: the
-    /// handles are taken here, the image is unpacked, feathered, copied
-    /// and cut on a worker, and `land_selection_edit` applies it.
+    /// handles are taken here, the image is unpacked, copied and cut on a
+    /// worker, and `land_selection_edit` applies it.
     fn start_selection_edit(&mut self, idx: usize, edit: SelectionEdit) {
         let item = &self.batch.items[idx];
-        let Some(mask) = item.selection_mask.clone() else { return };
-        // What gets cut is what the overlay shows: the feathered mask, which
-        // the texture build already computed when it is current.
-        let style = self.selection_style();
-        let feathered = item.current_selection_texture(style).and_then(|t| t.feathered.clone());
-        let (base, photo) = (item.edit_pixels(), item.photo_pixels());
+        let Some(shown) = item.selection_mask.clone() else { return };
+        let base = item.edit_pixels();
         let (item_id, version) = (item.id, item.timeline.version());
         let tx = self.batch.bg_io.selection_edit_tx.clone();
         std::thread::spawn(move || {
@@ -296,9 +279,6 @@ impl PrunrApp {
                 tracing::warn!(item_id, "selection edit skipped: the image could not be read");
                 return;
             };
-            let shown = feathered
-                .or_else(|| style.feather(&mask, photo.load().as_deref()))
-                .unwrap_or(mask);
             let copy = edit.copy_note().and_then(|note| shown.copy_to_rgba(&base).map(|rgba| (rgba, note)));
             let cut = edit.cuts().then(|| {
                 let mut edited = (*base).clone();
@@ -379,6 +359,7 @@ impl PrunrApp {
             at: ((at.0 + 0.5) / w as f32, (at.1 + 0.5) / h as f32),
             range: self.settings.brush.magic_depth_range,
             mode,
+            feather: self.settings.stroke_feather(),
         });
     }
 
@@ -518,6 +499,7 @@ impl PrunrApp {
             prompt,
             mode,
             reading: self.settings.brush.magic_reading(),
+            feather: self.settings.stroke_feather(),
             cpu_only: self.settings.cpu_only(),
         });
     }
@@ -557,9 +539,9 @@ impl PrunrApp {
             }
             match result.result {
                 Ok(drawn) => {
-                    let Some(dims) = self.batch.find_by_id(result.item_id).map(|i| i.dimensions) else { continue };
+                    let Some((dims, source)) = self.batch.find_by_id(result.item_id).map(|i| (i.dimensions, i.source_rgba.clone())) else { continue };
                     tracing::info!(item_id = result.item_id, "Magic Brush pick queued");
-                    self.queue_selection_op(result.item_id, SelectionOp::Stroke { drawn, dims });
+                    self.queue_selection_op(result.item_id, SelectionOp::Stroke { drawn, dims, source });
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
@@ -583,7 +565,7 @@ impl PrunrApp {
         if !self.batch.items[idx].is_idle() || self.selection_edit_pending(item_id) {
             return;
         }
-        let now = self.settings.brush.stroke_values();
+        let now = self.settings.stroke_values();
         let seen = self.brush_state.seen.replace((item_id, now));
         let reach = self.brush_state.reach;
         let item = &mut self.batch.items[idx];

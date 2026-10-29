@@ -318,10 +318,9 @@ fn an_undone_cut_is_not_applied_again() {
     assert!(item.shows_cutout());
     assert!(item.undo_step().is_ok());
     assert!(!item.shows_cutout() && item.hot_seg_tensor().is_none(), "the photo shows: the mask made nothing on screen");
-    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-    assert!(!crate::gui::drag_export::LayerJob::of(item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "no subject layer from the undone cut");
+    assert!(!crate::gui::drag_export::LayerJob::of(item, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "no subject layer from the undone cut");
     app.settings.model = SettingsModel::None;
-    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, app.settings.brush.cutout_action);
     assert!(inputs.is_ok_and(|i| i.seg_tensor.is_none()), "No model renders the photo itself");
 }
 
@@ -331,12 +330,11 @@ fn an_undone_cut_is_not_applied_again() {
 fn the_render_door_hands_the_photo_over_as_it_is() {
     use crate::gui::live_preview::PreviewKind;
     let mut app = app_in(State::Unprocessed, SettingsModel::None);
-    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
     let action = app.settings.brush.cutout_action;
     let role = crate::gui::knob_catalog::ModelRole::Filters;
     let photo = app.batch.items[0].source_rgba.clone().expect("decoded");
     for _ in 0..2 {
-        let render = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::Mask, role, style, action).expect("a render");
+        let render = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::Mask, role, action).expect("a render");
         assert!(render.original_from.is_none() && Arc::ptr_eq(&render.original, &photo), "the photo itself");
     }
     assert!(app.batch.items[0].start_photo.is_none(), "nothing held besides it");
@@ -363,8 +361,7 @@ fn an_unreadable_photo_is_not_decoded_again() {
     app.batch.items[0].land_decode(Err("corrupt".into()));
     app.ensure_source_decoded(0);
     assert!(!app.batch.items[0].decode_pending, "no second decode");
-    let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, style, app.settings.brush.cutout_action);
+    let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), crate::gui::live_preview::PreviewKind::Mask, crate::gui::knob_catalog::ModelRole::Filters, app.settings.brush.cutout_action);
     assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Never(_))), "refused for good, so the busy pill goes");
 }
 
