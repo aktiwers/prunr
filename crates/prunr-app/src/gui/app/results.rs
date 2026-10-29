@@ -48,7 +48,7 @@ impl PrunrApp {
         self.pump_upscale_results(ctx);
         self.pump_colorize_results(ctx);
         self.pump_sam_results(ctx);
-        self.pump_stroke_retunes();
+        self.adjust_strokes();
         self.pump_faces();
         self.pump_depth(ctx);
         self.pump_download_manager(ctx);
@@ -1855,21 +1855,19 @@ mod timeline_contract_tests {
     /// the fill coming and takes that stroke back.
     #[test]
     fn strokes_painted_while_an_erase_fills_stay_after_it() {
-        use crate::gui::selection_queue::{AfterLanding, SelectionOp};
+        use crate::gui::selection_queue::SelectionOp;
         let ctx = egui::Context::default();
-        let stroke = |cells: &[usize]| {
-            let mut c = vec![0i8; 16];
-            for &i in cells {
-                c[i] = prunr_core::selection::FULL;
-            }
-            Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, c))
+        // Square strokes along row 1 of the 4 × 4 image, from column `a` to `b`.
+        let stroke = |a: f32, b: f32| {
+            let drawn = crate::gui::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(a + 0.5, 1.5, 0.5), (b + 0.5, 1.5, 0.5)], crate::gui::tests::fixtures::HARD);
+            SelectionOp::Stroke { drawn, dims: (4, 4), kept: true }
         };
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
         app.batch.items[0].start_erase(None);
         let run = app.batch.items[0].job_run().expect("an erase");
-        app.queue_selection_op(1, SelectionOp::Merge(stroke(&[5, 6])), AfterLanding::Nothing);
-        app.queue_selection_op(1, SelectionOp::Merge(stroke(&[15])), AfterLanding::Nothing);
+        app.queue_selection_op(1, stroke(1.0, 2.0));
+        app.queue_selection_op(1, stroke(3.0, 3.0));
         crate::gui::tests::fixtures::settle_selection_edits(&mut app);
         app.handle_undo(&ctx);
         assert!(app.batch.items[0].awaits_run(run), "an undo of a stroke since keeps the erase");
@@ -2684,7 +2682,6 @@ mod depth_tests {
     /// drops it.
     #[test]
     fn a_by_depth_click_before_the_map_runs_when_it_lands() {
-        use crate::gui::processor::DecodedSelection;
         use prunr_core::selection::BrushMode;
         let mut app = PrunrApp::new_for_test();
         app.settings.model = SettingsModel::Silueta;
@@ -2704,7 +2701,7 @@ mod depth_tests {
             assert!(std::time::Instant::now() < deadline, "the click never ran");
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        assert!(matches!(result.result, Ok(DecodedSelection::ByDepth { .. })), "selected by depth");
+        assert!(matches!(result.result, Ok(crate::gui::brush_state::StrokeDrawn::Depth { .. })), "selected by depth");
 
         app.batch.items[0].depth = None;
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);

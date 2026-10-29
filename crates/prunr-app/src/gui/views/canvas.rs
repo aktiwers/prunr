@@ -248,27 +248,26 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
     use super::brush_overlay::{self, BrushAction};
     let Some((idx, img_rect)) = brush_target(app, canvas_rect) else { return };
     let (shift, subtract) = modifier_state(ui);
-    let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
-    let stamp = if selection_strokes {
-        let mut stamp = app.settings.brush.stamp();
-        stamp.mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
-        stamp
-    } else {
-        app.settings.brush.region_stamp(subtract && !shift)
-    };
     let action = {
         let item = &app.batch.items[idx];
-        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, stamp, item, img_rect)
+        brush_overlay::handle_input(ui, &mut app.brush_state, &app.settings, item, img_rect)
     };
     draw_modifier_glyph(ui, canvas_rect, (shift, subtract));
-    if let BrushAction::Committed(stroke_mask, path) = action {
-        use crate::gui::selection_queue::{AfterLanding, SelectionOp};
-        let item_id = app.batch.items[idx].id;
-
+    if let BrushAction::Committed(path) = action {
+        let selection_strokes = shows(app.settings.model, Surface::SelectionStrokes);
+        let stamp = if selection_strokes {
+            let mut stamp = app.settings.brush.stamp();
+            stamp.mode = app.settings.brush.mode_under(app.settings.model.edits_cutout(), shift, subtract);
+            stamp
+        } else {
+            app.settings.brush.region_stamp(subtract && !shift)
+        };
+        let item = &app.batch.items[idx];
+        let (item_id, dims) = (item.id, item.dimensions);
         tracing::info!(item_id, "brush stroke committed; merging into the selection");
+        let drawn = crate::gui::brush_state::StrokeDrawn::painted(path, stamp);
         // An eraser's region fills once drawn: its sliders set the next one.
-        let after = if selection_strokes { AfterLanding::Stroke(crate::gui::brush_state::StrokeDrawn::painted(path, stamp)) } else { AfterLanding::Nothing };
-        app.queue_selection_op(item_id, SelectionOp::Merge(std::sync::Arc::new(stroke_mask)), after);
+        app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, kept: selection_strokes });
     }
 }
 

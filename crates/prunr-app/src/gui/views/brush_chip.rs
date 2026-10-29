@@ -106,7 +106,7 @@ const REACHES: [chip::Choice<StrokeReach>; 3] = [
     chip::Choice { value: StrokeReach::All, name: "All", description: "", enabled: true },
 ];
 
-/// What the sliders adjust, the same in both brushes' panels and the strip.
+/// What the sliders adjust, the same in both brushes' panels.
 pub(super) fn reach_row(ui: &mut Ui, reach: &mut StrokeReach) {
     chip::choice_row(ui, "Sliders adjust", &REACHES, reach);
     super::hint(ui, super::tool_strip::ADJUST_REACH);

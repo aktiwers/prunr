@@ -441,10 +441,24 @@ pub(crate) struct Job {
 #[derive(Clone)]
 pub(crate) struct PaintedStroke {
     step: u64,
+    patch: StrokePatch,
+}
+
+/// A stroke's painted cells within their bounds.
+#[derive(Clone)]
+pub(crate) struct StrokePatch {
     rect: prunr_core::selection::CellRect,
     cells: prunr_core::selection::MaskArtifact,
     /// The stroke's plane, cells across and down.
     plane: (u32, u32),
+}
+
+impl StrokePatch {
+    /// `None` when the stroke painted nothing.
+    pub(crate) fn of(stroke: &prunr_core::selection::MaskArtifact) -> Option<Self> {
+        let rect = stroke.bounds()?;
+        Some(Self { rect, cells: stroke.crop(rect), plane: (stroke.width, stroke.height) })
+    }
 }
 
 /// What "Try another" reruns: the shown fill's start (`None`: the
@@ -993,10 +1007,6 @@ pub(crate) struct BatchItem {
     /// Cached SAM 2 image embedding, filled whenever Magic Brush is active
     /// and this item is selected. Invalidated on source change.
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
-    /// The latest stroke on this image, kept so its brush's sliders draw
-    /// it again in place instead of needing another stroke.
-    pub(crate) last_stroke: Option<LastStroke>,
-    /// Every stroke being adjusted at once, while a slider moves.
     pub(crate) adjusting: Option<StrokeAdjustment>,
     /// A background pre-encode was refused (RAM gate or encoder error);
     /// not retried every frame. Cleared with the embedding.
@@ -1038,28 +1048,33 @@ impl DepthPhotoKey {
     }
 }
 
-/// The image's strokes being drawn again as the sliders move, all at once.
+/// The image's strokes being drawn again as the sliders move: the latest
+/// one (Last) or every one since the picture changed (All).
 pub(crate) struct StrokeAdjustment {
-    /// The slider values it started from, and the ones last drawn.
+    pub(crate) reach: crate::gui::brush_state::StrokeReach,
+    /// The slider values where it began.
     pub(crate) from: crate::gui::brush_state::StrokeValues,
-    pub(crate) drawn: crate::gui::brush_state::StrokeValues,
-    /// The strokes as they stood before it.
-    pub(crate) history: Arc<super::timeline::StrokeHistory>,
-    /// The step it fills in once landed; before that, the step it began on.
+    /// The strokes as they stood then.
+    pub(crate) strokes: super::timeline::StrokeHistory,
+    /// How the shown step draws them.
+    pub(crate) shown: Arc<Vec<super::selection_queue::SelectionMade>>,
+    /// The step it fills in once landed (Last: the stroke's own, from the
+    /// start); before that, the step it began on.
     pub(crate) step: u64,
     pub(crate) landed: bool,
 }
 
-/// The latest stroke on an image and the selection it committed.
-pub(crate) struct LastStroke {
-    pub(crate) drawn: crate::gui::brush_state::StrokeDrawn,
-    /// The stroke as its sliders ask for it, drawn once nothing holds it.
-    pub(crate) wanted: crate::gui::brush_state::StrokeDrawn,
-    /// The selection the stroke committed: another author changing it
-    /// ends the retune.
-    pub(crate) committed_hash: u64,
-    /// The undo step the stroke made, which a retune amends.
-    pub(crate) step: u64,
+impl StrokeAdjustment {
+    /// The strokes as the sliders at `now` draw them: Last sets each
+    /// moved slider's value, All moves each stroke by as much.
+    pub(crate) fn at(&self, now: crate::gui::brush_state::StrokeValues) -> super::timeline::StrokeHistory {
+        use crate::gui::brush_state::StrokeReach;
+        let (from, reach) = (self.from, self.reach);
+        self.strokes.changed(|drawn| {
+            let values = drawn.values();
+            drawn.at(if reach == StrokeReach::Last { values.moved(from, now) } else { values.adjusted(from, now) })
+        })
+    }
 }
 
 /// A selection overlay texture and what it was built from. `shown` is
@@ -1122,7 +1137,7 @@ impl BatchItem {
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
-        self.last_stroke = None;
+        self.adjusting = None;
         super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take()));
         if let Some(t) = &mut self.selection_texture {
             t.feathered = None;
@@ -1187,8 +1202,10 @@ impl BatchItem {
         if self.selection_mask.is_none() {
             return false;
         }
-        let made = apply(&SelectionOp::Bake { action, feathered: self.feathered_selection(style) }, &self.selection_state());
-        self.land_selection_state(made, None, StepKind::Selection)
+        let op = SelectionOp::Bake { action, feathered: self.feathered_selection(style) };
+        let made = apply(&op, &self.selection_state());
+        let (kind, record) = op.step(style.edge_feather_px);
+        self.land_selection_state(made, None, Some(kind), record)
     }
 
     /// The current selection feathered as `style` says, once the overlay
@@ -1250,39 +1267,13 @@ impl BatchItem {
         }
     }
 
-    /// The latest stroke while it may be drawn again: it still owns the
-    /// selection, and its step is the one shown and the newest, so the
-    /// retune amends that step and merges onto the one before it. Any
-    /// other change (another stroke or author, undo, a step of any kind)
-    /// ends it.
-    pub(crate) fn retunable_stroke(&mut self) -> Option<&mut LastStroke> {
-        if !self.last_stroke_holds() {
-            self.last_stroke = None;
-        }
-        self.last_stroke.as_mut()
-    }
-
-    /// The adjustment of every stroke under way, while nothing else has
-    /// happened since: its step is the one shown and the newest.
+    /// The strokes' adjustment under way, while nothing else has happened
+    /// since: its step is the one shown and the newest.
     pub(crate) fn adjustment(&mut self) -> Option<&mut StrokeAdjustment> {
-        let (shown, newest) = (self.timeline.current().id, self.timeline.next().is_none());
-        if self.adjusting.as_ref().is_some_and(|a| a.step != shown || !newest) {
+        if self.adjusting.as_ref().is_some_and(|a| !self.timeline.is_newest_shown(a.step)) {
             self.adjusting = None;
         }
         self.adjusting.as_mut()
-    }
-
-    fn last_stroke_holds(&self) -> bool {
-        self.last_stroke.as_ref().is_some_and(|s| {
-            self.selection_hash == Some(s.committed_hash) && s.step == self.timeline.current().id && self.timeline.next().is_none()
-        })
-    }
-
-    /// Keep the stroke that just landed as the latest: drawn again while
-    /// it owns the selection and its step.
-    pub(crate) fn keep_last_stroke(&mut self, drawn: crate::gui::brush_state::StrokeDrawn) {
-        let step = self.timeline.current().id;
-        self.last_stroke = self.selection_hash.map(|committed_hash| LastStroke { wanted: drawn.clone(), drawn, committed_hash, step });
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
@@ -1291,7 +1282,6 @@ impl BatchItem {
         self.selection_hash = None;
         self.selection_texture = None;
         self.selection_tex_pending = None;
-        self.last_stroke = None;
     }
 
     /// Where the image is, derived: a cut under way, a failure with
@@ -1388,7 +1378,7 @@ impl BatchItem {
     pub(crate) fn commit_selection_mask(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, kind: StepKind) -> bool {
         let hash = mask.content_hash();
         let made = super::selection_queue::SelState { selection: Some(mask), edits: self.edits.clone() };
-        self.land_selection_state(made, Some(hash), kind)
+        self.land_selection_state(made, Some(hash), Some(kind), None)
     }
 
     /// The selection and the cut-out's edits, as a selection edit reads
@@ -1397,24 +1387,26 @@ impl BatchItem {
         super::selection_queue::SelState { selection: self.selection_mask.clone(), edits: self.edits.clone() }
     }
 
-    /// A selection edit made off the UI thread lands: the selection (with
-    /// its content `hash`) and edits it made, as one undo step of `kind`.
-    /// False, and nothing changes, when it made what is already shown.
-    pub(crate) fn land_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>, kind: StepKind) -> bool {
-        let changed = self.take_selection_state(made, hash);
-        if changed {
-            self.commit(kind);
+    /// A selection edit lands: the selection (with its content `hash`)
+    /// and edits it made, as one undo step of `kind`, or filling in the
+    /// shown step (`None`, a stroke adjustment while the slider moves).
+    /// The step records `record`. False when it made what is already
+    /// shown; a new step is then not made.
+    pub(crate) fn land_selection_state(
+        &mut self,
+        planes: super::selection_queue::SelState,
+        hash: Option<u64>,
+        kind: Option<StepKind>,
+        record: Option<super::selection_queue::Made>,
+    ) -> bool {
+        let changed = self.take_selection_state(planes, hash);
+        match kind {
+            Some(kind) if changed => self.commit(kind),
+            Some(_) => return false,
+            None if changed => self.amend(),
+            None => {}
         }
-        changed
-    }
-
-    /// As `land_selection_state`, filling in the shown step instead of
-    /// making one: a stroke adjustment redrawn while the slider moves.
-    pub(crate) fn amend_selection_state(&mut self, made: super::selection_queue::SelState, hash: Option<u64>) -> bool {
-        let changed = self.take_selection_state(made, hash);
-        if changed {
-            self.amend();
-        }
+        self.timeline.current_mut().made = record;
         changed
     }
 
@@ -1440,25 +1432,6 @@ impl BatchItem {
             self.invalidate_selection();
         }
         self.drop_correction_cache();
-        true
-    }
-
-    /// The selection the shown step replaced, the base a retune of the
-    /// latest stroke merges onto.
-    pub(crate) fn pre_stroke_selection(&self) -> Option<Region> {
-        self.timeline.previous()?.selection.clone().map(Region::Stored)
-    }
-
-    /// Replace the selection within the shown step: a retune of the last
-    /// commit, which stays one step. `hash` is the mask's content hash,
-    /// computed where the mask was built. Returns false when unchanged.
-    pub(crate) fn replace_selection_in_place(&mut self, mask: Arc<prunr_core::selection::MaskArtifact>, hash: u64) -> bool {
-        if self.selection_hash == Some(hash) {
-            return false;
-        }
-        self.selection_mask = Some(mask);
-        self.selection_hash = Some(hash);
-        self.amend();
         true
     }
 
@@ -1539,11 +1512,10 @@ impl BatchItem {
     /// A stroke landed: while an erase fills, where it was painted is the
     /// next area, which the fill's landing keeps, kept with the step it
     /// made so an undo of that step takes it back out.
-    pub(crate) fn note_painted_during_erase(&mut self, stroke: &prunr_core::selection::MaskArtifact) {
+    pub(crate) fn note_painted_during_erase(&mut self, patch: StrokePatch) {
         let Some(job) = self.job.as_mut().filter(|j| j.engine == Engine::Erase) else { return };
-        let Some(rect) = stroke.bounds() else { return };
         let step = self.timeline.current().id;
-        job.painted.push(PaintedStroke { step, rect, cells: stroke.crop(rect), plane: (stroke.width, stroke.height) });
+        job.painted.push(PaintedStroke { step, patch });
     }
 
     /// The fill landed: the marks it was made from go, those painted while
@@ -1552,8 +1524,8 @@ impl BatchItem {
     pub(crate) fn clear_filled_marks(&mut self) {
         let next = self.selection_mask.as_ref().zip(self.job.as_ref()).and_then(|(now, job)| {
             let mut strokes = job.painted.iter()
-                .filter(|s| s.plane == (now.width, now.height) && self.timeline.in_effect(s.step))
-                .map(|s| (s.rect, &s.cells))
+                .filter(|s| s.patch.plane == (now.width, now.height) && self.timeline.in_effect(s.step))
+                .map(|s| (s.patch.rect, &s.patch.cells))
                 .peekable();
             strokes.peek()?;
             now.within(&prunr_core::selection::MaskArtifact::from_patches(now.width, now.height, strokes))
@@ -1616,7 +1588,8 @@ impl BatchItem {
     pub(crate) fn amend(&mut self) {
         let shown = self.timeline.current();
         let state = DocState { at: shown.at, id: shown.id, made: shown.made.clone(), ..self.snapshot(shown.kind) };
-        *self.timeline.current_mut() = state;
+        // The planes it replaces free off the UI thread: a drag amends every few frames.
+        super::reclaim::later(std::mem::replace(self.timeline.current_mut(), state));
     }
 
     /// Keep what is on screen to reveal the next image over, when memory
@@ -2933,7 +2906,6 @@ impl BatchItem {
             selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,
-            last_stroke: None,
             adjusting: None,
             magic_preencode_refused: false,
             depth: None,
@@ -3184,7 +3156,7 @@ mod tests {
             item.start_erase(None);
             let stroke = cells(&[5, 9]);
             assert!(item.commit_selection_mask(Arc::clone(&stroke), StepKind::Stroke));
-            item.note_painted_during_erase(&stroke);
+            item.note_painted_during_erase(StrokePatch::of(&stroke).unwrap());
             if undo {
                 item.undo_step().unwrap();
             }

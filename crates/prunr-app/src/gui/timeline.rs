@@ -329,7 +329,7 @@ pub(crate) struct DocState {
     /// Which step this is (`next_step_id`): two can share an `at`.
     pub(crate) id: u64,
     /// What the step did to the selection, for a replay of the strokes.
-    pub(crate) made: Option<super::selection_queue::SelectionMade>,
+    pub(crate) made: Option<super::selection_queue::Made>,
 }
 
 pub(crate) fn next_step_id() -> u64 {
@@ -404,14 +404,25 @@ impl DocState {
     }
 }
 
-/// The strokes since the picture last changed (`strokes_since_picture`).
+/// Strokes to draw again: the step they start from, with its selection
+/// and edits, and what each step after it did.
 #[derive(Clone)]
 pub(crate) struct StrokeHistory {
-    /// The step they start from, with its selection and edits.
     pub(crate) from: u64,
     pub(crate) selection: Option<StoredSelection>,
     pub(crate) edits: Option<StoredSelection>,
-    pub(crate) ops: Vec<super::selection_queue::SelectionMade>,
+    pub(crate) ops: Arc<Vec<super::selection_queue::SelectionMade>>,
+}
+
+impl StrokeHistory {
+    fn from_step(start: &DocState, ops: Vec<super::selection_queue::SelectionMade>) -> Self {
+        Self { from: start.id, selection: start.selection.clone(), edits: start.edits.clone(), ops: Arc::new(ops) }
+    }
+
+    /// The same strokes, each as `change` makes it.
+    pub(crate) fn changed(&self, change: impl Fn(&super::brush_state::StrokeDrawn) -> super::brush_state::StrokeDrawn) -> Self {
+        Self { ops: Arc::new(self.ops.iter().map(|op| op.changed(&change)).collect()), ..self.clone() }
+    }
 }
 
 pub(crate) struct Timeline {
@@ -460,22 +471,21 @@ impl Timeline {
     }
 
     /// The strokes since the picture last changed, up to the shown step,
-    /// to draw again: the step they start from and what each step after
-    /// it did. Steps that change only the settings pass through; any other
-    /// step without a record, or one that changed the picture, is where
-    /// they start. An earlier adjustment's history stands in for the steps
-    /// it redrew. `None` without a stroke to draw.
+    /// to draw again. Steps that change only the settings pass through;
+    /// any other step without a record, or one that changed the picture,
+    /// is where they start. A redraw of earlier strokes stands in for the
+    /// steps it redrew. `None` without a stroke to draw.
     pub(crate) fn strokes_since_picture(&self) -> Option<StrokeHistory> {
-        use super::selection_queue::SelectionMade;
+        use super::selection_queue::{Made, SelectionMade};
         let mut ops = Vec::new();
         for i in (0..=self.cursor).rev() {
             let step = &self.states[i];
             let start = match (&step.made, step.kind) {
-                (Some(SelectionMade::Adjusted { from, ops: redrawn }), _) => {
+                (Some(Made::Redrawn { from, ops: redrawn }), _) => {
                     ops.extend(redrawn.iter().rev().cloned());
                     self.states.range(..i).find(|s| s.id == *from)?
                 }
-                (Some(made), _) => {
+                (Some(Made::One(made)), _) => {
                     ops.push(made.clone());
                     continue;
                 }
@@ -483,14 +493,26 @@ impl Timeline {
                 (None, _) => step,
             };
             ops.reverse();
-            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory {
-                from: start.id,
-                selection: start.selection.clone(),
-                edits: start.edits.clone(),
-                ops,
-            });
+            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory::from_step(start, ops));
         }
         None
+    }
+
+    /// The shown step's stroke, while it is the newest step, to draw
+    /// again from the step before it.
+    pub(crate) fn latest_stroke(&self) -> Option<StrokeHistory> {
+        use super::selection_queue::{Made, SelectionMade};
+        let shown = self.current();
+        let stroke = match &shown.made {
+            Some(Made::One(stroke @ SelectionMade::Stroke(_))) if !self.can_redo() => stroke.clone(),
+            _ => return None,
+        };
+        Some(StrokeHistory::from_step(self.previous()?, vec![stroke]))
+    }
+
+    /// Whether step `id` is the shown one and nothing is ahead of it.
+    pub(crate) fn is_newest_shown(&self, id: u64) -> bool {
+        self.current().id == id && !self.can_redo()
     }
 
     /// Fill in the shown state as a job it started lands: no new step.
