@@ -1860,7 +1860,7 @@ mod timeline_contract_tests {
         // Square strokes along row 1 of the 4 × 4 image, from column `a` to `b`.
         let stroke = |a: f32, b: f32| {
             let drawn = crate::gui::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(a + 0.5, 1.5, 0.5), (b + 0.5, 1.5, 0.5)], crate::gui::tests::fixtures::HARD);
-            SelectionOp::Stroke { drawn, dims: (4, 4), kept: true }
+            SelectionOp::Stroke { drawn, dims: (4, 4) }
         };
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);

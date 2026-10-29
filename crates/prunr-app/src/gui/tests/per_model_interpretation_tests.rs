@@ -127,7 +127,7 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
 /// Queue `drawn` on image `item_id` as its brush does, and land it.
 fn land(app: &mut PrunrApp, item_id: u64, drawn: crate::gui::brush_state::StrokeDrawn) {
     let dims = app.batch.find_by_id(item_id).expect("the image").dimensions;
-    app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, kept: true });
+    app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims });
     super::fixtures::settle_selection_edits(app);
 }
 
@@ -261,6 +261,22 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     slide(&mut app, |b| b.magic_depth_range = 0.3);
     redraw_lands(&mut app);
     assert!(selected_cells(&app) > before, "a wider Range picks more: {} cells, {before} before", selected_cells(&app));
+}
+
+/// An eraser's Paint Brush stroke is drawn again by its Size as on any
+/// other model: its area is painted before Process fills it.
+#[test]
+fn an_eraser_stroke_redraws_with_its_size() {
+    let mut app = app_with_model(SettingsModel::Inpaint);
+    push_test_item(&mut app, 9).dimensions = (32, 32);
+    app.settings.brush.radius = 4.0;
+    let stamp = app.settings.brush.region_stamp(false);
+    land(&mut app, 9, super::fixtures::painted(prunr_core::brush::BrushShape::Circle, 4.0, &[(8.0, 16.0, 2.0), (24.0, 16.0, 2.0)], stamp));
+    let (steps, before) = (app.batch.items[0].timeline.undo_steps(), selected_cells(&app));
+    slide(&mut app, |b| b.radius = 8.0);
+    redraw_lands(&mut app);
+    assert!(selected_cells(&app) > before, "a bigger Size paints more: {} cells, {before} before", selected_cells(&app));
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "still the stroke's one step");
 }
 
 /// A stroke stays the one its sliders redraw only while its step is the
@@ -1116,7 +1132,7 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
 fn dot(i: usize) -> crate::gui::selection_queue::SelectionOp {
     let (x, y) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
     let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, y, 0.5)], super::fixtures::HARD);
-    crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims: (8, 8), kept: false }
+    crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims: (8, 8) }
 }
 
 /// Selection edits run off the UI thread in order: two strokes queued
