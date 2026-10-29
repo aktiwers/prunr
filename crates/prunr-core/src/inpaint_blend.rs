@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use crate::guided_filter::{box_filter, box_filter_into};
 use crate::inpaint::{mask_bbox, Bbox};
 use crate::math::SendMutPtr;
+use crate::selection::{fill_band, BrushMode, MaskArtifact, FILL_CORE, FULL};
 
 /// Default ring width for [`color_match_inpainted`] (pixels). Fixed in
 /// absolute pixels on purpose: the inpaint patch size doesn't grow with
@@ -134,6 +135,113 @@ pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge
         .map(|(&c, &r)| if c >= 128 { FULL } else if r >= 128 { FULL / 2 } else { 0 })
         .collect();
     MaskArtifact::from_cells(w, h, cells)
+}
+
+/// An eraser stroke as it fills: the region it painted (`painted`, its
+/// cells signed by `mode`) grown by `grow_px` and filled in full, and for
+/// an Add stroke the `band_px` ring beyond, where the fill fades into the
+/// photo, kept with its band in the fill layer (`fill_region` and
+/// `fill_preview` grow both as for a whole region). A Subtract stroke
+/// carves its grown region.
+///
+/// Peak working set: the painted region and the two grown ones, a byte
+/// per pixel each (each grown in its bounding box), and the stroke's
+/// cells and fill layer, a byte per pixel each.
+pub fn eraser_stroke(painted: &MaskArtifact, mode: BrushMode, grow_px: f32, band_px: u8) -> MaskArtifact {
+    let (w, h) = (painted.width, painted.height);
+    let region = painted.region_mask(w, h);
+    let core = fill_region(&region, grow_px, 0.0);
+    let sign = if mode == BrushMode::Add { FULL } else { -FULL };
+    let plane = MaskArtifact::from_cells(w, h, core.as_raw().iter().map(|&c| if c >= 128 { sign } else { 0 }).collect());
+    if mode == BrushMode::Subtract {
+        return plane;
+    }
+    let band = band_px.min(fill_band(u8::MAX));
+    let hole = fill_region(&region, grow_px, band as f32);
+    drop(region);
+    let layer = core.as_raw().iter().zip(hole.as_raw())
+        .map(|(&c, &o)| if c >= 128 { FILL_CORE | band } else if o >= 128 { band } else { 0 })
+        .collect();
+    plane.with_fill_layer(layer)
+}
+
+/// What an erase replaces (`eraser_fill`): the hole, and the band the fill
+/// fades into the photo over at each of its pixels.
+pub struct EraserFill {
+    pub hole: GrayImage,
+    /// `None`: one band, `width`, for the whole hole.
+    band: Option<GrayImage>,
+    width: f32,
+}
+
+impl EraserFill {
+    pub fn band(&self) -> Band<'_> {
+        self.band.as_ref().map_or(Band::Uniform(self.width), Band::PerPixel)
+    }
+
+    /// The hole and its band as a mask file holds them (`pack_band`).
+    pub fn packed(&self) -> GrayImage {
+        match &self.band {
+            Some(band) => pack_band(&self.hole, band),
+            None => self.hole.clone(),
+        }
+    }
+}
+
+/// What an erase of `plane` replaces at `w × h`: its eraser strokes as
+/// each fills (its fill layer), and any other selected region as
+/// `fill_region` grows it by `grow_px` and `band_px`. A plane painted
+/// with one Expand and Feather fills exactly as a whole region does.
+///
+/// Peak working set: the selected region and the hole grown from it, the
+/// fill layer, the hole and its band, a byte per pixel each.
+pub fn eraser_fill(plane: &MaskArtifact, grow_px: f32, band_px: f32, (w, h): (u32, u32)) -> EraserFill {
+    let layer = plane.fill_layer_at(w, h).filter(|layer| layer.iter().any(|&c| c != 0));
+    let mut region = plane.region_mask(w, h);
+    let Some(layer) = layer else {
+        return EraserFill { hole: fill_region(&region, grow_px, band_px), band: None, width: band_px };
+    };
+    // Selected cells no eraser stroke made fill as a whole region does.
+    region.as_mut().iter_mut().zip(&layer).for_each(|(r, &f)| if f != 0 { *r = 0 });
+    let other = region.as_raw().iter().any(|&r| r != 0).then(|| fill_region(&region, grow_px, band_px));
+    drop(region);
+    let other_band = crate::math::round_u8(band_px).min(fill_band(u8::MAX));
+    let band: Vec<u8> = layer.iter().enumerate().map(|(i, &f)| {
+        let theirs = other.as_ref().is_some_and(|o| o.as_raw()[i] >= 128).then_some(other_band);
+        match (f, theirs) {
+            (0, None) => 0,
+            (0, Some(b)) => b,
+            (f, theirs) => fill_band(f).max(theirs.unwrap_or(0)),
+        }
+    }).collect();
+    let hole = GrayImage::from_fn(w, h, |x, y| {
+        let i = (y * w + x) as usize;
+        let theirs = other.as_ref().is_some_and(|o| o.as_raw()[i] >= 128);
+        image::Luma([if layer[i] != 0 || theirs { 255 } else { 0 }])
+    });
+    let mut widths = band.iter().zip(hole.as_raw()).filter(|(_, &m)| m >= 128).map(|(&b, _)| b);
+    let first = widths.next().unwrap_or(0);
+    if widths.all(|b| b == first) {
+        return EraserFill { hole, band: None, width: first as f32 };
+    }
+    EraserFill { band: Some(GrayImage::from_raw(w, h, band).expect("one band per pixel")), hole, width: 0.0 }
+}
+
+/// What an erase of `plane` will touch, for the overlay: `eraser_fill`'s
+/// hole, at full strength where the fill replaces the photo and at half
+/// in the band (as `fill_preview` shows a whole region).
+pub fn eraser_preview(plane: &MaskArtifact, grow_px: f32, band_px: f32) -> MaskArtifact {
+    let Some(layer) = plane.fill_layer().filter(|layer| layer.iter().any(|&c| c != 0)) else {
+        return fill_preview(plane, grow_px, band_px);
+    };
+    let other: Vec<i8> = plane.cells().iter().zip(layer).map(|(&c, &f)| if f != 0 { 0 } else { c }).collect();
+    let other = other.iter().any(|&c| MaskArtifact::is_selected(c))
+        .then(|| fill_preview(&MaskArtifact::from_cells(plane.width, plane.height, other), grow_px, band_px));
+    let cells = layer.iter().enumerate().map(|(i, &f)| {
+        let own = if f & FILL_CORE != 0 { FULL } else if f != 0 { FULL / 2 } else { 0 };
+        own.max(other.as_ref().map_or(0, |o| o.cells()[i]))
+    }).collect();
+    MaskArtifact::from_cells(plane.width, plane.height, cells)
 }
 
 /// Color-correct the inpainted region by matching its mean RGB to the
@@ -948,6 +1056,112 @@ mod tests {
         let read = read.expect("a band");
         assert_eq!(read.as_raw(), &vec![0, 0, 0, 3, 12, 40, 127, 127], "outside reads 0; a band past 127 px is 127");
         assert_eq!(unpack_band(hole.clone()), (hole, None));
+    }
+
+    /// A stroke painted as a disc at `(cx, cy)` of radius `r` on a `n × n`
+    /// plane, Add or Subtract.
+    fn disc(n: u32, (cx, cy): (i32, i32), r: i32, mode: BrushMode) -> MaskArtifact {
+        let v = if mode == BrushMode::Add { FULL } else { -FULL };
+        MaskArtifact::from_cells(n, n, (0..n * n).map(|i| {
+            let (x, y) = ((i % n) as i32 - cx, (i / n) as i32 - cy);
+            if x * x + y * y <= r * r { v } else { 0 }
+        }).collect())
+    }
+
+    /// The selection `strokes` make, each drawn as an eraser stroke with
+    /// its own Expand and Feather and merged in order.
+    fn erased(strokes: &[(MaskArtifact, BrushMode, f32, u8)]) -> MaskArtifact {
+        strokes.iter().fold(None::<MaskArtifact>, |sel, (painted, mode, grow, band)| {
+            let stroke = eraser_stroke(painted, *mode, *grow, *band);
+            Some(match sel {
+                Some(sel) => sel.merge_stroke(&stroke).unwrap(),
+                None => stroke.into_selection(),
+            })
+        }).expect("a stroke")
+    }
+
+    /// One eraser stroke fills exactly as its region did with one Expand
+    /// and Feather for the whole selection: the same hole, the same band,
+    /// the same overlay.
+    #[test]
+    fn one_eraser_stroke_fills_as_a_whole_region_did() {
+        for (grow, band) in [(0.0, 0u8), (2.0, 4), (-3.0, 9), (6.0, 21)] {
+            let painted = disc(80, (40, 40), 12, BrushMode::Add);
+            let plane = erased(&[(painted.clone(), BrushMode::Add, grow, band)]);
+            let fill = eraser_fill(&plane, 99.0, 99.0, (80, 80));
+            assert!(fill.hole == fill_region(&painted.region_mask(80, 80), grow, band as f32), "grow {grow}, band {band}");
+            assert!(matches!(fill.band(), Band::Uniform(w) if w == band as f32), "grow {grow}, band {band}");
+            assert_eq!(eraser_preview(&plane, 99.0, 99.0), fill_preview(&painted, grow, band as f32), "grow {grow}, band {band}");
+        }
+    }
+
+    /// Strokes painted with the same Expand and Feather fill as their
+    /// region did as a whole.
+    #[test]
+    fn strokes_with_one_feather_fill_as_their_region_did() {
+        let (a, b) = (disc(120, (35, 40), 10, BrushMode::Add), disc(120, (60, 50), 14, BrushMode::Add));
+        let plane = erased(&[(a.clone(), BrushMode::Add, 3.0, 6), (b.clone(), BrushMode::Add, 3.0, 6)]);
+        let painted = a.add_mask(&b).unwrap();
+        let fill = eraser_fill(&plane, 0.0, 0.0, (120, 120));
+        assert!(fill.hole == fill_region(&painted.region_mask(120, 120), 3.0, 6.0));
+        assert!(matches!(fill.band(), Band::Uniform(w) if w == 6.0));
+    }
+
+    /// Each stroke fades over its own Feather, and grows by its own Expand.
+    #[test]
+    fn each_eraser_stroke_fills_with_its_own_expand_and_feather() {
+        let (hard, soft) = (disc(160, (40, 40), 10, BrushMode::Add), disc(160, (115, 115), 10, BrushMode::Add));
+        let plane = erased(&[(hard.clone(), BrushMode::Add, 0.0, 0), (soft.clone(), BrushMode::Add, 8.0, 20)]);
+        let fill = eraser_fill(&plane, 0.0, 0.0, (160, 160));
+        let alone = |painted: &MaskArtifact, grow, band| fill_region(&painted.region_mask(160, 160), grow, band);
+        let (hard_hole, soft_hole) = (alone(&hard, 0.0, 0.0), alone(&soft, 8.0, 20.0));
+        let Band::PerPixel(band) = fill.band() else { panic!("two bands") };
+        for i in 0..160 * 160 {
+            let want = hard_hole.as_raw()[i].max(soft_hole.as_raw()[i]);
+            assert_eq!(fill.hole.as_raw()[i], want, "pixel {i}");
+            if soft_hole.as_raw()[i] >= 128 {
+                assert_eq!(band.as_raw()[i], 20, "pixel {i}: the soft stroke's band");
+            } else if hard_hole.as_raw()[i] >= 128 {
+                assert_eq!(band.as_raw()[i], 0, "pixel {i}: the hard stroke's band");
+            }
+        }
+    }
+
+    /// A Subtract stroke carves its region, grown by its own Expand, out
+    /// of the fill, band and all.
+    #[test]
+    fn a_subtract_stroke_carves_the_fill() {
+        let add = disc(100, (50, 50), 30, BrushMode::Add);
+        let carve = disc(100, (50, 50), 8, BrushMode::Subtract);
+        let plane = erased(&[(add, BrushMode::Add, 0.0, 6), (carve.clone(), BrushMode::Subtract, 4.0, 0)]);
+        let grown = fill_region(&carve.region_mask(100, 100), 4.0, 0.0);
+        let fill = eraser_fill(&plane, 0.0, 0.0, (100, 100));
+        for (i, (&g, &m)) in grown.as_raw().iter().zip(fill.hole.as_raw()).enumerate() {
+            if g >= 128 {
+                assert_eq!(m, 0, "pixel {i}: carved");
+            }
+        }
+        assert_eq!(fill.hole.get_pixel(50, 30).0[0], 255, "the rest still fills");
+    }
+
+    /// A region selected under another model (no fill layer) fills with
+    /// the eraser's Expand and Feather of now, beside the eraser strokes.
+    #[test]
+    fn a_region_no_eraser_stroke_made_fills_with_the_feather_set_now() {
+        let picked = disc(140, (40, 40), 10, BrushMode::Add).into_selection();
+        let only = eraser_fill(&picked, 2.0, 5.5, (140, 140));
+        assert!(only.hole == fill_region(&picked.region_mask(140, 140), 2.0, 5.5));
+        assert!(matches!(only.band(), Band::Uniform(w) if w == 5.5), "as before, to the fraction");
+
+        let stroke = eraser_stroke(&disc(140, (100, 100), 10, BrushMode::Add), BrushMode::Add, 0.0, 12);
+        let plane = picked.merge_stroke(&stroke).unwrap();
+        let fill = eraser_fill(&plane, 2.0, 6.0, (140, 140));
+        let Band::PerPixel(band) = fill.band() else { panic!("two bands") };
+        assert_eq!(band.get_pixel(40, 40).0[0], 6, "the picked region: the Feather set now");
+        assert_eq!(band.get_pixel(100, 100).0[0], 12, "the stroke: its own");
+        let preview = eraser_preview(&plane, 2.0, 6.0);
+        assert_eq!(preview.cells()[40 * 140 + 40], FULL);
+        assert_eq!(preview.cells()[100 * 140 + 100], FULL);
     }
 
     /// Edge blend 0 is no blend at all: the fill is only colour-matched.
