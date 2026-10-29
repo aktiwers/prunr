@@ -423,7 +423,7 @@ fn redrawing_every_stroke_as_it_is_changes_nothing() {
         SelectionMade::Clear => "clear",
     }).collect();
     assert_eq!(kinds, ["stroke", "fold", "stroke", "invert", "stroke", "clear", "stroke"]);
-    let replay = Replay { strokes, alone: false, dims: (32, 32), source: None };
+    let replay = Replay { strokes, dims: (32, 32), source: None };
     let made = apply(&SelectionOp::Replay(std::sync::Arc::new(replay)), &SelState::default());
     assert_eq!(made.selection.as_ref().map(|s| s.content_hash()), item.selection_hash, "the same selection");
     assert_eq!(made.edits.as_ref().map(|e| e.cells().to_vec()), item.edits.as_ref().map(|e| e.cells().to_vec()), "the same cut-out edits");
@@ -470,6 +470,36 @@ fn every_stroke_includes_the_latest_one_adjusted_alone() {
     assert_eq!(stroke_sizes(&app), [8.0, 16.0]);
     adjust_all(&mut app, |b| b.radius = 32.0);
     assert_eq!(stroke_sizes(&app), [16.0, 32.0]);
+}
+
+/// "Last stroke" after "All strokes" moved them: the latest stroke still
+/// takes the sliders alone, also after "Next stroke" in between, and the
+/// earlier strokes stay as All left them.
+#[test]
+fn last_reaches_the_latest_stroke_after_all_moved_every_one() {
+    use crate::gui::brush_state::StrokeReach;
+    for next_between in [false, true] {
+        let mut app = app_for_strokes();
+        paint_down(&mut app, 8.0, 8.0);
+        paint_down(&mut app, 24.0, 8.0);
+        adjust_all(&mut app, |b| b.radius = 16.0);
+        assert_eq!(stroke_sizes(&app), [16.0, 16.0]);
+        if next_between {
+            app.brush_state.reach = StrokeReach::Next;
+            slide(&mut app, |b| b.radius = 30.0);
+            assert!(!app.batch.selection_queue.any_pending(), "Next: the strokes to come only");
+        }
+        app.brush_state.reach = StrokeReach::Last;
+        app.adjust_strokes();
+        slide(&mut app, |b| b.radius = 12.0);
+        redraw_lands(&mut app);
+        assert_eq!(stroke_sizes(&app), [16.0, 12.0], "Next between: {next_between}");
+        let steps = app.batch.items[0].timeline.undo_steps();
+        slide(&mut app, |b| b.radius = 10.0);
+        redraw_lands(&mut app);
+        assert_eq!(stroke_sizes(&app), [16.0, 10.0], "Next between: {next_between}");
+        assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "the drag fills in one step");
+    }
 }
 
 /// "Next stroke": a slider sets the strokes to come and leaves the latest

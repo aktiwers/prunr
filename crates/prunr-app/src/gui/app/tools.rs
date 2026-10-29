@@ -589,7 +589,7 @@ impl PrunrApp {
         if !any_differ(&strokes.ops, &adjusting.shown) {
             return;
         }
-        let replay = Replay { strokes, alone: reach == StrokeReach::Last, dims: item.dimensions, source: item.source_rgba.clone() };
+        let replay = Replay { strokes, dims: item.dimensions, source: item.source_rgba.clone() };
         self.queue_selection_op(item_id, SelectionOp::Replay(Arc::new(replay)));
     }
 }
