@@ -8,7 +8,6 @@ use crate::gui::theme;
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use prunr_core::brush::BrushShape;
-use prunr_core::inpaint::FillScale;
 use prunr_core::selection::BrushMode;
 
 use super::chip;
@@ -62,13 +61,6 @@ const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
     chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
 ];
 
-const FILL_SCALES: [chip::Choice<FillScale>; 4] = [
-    chip::Choice { value: FillScale::Auto, name: "Auto", description: "Full size for small areas; large ones shrink to fit", enabled: true },
-    chip::Choice { value: FillScale::Full, name: "Full", description: "Every area at full size: sharpest, blotchy on large ones", enabled: true },
-    chip::Choice { value: FillScale::Half, name: "1/2", description: "Half size", enabled: true },
-    chip::Choice { value: FillScale::Quarter, name: "1/4", description: "Quarter size: softest, most even on large areas", enabled: true },
-];
-
 /// The Paint Brush panel: what the strip does not show.
 pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, reach: &mut StrokeReach, model: SettingsModel) -> BrushChipOutcome {
     let mut outcome = BrushChipOutcome::default();
@@ -77,13 +69,6 @@ pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, reach: &mut Stroke
     }
     reach_row(ui, reach);
     outcome.committed |= chip::choice_row(ui, "Shape", &BRUSH_SHAPES, &mut s.shape);
-    if shows(model, Surface::FillRegionKnobs) {
-        // Sharpen displays as 0-100% on a 0-2 internal range.
-        let sh = chip::slider_row_f32(ui, "Sharpen", &mut s.inpaint_sharpen, 0.0..=2.0, false, |v| fmt::percent(v / 2.0));
-        outcome.committed |= sh.commit;
-        super::hint(ui, "Sharpen the filled area, which comes out slightly soft.");
-        outcome.committed |= fill_scale_row(ui, s, model);
-    }
     if shows(model, Surface::SelectionStrokes) {
         outcome.committed |= render_shared_selection_section(ui, s);
     }
@@ -117,16 +102,6 @@ pub(super) fn expand_region_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chi
     chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0))
 }
 
-/// The eraser's Fill scale, in both brushes' panels. Returns true when
-/// it changed.
-pub(super) fn fill_scale_row(ui: &mut egui::Ui, s: &mut BrushSettings, model: SettingsModel) -> bool {
-    if !shows(model, Surface::FillRegionKnobs) {
-        return false;
-    }
-    let changed = chip::choice_row(ui, "Fill scale", &FILL_SCALES, &mut s.inpaint_fill_scale);
-    super::hint(ui, "A large area fills more convincingly at a smaller scale, a little softer. Auto keeps small areas at full size.");
-    changed
-}
 
 /// The eraser's Feather slider, in the flyout and the tool strip.
 pub(super) fn feather_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {
