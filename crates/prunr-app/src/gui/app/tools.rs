@@ -559,7 +559,7 @@ impl PrunrApp {
                 Ok(drawn) => {
                     let Some(dims) = self.batch.find_by_id(result.item_id).map(|i| i.dimensions) else { continue };
                     tracing::info!(item_id = result.item_id, "Magic Brush pick queued");
-                    self.queue_selection_op(result.item_id, SelectionOp::Stroke { drawn, dims, kept: true });
+                    self.queue_selection_op(result.item_id, SelectionOp::Stroke { drawn, dims });
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");

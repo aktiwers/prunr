@@ -33,9 +33,9 @@ impl SelState {
 #[derive(Clone)]
 pub(crate) enum SelectionOp {
     /// A stroke drawn here on a `dims` image and merged into the
-    /// selection: Add grows it, Subtract carves it away. `kept`: its step
-    /// records it, for its brush's sliders to draw it again.
-    Stroke { drawn: StrokeDrawn, dims: (u32, u32), kept: bool },
+    /// selection: Add grows it, Subtract carves it away. Its step records
+    /// it, for its brush's sliders to draw it again.
+    Stroke { drawn: StrokeDrawn, dims: (u32, u32) },
     Invert,
     /// The selection folded into the cut-out's edits as `action` says,
     /// and cleared; `feathered` is the plane the overlay shows, when built.
@@ -51,7 +51,7 @@ impl SelectionOp {
     pub(crate) fn step(&self, feather_px: u32) -> (super::timeline::StepKind, Option<Made>) {
         use super::timeline::StepKind;
         match self {
-            Self::Stroke { drawn, kept, .. } => (StepKind::Stroke, kept.then(|| Made::One(SelectionMade::Stroke(drawn.clone())))),
+            Self::Stroke { drawn, .. } => (StepKind::Stroke, Some(Made::One(SelectionMade::Stroke(drawn.clone())))),
             Self::Invert => (StepKind::Selection, Some(Made::One(SelectionMade::Invert))),
             Self::Bake { action, feathered } => {
                 let feather_px = if feathered.is_some() { feather_px } else { 0 };
@@ -358,7 +358,7 @@ mod tests {
         let mut queue = SelectionQueue::new();
         let at = |x: f32| {
             let drawn = super::super::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, 0.5, 0.5)], super::super::tests::fixtures::HARD);
-            SelectionOp::Stroke { drawn, dims: (3, 1), kept: true }
+            SelectionOp::Stroke { drawn, dims: (3, 1) }
         };
         queue.push(1, at(0.5), SelState::default());
         queue.push(1, at(2.5), SelState::default());

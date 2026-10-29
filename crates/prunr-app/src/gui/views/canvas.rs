@@ -266,8 +266,7 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
         let (item_id, dims) = (item.id, item.dimensions);
         tracing::info!(item_id, "brush stroke committed; merging into the selection");
         let drawn = crate::gui::brush_state::StrokeDrawn::painted(path, stamp);
-        // An eraser's region fills once drawn: its sliders set the next one.
-        app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, kept: selection_strokes });
+        app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims });
     }
 }
 
