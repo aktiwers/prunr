@@ -506,6 +506,14 @@ impl StrokeDrawn {
         Self::Paint { path: std::sync::Arc::new(path), size, stamp, edge }
     }
 
+    /// The brush that draws it, and whose sliders draw it again.
+    pub(crate) fn tool(&self) -> Tool {
+        match self {
+            Self::Magic { .. } | Self::Depth { .. } => Tool::Magic,
+            Self::Paint { .. } => Tool::Paint,
+        }
+    }
+
     pub(crate) fn edge(&self) -> StrokeEdge {
         match self {
             Self::Magic { edge, .. } | Self::Depth { edge, .. } | Self::Paint { edge, .. } => *edge,

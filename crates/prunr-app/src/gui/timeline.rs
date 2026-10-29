@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::selection::MaskArtifact;
 
+use super::brush_state::{StrokeDrawn, Tool};
 use super::item::Engine;
 use super::item_settings::ItemSettings;
 
@@ -432,17 +433,25 @@ impl StrokeHistory {
         Self { from: start.id, selection: start.selection.clone(), edits: start.edits.clone(), ops: Arc::new(ops), own_step }
     }
 
-    /// The same strokes, each as `change` makes it.
-    pub(crate) fn changed(&self, change: impl Fn(&super::brush_state::StrokeDrawn) -> super::brush_state::StrokeDrawn) -> Self {
-        Self { ops: Arc::new(self.ops.iter().map(|op| op.changed(&change)).collect()), ..self.clone() }
+    /// Where the latest stroke `tool` drew is among the ops.
+    pub(crate) fn latest_of(&self, tool: Tool) -> Option<usize> {
+        self.ops.iter().rposition(|op| op.drawn_by(tool))
     }
 
-    /// The same strokes with the latest one as `change` makes it.
-    pub(crate) fn latest_changed(&self, change: impl Fn(&super::brush_state::StrokeDrawn) -> super::brush_state::StrokeDrawn) -> Self {
-        use super::selection_queue::SelectionMade;
-        let latest = self.ops.iter().rposition(|op| matches!(op, SelectionMade::Stroke(_)));
+    /// The same strokes, each `tool` drew as `change` makes it.
+    pub(crate) fn changed(&self, tool: Tool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        self.changed_where(|i| self.ops[i].drawn_by(tool), change)
+    }
+
+    /// The same strokes, the latest `tool` drew as `change` makes it.
+    pub(crate) fn latest_changed(&self, tool: Tool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        let latest = self.latest_of(tool);
+        self.changed_where(|i| Some(i) == latest, change)
+    }
+
+    fn changed_where(&self, at: impl Fn(usize) -> bool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
         let ops = self.ops.iter().enumerate()
-            .map(|(i, op)| if Some(i) == latest { op.changed(&change) } else { op.clone() })
+            .map(|(i, op)| if at(i) { op.changed(&change) } else { op.clone() })
             .collect();
         Self { ops: Arc::new(ops), ..self.clone() }
     }
@@ -521,21 +530,15 @@ impl Timeline {
         None
     }
 
-    /// The shown step's latest stroke, while the step is the newest, to
-    /// draw again: its own stroke from the step before it, or the strokes
-    /// a redraw of every stroke drew, the latest among them.
-    pub(crate) fn latest_stroke(&self) -> Option<StrokeHistory> {
-        use super::selection_queue::{Made, SelectionMade};
-        if self.can_redo() {
-            return None;
-        }
+    /// The latest stroke `tool` drew since the picture changed, to draw
+    /// again: the shown step's own, from the step before it, while that
+    /// step is the newest; else every stroke since the picture changed,
+    /// that one the latest of `tool`'s among them.
+    pub(crate) fn latest_stroke(&self, tool: Tool) -> Option<StrokeHistory> {
+        use super::selection_queue::Made;
         match &self.current().made {
-            Some(Made::One(stroke @ SelectionMade::Stroke(_))) => Some(StrokeHistory::from_step(self.previous()?, vec![stroke.clone()], true)),
-            Some(Made::Redrawn { from, ops }) if ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))) => {
-                let start = self.states.range(..self.cursor).find(|s| s.id == *from)?;
-                Some(StrokeHistory::from_step(start, ops.to_vec(), false))
-            }
-            _ => None,
+            Some(Made::One(op)) if op.drawn_by(tool) && !self.can_redo() => Some(StrokeHistory::from_step(self.previous()?, vec![op.clone()], true)),
+            _ => self.strokes_since_picture().filter(|h| h.latest_of(tool).is_some()),
         }
     }
 

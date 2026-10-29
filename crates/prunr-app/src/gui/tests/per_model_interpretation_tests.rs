@@ -123,8 +123,10 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
     assert!(app.processor.live_preview.is_pending_for(7), "the re-cut is queued");
 }
 
-/// Queue `drawn` on image `item_id` as its brush does, and land it.
+/// Queue `drawn` on image `item_id` as its brush does, with that brush
+/// in hand, and land it.
 fn land(app: &mut PrunrApp, item_id: u64, drawn: crate::gui::brush_state::StrokeDrawn) {
+    app.set_tool(Some(drawn.tool()));
     let dims = app.batch.find_by_id(item_id).expect("the image").dimensions;
     app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, source: None });
     super::fixtures::settle_selection_edits(app);
@@ -278,11 +280,13 @@ fn an_eraser_stroke_redraws_with_its_size() {
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "still the stroke's one step");
 }
 
-/// A stroke stays the one its sliders redraw only while its step is the
-/// one shown and the newest: another step after it, or an undo, ends it,
-/// so a redraw never writes into a step the stroke did not make.
+/// A redraw never writes into a step its stroke did not make: with a step
+/// after the stroke, a slider draws it again as a step of its own, and
+/// that step undone shows the stroke as it was; after an undo of the
+/// stroke there is none to draw.
 #[test]
-fn the_latest_stroke_ends_with_the_next_step() {
+fn a_redraw_never_writes_into_a_step_its_stroke_did_not_make() {
+    use crate::gui::brush_state::Tool;
     let land_one = || {
         let settings = crate::gui::brush_state::BrushSettings { radius: 2.0, ..Default::default() };
         let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Circle, settings.radius, &[(8.0, 8.0, 1.0)], settings.stamp());
@@ -290,15 +294,76 @@ fn the_latest_stroke_ends_with_the_next_step() {
         app.settings.brush = settings;
         app
     };
-    let mut after_a_step = land_one();
-    after_a_step.batch.items[0].commit(StepKind::Adjust);
+    let mut app = land_one();
+    let drawn = app.batch.items[0].selection_hash;
+    app.batch.items[0].commit(StepKind::Adjust);
+    let steps = app.batch.items[0].timeline.undo_steps();
+    slide(&mut app, |b| b.radius = 5.0);
+    redraw_lands(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "a step of its own");
+    assert_eq!(stroke_sizes(&app), [5.0]);
+    app.handle_undo(&egui::Context::default());
+    assert_eq!(app.batch.items[0].selection_hash, drawn, "the step after the stroke as it was");
+
     let mut undone = land_one();
     undone.handle_undo(&egui::Context::default());
-    for (case, mut app) in [("another step", after_a_step), ("an undo", undone)] {
-        assert!(app.batch.items[0].timeline.latest_stroke().is_none(), "{case}");
-        slide(&mut app, |b| b.radius = 5.0);
-        assert!(!app.batch.selection_queue.any_pending(), "{case}: nothing redrawn");
-    }
+    assert!(undone.batch.items[0].timeline.latest_stroke(Tool::Paint).is_none());
+    slide(&mut undone, |b| b.radius = 5.0);
+    assert!(!undone.batch.selection_queue.any_pending(), "an undone stroke: nothing redrawn");
+}
+
+/// Each brush's sliders reach the strokes that brush drew: Last its
+/// latest one, even with the other brush's stroke after it, and All every
+/// one of its own; the other brush's strokes stay as drawn, also for
+/// Feather, which both brushes have.
+#[test]
+fn a_brushs_sliders_reach_only_its_own_strokes() {
+    use crate::gui::brush_state::{StrokeDrawn, StrokeReach, Tool};
+    use crate::gui::selection_queue::SelectionMade;
+    let depth_pick = |app: &mut PrunrApp| {
+        let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
+        land(app, 9, StrokeDrawn::Depth { around: depth.at(0.9, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
+    };
+    let feathers = |app: &PrunrApp| -> Vec<(Tool, f32)> {
+        app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| h.ops.iter().filter_map(|op| match op {
+            SelectionMade::Stroke(d) => match d.edge() {
+                crate::gui::brush_state::StrokeEdge::Selection { feather } => Some((d.tool(), feather)),
+                _ => None,
+            },
+            _ => None,
+        }).collect())
+    };
+
+    let mut app = app_for_strokes();
+    // A photo for Feather to soften against.
+    app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]))));
+    paint_down(&mut app, 4.0, 8.0);
+    paint_down(&mut app, 12.0, 8.0);
+    depth_pick(&mut app);
+    app.set_tool(Some(Tool::Paint));
+    let steps = app.batch.items[0].timeline.undo_steps();
+    app.brush_state.reach = StrokeReach::Last;
+    slide(&mut app, |b| b.radius = 12.0);
+    redraw_lands(&mut app);
+    assert_eq!(stroke_sizes(&app), [8.0, 12.0], "Last: the Paint Brush's latest stroke, past the pick after it");
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "one step");
+    slide(&mut app, |b| b.radius = 14.0);
+    redraw_lands(&mut app);
+    assert_eq!(stroke_sizes(&app), [8.0, 14.0]);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "the drag fills in its one step");
+
+    adjust_all(&mut app, |b| b.edge_feather = 3.0);
+    assert_eq!(feathers(&app), [(Tool::Paint, 3.0), (Tool::Paint, 3.0), (Tool::Magic, 0.0)], "All: the Paint Brush's strokes only");
+
+    app.set_tool(Some(Tool::Magic));
+    slide(&mut app, |b| b.edge_feather = 5.0);
+    super::fixtures::settle_selection_edits(&mut app);
+    assert_eq!(feathers(&app), [(Tool::Paint, 3.0), (Tool::Paint, 3.0), (Tool::Magic, 2.0)], "the Magic Brush's All: its pick only");
+    app.brush_state.reach = StrokeReach::Last;
+    app.adjust_strokes();
+    slide(&mut app, |b| b.magic_depth_range = 0.2);
+    redraw_lands(&mut app);
+    assert_eq!(stroke_sizes(&app), [8.0, 14.0], "the Paint Brush's strokes as they were");
 }
 
 /// Image 9, a 32 × 32 Silueta cut-out to paint on.

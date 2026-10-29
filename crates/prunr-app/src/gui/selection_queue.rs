@@ -80,6 +80,11 @@ impl SelectionMade {
         }
     }
 
+    /// A stroke `tool` drew.
+    pub(crate) fn drawn_by(&self, tool: super::brush_state::Tool) -> bool {
+        matches!(self, Self::Stroke(drawn) if drawn.tool() == tool)
+    }
+
     /// Whether a redraw of one in place of the other would change it.
     fn differs(&self, other: &Self) -> bool {
         match (self, other) {

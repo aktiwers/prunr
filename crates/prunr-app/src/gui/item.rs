@@ -1048,32 +1048,35 @@ impl DepthPhotoKey {
     }
 }
 
-/// The image's strokes being drawn again as the sliders move: the latest
-/// one (Last) or every one since the picture changed (All).
+/// The image's strokes being drawn again as a brush's sliders move: the
+/// latest one that brush drew (Last) or every one it drew since the
+/// picture changed (All).
 pub(crate) struct StrokeAdjustment {
     pub(crate) reach: crate::gui::brush_state::StrokeReach,
+    pub(crate) tool: crate::gui::brush_state::Tool,
     /// The slider values where it began.
     pub(crate) from: crate::gui::brush_state::StrokeValues,
     /// The strokes as they stood then.
     pub(crate) strokes: super::timeline::StrokeHistory,
     /// How the shown step draws them.
     pub(crate) shown: Arc<Vec<super::selection_queue::SelectionMade>>,
-    /// The step it fills in once landed (Last: the stroke's own, from the
-    /// start); before that, the step it began on.
+    /// The step it fills in once landed (the stroke's own, from the start,
+    /// when it is the shown step's own stroke); before that, the step it
+    /// began on.
     pub(crate) step: u64,
     pub(crate) landed: bool,
 }
 
 impl StrokeAdjustment {
     /// The strokes as the sliders at `now` draw them: Last sets each
-    /// moved slider's value on the latest stroke, All moves each stroke by
-    /// as much.
+    /// moved slider's value on the brush's latest stroke, All moves each of
+    /// its strokes by as much.
     pub(crate) fn at(&self, now: crate::gui::brush_state::StrokeValues) -> super::timeline::StrokeHistory {
         use crate::gui::brush_state::StrokeReach;
-        let from = self.from;
+        let (from, tool) = (self.from, self.tool);
         match self.reach {
-            StrokeReach::Last => self.strokes.latest_changed(|drawn| drawn.at(drawn.values().moved(from, now))),
-            _ => self.strokes.changed(|drawn| drawn.at(drawn.values().adjusted(from, now))),
+            StrokeReach::Last => self.strokes.latest_changed(tool, |drawn| drawn.at(drawn.values().moved(from, now))),
+            _ => self.strokes.changed(tool, |drawn| drawn.at(drawn.values().adjusted(from, now))),
         }
     }
 }
