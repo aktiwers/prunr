@@ -116,13 +116,14 @@ fn the_hardware_page_names_every_runtime_control() {
         ("both installed", both, None, vec![openvino.uninstall_label(), "Built in", store.name()]),
         ("OpenVINO installing", built_in_only, installing, vec!["Cancel"]),
         ("none installed", HardwareInstallCache::default(), None, vec![openvino.install_button_label()]),
+        ("an earlier one in use", HardwareInstallCache::default().with_update(openvino), None, vec![openvino.update_button_label()]),
     ];
     // Where OpenVINO is not offered for download (Windows), the page has
     // no install, uninstall or cancel for it; a runtime installed anyway
     // still gives the choice. Every control is still named.
     let offered = RuntimeId::OFFERED.contains(&openvino);
     for (shape, installs, installing, expected) in shapes {
-        let download_controls = |name: &&str| [openvino.install_button_label(), openvino.uninstall_label(), "Cancel"].contains(name);
+        let download_controls = |name: &&str| [openvino.install_button_label(), openvino.update_button_label(), openvino.uninstall_label(), "Cancel"].contains(name);
         let expected: Vec<&str> = expected.into_iter().filter(|n| offered || !download_controls(n)).collect();
         let ctx = HardwareSectionContext { installing, testable: true, ..hardware_page(installs) };
         let mut harness = Harness::new_ui(move |ui| { render_page_hardware(ui, &ctx); });

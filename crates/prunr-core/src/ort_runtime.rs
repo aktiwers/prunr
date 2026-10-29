@@ -874,6 +874,14 @@ fn store_entries() -> Vec<(String, PathBuf)> {
     prunr_models::runtime_store_dir().map(|root| store_entries_in(&root)).unwrap_or_default()
 }
 
+/// The mark beside a Runtime Store install that goes at the next start:
+/// one uninstalled while loaded, or one an update replaced. No process
+/// loads an install so marked.
+pub fn removal_mark(install: &Path) -> Option<PathBuf> {
+    let name = install.file_name()?.to_string_lossy();
+    Some(install.with_file_name(format!(".{name}.remove")))
+}
+
 /// Every runtime-store entry as `(dir name, path the dylib would have)`,
 /// sorted by name so logs reproduce.
 fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
@@ -885,6 +893,7 @@ fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
         .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
         // A hidden folder is an install still being extracted.
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| !removal_mark(&e.path()).is_some_and(|mark| mark.is_file()))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().join(DYLIB_NAME)))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1246,6 +1255,18 @@ mod tests {
         install(root.path(), "openvino-1.24.1-windows-x64");
         install(root.path(), "directml-1.24.1-windows-x64");
         assert_eq!(picked(root.path(), None, false), Some(root.path().join("directml-1.24.1-windows-x64").join(DYLIB_NAME)));
+    }
+
+    /// An install marked to go (one an update replaced) never loads, even
+    /// when preferred: the next start removes it.
+    #[test]
+    fn an_install_marked_to_go_never_loads() {
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "openvino-1.24.1-linux-x64");
+        install(root.path(), "plain-1.24.1-linux-x64");
+        write_preferred(root.path(), "openvino-1.24.1-linux-x64").unwrap();
+        std::fs::write(removal_mark(&root.path().join("openvino-1.24.1-linux-x64")).unwrap(), b"").unwrap();
+        assert_eq!(picked(root.path(), None, false), Some(root.path().join("plain-1.24.1-linux-x64").join(DYLIB_NAME)));
     }
 
     #[test]

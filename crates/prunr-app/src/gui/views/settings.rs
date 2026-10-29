@@ -762,10 +762,12 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
     let waits = rt.is_addon() && ctx.installs.addon_waits;
     let in_use = (rt.is_addon() && !waits) || ctx.installs.loaded_runtime == Some(RuntimeChoice::Store(rt));
     let failure = ctx.gpu_failures[rt.stack().index()].filter(|_| in_use).map(|f| f.text());
+    let update = !installed && ctx.installs.updates(rt);
     let status = match installing_this {
         Some((_, progress)) => progress.as_str(),
         None if installed && waits => rt.waiting_line(),
         None if installed => failure.as_deref().unwrap_or(rt.installed_line()),
+        None if update => &rt.update_line(ctx.installs.nvidia_libraries),
         None => &rt.not_installed(recommended, ctx.installs.nvidia_libraries),
     };
     rows.row(rt.display_name(), status, |ui| {
@@ -778,8 +780,9 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
                 *intent = Some(HardwareSectionIntent::Uninstall(rt));
             }
         } else {
-            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, "Install")).inner;
-            if super::chip::named(resp, rt.install_button_label()).clicked() {
+            let (text, name) = if update { ("Update", rt.update_button_label()) } else { ("Install", rt.install_button_label()) };
+            let resp = ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, text)).inner;
+            if super::chip::named(resp, name).clicked() {
                 *intent = Some(HardwareSectionIntent::StartInstall(rt));
             }
         }
