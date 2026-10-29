@@ -357,9 +357,11 @@ impl SelectionStyle {
     }
 
     /// Under an eraser, the plane the overlay draws for `mask`: what the
-    /// erase will touch. `None` shows `mask` as it is.
+    /// erase will touch, each eraser stroke as it fills and any other
+    /// selected region with the Expand and Feather set now. `None` shows
+    /// `mask` as it is.
     pub(crate) fn shown_region(&self, mask: &prunr_core::selection::MaskArtifact) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.fill.map(|f| Arc::new(prunr_core::inpaint_blend::fill_preview(mask, f.grow, f.blend)))
+        self.fill.map(|f| Arc::new(prunr_core::inpaint_blend::eraser_preview(mask, f.grow, f.blend)))
     }
 
     /// The default outline, with `fill_opacity`.

@@ -154,7 +154,7 @@ fn app_with_a_magic_pick() -> (PrunrApp, u64) {
     item.dimensions = (8, 8);
     give_tensor(item);
     let reading = app.settings.brush.magic_reading();
-    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading, feather: 0.0 });
+    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading, edge: crate::gui::brush_state::StrokeEdge::HARD });
     assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
     let hash = app.batch.items[0].selection_hash.expect("the pick");
     (app, hash)
@@ -252,7 +252,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     assert!(opacity > 0 && opacity < prunr_core::selection::FULL.unsigned_abs(), "Opacity halves it: {opacity}");
 
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(16, 16, (0..256).map(|i| (i % 16) as f32 / 15.0).collect()));
-    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, feather: 0.0 };
+    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD };
     let mut app = app_with_landed_stroke(drawn, (16, 16));
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
@@ -438,7 +438,7 @@ fn a_slider_moves_only_its_own_strokes() {
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
-    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, feather: 0.0 });
+    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
     app.settings.brush.magic_depth_range = 0.05;
     adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
     let ops = app.batch.items[0].timeline.strokes_since_picture().expect("strokes").ops;
@@ -516,7 +516,7 @@ fn feather_softens_only_the_strokes_its_reach_takes() {
     let feathers = |app: &PrunrApp| -> Vec<f32> {
         app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| {
             h.ops.iter().filter_map(|op| match op {
-                SelectionMade::Stroke(StrokeDrawn::Paint { feather, .. }) => Some(*feather),
+                SelectionMade::Stroke(StrokeDrawn::Paint { edge: crate::gui::brush_state::StrokeEdge::Selection { feather }, .. }) => Some(*feather),
                 _ => None,
             }).collect()
         })
@@ -538,6 +538,51 @@ fn feather_softens_only_the_strokes_its_reach_takes() {
     adjust_all(&mut app, |b| b.edge_feather = 5.0);
     assert_eq!(feathers(&app), [2.0, 5.0]);
     assert_ne!(left(&app), hard_left, "the earlier stroke softened too");
+}
+
+/// An eraser's Expand region and Feather are each stroke's own: on "Next
+/// stroke" they redraw nothing, on "Last stroke" they change the latest
+/// stroke's fill and leave the earlier one's, on "All strokes" they move
+/// both; the erase fills each stroke with its own.
+#[test]
+fn an_erasers_expand_and_feather_reach_the_strokes_the_switch_says() {
+    use crate::gui::brush_state::StrokeReach;
+    use prunr_core::inpaint_blend::{eraser_fill, eraser_preview, Band};
+    let mut app = app_with_model(SettingsModel::Inpaint);
+    push_test_item(&mut app, 9).dimensions = (64, 32);
+    (app.settings.brush.inpaint_grow, app.settings.brush.inpaint_feather) = (0.0, 2.0);
+    for x in [12.0, 52.0] {
+        let edge = app.settings.stroke_edge();
+        let stamp = app.settings.brush.region_stamp(false);
+        let drawn = super::fixtures::painted_with_edge(prunr_core::brush::BrushShape::Circle, 3.0, &[(x, 16.0, 3.0)], stamp, edge);
+        land(&mut app, 9, drawn);
+    }
+    let plane = |app: &PrunrApp| std::sync::Arc::clone(app.batch.items[0].selection_mask.as_ref().expect("painted"));
+    let left = |p: &prunr_core::selection::MaskArtifact| {
+        let shown = eraser_preview(p, 0.0, 0.0);
+        shown.cells().chunks(64).flat_map(|row| row[..32].to_vec()).collect::<Vec<i8>>()
+    };
+    let (first_left, first) = (left(&plane(&app)), plane(&app));
+
+    app.brush_state.reach = StrokeReach::Next;
+    slide(&mut app, |b| b.inpaint_feather = 6.0);
+    assert!(!app.batch.selection_queue.any_pending(), "Next: the strokes to come only");
+
+    app.brush_state.reach = StrokeReach::Last;
+    app.adjust_strokes();
+    slide(&mut app, |b| (b.inpaint_grow, b.inpaint_feather) = (2.0, 8.0));
+    redraw_lands(&mut app);
+    assert_ne!(*plane(&app), *first, "the latest stroke fills anew");
+    assert_eq!(left(&plane(&app)), first_left, "the earlier stroke as drawn");
+    let fill = eraser_fill(&plane(&app), 0.0, 0.0, (64, 32));
+    let Band::PerPixel(band) = fill.band() else { panic!("each stroke its own band") };
+    assert_eq!((band.get_pixel(12, 16).0[0], band.get_pixel(52, 16).0[0]), (2, 8));
+
+    adjust_all(&mut app, |b| b.inpaint_feather = 10.0);
+    assert_ne!(left(&plane(&app)), first_left, "the earlier stroke moves too");
+    let fill = eraser_fill(&plane(&app), 0.0, 0.0, (64, 32));
+    let Band::PerPixel(band) = fill.band() else { panic!("each stroke its own band") };
+    assert_eq!((band.get_pixel(12, 16).0[0], band.get_pixel(52, 16).0[0]), (4, 10), "both by as much");
 }
 
 /// A slider moved on one image leaves another image's latest stroke as

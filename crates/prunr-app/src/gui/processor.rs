@@ -394,7 +394,7 @@ pub(crate) struct DepthSelectRequest {
     pub(crate) at: (f32, f32),
     pub(crate) range: f32,
     pub(crate) mode: prunr_core::selection::BrushMode,
-    pub(crate) feather: f32,
+    pub(crate) edge: super::brush_state::StrokeEdge,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
@@ -422,7 +422,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) reading: prunr_core::MaskReading,
-    pub(crate) feather: f32,
+    pub(crate) edge: super::brush_state::StrokeEdge,
     pub(crate) cpu_only: bool,
 }
 
@@ -742,10 +742,10 @@ pub(crate) struct InpaintTuning {
 }
 
 impl InpaintTuning {
-    /// The region a fill replaces: the painted one grown by Expand, plus
-    /// the Feather ring.
-    fn fill_region(&self, painted: &prunr_core::selection::MaskArtifact, (w, h): (u32, u32)) -> image::GrayImage {
-        prunr_core::inpaint_blend::fill_region(&painted.region_mask(w, h), self.grow_px, self.feather_px)
+    /// What a fill replaces: each eraser stroke as it fills, and any other
+    /// selected region grown by the Expand plus the Feather ring set now.
+    fn fill(&self, painted: &prunr_core::selection::MaskArtifact, dims: (u32, u32)) -> prunr_core::inpaint_blend::EraserFill {
+        prunr_core::inpaint_blend::eraser_fill(painted, self.grow_px, self.feather_px, dims)
     }
 }
 
@@ -994,7 +994,7 @@ impl Processor {
     pub(crate) fn dispatch_depth_select(&mut self, req: DepthSelectRequest) {
         self.note_pick(req.item_id);
         let around = req.depth.at(req.at.0, req.at.1);
-        let drawn = super::brush_state::StrokeDrawn::Depth { depth: req.depth, around, mode: req.mode, range: req.range, feather: req.feather };
+        let drawn = super::brush_state::StrokeDrawn::Depth { depth: req.depth, around, mode: req.mode, range: req.range, edge: req.edge };
         let _ = self.sam_decoded.tx.send(SamDecoderResult { item_id: req.item_id, result: Ok(drawn) });
     }
 
@@ -1119,11 +1119,11 @@ impl Processor {
                     return Err(prunr_core::CoreError::ImageFormat("the image could not be read".into()));
                 };
                 preview_the_photo(&progress, &image);
-                let mask = tuning.fill_region(&correction, image.dimensions());
+                let fill = tuning.fill(&correction, image.dimensions());
                 // This path only sees LaMa / Big-LaMa / MI-GAN.
-                let filled = prunr_core::inpaint::process_lama(&image, &mask, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress)?;
+                let filled = prunr_core::inpaint::process_lama(&image, &fill.hole, tuning.model, tuning.cpu_only, tuning.fill_scale, &progress)?;
                 progress.step(prunr_core::Step::Blending);
-                let rgba = prunr_core::inpaint_blend::finalize_inpaint(filled.rgba, &image, &mask, prunr_core::inpaint_blend::Band::Uniform(tuning.feather_px), tuning.sharpen, tuning.edge_colour);
+                let rgba = prunr_core::inpaint_blend::finalize_inpaint(filled.rgba, &image, &fill.hole, fill.band(), tuning.sharpen, tuning.edge_colour);
                 Ok((rgba, filled.scale))
             });
             run.end();
@@ -1259,8 +1259,11 @@ impl Processor {
                 };
                 // Before the dispatch, so it lands under the worker's previews.
                 preview_the_photo(&progress, &image);
-                let mask = tuning.fill_region(&correction, image.dimensions());
-                let sd_req = sd_request(&tuning);
+                let fill = tuning.fill(&correction, image.dimensions());
+                let band = fill.band().widest();
+                let sd_req = sd_request(&tuning, band);
+                // Strokes with their own Feather go as a band per pixel.
+                let mask = fill.packed();
                 let dir = crate::subprocess::protocol::ipc_temp_dir();
                 let image_path = crate::subprocess::protocol::IpcKind::InpaintImg.path_for_generation(dir, item_id, generation);
                 let mask_path  = crate::subprocess::protocol::IpcKind::InpaintMask.path_for_generation(dir, item_id, generation);
@@ -1280,7 +1283,7 @@ impl Processor {
                 }
                 let job = crate::subprocess::protocol::InpaintJob {
                     item_id, generation, model_id: tuning.model, image_path, mask_path, sd_req,
-                    feather_px: tuning.feather_px,
+                    feather_px: band,
                     sharpen: tuning.sharpen,
                     edge_colour: tuning.edge_colour,
                 };
@@ -1999,7 +2002,7 @@ impl Processor {
                 .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
                 .map(|out| {
                     tracing::debug!(item_id = req.item_id, decoder_ms = started.elapsed().as_millis() as u64, "SAM decoder ran");
-                    super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading, feather: req.feather }
+                    super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading, edge: req.edge }
                 }))
                 .unwrap_or_else(Err);
             let _ = tx.send(SamDecoderResult { item_id: req.item_id, result });
@@ -2140,15 +2143,16 @@ fn run_sam_decoder_inline(
     Ok(prunr_core::sam::SamDecoderOutput { masks, iou_predictions })
 }
 
-/// The SD pipeline's request for an erase under `tuning`; `None` for an
-/// eraser outside the SD family.
-pub(crate) fn sd_request(tuning: &InpaintTuning) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
+/// The SD pipeline's request for an erase under `tuning` whose Feather
+/// band is `band_px` wide (at its widest); `None` for an eraser outside
+/// the SD family.
+pub(crate) fn sd_request(tuning: &InpaintTuning, band_px: f32) -> Option<prunr_core::inpaint_sd::SdInpaintRequest> {
     use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
     let base = SdInpaintRequest {
         seed: tuning.sd_seed,
         tuning: prunr_core::inpaint_sd::SdTuning { cpu_only: tuning.cpu_only, ..tuning.sd_tuning.clone() },
         fill_scale: tuning.fill_scale,
-        soft_edge_px: if tuning.soft_edge { tuning.feather_px } else { 0.0 },
+        soft_edge_px: if tuning.soft_edge { band_px } else { 0.0 },
         ..Default::default()
     };
     match tuning.model {
@@ -2206,18 +2210,18 @@ mod sd_request_tests {
         use prunr_core::inpaint_sd::SchedulerKind;
         for model in [prunr_models::ModelId::SdV15InpaintFp16, prunr_models::ModelId::RoremFp16] {
             let on = InpaintTuning { model, feather_px: 22.0, soft_edge: true, ..Default::default() };
-            assert_eq!(sd_request(&on).unwrap().soft_edge_px, 22.0, "{model:?}");
+            assert_eq!(sd_request(&on, 22.0).unwrap().soft_edge_px, 22.0, "{model:?}");
             let off = InpaintTuning { soft_edge: false, ..on };
-            assert_eq!(sd_request(&off).unwrap().soft_edge_px, 0.0, "{model:?}");
+            assert_eq!(sd_request(&off, 22.0).unwrap().soft_edge_px, 0.0, "{model:?}");
         }
         let quality = InpaintTuning {
             model: prunr_models::ModelId::SdV15InpaintFp16,
             sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             ..Default::default()
         };
-        assert_eq!(sd_request(&quality).unwrap().scheduler, SchedulerKind::DpmPp2MKarras, "the quality's own");
+        assert_eq!(sd_request(&quality, 0.0).unwrap().scheduler, SchedulerKind::DpmPp2MKarras, "the quality's own");
         let chosen = InpaintTuning { sd_sampler: Some(SdScheduler::Lcm), ..quality };
-        assert_eq!(sd_request(&chosen).unwrap().scheduler, SchedulerKind::Lcm, "the chosen one");
+        assert_eq!(sd_request(&chosen, 0.0).unwrap().scheduler, SchedulerKind::Lcm, "the chosen one");
     }
 
     /// A generated fill's soft edge already meets the photo, so its edge
@@ -2248,7 +2252,7 @@ mod sd_request_tests {
             use_taesd: true,
             ..Default::default()
         };
-        let req = sd_request(&tuning).expect("RORem runs through the SD pipeline");
+        let req = sd_request(&tuning, 0.0).expect("RORem runs through the SD pipeline");
         assert_eq!(req.num_inference_steps, 6, "its own steps, not SD's");
         assert_eq!(req.scheduler, prunr_core::inpaint_sd::SchedulerKind::Lcm);
         assert!(req.prompt.is_empty() && req.guidance_scale <= 1.0 && !req.use_taesd);
@@ -2257,7 +2261,7 @@ mod sd_request_tests {
 
     #[test]
     fn non_sd_erasers_have_no_sd_request() {
-        assert!(sd_request(&InpaintTuning::default()).is_none());
+        assert!(sd_request(&InpaintTuning::default(), 0.0).is_none());
     }
 }
 

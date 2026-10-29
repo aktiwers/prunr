@@ -895,7 +895,8 @@ struct DiffusionRun<'a> {
 
 impl<'a> DiffusionRun<'a> {
     fn open(id: ModelId, inputs: &'a Inputs, cpu_only: bool) -> Result<Self, String> {
-        let request = crate::gui::processor::sd_request(&diffusion_tuning(id, cpu_only))
+        let tuning = diffusion_tuning(id, cpu_only);
+        let request = crate::gui::processor::sd_request(&tuning, tuning.feather_px)
             .ok_or_else(|| format!("{id:?} is not a Stable Diffusion eraser"))?;
         let parts = prunr_core::inpaint_sd::load_bundle(id, &request.tuning).map_err(|e| e.to_string())?;
         Ok(Self { id, cpu_only, request, pick: BundlePick::of(parts), inputs })

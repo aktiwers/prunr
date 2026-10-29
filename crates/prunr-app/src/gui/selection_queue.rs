@@ -32,8 +32,9 @@ impl SelState {
 
 #[derive(Clone)]
 pub(crate) enum SelectionOp {
-    /// A stroke drawn here on a `dims` image, its edge feathered against
-    /// the photo `source`, and merged into the selection: Add grows it,
+    /// A stroke drawn here on a `dims` image with its edge (a selection's
+    /// feathered against the photo `source`, an eraser's grown with its
+    /// fill's band), and merged into the selection: Add grows it,
     /// Subtract carves it away. Its step records it, for its brush's
     /// sliders to draw it again.
     Stroke { drawn: StrokeDrawn, dims: (u32, u32), source: Option<Arc<image::RgbaImage>> },

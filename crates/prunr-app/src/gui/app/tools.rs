@@ -359,7 +359,7 @@ impl PrunrApp {
             at: ((at.0 + 0.5) / w as f32, (at.1 + 0.5) / h as f32),
             range: self.settings.brush.magic_depth_range,
             mode,
-            feather: self.settings.stroke_feather(),
+            edge: self.settings.stroke_edge(),
         });
     }
 
@@ -499,7 +499,7 @@ impl PrunrApp {
             prompt,
             mode,
             reading: self.settings.brush.magic_reading(),
-            feather: self.settings.stroke_feather(),
+            edge: self.settings.stroke_edge(),
             cpu_only: self.settings.cpu_only(),
         });
     }
