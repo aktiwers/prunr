@@ -154,14 +154,11 @@ fn the_tool_strip_follows_the_paint_brush() {
     h.state_mut().brush_state.enable();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Restore", "Erase", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
+    // Every brush setting is on the strip: nothing waits behind a click.
+    for knob in ["Restore", "Erase", "Select", "Next", "Last", "All", "Size", "Hardness", "Opacity", "Feather", "Circle", "Square", "Line", "Reset the brush"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
     }
     assert_all_controls_named(&h, "paint brush strip");
-    click(&mut h, "More Paint Brush settings");
-    assert!(egui::Popup::is_any_open(&h.ctx), "the dots open the full panel");
-    assert!(names(&h).iter().any(|n| n == "Feather"), "{:?}", names(&h));
-    assert_all_controls_named(&h, "paint brush panel");
     h.state_mut().brush_state.disable();
     settle(&mut h);
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
@@ -286,7 +283,7 @@ fn the_tool_strip_follows_the_magic_brush() {
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Confidence", "More Magic Brush settings"] {
+    for knob in ["Restore", "Erase", "Select", "Object", "Depth", "Confidence", "Next", "Last", "All", "Remove specks", "Feather", "Reset the brush"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
     }
     // Magic Brush picks objects; size, hardness and shape would change nothing.
@@ -294,12 +291,6 @@ fn the_tool_strip_follows_the_magic_brush() {
         assert!(!present.iter().any(|n| n == knob), "{knob} on the Magic Brush strip: {present:?}");
     }
     assert_all_controls_named(&h, "magic brush strip");
-    click(&mut h, "More Magic Brush settings");
-    assert!(egui::Popup::is_any_open(&h.ctx));
-    let panel = names(&h);
-    assert!(!panel.iter().any(|n| n == "Size" || n == "Hardness"), "{panel:?}");
-    assert!(panel.iter().any(|n| n == "Remove specks"), "{panel:?}");
-    assert_all_controls_named(&h, "magic brush panel");
 }
 
 /// Magic Brush's Depth choice trades Confidence for Range on the strip.

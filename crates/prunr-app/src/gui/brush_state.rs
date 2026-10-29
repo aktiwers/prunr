@@ -318,13 +318,24 @@ impl BrushSettings {
         self.sd_guidance_scale = self.sd_guidance_scale.clamp(*guidance.start(), *guidance.end());
     }
 
-    /// Reset the brush popover's sliders and shape to `source`. `strength`
-    /// and `mode` carry user intent across a reset and stay; SD tuning
-    /// belongs to the SD popover.
-    pub fn reset_popover_fields_from(&mut self, source: &Self) {
-        self.radius = source.radius;
-        self.hardness = source.hardness;
-        self.shape = source.shape;
+    /// Put `tool`'s knobs back as `source` has them: the Paint Brush's
+    /// Size, Hardness and Shape, the Magic Brush's Confidence, Range and
+    /// Remove specks, and either's eraser Expand region and Feather.
+    /// `strength` and `mode` carry user intent across a reset and stay;
+    /// an eraser's tuning belongs to its Advanced.
+    pub(crate) fn reset_tool_from(&mut self, tool: Tool, source: &Self) {
+        match tool {
+            Tool::Paint => {
+                self.radius = source.radius;
+                self.hardness = source.hardness;
+                self.shape = source.shape;
+            }
+            Tool::Magic => {
+                self.magic_confidence_threshold = source.magic_confidence_threshold;
+                self.magic_depth_range = source.magic_depth_range;
+                self.magic_remove_specks = source.magic_remove_specks;
+            }
+        }
         self.take_inpaint_tuning_from(source);
     }
 }
@@ -548,23 +559,6 @@ pub(crate) enum StrokeReach {
     All,
 }
 
-impl StrokeReach {
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Next => "Next stroke",
-            Self::Last => "Last stroke",
-            Self::All => "All strokes",
-        }
-    }
-
-    pub(crate) fn following(self) -> Self {
-        match self {
-            Self::Next => Self::Last,
-            Self::Last => Self::All,
-            Self::All => Self::Next,
-        }
-    }
-}
 
 #[derive(Default)]
 pub(crate) struct BrushState {
@@ -976,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_popover_fields_from_default_restores_visible_sliders_and_shape_only() {
+    fn paint_reset_restores_its_sliders_and_shape_only() {
         let mut s = BrushSettings {
             radius: 80.0,
             hardness: 0.0,
@@ -1005,7 +999,7 @@ mod tests {
             magic_depth_range: 0.2,
             cutout_action: CutoutAction::Erase,
         };
-        s.reset_popover_fields_from(&BrushSettings::default());
+        s.reset_tool_from(Tool::Paint, &BrushSettings::default());
 
         let d = BrushSettings::default();
         assert_eq!(s.radius, d.radius);
@@ -1033,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_popover_fields_from_uses_source_not_factory() {
+    fn paint_reset_uses_source_not_factory() {
         let source = BrushSettings {
             radius: 99.0,
             hardness: 0.1,
@@ -1048,7 +1042,7 @@ mod tests {
         target.strength = 0.42;
         target.mode = BrushMode::Add;
 
-        target.reset_popover_fields_from(&source);
+        target.reset_tool_from(Tool::Paint, &source);
 
         assert!((target.radius - 99.0).abs() < f32::EPSILON);
         assert!((target.hardness - 0.1).abs() < f32::EPSILON);
@@ -1059,6 +1053,29 @@ mod tests {
         // strength + mode carry user intent across reset — must not change.
         assert!((target.strength - 0.42).abs() < f32::EPSILON);
         assert_eq!(target.mode, BrushMode::Add);
+    }
+
+    /// The Magic Brush's Reset puts back its own knobs and leaves the
+    /// Paint Brush's.
+    #[test]
+    fn magic_reset_restores_its_own_knobs() {
+        let mut s = BrushSettings {
+            radius: 80.0,
+            magic_confidence_threshold: 0.9,
+            magic_depth_range: 0.25,
+            magic_remove_specks: false,
+            magic_depth: true,
+            inpaint_grow: -8.0,
+            ..BrushSettings::default()
+        };
+        s.reset_tool_from(Tool::Magic, &BrushSettings::default());
+        let d = BrushSettings::default();
+        assert_eq!(s.magic_confidence_threshold, d.magic_confidence_threshold);
+        assert_eq!(s.magic_depth_range, d.magic_depth_range);
+        assert_eq!(s.magic_remove_specks, d.magic_remove_specks);
+        assert_eq!(s.inpaint_grow, d.inpaint_grow);
+        assert_eq!(s.radius, 80.0, "the Paint Brush's Size is its own");
+        assert!(s.magic_depth, "Object or Depth is a choice, not a setting to reset");
     }
 
     #[test]

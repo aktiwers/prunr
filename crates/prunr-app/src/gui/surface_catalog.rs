@@ -176,17 +176,11 @@ pub const VISITS: &[Visit] = &[
     on(Surface::SdChips, visit("prompt", Kind::Popover, &[Click("Prompt")], &["Negative prompt"])),
     on(Surface::SdChips, visit("stable diffusion advanced", Kind::Flyout, &[Click("Advanced")], &["Guidance", "As Quality", "Soft edge"])),
     on(Surface::RoremChips, visit("rorem advanced", Kind::Flyout, &[Click("Advanced")], &["Steps", "Pin seed", "Soft edge"])),
-    on(Surface::FillChips, visit("eraser advanced", Kind::Flyout, &[Click("Advanced")], &["Along the edge"])),
-    on(Surface::Brushes, with(
-        Variants::Fixed(&[panel(&[Click("More Paint Brush settings")], &["Feather"])]),
-        visit("paint brush", Kind::Strip, &[Click("Paint Brush")], &["Size", "More Paint Brush settings"]),
-    )),
-    on(Surface::SelectionStrokes, visit("paint brush strokes", Kind::Strip, &[Click("Paint Brush")], &["Hardness", "Opacity"])),
+    on(Surface::FillChips, visit("eraser advanced", Kind::Flyout, &[Click("Advanced")], &["Auto", "Sharpen", "Along the edge"])),
+    on(Surface::Brushes, visit("paint brush", Kind::Strip, &[Click("Paint Brush")], &["Size", "Circle", "Next", "Last", "All", "Reset the brush"])),
+    on(Surface::SelectionStrokes, visit("paint brush strokes", Kind::Strip, &[Click("Paint Brush")], &["Hardness", "Opacity", "Feather"])),
     on(Surface::FillRegionKnobs, visit("paint brush region", Kind::Strip, &[Click("Paint Brush")], &["Expand region", "Feather"])),
-    on(Surface::Brushes, with(
-        Variants::Fixed(&[panel(&[Click("More Magic Brush settings")], &[])]),
-        visit("magic brush", Kind::Strip, &[Click("Magic Brush")], &["More Magic Brush settings"]),
-    )),
+    on(Surface::Brushes, visit("magic brush", Kind::Strip, &[Click("Magic Brush")], &["Object", "Depth", "Remove specks", "Reset the brush"])),
 ];
 
 /// Modals no click from a fresh window reaches, each with why; their own
