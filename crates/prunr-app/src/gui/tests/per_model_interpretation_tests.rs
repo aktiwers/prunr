@@ -160,8 +160,7 @@ fn app_with_a_retunable_stroke() -> (PrunrApp, u64) {
 #[test]
 fn confidence_change_retunes_the_last_stroke_in_place() {
     let (mut app, first_hash) = app_with_a_retunable_stroke();
-    app.settings.brush.magic_confidence_threshold = 0.9;
-    app.maybe_retune_last_stroke();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
     assert!(app.processor.retune_in_flight());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.processor.retune_in_flight() {
@@ -182,10 +181,9 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
     assert!(sel.cells()[7] != 0 && sel.cells()[0] == 0);
 
     // The speck switch retunes the last stroke the same way.
-    app.maybe_retune_last_stroke();
+    app.adjust_strokes();
     assert!(!app.processor.retune_in_flight(), "nothing changed, nothing to retune");
-    app.settings.brush.magic_remove_specks = !app.settings.brush.magic_remove_specks;
-    app.maybe_retune_last_stroke();
+    slide(&mut app, |b| b.magic_remove_specks = !b.magic_remove_specks);
     assert!(app.processor.retune_in_flight(), "flipping Remove specks retunes the last stroke");
 }
 
@@ -196,8 +194,7 @@ fn confidence_change_retunes_the_last_stroke_in_place() {
 fn a_retune_on_a_busy_image_leaves_the_knob_alive() {
     use crate::gui::item::Engine;
     let (mut app, first_hash) = app_with_a_retunable_stroke();
-    app.settings.brush.magic_confidence_threshold = 0.9;
-    app.maybe_retune_last_stroke();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
     assert!(app.processor.retune_in_flight());
     app.batch.items[0].start_job(Some(StepKind::Process), Engine::Segment);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -208,11 +205,10 @@ fn a_retune_on_a_busy_image_leaves_the_knob_alive() {
     }
     assert_eq!(app.batch.items[0].selection_hash, Some(first_hash), "dropped: a run holds the image");
 
-    app.settings.brush.magic_confidence_threshold = 0.8;
-    app.maybe_retune_last_stroke();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.8);
     assert!(!app.processor.retune_in_flight(), "none starts while the run holds it");
     app.batch.items[0].abandon_job();
-    app.maybe_retune_last_stroke();
+    app.adjust_strokes();
     assert!(app.processor.retune_in_flight(), "the image free, the knob retunes");
 }
 
@@ -228,9 +224,15 @@ fn app_with_landed_stroke(mask: prunr_core::selection::MaskArtifact, drawn: crat
     app
 }
 
+/// Move the brush sliders by `change`, a frame seeing them before and after.
+fn slide(app: &mut PrunrApp, change: impl FnOnce(&mut crate::gui::brush_state::BrushSettings)) {
+    app.adjust_strokes();
+    change(&mut app.settings.brush);
+    app.adjust_strokes();
+}
+
 /// Run the latest stroke's retune to its landing.
 fn retune_lands(app: &mut PrunrApp) {
-    app.maybe_retune_last_stroke();
     assert!(app.processor.retune_in_flight(), "a slider moved: the stroke is drawn again");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while app.processor.retune_in_flight() {
@@ -263,16 +265,15 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     app.settings.brush = settings;
     let (steps, before) = (app.batch.items[0].timeline.undo_steps(), selected_cells(&app));
     assert_eq!(app.batch.items[0].retunable_tool(), Some(Tool::Paint));
-    app.maybe_retune_last_stroke();
+    app.adjust_strokes();
     assert!(!app.processor.retune_in_flight(), "the values it was drawn with: nothing to redraw");
-    app.settings.brush.magic_confidence_threshold = 0.9;
-    app.maybe_retune_last_stroke();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
     assert!(!app.processor.retune_in_flight(), "another brush's slider leaves it");
-    app.settings.brush.radius = 4.0;
+    slide(&mut app, |b| b.radius = 4.0);
     retune_lands(&mut app);
     assert!(selected_cells(&app) > before, "Size doubled the stroke: {} cells, {before} before", selected_cells(&app));
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "still the stroke's one step");
-    app.settings.brush.strength = 0.5;
+    slide(&mut app, |b| b.strength = 0.5);
     retune_lands(&mut app);
     let opacity = app.batch.items[0].selection_mask.as_ref().unwrap().cells()[8 * 16 + 8].unsigned_abs();
     assert!(opacity > 0 && opacity < prunr_core::selection::FULL.unsigned_abs(), "Opacity halves it: {opacity}");
@@ -283,7 +284,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
     assert_eq!(app.batch.items[0].retunable_tool(), Some(Tool::Magic));
-    app.settings.brush.magic_depth_range = 0.3;
+    slide(&mut app, |b| b.magic_depth_range = 0.3);
     retune_lands(&mut app);
     assert!(selected_cells(&app) > before, "a wider Range picks more: {} cells, {before} before", selected_cells(&app));
 }
@@ -302,7 +303,6 @@ fn the_latest_stroke_ends_with_the_next_step() {
         let (mask, path) = brush.commit_stroke(settings.stamp()).expect("a stroke");
         let mut app = app_with_landed_stroke(mask, StrokeDrawn::painted(path, settings.stamp()));
         app.settings.brush = settings;
-        app.settings.brush.radius = 5.0;
         app
     };
     let mut after_a_step = land();
@@ -311,7 +311,7 @@ fn the_latest_stroke_ends_with_the_next_step() {
     undone.handle_undo(&egui::Context::default());
     for (case, mut app) in [("another step", after_a_step), ("an undo", undone)] {
         assert_eq!(app.batch.items[0].retunable_tool(), None, "{case}");
-        app.maybe_retune_last_stroke();
+        slide(&mut app, |b| b.radius = 5.0);
         assert!(!app.processor.retune_in_flight(), "{case}: nothing redrawn");
     }
 }
@@ -325,9 +325,13 @@ fn app_for_strokes() -> PrunrApp {
     app
 }
 
-/// A Paint Brush stroke down column `x` at Size `size`, landed as the
-/// brush lands it.
+/// A Paint Brush stroke down column `x` at Size `size` on image 9,
+/// landed as the brush lands it.
 fn paint_down(app: &mut PrunrApp, x: f32, size: f32) {
+    paint_down_on(app, 9, x, size);
+}
+
+fn paint_down_on(app: &mut PrunrApp, item_id: u64, x: f32, size: f32) {
     use crate::gui::brush_state::{BrushState, StrokeDrawn};
     use crate::gui::selection_queue::{AfterLanding, SelectionOp};
     app.settings.brush.radius = size;
@@ -337,7 +341,7 @@ fn paint_down(app: &mut PrunrApp, x: f32, size: f32) {
     brush.extend_stroke_with_radius(x, 28.0, size / 4.0);
     let stamp = app.settings.brush.stamp();
     let (mask, path) = brush.commit_stroke(stamp).expect("a stroke");
-    app.queue_selection_op(9, SelectionOp::Merge(std::sync::Arc::new(mask)), AfterLanding::Stroke(StrokeDrawn::painted(path, stamp)));
+    app.queue_selection_op(item_id, SelectionOp::Merge(std::sync::Arc::new(mask)), AfterLanding::Stroke(StrokeDrawn::painted(path, stamp)));
     super::fixtures::settle_selection_edits(app);
 }
 
@@ -457,11 +461,29 @@ fn every_stroke_includes_the_latest_one_adjusted_alone() {
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
     paint_down(&mut app, 24.0, 8.0);
-    app.settings.brush.radius = 16.0;
+    slide(&mut app, |b| b.radius = 16.0);
     retune_lands(&mut app);
     assert_eq!(stroke_sizes(&app), [8.0, 16.0]);
     adjust_all(&mut app, |b| b.radius = 32.0);
     assert_eq!(stroke_sizes(&app), [16.0, 32.0]);
+}
+
+/// A slider moved on one image leaves another image's latest stroke as
+/// it was: selecting that image redraws nothing.
+#[test]
+fn another_image_keeps_its_latest_stroke_as_drawn() {
+    let mut app = app_for_strokes();
+    let item = push_test_item(&mut app, 10);
+    item.dimensions = (32, 32);
+    super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+    paint_down_on(&mut app, 10, 8.0, 8.0);
+    paint_down(&mut app, 8.0, 8.0);
+    app.batch.select_item(0);
+    slide(&mut app, |b| b.radius = 16.0);
+    retune_lands(&mut app);
+    app.batch.select_item(1);
+    app.adjust_strokes();
+    assert!(!app.processor.retune_in_flight(), "the other image's stroke is not redrawn");
 }
 
 /// A stroke committed under each active model: segmentation re-cuts at
