@@ -158,8 +158,6 @@ pub struct PrunrApp {
     /// this to keep that click, and a drag starting from it, off the image.
     pub(crate) popup_open_at_frame_start: bool,
 
-    // Canvas fade-in: incremented on every image switch
-    pub(crate) canvas_switch_id: u64,
     /// Incremented when a result completes, drives crossfade in render_done
     pub(crate) result_switch_id: u64,
 
@@ -473,7 +471,6 @@ impl PrunrApp {
             runtime_prompt_evaluated: false,
             popup_open_at_frame_start: false,
             settings,
-            canvas_switch_id: 0,
             result_switch_id: 0,
             pending_batch_sync: false,
             // Clears the brush's modifier hint in the same corner.
@@ -1793,7 +1790,6 @@ mod field_list_tests {
             runtime_prompt: _,
             runtime_prompt_evaluated: _,
             popup_open_at_frame_start: _,
-            canvas_switch_id: _,
             result_switch_id: _,
             pending_batch_sync: _,
             toasts: _,

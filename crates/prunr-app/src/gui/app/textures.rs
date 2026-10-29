@@ -14,11 +14,10 @@ impl PrunrApp {
     }
 
     /// Another image is shown (picked by key or in the list, or just
-    /// loaded): the canvas fits it afresh, leaves Compare and fades it in.
+    /// loaded): the canvas fits it afresh and leaves Compare.
     pub(crate) fn on_selected_changed(&mut self, ctx: &egui::Context) {
         self.zoom_state.reset();
         self.show_original = false;
-        self.canvas_switch_id += 1;
         self.sync_selected_batch_textures(ctx);
     }
 
