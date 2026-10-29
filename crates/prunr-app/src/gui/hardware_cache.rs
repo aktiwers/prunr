@@ -10,6 +10,9 @@ pub(crate) struct HardwareInstallCache {
     pub migraphx: bool,
     /// NVIDIA's libraries beside the CUDA runtime.
     pub nvidia_libraries: bool,
+    /// Bit per runtime (`update_bit`) set when an earlier Prunr's install
+    /// of it is there, so installing it is an update.
+    updates: u8,
     /// An add-on is installed but this process loaded an older runtime
     /// from the Runtime Store, which cannot take it.
     pub addon_waits: bool,
@@ -267,6 +270,14 @@ fn disk_usage_in(dir: &std::path::Path) -> u64 {
     }).sum()
 }
 
+fn update_bit(runtime: RuntimeId) -> u8 {
+    match runtime {
+        RuntimeId::OpenVino => 1,
+        RuntimeId::Cuda => 2,
+        RuntimeId::MiGraphX => 4,
+    }
+}
+
 fn registry_bits() -> u128 {
     debug_assert!(prunr_models::REGISTRY.len() <= 128, "the registry outgrew its bit set");
     prunr_models::REGISTRY.iter().enumerate()
@@ -282,6 +293,7 @@ impl HardwareInstallCache {
             cuda: RuntimeId::Cuda.is_installed(),
             migraphx: RuntimeId::MiGraphX.is_installed(),
             nvidia_libraries: crate::runtime_install::nvidia_libraries_installed(),
+            updates: RuntimeId::OFFERED.iter().filter(|rt| !rt.superseded().is_empty()).fold(0, |bits, rt| bits | update_bit(*rt)),
             addon_waits: false,
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
             built_in_gpu: prunr_core::ort_runtime::BUILT_IN_HAS_GPU && prunr_core::ort_runtime::has_built_in(),
@@ -316,6 +328,7 @@ impl HardwareInstallCache {
             cuda: true,
             migraphx: true,
             nvidia_libraries: false,
+            updates: 0,
             addon_waits: false,
             intel_gpu: false,
             built_in_gpu: true,
@@ -343,6 +356,17 @@ impl HardwareInstallCache {
     /// runtime, and is not installed.
     pub fn cuda_offered(&self) -> bool {
         !self.cuda && RuntimeId::Cuda.is_addon() && crate::hardware::profile().runs(RuntimeId::Cuda)
+    }
+
+    /// Installing `runtime` replaces an earlier Prunr's install of it.
+    pub fn updates(&self, runtime: RuntimeId) -> bool {
+        self.updates & update_bit(runtime) != 0
+    }
+
+    /// As if an earlier Prunr's install of `runtime` were there.
+    #[cfg(test)]
+    pub(crate) fn with_update(self, runtime: RuntimeId) -> Self {
+        Self { updates: self.updates | update_bit(runtime), ..self }
     }
 
     pub fn has_runtime(&self, runtime: RuntimeId) -> bool {

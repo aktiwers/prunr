@@ -466,23 +466,28 @@ fn removing_unsaved_work_asks_first() {
 }
 
 /// The first-launch runtime prompt is a modal for each runtime it can
-/// offer: its buttons are named, and Escape closes it as Not now.
+/// offer, as an install or, over an earlier Prunr's install, an update:
+/// its buttons are named, and Escape closes it as Not now.
 #[test]
 fn the_runtime_prompt_is_a_modal_that_escape_closes() {
     use crate::runtime_install::RuntimeId;
     let mut h = loaded();
+    let installs = h.state().hardware_install_cache;
     for &rt in RuntimeId::OFFERED {
-        h.state_mut().runtime_prompt = Some(rt);
-        settle(&mut h);
-        let present = names(&h);
-        for n in [rt.install_button_label(), "Not now", "Open Settings"] {
-            assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+        for (update, offer) in [(false, rt.install_button_label()), (true, rt.update_button_label())] {
+            h.state_mut().hardware_install_cache = if update { installs.with_update(rt) } else { installs };
+            h.state_mut().runtime_prompt = Some(rt);
+            settle(&mut h);
+            let present = names(&h);
+            for n in [offer, "Not now", "Open Settings"] {
+                assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+            }
+            assert_all_controls_named(&h, rt.display_name());
+            h.key_press(egui::Key::Escape);
+            settle(&mut h);
+            assert!(h.state().runtime_prompt.is_none(), "Escape closed the {rt:?} prompt");
+            assert!(h.state().settings.is_runtime_prompt_snoozed(rt), "as Not now");
         }
-        assert_all_controls_named(&h, rt.display_name());
-        h.key_press(egui::Key::Escape);
-        settle(&mut h);
-        assert!(h.state().runtime_prompt.is_none(), "Escape closed the {rt:?} prompt");
-        assert!(h.state().settings.is_runtime_prompt_snoozed(rt), "as Not now");
     }
 }
 

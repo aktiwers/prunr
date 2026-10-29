@@ -152,7 +152,25 @@ impl RuntimeId {
     /// An add-on uninstalled while loaded leaves this mark beside its
     /// install, and goes at the next start (`finish_uninstalls`).
     fn removal_mark(self) -> Option<PathBuf> {
-        self.install_dir().and_then(|dir| beside(&dir, "remove").ok())
+        self.install_dir().and_then(|dir| prunr_core::ort_runtime::removal_mark(&dir))
+    }
+
+    /// Installs of it an earlier Prunr made that this one neither offers
+    /// nor loads by name: another version, or the whole runtime the
+    /// add-on replaced. They stay in use until this one is installed.
+    pub fn superseded(self) -> Vec<PathBuf> {
+        prunr_models::runtime_store_dir().map_or_else(Vec::new, |store| self.superseded_in(&store))
+    }
+
+    fn superseded_in(self, store: &Path) -> Vec<PathBuf> {
+        let (current, prefix) = (self.install_subdir(), format!("{}-", self.short_name()));
+        let Ok(read) = std::fs::read_dir(store) else { return Vec::new() };
+        read.filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .filter(|e| e.file_name().to_str().is_some_and(|name| name.starts_with(&prefix) && name != current))
+            .map(|e| e.path())
+            .filter(|dir| !prunr_core::ort_runtime::removal_mark(dir).is_some_and(|mark| mark.is_file()))
+            .collect()
     }
 
     fn removal_pending(self) -> bool {
@@ -274,6 +292,33 @@ impl RuntimeId {
     }
 
     /// The first-launch prompt's install-button label.
+    pub fn update_button_label(self) -> &'static str {
+        match self {
+            Self::OpenVino if self.is_addon() => "Update OpenVINO",
+            Self::OpenVino => "Update OpenVINO Runtime",
+            Self::Cuda if self.is_addon() => "Update CUDA",
+            Self::Cuda => "Update CUDA Runtime",
+            Self::MiGraphX => "Update MIGraphX Runtime",
+        }
+    }
+
+    /// The first-launch prompt's body where an earlier Prunr's install of
+    /// it is in use.
+    pub fn update_prompt_body(self, nvidia_here: bool) -> String {
+        format!(
+            "This computer runs {} from an earlier version of Prunr. The current one ({}) \
+             replaces it; the earlier one is removed at the next start.",
+            self.display_name(),
+            self.download_size(nvidia_here),
+        )
+    }
+
+    /// Settings › Hardware's line where an earlier Prunr's install of it
+    /// is in use.
+    pub fn update_line(self, nvidia_here: bool) -> String {
+        format!("An earlier version is in use. Update ({}); the earlier one is removed at the next start.", self.download_size(nvidia_here))
+    }
+
     pub fn install_button_label(self) -> &'static str {
         match self {
             Self::OpenVino if self.is_addon() => "Install OpenVINO",
@@ -504,32 +549,41 @@ pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     Ok(Uninstalled::Now)
 }
 
-/// Remove the add-ons uninstalled while they were loaded. Off the main
-/// thread: an add-on is about 2 GB, and nothing loads it meanwhile, as
-/// its mark stays until it is gone (`is_installed`).
+/// Remove the installs marked to go: add-ons uninstalled while they were
+/// loaded, and installs an update replaced. Off the main thread: an
+/// add-on is about 2 GB, and nothing loads it meanwhile, as its mark
+/// stays until it is gone (`is_installed`, the runtime resolver).
 pub fn finish_uninstalls() {
     let Some(store) = prunr_models::runtime_store_dir() else { return };
-    let marked: Vec<String> = RuntimeId::addons().filter(|rt| rt.removal_pending()).map(|rt| rt.install_subdir()).collect();
+    let marked = marked_installs(&store);
     if !marked.is_empty() {
-        std::thread::spawn(move || remove_marked(&store, marked));
+        std::thread::spawn(move || remove_marked(marked));
     }
 }
 
-/// Remove each of `subdirs` in `store` that has its removal mark beside
-/// it, then the mark; nothing else in `store`.
-fn remove_marked(store: &Path, subdirs: impl IntoIterator<Item = String>) {
-    for subdir in subdirs.into_iter().filter(|subdir| ri::validate_subdir(subdir).is_ok()) {
-        let dir = store.join(&subdir);
-        let Ok(mark) = beside(&dir, "remove") else { continue };
-        if !mark.is_file() {
-            continue;
-        }
+/// The installs of a runtime Prunr offers in `store` with their removal
+/// mark beside them; nothing else there, marked or not.
+fn marked_installs(store: &Path) -> Vec<PathBuf> {
+    let Ok(read) = std::fs::read_dir(store) else { return Vec::new() };
+    let ours = |name: &str| [RuntimeId::OpenVino, RuntimeId::Cuda, RuntimeId::MiGraphX].iter().any(|rt| name.starts_with(&format!("{}-", rt.short_name())));
+    read.filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()) && e.file_name().to_str().is_some_and(ours))
+        .map(|e| e.path())
+        .filter(|dir| prunr_core::ort_runtime::removal_mark(dir).is_some_and(|mark| mark.is_file()))
+        .collect()
+}
+
+/// Remove each of `dirs`, then its mark.
+fn remove_marked(dirs: Vec<PathBuf>) {
+    for dir in dirs {
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
-                let _ = std::fs::remove_file(&mark);
-                tracing::info!(dir = %dir.display(), "removed an add-on uninstalled while it was loaded");
+                if let Some(mark) = prunr_core::ort_runtime::removal_mark(&dir) {
+                    let _ = std::fs::remove_file(&mark);
+                }
+                tracing::info!(dir = %dir.display(), "removed an install marked to go");
             }
-            Err(e) => tracing::warn!(dir = %dir.display(), %e, "could not remove an uninstalled add-on; trying at the next start"),
+            Err(e) => tracing::warn!(dir = %dir.display(), %e, "could not remove an install marked to go; trying at the next start"),
         }
     }
 }
@@ -586,6 +640,14 @@ fn run_install(
         use_installed_addons();
         prunr_core::ort_runtime::hosts_addons().then(|| start_addon(addon))
     });
+    // An earlier install of it goes at the next start, never loaded again.
+    for old in rt.superseded() {
+        if let Some(mark) = prunr_core::ort_runtime::removal_mark(&old) {
+            if let Err(e) = std::fs::write(&mark, b"") {
+                tracing::warn!(dir = %old.display(), %e, "could not mark a replaced install for removal");
+            }
+        }
+    }
 
     let _ = tx.send(InstallEvent::Done { install_dir, started });
     Ok(())
@@ -924,21 +986,39 @@ mod tests {
         assert_eq!([RuntimeId::Cuda.is_addon(), RuntimeId::OpenVino.is_addon()], [x64, x64], "CUDA and OpenVINO join Prunr's own runtime");
     }
 
-    /// At the next start only the add-on marked for removal goes, with its
-    /// mark: not one without a mark, not a marked folder no add-on names.
+    /// At the next start only an install marked for removal goes, with its
+    /// mark: not one without a mark, not a marked folder no runtime names.
     #[test]
-    fn only_a_marked_add_on_is_removed_at_the_next_start() {
+    fn only_a_marked_install_is_removed_at_the_next_start() {
         let store = tempfile::tempdir().unwrap();
         for name in ["cuda-addon-0.2.0-windows-x64", "cuda-1.24.1-windows-x64", "other"] {
             std::fs::create_dir_all(store.path().join(name).join("nvidia")).unwrap();
         }
         std::fs::write(store.path().join(".cuda-addon-0.2.0-windows-x64.remove"), b"").unwrap();
         std::fs::write(store.path().join(".other.remove"), b"").unwrap();
-        remove_marked(store.path(), ["cuda-addon-0.2.0-windows-x64".to_string(), "cuda-1.24.1-windows-x64".to_string(), "../escape".to_string()]);
+        remove_marked(marked_installs(store.path()));
         assert!(!store.path().join("cuda-addon-0.2.0-windows-x64").exists(), "marked: removed");
         assert!(!store.path().join(".cuda-addon-0.2.0-windows-x64.remove").exists(), "its mark too");
         assert!(store.path().join("cuda-1.24.1-windows-x64").exists(), "not marked: kept");
         assert!(store.path().join("other").exists() && store.path().join(".other.remove").exists(), "not an add-on: kept");
+    }
+
+    /// An earlier Prunr's installs of a runtime (the whole runtime an
+    /// add-on replaced, another version of it) are what its install
+    /// replaces; the current install, another runtime's, and one already
+    /// marked to go are not.
+    #[test]
+    fn an_update_replaces_the_earlier_installs_of_its_runtime() {
+        let store = tempfile::tempdir().unwrap();
+        let rt = RuntimeId::OpenVino;
+        let current = rt.install_subdir();
+        for name in [current.as_str(), "openvino-1.24.1-linux-x64", "openvino-addon-0.0.1-linux-x64", "openvino-going", "cuda-1.24.1-linux-x64", "other"] {
+            std::fs::create_dir_all(store.path().join(name)).unwrap();
+        }
+        std::fs::write(store.path().join(".openvino-going.remove"), b"").unwrap();
+        let mut replaced: Vec<String> = rt.superseded_in(store.path()).iter().map(|d| d.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        replaced.sort();
+        assert_eq!(replaced, ["openvino-1.24.1-linux-x64", "openvino-addon-0.0.1-linux-x64"]);
     }
 
     /// An add-on's download leaves its library in the install, beside the
