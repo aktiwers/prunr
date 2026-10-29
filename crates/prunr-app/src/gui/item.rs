@@ -1262,11 +1262,6 @@ impl BatchItem {
         self.last_stroke.as_mut()
     }
 
-    /// The brush that drew the latest stroke, while its sliders redraw it.
-    pub(crate) fn retunable_tool(&self) -> Option<crate::gui::brush_state::Tool> {
-        self.last_stroke.as_ref().filter(|_| self.last_stroke_holds()).map(|s| s.drawn.tool())
-    }
-
     /// The adjustment of every stroke under way, while nothing else has
     /// happened since: its step is the one shown and the newest.
     pub(crate) fn adjustment(&mut self) -> Option<&mut StrokeAdjustment> {

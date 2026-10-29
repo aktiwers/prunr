@@ -252,7 +252,7 @@ fn selected_cells(app: &PrunrApp) -> usize {
 /// for the brush that drew it.
 #[test]
 fn each_brush_redraws_its_latest_stroke_in_place() {
-    use crate::gui::brush_state::{BrushState, StrokeDrawn, Tool};
+    use crate::gui::brush_state::{BrushState, StrokeDrawn};
     use prunr_core::brush::BrushShape;
 
     let mut brush = BrushState::default();
@@ -264,7 +264,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     let mut app = app_with_landed_stroke(mask, StrokeDrawn::painted(path, settings.stamp()));
     app.settings.brush = settings;
     let (steps, before) = (app.batch.items[0].timeline.undo_steps(), selected_cells(&app));
-    assert_eq!(app.batch.items[0].retunable_tool(), Some(Tool::Paint));
+    assert!(matches!(app.batch.items[0].retunable_stroke().map(|s| &s.drawn), Some(StrokeDrawn::Paint { .. })));
     app.adjust_strokes();
     assert!(!app.processor.retune_in_flight(), "the values it was drawn with: nothing to redraw");
     slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
@@ -283,7 +283,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     let mut app = app_with_landed_stroke(drawn.mask(16, 16), drawn);
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
-    assert_eq!(app.batch.items[0].retunable_tool(), Some(Tool::Magic));
+    assert!(matches!(app.batch.items[0].retunable_stroke().map(|s| &s.drawn), Some(StrokeDrawn::Depth { .. })));
     slide(&mut app, |b| b.magic_depth_range = 0.3);
     retune_lands(&mut app);
     assert!(selected_cells(&app) > before, "a wider Range picks more: {} cells, {before} before", selected_cells(&app));
@@ -310,7 +310,7 @@ fn the_latest_stroke_ends_with_the_next_step() {
     let mut undone = land();
     undone.handle_undo(&egui::Context::default());
     for (case, mut app) in [("another step", after_a_step), ("an undo", undone)] {
-        assert_eq!(app.batch.items[0].retunable_tool(), None, "{case}");
+        assert!(app.batch.items[0].retunable_stroke().is_none(), "{case}");
         slide(&mut app, |b| b.radius = 5.0);
         assert!(!app.processor.retune_in_flight(), "{case}: nothing redrawn");
     }
@@ -348,7 +348,7 @@ fn paint_down_on(app: &mut PrunrApp, item_id: u64, x: f32, size: f32) {
 /// With "all strokes" on, move the sliders by `change` and let the
 /// redraw land.
 fn adjust_all(app: &mut PrunrApp, change: impl FnOnce(&mut crate::gui::brush_state::BrushSettings)) {
-    app.brush_state.adjust_all = true;
+    app.brush_state.reach = crate::gui::brush_state::StrokeReach::All;
     app.adjust_strokes();
     change(&mut app.settings.brush);
     app.adjust_strokes();
@@ -466,6 +466,32 @@ fn every_stroke_includes_the_latest_one_adjusted_alone() {
     assert_eq!(stroke_sizes(&app), [8.0, 16.0]);
     adjust_all(&mut app, |b| b.radius = 32.0);
     assert_eq!(stroke_sizes(&app), [16.0, 32.0]);
+}
+
+/// "Next stroke": a slider sets the strokes to come and leaves the latest
+/// one. Back on "Last stroke", only a slider moved after that redraws it,
+/// and only that slider's value changes.
+#[test]
+fn next_leaves_the_latest_stroke_to_the_sliders_moved_after() {
+    use crate::gui::brush_state::{StrokeDrawn, StrokeReach};
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 8.0, 8.0);
+    app.brush_state.reach = StrokeReach::Next;
+    slide(&mut app, |b| b.radius = 16.0);
+    assert!(!app.processor.retune_in_flight(), "the next stroke only");
+    app.brush_state.reach = StrokeReach::Last;
+    app.adjust_strokes();
+    assert!(!app.processor.retune_in_flight(), "switching redraws nothing");
+    slide(&mut app, |b| b.hardness = 0.5);
+    retune_lands(&mut app);
+    let drawn = app.batch.items[0].retunable_stroke().map(|s| s.drawn.clone());
+    assert!(
+        matches!(drawn, Some(StrokeDrawn::Paint { size, stamp, .. }) if size == 8.0 && stamp.hardness == 0.5),
+        "the Hardness moved, the Size as drawn",
+    );
+    slide(&mut app, |b| b.radius = 24.0);
+    retune_lands(&mut app);
+    assert_eq!(stroke_sizes(&app), [24.0], "a Size moved now takes the stroke with it");
 }
 
 /// A slider moved on one image leaves another image's latest stroke as
