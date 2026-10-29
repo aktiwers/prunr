@@ -1869,6 +1869,29 @@ mod timeline_contract_tests {
         assert_eq!(kept, [5, 6], "the stroke across the filled area whole; the undone one gone");
     }
 
+    /// A stroke painted while an erase fills stays as the next area with
+    /// its own Feather: its band, past its cells, stays with it.
+    #[test]
+    fn a_stroke_painted_while_an_erase_fills_keeps_its_band() {
+        use crate::gui::selection_queue::SelectionOp;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        app.batch.items[0].start_erase(None);
+        let run = app.batch.items[0].job_run().expect("an erase");
+        let edge = crate::gui::brush_state::StrokeEdge::Eraser { expand: 0.0, feather: 1.0 };
+        let stamp = app.settings.brush.region_stamp(false);
+        let drawn = crate::gui::tests::fixtures::painted_with_edge(prunr_core::brush::BrushShape::Square, 1.0, &[(1.5, 1.5, 0.5)], stamp, edge);
+        app.queue_selection_op(1, SelectionOp::Stroke { drawn, dims: (4, 4), source: None });
+        crate::gui::tests::fixtures::settle_selection_edits(&mut app);
+        app.processor.land_inpaint_for_test(1, run, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        let left = app.batch.items[0].selection_mask.as_ref().expect("the stroke painted meanwhile");
+        let layer = left.fill_layer().expect("its fill");
+        assert_eq!(layer[4 + 1], prunr_core::selection::FILL_CORE | 1, "its core, with its band");
+        assert!([1, 4, 6, 9].iter().all(|&i| layer[i] == 1), "the band around it: {layer:?}");
+    }
+
     /// An erase lands as one step that shows the filled image without its
     /// brush marks; undoing it brings back both the image and the marks.
     #[test]

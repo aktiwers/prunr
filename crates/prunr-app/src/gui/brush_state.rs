@@ -439,7 +439,8 @@ impl PaintPath {
 
 /// The slider values strokes are drawn with: the Paint Brush's Size,
 /// Hardness and Opacity, Magic Brush's reading and depth Range, and
-/// either's Feather (the selection's edge, against the photo).
+/// either's edge: a selection's Feather, or an eraser's Expand region and
+/// Feather.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StrokeValues {
     pub(crate) size: f32,
@@ -448,75 +449,126 @@ pub(crate) struct StrokeValues {
     pub(crate) reading: prunr_core::MaskReading,
     pub(crate) range: f32,
     pub(crate) feather: f32,
+    pub(crate) expand: f32,
+    pub(crate) fill_feather: f32,
 }
 
 /// The selection Feather's range, in pixels.
 pub(crate) const FEATHER_RANGE: std::ops::RangeInclusive<f32> = 0.0..=20.0;
+/// An eraser stroke's Expand region and Feather ranges, in whole pixels.
+pub(crate) const EXPAND_RANGE: std::ops::RangeInclusive<f32> = -16.0..=16.0;
+pub(crate) const FILL_FEATHER_RANGE: std::ops::RangeInclusive<f32> = 0.0..=32.0;
+
+/// How a stroke's edge is drawn: a selection's softened against the photo
+/// by its Feather; an eraser's grown by its Expand region, the fill fading
+/// into the photo over its Feather.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum StrokeEdge {
+    Selection { feather: f32 },
+    Eraser { expand: f32, feather: f32 },
+}
+
+impl StrokeEdge {
+    /// A selection stroke's edge as painted, unsoftened.
+    #[cfg(test)]
+    pub(crate) const HARD: Self = Self::Selection { feather: 0.0 };
+
+    fn values(self) -> StrokeValues {
+        match self {
+            Self::Selection { feather } => StrokeValues { feather, ..UNUSED },
+            Self::Eraser { expand, feather } => StrokeValues { expand, fill_feather: feather, ..UNUSED },
+        }
+    }
+
+    /// The same kind of edge at `values`.
+    fn at(self, values: StrokeValues) -> Self {
+        match self {
+            Self::Selection { .. } => Self::Selection { feather: values.feather },
+            Self::Eraser { .. } => Self::Eraser { expand: values.expand, feather: values.fill_feather },
+        }
+    }
+}
 
 /// A stroke as it was drawn, kept with its undo step so its brush's
 /// sliders can draw it again: a Magic Brush pick, a depth pick or a
-/// Paint Brush stroke, each with the values it has now, its Feather
-/// among them.
+/// Paint Brush stroke, each with the values it has now, its edge among
+/// them.
 #[derive(Clone)]
 pub(crate) enum StrokeDrawn {
-    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading, feather: f32 },
-    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32, feather: f32 },
-    Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp, feather: f32 },
+    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading, edge: StrokeEdge },
+    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32, edge: StrokeEdge },
+    Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp, edge: StrokeEdge },
 }
 
 impl StrokeDrawn {
-    pub(crate) fn painted(path: PaintPath, stamp: Stamp, feather: f32) -> Self {
+    pub(crate) fn painted(path: PaintPath, stamp: Stamp, edge: StrokeEdge) -> Self {
         let size = path.size;
-        Self::Paint { path: std::sync::Arc::new(path), size, stamp, feather }
+        Self::Paint { path: std::sync::Arc::new(path), size, stamp, edge }
     }
 
-    fn feather(&self) -> f32 {
+    pub(crate) fn edge(&self) -> StrokeEdge {
         match self {
-            Self::Magic { feather, .. } | Self::Depth { feather, .. } | Self::Paint { feather, .. } => *feather,
+            Self::Magic { edge, .. } | Self::Depth { edge, .. } | Self::Paint { edge, .. } => *edge,
+        }
+    }
+
+    fn mode(&self) -> BrushMode {
+        match self {
+            Self::Magic { mode, .. } | Self::Depth { mode, .. } => *mode,
+            Self::Paint { stamp, .. } => stamp.mode,
         }
     }
 
     /// The values it is drawn with; those its brush has no slider for
     /// read as `UNUSED`.
     pub(crate) fn values(&self) -> StrokeValues {
+        let edge = self.edge().values();
         match self {
-            Self::Magic { reading, feather, .. } => StrokeValues { reading: *reading, feather: *feather, ..UNUSED },
-            Self::Depth { range, feather, .. } => StrokeValues { range: *range, feather: *feather, ..UNUSED },
-            Self::Paint { size, stamp, feather, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, feather: *feather, ..UNUSED },
+            Self::Magic { reading, .. } => StrokeValues { reading: *reading, ..edge },
+            Self::Depth { range, .. } => StrokeValues { range: *range, ..edge },
+            Self::Paint { size, stamp, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, ..edge },
         }
     }
 
     /// The stroke drawn at `values`, keeping what made it (its mode, its
-    /// pick, its path).
+    /// pick, its path) and the kind of its edge.
     pub(crate) fn at(&self, values: StrokeValues) -> Self {
         use std::sync::Arc;
+        let edge = self.edge().at(values);
         match self {
-            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading, feather: values.feather },
+            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading, edge },
             Self::Depth { depth, around, mode, .. } => {
-                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range, feather: values.feather }
+                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range, edge }
             }
             Self::Paint { path, stamp, .. } => Self::Paint {
                 path: Arc::clone(path),
                 size: values.size,
                 stamp: Stamp { hardness: values.hardness, strength: values.opacity, ..*stamp },
-                feather: values.feather,
+                edge,
             },
         }
     }
 
-    /// The stroke's own mask on a `width` × `height` image, its edge
-    /// feathered against the photo `source` (none to feather against:
-    /// as drawn).
+    /// The stroke's own mask on a `width` × `height` image, with its edge:
+    /// a selection's feathered against the photo `source` (none to feather
+    /// against: as drawn), an eraser's grown and with its fill's band.
     pub(crate) fn mask(&self, width: u32, height: u32, source: Option<&image::RgbaImage>) -> MaskArtifact {
         let drawn = match self {
             Self::Magic { output, mode, reading, .. } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
             Self::Depth { depth, around, mode, range, .. } => prunr_core::depth::select_by_depth(depth, width, height, *around, *range, *mode),
             Self::Paint { path, size, stamp, .. } => path.render(width, height, *size, *stamp),
         };
-        let feather = self.feather().round().max(0.0) as u32;
-        match source {
-            Some(photo) if feather > 0 => prunr_core::selection::refine::feather_edges(&drawn, photo, feather),
-            _ => drawn,
+        match self.edge() {
+            StrokeEdge::Selection { feather } => {
+                let feather = feather.round().max(0.0) as u32;
+                match source {
+                    Some(photo) if feather > 0 => prunr_core::selection::refine::feather_edges(&drawn, photo, feather),
+                    _ => drawn,
+                }
+            }
+            StrokeEdge::Eraser { expand, feather } => {
+                prunr_core::inpaint_blend::eraser_stroke(&drawn, self.mode(), expand, prunr_core::math::round_u8(feather))
+            }
         }
     }
 }
@@ -529,6 +581,8 @@ const UNUSED: StrokeValues = StrokeValues {
     reading: prunr_core::MaskReading { confidence: 0.0, remove_specks: false },
     range: 0.0,
     feather: 0.0,
+    expand: 0.0,
+    fill_feather: 0.0,
 };
 
 impl StrokeValues {
@@ -545,6 +599,8 @@ impl StrokeValues {
             },
             range: moved_to(self.range, from.range, to.range),
             feather: moved_to(self.feather, from.feather, to.feather),
+            expand: moved_to(self.expand, from.expand, to.expand),
+            fill_feather: moved_to(self.fill_feather, from.fill_feather, to.fill_feather),
         }
     }
 
@@ -563,6 +619,8 @@ impl StrokeValues {
             },
             range: offset(self.range, from.range, to.range, DEPTH_RANGE),
             feather: offset(self.feather, from.feather, to.feather, FEATHER_RANGE),
+            expand: offset(self.expand, from.expand, to.expand, EXPAND_RANGE),
+            fill_feather: offset(self.fill_feather, from.fill_feather, to.fill_feather, FILL_FEATHER_RANGE),
         }
     }
 }
@@ -940,7 +998,7 @@ mod tests {
             s.begin_stroke(shape, 2.0);
             s.extend_stroke_with_radius(4.0, 30.0, 2.0);
             s.extend_stroke_with_radius(60.0, 30.0, 2.0);
-            let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), 0.0).mask(64, 64, None);
+            let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), StrokeEdge::HARD).mask(64, 64, None);
             let gaps = (4..=60).filter(|&x| c.cells()[30 * 64 + x] == 0).count();
             assert_eq!(gaps, 0, "{shape:?} left {gaps} unpainted cells between the samples");
         }
@@ -968,7 +1026,7 @@ mod tests {
         let mut s = BrushState::default();
         s.begin_stroke(BrushShape::Circle, 8.0);
         s.extend_stroke_with_radius(32.0, 32.0, 8.0);
-        let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), 0.0).mask(64, 64, None);
+        let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), StrokeEdge::HARD).mask(64, 64, None);
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
         assert!(c.has_selected_region());

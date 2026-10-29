@@ -65,19 +65,30 @@ pub(crate) const HARD: prunr_core::brush::Stamp =
     prunr_core::brush::Stamp { hardness: 1.0, strength: 1.0, mode: prunr_core::selection::BrushMode::Add };
 
 /// A Paint Brush stroke of `shape` at Size `size` through `samples`
-/// (x, y, radius in image pixels), drawn with `stamp`.
+/// (x, y, radius in image pixels), drawn with `stamp` and a hard edge.
 pub(crate) fn painted(
     shape: prunr_core::brush::BrushShape,
     size: f32,
     samples: &[(f32, f32, f32)],
     stamp: prunr_core::brush::Stamp,
 ) -> crate::gui::brush_state::StrokeDrawn {
+    painted_with_edge(shape, size, samples, stamp, crate::gui::brush_state::StrokeEdge::HARD)
+}
+
+/// `painted`, its edge drawn as `edge`.
+pub(crate) fn painted_with_edge(
+    shape: prunr_core::brush::BrushShape,
+    size: f32,
+    samples: &[(f32, f32, f32)],
+    stamp: prunr_core::brush::Stamp,
+    edge: crate::gui::brush_state::StrokeEdge,
+) -> crate::gui::brush_state::StrokeDrawn {
     let mut brush = crate::gui::brush_state::BrushState::default();
     brush.begin_stroke(shape, size);
     for &(x, y, radius) in samples {
         brush.extend_stroke_with_radius(x, y, radius);
     }
-    crate::gui::brush_state::StrokeDrawn::painted(brush.commit_stroke().expect("a stroke"), stamp, 0.0)
+    crate::gui::brush_state::StrokeDrawn::painted(brush.commit_stroke().expect("a stroke"), stamp, edge)
 }
 
 /// Land every selection edit queued so far, as frames would.

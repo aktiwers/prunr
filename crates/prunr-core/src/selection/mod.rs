@@ -77,6 +77,24 @@ pub fn fill_band(cell: u8) -> u8 {
     cell & !FILL_CORE
 }
 
+/// The bounding rectangle of the cells of a `w`-wide plane `pred`
+/// accepts; `None` when it accepts none.
+fn bounds_of<T: Copy + Sync>(plane: &[T], w: usize, pred: impl Fn(T) -> bool + Sync) -> Option<CellRect> {
+    if w == 0 {
+        return None;
+    }
+    plane
+        .par_chunks(w)
+        .enumerate()
+        .filter_map(|(y, row)| {
+            let x0 = row.iter().position(|&v| pred(v))? as u32;
+            // the row has an accepted cell, found just above
+            let x1 = row.iter().rposition(|&v| pred(v)).unwrap_or(0) as u32;
+            Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
+        })
+        .reduce_with(CellRect::union)
+}
+
 /// The cells of a `w`-wide plane inside `r`, row by row.
 fn crop_rows<T: Copy>(plane: &[T], w: usize, r: CellRect) -> Vec<T> {
     let cw = r.width() as usize;
@@ -588,31 +606,21 @@ impl MaskArtifact {
         })
     }
 
-    /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
+    /// The bounding rectangle of the non-zero cells, and of the fill an
+    /// eraser stroke reaches past them with; `None` when it has neither.
     pub fn bounds(&self) -> Option<CellRect> {
-        if self.is_blank() {
-            return None;
+        let cells = (!self.is_blank()).then(|| self.bounds_where(|v| v != 0)).flatten();
+        let fill = self.fill.as_ref().and_then(|layer| bounds_of(layer, self.width as usize, |f| f != 0));
+        match (cells, fill) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (a, b) => a.or(b),
         }
-        self.bounds_where(|v| v != 0)
     }
 
     /// The bounding rectangle of the cells `pred` accepts; `None` when it
     /// accepts none.
     pub fn bounds_where(&self, pred: impl Fn(i8) -> bool + Sync) -> Option<CellRect> {
-        let w = self.width as usize;
-        if w == 0 {
-            return None;
-        }
-        self.data
-            .par_chunks(w)
-            .enumerate()
-            .filter_map(|(y, row)| {
-                let x0 = row.iter().position(|&v| pred(v))? as u32;
-                // the row has an accepted cell, found just above
-                let x1 = row.iter().rposition(|&v| pred(v)).unwrap_or(0) as u32;
-                Some(CellRect { x0, y0: y as u32, x1, y1: y as u32 })
-            })
-            .reduce_with(CellRect::union)
+        bounds_of(&self.data, self.width as usize, pred)
     }
 
     /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
@@ -733,6 +741,7 @@ mod tests {
         assert_eq!(MaskArtifact::from_patches(4, 1, [(r, &plane.crop(r))]).fill_layer(), Some(&[0, FILL_CORE | 3, FILL_CORE | 3, 3][..]));
         assert_eq!(plane.within(&plane).and_then(|p| p.fill_layer().map(<[u8]>::to_vec)), Some(vec![3, FILL_CORE | 3, FILL_CORE | 3, 3]));
         assert!(plane.invert().fill_layer().is_none());
+        assert_eq!(plane.bounds(), Some(CellRect { x0: 0, y0: 0, x1: 3, y1: 0 }), "the band past the cells counts");
         let bare = mask(4, 1, vec![0, 127, 127, 0]);
         assert_ne!(plane.content_hash(), bare.content_hash());
         assert_ne!(plane, bare);

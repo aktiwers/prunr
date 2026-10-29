@@ -167,23 +167,37 @@ impl Settings {
         self.model.erases_with(self.brush.cutout_action)
     }
 
-    /// The Feather a new selection stroke is drawn with: the brush's,
-    /// where its strip offers it; an eraser feathers its fill instead.
-    pub(crate) fn stroke_feather(&self) -> f32 {
+    /// The edge a new stroke is drawn with, as its brush's strip sets it: a
+    /// selection's Feather, or under an eraser its Expand region and the
+    /// fill's Feather.
+    pub(crate) fn stroke_edge(&self) -> super::brush_state::StrokeEdge {
+        use super::brush_state::StrokeEdge;
         use crate::gui::knob_catalog::{shows, Surface};
-        if shows(self.model, Surface::SelectionStrokes) { self.brush.edge_feather } else { 0.0 }
+        let b = &self.brush;
+        if shows(self.model, Surface::SelectionStrokes) {
+            StrokeEdge::Selection { feather: b.edge_feather }
+        } else {
+            StrokeEdge::Eraser { expand: b.inpaint_grow, feather: b.inpaint_feather }
+        }
     }
 
     /// The values a stroke is drawn with, which its brush's sliders set.
     pub(crate) fn stroke_values(&self) -> super::brush_state::StrokeValues {
+        use super::brush_state::StrokeEdge;
         let b = &self.brush;
+        let (feather, expand, fill_feather) = match self.stroke_edge() {
+            StrokeEdge::Selection { feather } => (feather, 0.0, 0.0),
+            StrokeEdge::Eraser { expand, feather } => (0.0, expand, feather),
+        };
         super::brush_state::StrokeValues {
             size: b.radius,
             hardness: b.hardness,
             opacity: b.strength,
             reading: b.magic_reading(),
             range: b.magic_depth_range,
-            feather: self.stroke_feather(),
+            feather,
+            expand,
+            fill_feather,
         }
     }
 
@@ -771,21 +785,26 @@ mod tests {
     use crate::gui::item_settings::item_with_gamma;
     use prunr_core::LineMode;
 
-    /// A selection stroke is drawn with the brush's Feather; under an
-    /// eraser, whose strip feathers the fill instead, a stroke has none.
+    /// A selection stroke is drawn with the brush's Feather; an eraser
+    /// stroke with the eraser's Expand region and Feather, which its strip
+    /// shows in their place.
     #[test]
-    fn only_a_selection_stroke_takes_the_brush_feather() {
+    fn a_stroke_takes_the_edge_its_strip_shows() {
+        use crate::gui::brush_state::StrokeEdge;
         let mut s = Settings::default();
-        s.brush.edge_feather = 6.0;
+        (s.brush.edge_feather, s.brush.inpaint_grow, s.brush.inpaint_feather) = (6.0, -3.0, 12.0);
         for model in SettingsModel::ALL {
-            let selects = crate::gui::knob_catalog::shows(model, crate::gui::knob_catalog::Surface::SelectionStrokes);
             s.model = model;
-            assert_eq!(s.stroke_values().feather, if selects { 6.0 } else { 0.0 }, "{model:?}");
+            let want = if crate::gui::knob_catalog::shows(model, crate::gui::knob_catalog::Surface::SelectionStrokes) {
+                StrokeEdge::Selection { feather: 6.0 }
+            } else {
+                StrokeEdge::Eraser { expand: -3.0, feather: 12.0 }
+            };
+            assert_eq!(s.stroke_edge(), want, "{model:?}");
         }
-        s.model = SettingsModel::Silueta;
-        assert_eq!(s.stroke_feather(), 6.0);
         s.model = SettingsModel::Inpaint;
-        assert_eq!(s.stroke_feather(), 0.0, "an eraser");
+        let v = s.stroke_values();
+        assert_eq!((v.feather, v.expand, v.fill_feather), (0.0, -3.0, 12.0), "an eraser");
     }
 
     /// A settings file that is no JSON starts from the defaults and is

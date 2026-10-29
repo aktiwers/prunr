@@ -4,7 +4,7 @@
 
 use egui::{Align2, Id, Order, Rect, RichText, Ui};
 
-use crate::gui::brush_state::{BrushSettings, StrokeReach, Tool, BRUSH_RADIUS_RANGE};
+use crate::gui::brush_state::{BrushSettings, StrokeReach, Tool, BRUSH_RADIUS_RANGE, EXPAND_RANGE, FEATHER_RANGE, FILL_FEATHER_RANGE};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
@@ -332,11 +332,18 @@ fn cell(ui: &mut Ui, cell: Cell, name_width: f32, knobs: &mut Knobs) {
         Cell::Hardness => chip::slider_cell_f32(ui, "Hardness", name_width, &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit,
         Cell::Opacity => chip::slider_cell_f32(ui, "Opacity", name_width, &mut s.strength, 0.0..=1.0, false, fmt::percent).commit,
         Cell::SelectionFeather => {
-            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.edge_feather, crate::gui::brush_state::FEATHER_RANGE, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
+            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.edge_feather, FEATHER_RANGE, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
         }
-        Cell::Expand => chip::slider_cell_f32(ui, "Expand region", name_width, &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0)).commit,
+        // An eraser stroke keeps its region and band in whole pixels.
+        Cell::Expand => {
+            let change = chip::slider_cell_f32(ui, "Expand region", name_width, &mut s.inpaint_grow, EXPAND_RANGE, false, |v| fmt::signed_px(v, 0));
+            s.inpaint_grow = s.inpaint_grow.round();
+            change.commit
+        }
         Cell::FillFeather => {
-            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0))).commit
+            let change = chip::slider_cell_f32(ui, "Feather", name_width, &mut s.inpaint_feather, FILL_FEATHER_RANGE, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)));
+            s.inpaint_feather = s.inpaint_feather.round();
+            change.commit
         }
         Cell::Pick => magic_brush_chip::pick(ui, s),
         Cell::Reading => magic_brush_chip::reading(ui, s, name_width),
@@ -354,4 +361,75 @@ fn try_another_button(ui: &mut Ui, refusal: Option<&'static str>) -> bool {
 fn try_another_label() -> &'static str {
     static LABEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     LABEL.get_or_init(|| format!("{}  Try another", egui_material_icons::icons::ICON_REFRESH.codepoint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gui::brush_state::StrokeDrawn;
+    use crate::gui::settings::Settings;
+
+    /// How a test moves the slider in `cell` (with Magic Brush reading by
+    /// `depth`); `None` for a cell that holds no slider.
+    fn slider(cell: Cell, depth: bool) -> Option<fn(&mut BrushSettings)> {
+        match cell {
+            Cell::Size => Some(|s| s.radius += 4.0),
+            Cell::Hardness => Some(|s| s.hardness = if s.hardness > 0.5 { 0.2 } else { 0.8 }),
+            Cell::Opacity => Some(|s| s.strength = if s.strength > 0.5 { 0.3 } else { 0.9 }),
+            Cell::SelectionFeather => Some(|s| s.edge_feather += 3.0),
+            Cell::Expand => Some(|s| s.inpaint_grow += 3.0),
+            Cell::FillFeather => Some(|s| s.inpaint_feather += 3.0),
+            Cell::Reading if depth => Some(|s| s.magic_depth_range += 0.05),
+            Cell::Reading => Some(|s| s.magic_confidence_threshold = if s.magic_confidence_threshold > 0.5 { 0.2 } else { 0.8 }),
+            Cell::Empty | Cell::Mode | Cell::Reach | Cell::Shape | Cell::Reset | Cell::Pick => None,
+        }
+    }
+
+    /// A stroke `tool` draws under `settings` (a depth pick when `depth`).
+    fn stroke(tool: Tool, depth: bool, settings: &Settings) -> StrokeDrawn {
+        use prunr_core::selection::BrushMode;
+        let (edge, mode) = (settings.stroke_edge(), BrushMode::Add);
+        match (tool, depth) {
+            (Tool::Paint, _) => crate::gui::tests::fixtures::painted_with_edge(prunr_core::brush::BrushShape::Circle, settings.brush.radius, &[(8.0, 8.0, 2.0)], settings.brush.stamp(), edge),
+            (Tool::Magic, true) => StrokeDrawn::Depth {
+                depth: std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(4, 4, vec![0.5; 16])),
+                around: 0.5, mode, range: settings.brush.magic_depth_range, edge,
+            },
+            (Tool::Magic, false) => {
+                let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
+                let output = prunr_core::sam::SamDecoderOutput { masks: vec![0.0; 3 * m * m], iou_predictions: [0.9, 0.1, 0.1] }.best_only();
+                StrokeDrawn::Magic { output: std::sync::Arc::new(output), mode, reading: settings.brush.magic_reading(), edge }
+            }
+        }
+    }
+
+    /// Every slider on every brush strip, on every model, moves a value
+    /// its strokes keep, so Next, Last and All decide which strokes it
+    /// reaches: a slider the strokes do not keep would change all of them
+    /// at once, whatever the switch says.
+    #[test]
+    fn every_strip_slider_is_a_value_its_strokes_keep() {
+        for model in SettingsModel::ALL.into_iter().filter(|&m| shows(m, Surface::Brushes)) {
+            for tool in [Tool::Paint, Tool::Magic] {
+                let g = grid(tool, model);
+                let narrow = g.narrow.iter().flat_map(|n| n.columns.iter().flatten().chain(n.below));
+                for &cell in g.columns.iter().flatten().chain(&g.end).chain(narrow) {
+                    for depth in [false, true] {
+                        let Some(slide) = slider(cell, depth) else { continue };
+                        let mut settings = Settings { model, ..Default::default() };
+                        settings.brush.magic_depth = depth;
+                        let drawn = stroke(tool, depth, &settings);
+                        let before = settings.stroke_values();
+                        slide(&mut settings.brush);
+                        let after = settings.stroke_values();
+                        let case = format!("{model:?}, {}, {:?}{}", tool.title(), cell.names(), if depth { " (depth)" } else { "" });
+                        assert_ne!(before, after, "{case}: the slider moves a stroke value");
+                        let keeps = |redrawn: StrokeDrawn| redrawn.values() != drawn.values();
+                        assert!(keeps(drawn.at(drawn.values().moved(before, after))), "{case}: Last redraws the stroke with it");
+                        assert!(keeps(drawn.at(drawn.values().adjusted(before, after))), "{case}: All moves the stroke by it");
+                    }
+                }
+            }
+        }
+    }
 }
