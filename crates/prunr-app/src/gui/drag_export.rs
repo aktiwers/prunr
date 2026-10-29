@@ -196,7 +196,7 @@ pub(crate) struct LayerJob {
 }
 
 impl LayerJob {
-    pub(crate) fn of(item: &BatchItem, style: super::background_io::SelectionStyle, action: super::brush_state::CutoutAction) -> Self {
+    pub(crate) fn of(item: &BatchItem, action: super::brush_state::CutoutAction) -> Self {
         Self {
             item_id: item.id,
             filename: item.filename.clone(),
@@ -204,7 +204,7 @@ impl LayerJob {
             start: item.run_start(super::item::Engine::Segment),
             source_rgba: item.source_rgba.clone(),
             source: item.source.clone(),
-            correction: item.correction(style, action),
+            correction: item.correction(action),
             // The cut-out's mask only while it made the image shown: after
             // an undo to the photo there is no subject layer to cut.
             seg: item.cached_tensor.clone().filter(|_| item.shows_cutout()),
@@ -422,7 +422,6 @@ impl Composite {
 #[derive(Clone, Copy)]
 pub(crate) struct DragSpec {
     pub split: bool,
-    pub style: super::background_io::SelectionStyle,
     pub action: super::brush_state::CutoutAction,
 }
 
@@ -438,7 +437,7 @@ pub(crate) struct DragFiles {
 
 impl DragFiles {
     pub(crate) fn of(item: &BatchItem, spec: DragSpec) -> Self {
-        Self { composite: Composite::of(item), layers: spec.split.then(|| LayerJob::of(item, spec.style, spec.action)) }
+        Self { composite: Composite::of(item), layers: spec.split.then(|| LayerJob::of(item, spec.action)) }
     }
 
     /// Render and write the files; slow on a big image, so off the UI
@@ -476,7 +475,6 @@ pub(crate) struct DragKey {
 /// What layers add to a drag's key: the correction they apply and the
 /// tensors they are made from.
 struct LayerKey {
-    style: super::background_io::SelectionStyle,
     action: super::brush_state::CutoutAction,
     selection: Option<u64>,
     edits: Option<std::sync::Weak<prunr_core::selection::MaskArtifact>>,
@@ -486,7 +484,7 @@ struct LayerKey {
 
 impl DragKey {
     pub(crate) fn of(item: &BatchItem, spec: DragSpec) -> Self {
-        let DragSpec { split, style, action } = spec;
+        let DragSpec { split, action } = spec;
         Self {
             settings: item.settings,
             result: item.result_rgba.as_ref().map(Arc::downgrade),
@@ -494,7 +492,6 @@ impl DragKey {
             bg_image: item.bg_image.as_ref().map(Arc::downgrade),
             backdrop: item.backdrop_key(),
             layers: split.then(|| LayerKey {
-                style,
                 action,
                 selection: item.selection_hash,
                 edits: item.edits.as_ref().map(Arc::downgrade),
@@ -520,7 +517,7 @@ impl DragKey {
             && match (&self.layers, &other.layers) {
                 (None, None) => true,
                 (Some(a), Some(b)) => {
-                    (a.style, a.action, a.selection, a.seg, a.edges) == (b.style, b.action, b.selection, b.seg, b.edges)
+                    (a.action, a.selection, a.seg, a.edges) == (b.action, b.selection, b.seg, b.edges)
                         && same(&a.edits, &b.edits)
                 }
                 _ => false,
@@ -561,7 +558,7 @@ mod tests {
     #[test]
     fn a_parked_result_is_what_a_drag_carries() {
         use crate::gui::brush_state::CutoutAction;
-        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let mut item = processed_item(33, "parked.jpg");
         item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 200, 0, 255]))));
         item.commit(crate::gui::timeline::StepKind::Process);
@@ -577,7 +574,7 @@ mod tests {
     #[test]
     fn two_images_with_one_name_keep_their_own_drag_files() {
         use crate::gui::brush_state::CutoutAction;
-        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let mut a = processed_item(31, "same-name.jpg");
         a.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))));
         let mut b = processed_item(32, "same-name.jpg");
@@ -607,7 +604,7 @@ mod tests {
             String::new(),
         );
         let blank = LayerSource { original: DynamicImage::ImageRgba8(image::RgbaImage::new(10, 10)), correction: None };
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
+        let job = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase);
         for kind in LayerKind::ALL {
             assert!(render_layer(&job, kind, &blank, None, &Default::default()).is_none());
         }
@@ -644,7 +641,7 @@ mod tests {
         let photo = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(16, 16, image::Rgba([90, 90, 90, 255])));
 
         let src = LayerSource { original: photo.clone(), correction: None };
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
+        let job = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase);
         let Some(LayerOutput::Rgba(layer)) = render_layer(&job, LayerKind::Lines, &src, None, &Default::default()) else {
             panic!("the Lines layer renders from the cached lines");
         };
@@ -674,7 +671,7 @@ mod tests {
         let src = LayerSource { original: DynamicImage::ImageRgba8((*erased).clone()), correction: Some(restore) };
         let seg = item.cached_tensor.as_ref().and_then(|t| t.bundle());
 
-        let job = LayerJob::of(&item, crate::gui::background_io::SelectionStyle::with_fill(0.0), crate::gui::brush_state::CutoutAction::Erase);
+        let job = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase);
         let Some(LayerOutput::Gray(mask)) = render_layer(&job, LayerKind::Mask, &src, seg.as_ref(), &Default::default()) else { panic!("mask layer") };
         assert_eq!(mask.get_pixel(5, 5)[0], 255, "the restored pixel is in the mask");
         assert_eq!(mask.get_pixel(9, 9)[0], 0, "the rest stays out");
@@ -693,12 +690,11 @@ mod tests {
 
         let mut item = BatchItem::new(1, "photo.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (8, 8), ItemSettings::default(), String::new());
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        assert!(!LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "nothing cached, no layers");
+        assert!(!LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase).has_layers(), "nothing cached, no layers");
 
         crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
-        let job = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Erase);
+        let job = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
         let files = std::thread::spawn(move || job.render_bytes(&Default::default())).join().expect("render thread");
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -729,9 +725,8 @@ mod tests {
         item.cached_tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![10.0; 64], height: 8, width: 8, model: prunr_core::ModelKind::Silueta });
         let erased_left: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -prunr_core::selection::FULL } else { 0 }).collect();
         item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
 
-        let files = LayerJob::of(&item, style, crate::gui::brush_state::CutoutAction::Select).render_bytes(&Default::default());
+        let files = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Select).render_bytes(&Default::default());
         let (_, mask) = files.iter().find(|(n, _)| n == "photo-mask.png").expect("a mask layer");
         let mask = image::load_from_memory(mask).expect("png").to_luma8();
         assert_eq!(mask.get_pixel(0, 4)[0], 0, "the erased half is gone");
@@ -766,8 +761,7 @@ mod tests {
     #[test]
     fn a_drag_key_follows_what_the_files_show() {
         use crate::gui::brush_state::CutoutAction;
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let spec = |split| DragSpec { split, style, action: CutoutAction::Restore };
+        let spec = |split| DragSpec { split, action: CutoutAction::Restore };
         let mut item = processed_item(1, "key.jpg");
         let key = DragKey::of(&item, spec(false));
         assert!(key.matches(&DragKey::of(&item, spec(false))));
@@ -784,7 +778,7 @@ mod tests {
     #[test]
     fn a_new_result_parked_off_screen_stales_the_drag_key() {
         use crate::gui::brush_state::CutoutAction;
-        let spec = DragSpec { split: false, style: crate::gui::background_io::SelectionStyle::with_fill(0.0), action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let mut item = processed_item(2, "parked.jpg");
         item.park_off_screen();
         assert!(matches!(item.result_pixels(), Some(crate::gui::item::Pixels::Parked(_))));
@@ -803,8 +797,7 @@ mod tests {
     fn a_drag_takes_the_files_written_ahead_while_current() {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::DragExportState;
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let spec = |split| DragSpec { split, style, action: CutoutAction::Restore };
+        let spec = |split| DragSpec { split, action: CutoutAction::Restore };
         let mut item = processed_item(9, "ahead-test.jpg");
         let mut state = DragExportState::new();
         let key = |item: &crate::gui::item::BatchItem| DragKey::of(item, spec(false));
@@ -836,8 +829,7 @@ mod tests {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::DragExportState;
         use crate::gui::item::{BatchItem, ImageSource};
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let gone = ImageSource::file(PathBuf::from("/nonexistent/prunr-drag-gone.png"));
         let item = BatchItem::new(11, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new());
         let mut state = DragExportState::new();
@@ -856,8 +848,7 @@ mod tests {
     fn many_drag_files_are_written_a_few_at_a_time_hovered_first() {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::{writers, DragExportState};
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let items: Vec<_> = (100..112).map(|id| processed_item(id, &format!("pool{id}.jpg"))).collect();
         let targets: Vec<u64> = items.iter().map(|i| i.id).collect();
         let key_of = |id: u64| items.iter().find(|i| i.id == id).map(|i| DragKey::of(i, spec));
@@ -894,8 +885,7 @@ mod tests {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::{DragExportState, DragReady};
         use crate::gui::item::{BatchItem, ImageSource};
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let spec = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
         let mut items: Vec<_> = (200..204).map(|id| processed_item(id, &format!("order{id}.jpg"))).collect();
         let gone = ImageSource::file(PathBuf::from("/nonexistent/prunr-drag-order-gone.png"));
         items.push(BatchItem::new(299, "gone.png".to_string(), gone, (4, 4), ItemSettings::default(), String::new()));
@@ -926,8 +916,7 @@ mod tests {
     fn a_drag_writes_again_an_image_changed_while_written() {
         use crate::gui::brush_state::CutoutAction;
         use crate::gui::drag_export_state::{DragExportState, DragReady};
-        let style = crate::gui::background_io::SelectionStyle::with_fill(0.0);
-        let before = DragSpec { split: false, style, action: CutoutAction::Restore };
+        let before = DragSpec { split: false, action: CutoutAction::Restore };
         let after = DragSpec { split: true, ..before };
         let item = processed_item(310, "changed310.jpg");
         assert!(!DragKey::of(&item, before).matches(&DragKey::of(&item, after)));

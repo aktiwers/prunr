@@ -32,13 +32,11 @@ pub(crate) enum FileLoad {
 pub(crate) enum TexLanding {
     /// An image texture, with the parked result its build unpacked.
     Image { item_id: u64, target: TexTarget, unpacked: Option<std::sync::Arc<image::RgbaImage>> },
-    /// A whole selection overlay: the mask it shows and the feathered
-    /// plane it was built from.
+    /// A whole selection overlay and the mask it shows.
     Selection {
         item_id: u64,
         key: SelectionTextureKey,
         shown: Arc<prunr_core::selection::MaskArtifact>,
-        feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
     },
     /// The picture behind the result, for `key`.
     Backdrop { item_id: u64, key: u64 },
@@ -91,9 +89,8 @@ pub(crate) struct SaveDone {
 }
 
 pub(crate) enum SelectionImage {
-    /// The whole overlay, and the feathered plane it was built from when
-    /// the style feathers (so actions can reuse it).
-    Full { image: crate::gui::image_texture::PreparedImage, feathered: Option<Arc<prunr_core::selection::MaskArtifact>> },
+    /// The whole overlay.
+    Full { image: crate::gui::image_texture::PreparedImage },
     /// The pixels that differ from the texture showing `base_hash`,
     /// to upload at `pos` into that texture.
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
@@ -273,10 +270,9 @@ impl BackgroundIO {
 
     /// Spawn an off-thread job to build the selection texture for a mask.
     ///
-    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K) plus,
-    /// with feather > 0, the bbox-sized guided-filter scratch documented on
-    /// `feather_edges`. The result carries its key; the drain installs it
-    /// only while the item's mask still matches.
+    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K). The
+    /// result carries its key; the drain installs it only while the item's
+    /// mask still matches.
     ///
     /// With `base` (the plane the item's texture shows, and its hash)
     /// the result is a patch of the changed region instead of a full
@@ -286,7 +282,6 @@ impl BackgroundIO {
         item_id: u64,
         mask: Arc<prunr_core::selection::MaskArtifact>,
         key: SelectionTextureKey,
-        source: Option<Arc<image::RgbaImage>>,
         base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>,
         ctx: egui::Context,
     ) {
@@ -302,21 +297,9 @@ impl BackgroundIO {
             // An eraser's region reaches beyond the painted cells: its
             // overlay is drawn from the reach, and patched from the last
             // reach rather than from the paint.
-            let (image, shown) = match style.shown_region(&mask) {
-                Some(reach) => {
-                    let image = patch_from(base, &reach)
-                        .unwrap_or_else(|| SelectionImage::Full { image: prepared(build_selection_image(&reach, style)), feathered: None });
-                    (image, reach)
-                }
-                None => {
-                    let image = patch_from(base, &mask).unwrap_or_else(|| {
-                        let feathered = style.feather(&mask, source.as_deref());
-                        let shown = feathered.as_ref().unwrap_or(&mask);
-                        SelectionImage::Full { image: prepared(build_selection_image(shown, style)), feathered }
-                    });
-                    (image, mask)
-                }
-            };
+            let shown = style.shown_region(&mask).unwrap_or(mask);
+            let image = patch_from(base, &shown)
+                .unwrap_or_else(|| SelectionImage::Full { image: prepared(build_selection_image(&shown, style)) });
             let _ = texture_tx.send(SelectionTextureResult { item_id, image, key, shown });
             // Some compositors drop thread-initiated wake-ups while the
             // window is idle; the pending key's poll in `logic()` is the
@@ -339,19 +322,6 @@ pub(crate) struct SelectionEditDone {
     pub(crate) cut: Option<image::RgbaImage>,
 }
 
-/// `mask` feathered by `px` against the photo `source`; `None` for no
-/// feather, or no photo to feather against.
-pub(crate) fn feathered(
-    mask: &prunr_core::selection::MaskArtifact,
-    source: Option<&image::RgbaImage>,
-    px: u32,
-) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
-    match (px, source) {
-        (0, _) | (_, None) => None,
-        (px, Some(src)) => Some(std::sync::Arc::new(prunr_core::selection::refine::feather_edges(mask, src, px))),
-    }
-}
-
 /// What a selection texture bakes in; the overlay is a single textured
 /// quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -361,7 +331,6 @@ pub(crate) struct SelectionStyle {
     pub(crate) erase: bool,
     /// Outline width in image pixels; 0 draws no outline.
     pub(crate) outline_thickness: f32,
-    pub(crate) edge_feather_px: u32,
     /// Under an eraser, the overlay shows the region the erase will
     /// touch: the painted one grown, plus its blend band.
     pub(crate) fill: Option<FillRegionPx>,
@@ -383,7 +352,6 @@ impl SelectionStyle {
             fill_opacity: s.selection_fill,
             erase: s.brush_erases(),
             outline_thickness: if s.selection_outline { Self::OUTLINE_PX } else { 0.0 },
-            edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
             fill: s.model.is_inpaint().then_some(FillRegionPx { grow: s.brush.inpaint_grow, blend: s.brush.inpaint_feather }),
         }
     }
@@ -394,21 +362,10 @@ impl SelectionStyle {
         self.fill.map(|f| Arc::new(prunr_core::inpaint_blend::fill_preview(mask, f.grow, f.blend)))
     }
 
-    /// The default outline and no feather, with `fill_opacity`.
+    /// The default outline, with `fill_opacity`.
     #[cfg(test)]
     pub(crate) fn with_fill(fill_opacity: f32) -> Self {
-        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0, fill: None }
-    }
-
-    /// The feathered selection, or `None` when this style shows `mask` as
-    /// it is (no feather, or no photo to feather against). The texture
-    /// build, the re-cut and Delete / Copy / Cut all go through here.
-    pub(crate) fn feather(
-        &self,
-        mask: &prunr_core::selection::MaskArtifact,
-        source: Option<&image::RgbaImage>,
-    ) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
-        feathered(mask, source, self.edge_feather_px)
+        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, fill: None }
     }
 
     /// The style as drawn at `zoom` (screen points per image pixel): an
@@ -550,12 +507,12 @@ mod tests {
         let io = BackgroundIO::new();
         let ctx = egui::Context::default();
         let wait = std::time::Duration::from_secs(10);
-        io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, None, ctx.clone());
+        io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, ctx.clone());
         let first = io.selection_texture_rx.recv_timeout(wait).expect("the first build");
         let SelectionImage::Full { .. } = first.image else { panic!("a first build is whole") };
         let full_a = build_selection_image(&first.shown, style);
         assert_eq!(first.shown.cells(), style.shown_region(&a).expect("an eraser").cells(), "the texture remembers the reach it drew");
-        io.request_selection_visualization(1, Arc::clone(&b), (2, style), None, Some((1, Arc::clone(&first.shown))), ctx);
+        io.request_selection_visualization(1, Arc::clone(&b), (2, style), Some((1, Arc::clone(&first.shown))), ctx);
         let second = io.selection_texture_rx.recv_timeout(wait).expect("the second build");
         let SelectionImage::Patch { base_hash: 1, pos, image: patch } = second.image else { panic!("a stroke patches the last reach") };
         let mut pasted = full_a;

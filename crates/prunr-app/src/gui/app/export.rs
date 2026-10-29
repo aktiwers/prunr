@@ -62,7 +62,6 @@ impl PrunrApp {
     /// `LayerJob` snapshot. Per-item fallback to the composite when the
     /// layers' data is gone, so every target lands at least one file.
     pub(super) fn on_save_layers_picked(&mut self, targets: &[u64], folder: PathBuf) {
-        let style = self.selection_style();
         let format = self.settings.export_format;
         let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
         let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
@@ -70,7 +69,7 @@ impl PrunrApp {
             .map(|(item, name)| LayerSave {
                 mark: item.save_mark(),
                 depth: self.settings.export_depth_map.then(|| item.depth_export().named(&name)),
-                layers: crate::gui::drag_export::LayerJob::of(item, style, self.settings.brush.cutout_action).named(name),
+                layers: crate::gui::drag_export::LayerJob::of(item, self.settings.brush.cutout_action).named(name),
                 composite: (item.export_image(), item.export_bg()),
             })
             .collect();
@@ -275,7 +274,7 @@ impl PrunrApp {
 
     /// How a drag writes its files under the current settings.
     fn drag_spec(&self) -> crate::gui::drag_export::DragSpec {
-        crate::gui::drag_export::DragSpec { split: self.saves_layers(), style: self.selection_style(), action: self.settings.brush.cutout_action }
+        crate::gui::drag_export::DragSpec { split: self.saves_layers(), action: self.settings.brush.cutout_action }
     }
 
     pub fn handle_copy(&mut self) {

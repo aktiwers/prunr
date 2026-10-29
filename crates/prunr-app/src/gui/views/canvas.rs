@@ -262,10 +262,10 @@ fn handle_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) 
             app.settings.brush.region_stamp(subtract && !shift)
         };
         let item = &app.batch.items[idx];
-        let (item_id, dims) = (item.id, item.dimensions);
+        let (item_id, dims, source) = (item.id, item.dimensions, item.source_rgba.clone());
         tracing::info!(item_id, "brush stroke committed; merging into the selection");
-        let drawn = crate::gui::brush_state::StrokeDrawn::painted(path, stamp);
-        app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims });
+        let drawn = crate::gui::brush_state::StrokeDrawn::painted(path, stamp, app.settings.stroke_feather());
+        app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, source });
     }
 }
 

@@ -586,13 +586,11 @@ impl BatchManager {
         }
         let Some(mask) = item.selection_mask.clone() else { return };
         item.selection_tex_pending = Some(key);
-        let (item_id, source) = (item.id, item.source_rgba.clone());
-        // A patch applies only to a texture of the same style, and only
-        // without feather: feathering reshapes the plane beyond the stroke.
+        // A patch applies only to a texture of the same style.
         let base = item.selection_texture.as_ref()
-            .filter(|t| t.key.1 == style && style.edge_feather_px == 0)
+            .filter(|t| t.key.1 == style)
             .map(|t| (t.key.0, Arc::clone(&t.shown)));
-        self.bg_io.request_selection_visualization(item_id, mask, key, source, base, ctx.clone());
+        self.bg_io.request_selection_visualization(item.id, mask, key, base, ctx.clone());
     }
 
     /// The items a drag from row `idx` carries: every ticked one when that
@@ -1430,7 +1428,7 @@ mod tests {
         let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
         let item = &mut bm.items[0];
         item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (1, style(0.15)), texture: handle.into(), shown: mask, feathered: None,
+            key: (1, style(0.15)), texture: handle.into(), shown: mask,
         });
         assert!(item.selection_hash.is_none(), "the selection was undone");
         bm.ensure_selection_texture(style(0.15), &ctx);
@@ -1438,28 +1436,18 @@ mod tests {
     }
 
     /// A cut-out's re-cut applies the selection at the photo's own size,
-    /// feathered once the overlay has built the feathered plane; never a
-    /// copy shrunk to the model's working size.
+    /// never a copy shrunk to the model's working size.
     #[test]
-    fn a_recut_applies_the_full_size_selection_and_its_feather() {
+    fn a_recut_applies_the_full_size_selection() {
         let mut bm = fixture();
         bm.items.push(item_with_cache(1, 0));
-        let ctx = egui::Context::default();
         let cells: Vec<i8> = (0..64).map(|i| if i % 8 < 4 { -127 } else { 0 }).collect();
         let selection = std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, cells));
-        let feathered = std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-60; 64]));
         let item = &mut bm.items[0];
         item.commit_selection_mask(std::sync::Arc::clone(&selection), crate::gui::timeline::StepKind::Stroke);
-        let hash = item.selection_hash.expect("committed");
-        let plane = item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).expect("a selection");
+        let plane = item.correction_plane(crate::gui::brush_state::CutoutAction::Erase).expect("a selection");
         assert_eq!((plane.width, plane.height), (8, 8), "the photo's size, not the model's");
         assert!(std::sync::Arc::ptr_eq(&plane, &selection));
-
-        let handle = ctx.load_texture("sel", egui::ColorImage::new([8, 8], vec![egui::Color32::WHITE; 64]), Default::default());
-        item.selection_texture = Some(crate::gui::item::SelectionTexture {
-            key: (hash, style(0.15)), texture: handle.into(), shown: selection, feathered: Some(std::sync::Arc::clone(&feathered)),
-        });
-        assert!(std::sync::Arc::ptr_eq(&item.correction_plane(style(0.15), crate::gui::brush_state::CutoutAction::Erase).unwrap(), &feathered), "the feathered plane once built");
     }
 
     /// A drag carries the ticked rows when it starts on one, else its own

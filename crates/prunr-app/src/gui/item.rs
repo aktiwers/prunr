@@ -1085,9 +1085,6 @@ pub(crate) struct SelectionTexture {
     pub(crate) key: super::background_io::SelectionTextureKey,
     pub(crate) texture: super::image_texture::ImageTexture,
     pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
-    /// With Feather on, the feathered plane the texture was built from, so
-    /// Delete / Copy / Cut act on it without filtering again.
-    pub(crate) feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
 }
 
 impl BatchItem {
@@ -1139,9 +1136,6 @@ impl BatchItem {
         self.volatile_edge_tensor = None;
         self.adjusting = None;
         super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take()));
-        if let Some(t) = &mut self.selection_texture {
-            t.feathered = None;
-        }
         self.drop_correction_cache();
     }
 
@@ -1151,12 +1145,11 @@ impl BatchItem {
 
     /// What corrects a cut-out: the edits already made, with the
     /// selection on top as `action` says (restored, erased, or nothing
-    /// while only selecting), at full resolution. The selection is the
-    /// feathered plane once the overlay has built it (its landing re-cuts
-    /// again). Built once per change of its inputs.
+    /// while only selecting), at full resolution. Built once per change
+    /// of its inputs.
     #[cfg(test)]
-    pub(crate) fn correction_plane(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        self.correction(style, action).map(|c| {
+    pub(crate) fn correction_plane(&self, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.correction(action).map(|c| {
             let (plane, built) = c.resolve();
             if let Some(built) = built {
                 self.keep_built_correction(built);
@@ -1167,10 +1160,9 @@ impl BatchItem {
 
     /// What corrects a cut-out, as a handle: built already, or to build
     /// where it is used. Never builds here.
-    pub(crate) fn correction(&self, style: super::background_io::SelectionStyle, action: CutoutAction) -> Option<Correction> {
-        let selection = self.selection_mask.as_ref()
-            .filter(|m| !m.is_blank() && action != CutoutAction::Select)
-            .map(|m| self.feathered_selection(style).unwrap_or_else(|| Arc::clone(m)));
+    pub(crate) fn correction(&self, action: CutoutAction) -> Option<Correction> {
+        let selection = self.selection_mask.clone()
+            .filter(|m| !m.is_blank() && action != CutoutAction::Select);
         match (&self.edits, selection) {
             (None, None) => None,
             (Some(edits), None) => Some(Correction::Ready(Arc::clone(edits))),
@@ -1197,26 +1189,15 @@ impl BatchItem {
     /// here and now, as the selection queue does off the UI thread: the
     /// same edit and the same landing. False when there was no selection.
     #[cfg(test)]
-    pub(crate) fn bake_selection(&mut self, style: super::background_io::SelectionStyle, action: CutoutAction) -> bool {
+    pub(crate) fn bake_selection(&mut self, action: CutoutAction) -> bool {
         use super::selection_queue::{apply, SelectionOp};
         if self.selection_mask.is_none() {
             return false;
         }
-        let op = SelectionOp::Bake { action, feathered: self.feathered_selection(style) };
+        let op = SelectionOp::Bake { action };
         let made = apply(&op, &self.selection_state());
-        let (kind, record) = op.step(style.edge_feather_px);
+        let (kind, record) = op.step();
         self.land_selection_state(made, None, Some(kind), record)
-    }
-
-    /// The current selection feathered as `style` says, once the overlay
-    /// has built it. Only the feather matters: a change of tint or fill
-    /// keeps the plane.
-    pub(crate) fn feathered_selection(&self, style: super::background_io::SelectionStyle) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
-        let (hash, texture) = (self.selection_hash?, self.selection_texture.as_ref()?);
-        let (built_hash, built_style) = texture.key;
-        (built_hash == hash && built_style.edge_feather_px == style.edge_feather_px)
-            .then(|| texture.feathered.clone())
-            .flatten()
     }
 
     /// The overlay texture, when it was built from the current selection
@@ -1847,8 +1828,8 @@ impl BatchItem {
         let current = self.selection_hash == Some(result.key.0) && self.selection_mask.is_some();
         let super::background_io::SelectionTextureResult { item_id, image, key, shown } = result;
         match image {
-            SelectionImage::Full { image, feathered } if current => {
-                upload(image, super::background_io::TexLanding::Selection { item_id, key, shown, feathered });
+            SelectionImage::Full { image } if current => {
+                upload(image, super::background_io::TexLanding::Selection { item_id, key, shown });
             }
             SelectionImage::Full { .. } => {
                 clear_if(&mut self.selection_tex_pending, key);
@@ -1867,27 +1848,17 @@ impl BatchItem {
     }
 
     /// A whole selection overlay uploaded: it shows while still for the
-    /// mask shown. Returns whether a feathered plane the cut-out has not
-    /// had yet came with it.
+    /// mask shown.
     pub(crate) fn install_selection_texture(
         &mut self,
         texture: super::image_texture::ImageTexture,
         key: super::background_io::SelectionTextureKey,
         shown: Arc<prunr_core::selection::MaskArtifact>,
-        feathered: Option<Arc<prunr_core::selection::MaskArtifact>>,
-    ) -> bool {
+    ) {
         clear_if(&mut self.selection_tex_pending, key);
-        if self.selection_hash != Some(key.0) || self.selection_mask.is_none() {
-            return false;
+        if self.selection_hash == Some(key.0) && self.selection_mask.is_some() {
+            self.selection_texture = Some(SelectionTexture { key, texture, shown });
         }
-        // Re-cut only for a feathered plane the cut-out has not had yet;
-        // a rebuild for zoom keeps the same one.
-        let had_it = self.selection_texture.as_ref().is_some_and(|t| {
-            t.feathered.is_some() && t.key.0 == key.0 && t.key.1.edge_feather_px == key.1.edge_feather_px
-        });
-        let new_plane = feathered.is_some() && !had_it;
-        self.selection_texture = Some(SelectionTexture { key, texture, shown, feathered });
-        new_plane
     }
 
     /// Whether an erase has something to fill.
@@ -3699,18 +3670,17 @@ mod tests {
     }
 
     /// A selection overlay built for a mask the image has since replaced
-    /// is dropped; the one for the shown mask is kept, and a feathered
-    /// plane that comes with it is reported once.
+    /// is dropped; the one for the shown mask is kept.
     #[test]
     fn a_selection_overlay_lands_only_for_the_mask_shown() {
         use crate::gui::background_io::{SelectionImage, SelectionStyle, SelectionTextureResult, TexLanding};
         use crate::gui::image_texture::PreparedImage;
         let ctx = egui::Context::default();
         let image = || PreparedImage::from_color_image(egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]));
-        let style = SelectionStyle { fill_opacity: 0.5, erase: false, outline_thickness: 1.0, edge_feather_px: 2, fill: None };
-        let full = |hash: u64, feathered: bool| SelectionTextureResult {
+        let style = SelectionStyle::with_fill(0.5);
+        let full = |hash: u64| SelectionTextureResult {
             item_id: 1,
-            image: SelectionImage::Full { image: image(), feathered: feathered.then(|| make_mask(hash, 2, 2)) },
+            image: SelectionImage::Full { image: image() },
             key: (hash, style),
             shown: make_mask(hash, 2, 2),
         };
@@ -3722,20 +3692,20 @@ mod tests {
                 let mut uploads = crate::gui::image_texture::Uploads::default();
                 uploads.push("selection".into(), image, landing);
                 let (texture, landing) = uploads.pump(&ctx, |_| true).landed.pop().expect("uploaded");
-                let TexLanding::Selection { key, shown, feathered, .. } = landing else { panic!("a selection") };
-                item.install_selection_texture(texture, key, shown, feathered)
+                let TexLanding::Selection { key, shown, .. } = landing else { panic!("a selection") };
+                item.install_selection_texture(texture, key, shown);
             })
         };
         let mut item = fixture_item(1);
         item.selection_mask = Some(make_mask(7, 2, 2));
         item.selection_hash = Some(7);
         item.selection_tex_pending = Some((3, style));
-        assert_eq!(land(&mut item, full(3, true)), None, "a stale build is not uploaded");
+        assert!(land(&mut item, full(3)).is_none(), "a stale build is not uploaded");
         assert!(item.selection_texture.is_none() && item.selection_tex_pending.is_none(), "and frees the slot");
         item.selection_tex_pending = Some((7, style));
-        assert_eq!(land(&mut item, full(7, true)), Some(true), "the shown mask's overlay lands with a new feathered plane");
+        assert!(land(&mut item, full(7)).is_some(), "the shown mask's overlay is uploaded");
         assert!(item.selection_tex_pending.is_none(), "pending until installed");
-        assert_eq!(land(&mut item, full(7, true)), Some(false), "a rebuild keeps the plane it had");
+        assert_eq!(item.selection_texture.as_ref().map(|t| t.key), Some((7, style)), "and installed");
     }
 
     /// A lens-blur backdrop keys on where it focuses: a new result with

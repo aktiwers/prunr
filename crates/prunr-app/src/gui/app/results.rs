@@ -1034,7 +1034,6 @@ impl PrunrApp {
         }
 
         // Large pictures upload a few tiles per frame and land whole.
-        let mut feathered_landed = Vec::new();
         let mut uploads = std::mem::take(&mut self.batch.bg_io.uploads);
         let pumped = uploads.pump(ctx, |landing| {
             self.batch.find_by_id(landing.item_id()).is_some_and(|i| i.wants_upload(landing))
@@ -1056,11 +1055,9 @@ impl PrunrApp {
                     }
                     landed = true;
                 }
-                TexLanding::Selection { item_id, key, shown, feathered } => {
+                TexLanding::Selection { item_id, key, shown } => {
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                    if item.install_selection_texture(texture, key, shown, feathered) {
-                        feathered_landed.push(item_id);
-                    }
+                    item.install_selection_texture(texture, key, shown);
                 }
                 TexLanding::Backdrop { item_id, key } => {
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
@@ -1068,12 +1065,6 @@ impl PrunrApp {
                 }
             }
         }
-        // A feathered selection that just landed changes what the cut-out
-        // applies; re-cut with it.
-        for id in feathered_landed {
-            self.recut_with_selection(id);
-        }
-
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
         let mut unreadable = 0u32;
@@ -1719,8 +1710,7 @@ mod timeline_contract_tests {
         let img = Arc::new(image::RgbaImage::new(4, 4));
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.land_upscale(UpscaleCache::new(img.clone(), img, None));
-        let style = app.selection_style();
-        let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::UpscaleTier2, app.settings.model.role(), style, app.settings.brush.cutout_action);
+        let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), PreviewKind::UpscaleTier2, app.settings.model.role(), app.settings.brush.cutout_action);
         assert!(inputs.is_ok_and(|i| i.upscale.is_some()), "dispatched from the kept run");
         assert!(app.batch.items[0].source_rgba.is_none() && app.batch.items[0].start_photo.is_none(), "without decoding the photo");
     }
@@ -1860,7 +1850,7 @@ mod timeline_contract_tests {
         // Square strokes along row 1 of the 4 × 4 image, from column `a` to `b`.
         let stroke = |a: f32, b: f32| {
             let drawn = crate::gui::tests::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(a + 0.5, 1.5, 0.5), (b + 0.5, 1.5, 0.5)], crate::gui::tests::fixtures::HARD);
-            SelectionOp::Stroke { drawn, dims: (4, 4) }
+            SelectionOp::Stroke { drawn, dims: (4, 4), source: None }
         };
         let mut app = app_with_processed_item(SettingsModel::Inpaint);
         app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
@@ -3019,14 +3009,14 @@ mod spare_scales_tests {
         use crate::gui::live_preview::PreviewKind;
         let mut app = waiting_for_fine();
         app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(4, 4)));
-        let (style, action) = (app.selection_style(), app.settings.brush.cutout_action);
+        let action = app.settings.brush.cutout_action;
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), style, action);
+            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), action);
             assert!(matches!(inputs, Err(crate::gui::capability::Verdict::Wait(_))), "{kind:?} waits for Fine");
         }
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         for kind in [PreviewKind::Mask, PreviewKind::Edge] {
-            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), style, action);
+            let inputs = PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(1).expect("the item"), kind, app.settings.model.role(), action);
             assert!(inputs.is_ok_and(|i| i.edge_tensor.is_some() || i.packed.primary == Some(Fine)), "{kind:?} renders with Fine once it lands");
         }
     }

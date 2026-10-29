@@ -264,11 +264,6 @@ impl BrushSettings {
         prunr_core::MaskReading { confidence: self.magic_confidence_threshold, remove_specks: self.magic_remove_specks }
     }
 
-    /// The values a stroke is drawn with, which its brush's sliders set.
-    pub(crate) fn stroke_values(&self) -> StrokeValues {
-        StrokeValues { size: self.radius, hardness: self.hardness, opacity: self.strength, reading: self.magic_reading(), range: self.magic_depth_range }
-    }
-
     /// The settings that belong to a model rather than to the brush: the
     /// fill's Sharpen and scale, and the Stable Diffusion quality, prompt
     /// and seed. Expand region and Feather sit on the brush strips and
@@ -443,7 +438,8 @@ impl PaintPath {
 }
 
 /// The slider values strokes are drawn with: the Paint Brush's Size,
-/// Hardness and Opacity, Magic Brush's reading and depth Range.
+/// Hardness and Opacity, Magic Brush's reading and depth Range, and
+/// either's Feather (the selection's edge, against the photo).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StrokeValues {
     pub(crate) size: f32,
@@ -451,31 +447,42 @@ pub(crate) struct StrokeValues {
     pub(crate) opacity: f32,
     pub(crate) reading: prunr_core::MaskReading,
     pub(crate) range: f32,
+    pub(crate) feather: f32,
 }
+
+/// The selection Feather's range, in pixels.
+pub(crate) const FEATHER_RANGE: std::ops::RangeInclusive<f32> = 0.0..=20.0;
 
 /// A stroke as it was drawn, kept with its undo step so its brush's
 /// sliders can draw it again: a Magic Brush pick, a depth pick or a
-/// Paint Brush stroke, each with the values it has now.
+/// Paint Brush stroke, each with the values it has now, its Feather
+/// among them.
 #[derive(Clone)]
 pub(crate) enum StrokeDrawn {
-    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading },
-    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32 },
-    Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp },
+    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading, feather: f32 },
+    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32, feather: f32 },
+    Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp, feather: f32 },
 }
 
 impl StrokeDrawn {
-    pub(crate) fn painted(path: PaintPath, stamp: Stamp) -> Self {
+    pub(crate) fn painted(path: PaintPath, stamp: Stamp, feather: f32) -> Self {
         let size = path.size;
-        Self::Paint { path: std::sync::Arc::new(path), size, stamp }
+        Self::Paint { path: std::sync::Arc::new(path), size, stamp, feather }
+    }
+
+    fn feather(&self) -> f32 {
+        match self {
+            Self::Magic { feather, .. } | Self::Depth { feather, .. } | Self::Paint { feather, .. } => *feather,
+        }
     }
 
     /// The values it is drawn with; those its brush has no slider for
     /// read as `UNUSED`.
     pub(crate) fn values(&self) -> StrokeValues {
         match self {
-            Self::Magic { reading, .. } => StrokeValues { reading: *reading, ..UNUSED },
-            Self::Depth { range, .. } => StrokeValues { range: *range, ..UNUSED },
-            Self::Paint { size, stamp, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, ..UNUSED },
+            Self::Magic { reading, feather, .. } => StrokeValues { reading: *reading, feather: *feather, ..UNUSED },
+            Self::Depth { range, feather, .. } => StrokeValues { range: *range, feather: *feather, ..UNUSED },
+            Self::Paint { size, stamp, feather, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, feather: *feather, ..UNUSED },
         }
     }
 
@@ -484,21 +491,32 @@ impl StrokeDrawn {
     pub(crate) fn at(&self, values: StrokeValues) -> Self {
         use std::sync::Arc;
         match self {
-            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading },
-            Self::Depth { depth, around, mode, .. } => Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range },
+            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading, feather: values.feather },
+            Self::Depth { depth, around, mode, .. } => {
+                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range, feather: values.feather }
+            }
             Self::Paint { path, stamp, .. } => Self::Paint {
                 path: Arc::clone(path),
                 size: values.size,
                 stamp: Stamp { hardness: values.hardness, strength: values.opacity, ..*stamp },
+                feather: values.feather,
             },
         }
     }
 
-    pub(crate) fn mask(&self, width: u32, height: u32) -> MaskArtifact {
-        match self {
-            Self::Magic { output, mode, reading } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
-            Self::Depth { depth, around, mode, range } => prunr_core::depth::select_by_depth(depth, width, height, *around, *range, *mode),
-            Self::Paint { path, size, stamp } => path.render(width, height, *size, *stamp),
+    /// The stroke's own mask on a `width` × `height` image, its edge
+    /// feathered against the photo `source` (none to feather against:
+    /// as drawn).
+    pub(crate) fn mask(&self, width: u32, height: u32, source: Option<&image::RgbaImage>) -> MaskArtifact {
+        let drawn = match self {
+            Self::Magic { output, mode, reading, .. } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
+            Self::Depth { depth, around, mode, range, .. } => prunr_core::depth::select_by_depth(depth, width, height, *around, *range, *mode),
+            Self::Paint { path, size, stamp, .. } => path.render(width, height, *size, *stamp),
+        };
+        let feather = self.feather().round().max(0.0) as u32;
+        match source {
+            Some(photo) if feather > 0 => prunr_core::selection::refine::feather_edges(&drawn, photo, feather),
+            _ => drawn,
         }
     }
 }
@@ -510,6 +528,7 @@ const UNUSED: StrokeValues = StrokeValues {
     opacity: 0.0,
     reading: prunr_core::MaskReading { confidence: 0.0, remove_specks: false },
     range: 0.0,
+    feather: 0.0,
 };
 
 impl StrokeValues {
@@ -525,6 +544,7 @@ impl StrokeValues {
                 remove_specks: moved_to(self.reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
             },
             range: moved_to(self.range, from.range, to.range),
+            feather: moved_to(self.feather, from.feather, to.feather),
         }
     }
 
@@ -542,6 +562,7 @@ impl StrokeValues {
                 remove_specks: moved_to(self.reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
             },
             range: offset(self.range, from.range, to.range, DEPTH_RANGE),
+            feather: offset(self.feather, from.feather, to.feather, FEATHER_RANGE),
         }
     }
 }
@@ -919,7 +940,7 @@ mod tests {
             s.begin_stroke(shape, 2.0);
             s.extend_stroke_with_radius(4.0, 30.0, 2.0);
             s.extend_stroke_with_radius(60.0, 30.0, 2.0);
-            let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp()).mask(64, 64);
+            let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), 0.0).mask(64, 64, None);
             let gaps = (4..=60).filter(|&x| c.cells()[30 * 64 + x] == 0).count();
             assert_eq!(gaps, 0, "{shape:?} left {gaps} unpainted cells between the samples");
         }
@@ -947,7 +968,7 @@ mod tests {
         let mut s = BrushState::default();
         s.begin_stroke(BrushShape::Circle, 8.0);
         s.extend_stroke_with_radius(32.0, 32.0, 8.0);
-        let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp()).mask(64, 64);
+        let c = StrokeDrawn::painted(s.commit_stroke().expect("populated stroke"), default_stamp(), 0.0).mask(64, 64, None);
         assert_eq!(c.width, 64);
         assert_eq!(c.height, 64);
         assert!(c.has_selected_region());

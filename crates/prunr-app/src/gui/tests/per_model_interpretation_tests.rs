@@ -35,13 +35,12 @@ fn px(v: u8) -> image::RgbaImage {
     image::RgbaImage::from_pixel(8, 8, image::Rgba([v, v, v, 255]))
 }
 
-/// The live preview's mask inputs for `id`, at the app's current selection
-/// style and cut-out action.
+/// The live preview's mask inputs for `id`, at the app's current cut-out
+/// action.
 fn preview_inputs(app: &mut PrunrApp, id: u64, filter_only: bool) -> Option<DispatchInputs> {
-    let style = app.selection_style();
     let action = app.settings.brush.cutout_action;
     let role = if filter_only { crate::gui::knob_catalog::ModelRole::Filters } else { crate::gui::knob_catalog::ModelRole::Cutout };
-    PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(id).expect("the item"), PreviewKind::Mask, role, style, action).ok()
+    PrunrApp::build_preview_inputs(app.batch.find_by_id_mut(id).expect("the item"), PreviewKind::Mask, role, action).ok()
 }
 
 /// A second stroke on the first item: its bottom-right cell joins the
@@ -127,7 +126,7 @@ fn a_stroke_is_one_step_sharing_the_result_before_it() {
 /// Queue `drawn` on image `item_id` as its brush does, and land it.
 fn land(app: &mut PrunrApp, item_id: u64, drawn: crate::gui::brush_state::StrokeDrawn) {
     let dims = app.batch.find_by_id(item_id).expect("the image").dimensions;
-    app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims });
+    app.queue_selection_op(item_id, crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims, source: None });
     super::fixtures::settle_selection_edits(app);
 }
 
@@ -155,7 +154,7 @@ fn app_with_a_magic_pick() -> (PrunrApp, u64) {
     item.dimensions = (8, 8);
     give_tensor(item);
     let reading = app.settings.brush.magic_reading();
-    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading });
+    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading, feather: 0.0 });
     assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
     let hash = app.batch.items[0].selection_hash.expect("the pick");
     (app, hash)
@@ -253,7 +252,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     assert!(opacity > 0 && opacity < prunr_core::selection::FULL.unsigned_abs(), "Opacity halves it: {opacity}");
 
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(16, 16, (0..256).map(|i| (i % 16) as f32 / 15.0).collect()));
-    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 };
+    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, feather: 0.0 };
     let mut app = app_with_landed_stroke(drawn, (16, 16));
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
@@ -406,7 +405,7 @@ fn redrawing_every_stroke_as_it_is_changes_nothing() {
     use crate::gui::selection_queue::{apply, Replay, SelState, SelectionMade, SelectionOp};
     let mut app = app_for_strokes();
     paint_down(&mut app, 6.0, 12.0);
-    app.queue_selection_op(9, SelectionOp::Bake { action: CutoutAction::Erase, feathered: None });
+    app.queue_selection_op(9, SelectionOp::Bake { action: CutoutAction::Erase });
     super::fixtures::settle_selection_edits(&mut app);
     paint_down(&mut app, 16.0, 8.0);
     app.queue_selection_op(9, SelectionOp::Invert);
@@ -439,7 +438,7 @@ fn a_slider_moves_only_its_own_strokes() {
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
-    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05 });
+    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, feather: 0.0 });
     app.settings.brush.magic_depth_range = 0.05;
     adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
     let ops = app.batch.items[0].timeline.strokes_since_picture().expect("strokes").ops;
@@ -496,6 +495,49 @@ fn next_leaves_the_latest_stroke_to_the_sliders_moved_after() {
     slide(&mut app, |b| b.radius = 24.0);
     redraw_lands(&mut app);
     assert_eq!(stroke_sizes(&app), [24.0], "a Size moved now takes the stroke with it");
+}
+
+/// Feather is each stroke's own, like its other sliders: on "Next
+/// stroke" it redraws nothing, on "Last stroke" it softens the latest
+/// stroke against the photo and leaves the earlier one as drawn, on "All
+/// strokes" it moves both by as much.
+#[test]
+fn feather_softens_only_the_strokes_its_reach_takes() {
+    use crate::gui::brush_state::{StrokeDrawn, StrokeReach};
+    use crate::gui::selection_queue::SelectionMade;
+    let mut app = app_for_strokes();
+    app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]))));
+    paint_down(&mut app, 8.0, 8.0);
+    paint_down(&mut app, 24.0, 8.0);
+    let left = |app: &PrunrApp| -> Vec<i8> {
+        let cells = app.batch.items[0].selection_mask.as_ref().expect("a selection").cells();
+        cells.chunks(32).flat_map(|row| row[..10].to_vec()).collect()
+    };
+    let feathers = |app: &PrunrApp| -> Vec<f32> {
+        app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| {
+            h.ops.iter().filter_map(|op| match op {
+                SelectionMade::Stroke(StrokeDrawn::Paint { feather, .. }) => Some(*feather),
+                _ => None,
+            }).collect()
+        })
+    };
+    let (hard_left, hard) = (left(&app), app.batch.items[0].selection_hash);
+
+    app.brush_state.reach = StrokeReach::Next;
+    slide(&mut app, |b| b.edge_feather = 2.0);
+    assert!(!app.batch.selection_queue.any_pending(), "Next: the strokes to come only");
+
+    app.brush_state.reach = StrokeReach::Last;
+    app.adjust_strokes();
+    slide(&mut app, |b| b.edge_feather = 3.0);
+    redraw_lands(&mut app);
+    assert_eq!(feathers(&app), [0.0, 3.0]);
+    assert_ne!(app.batch.items[0].selection_hash, hard, "the latest stroke softened");
+    assert_eq!(left(&app), hard_left, "the earlier stroke as drawn");
+
+    adjust_all(&mut app, |b| b.edge_feather = 5.0);
+    assert_eq!(feathers(&app), [2.0, 5.0]);
+    assert_ne!(left(&app), hard_left, "the earlier stroke softened too");
 }
 
 /// A slider moved on one image leaves another image's latest stroke as
@@ -870,9 +912,8 @@ fn the_switch_says_what_the_selection_does() {
     use crate::gui::brush_state::CutoutAction;
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 4);
-    let style = app.selection_style();
     let item = &app.batch.items[0];
-    let at = |action| item.correction_plane(style, action).map(|p| p.cells()[2 * 8 + 2]);
+    let at = |action| item.correction_plane(action).map(|p| p.cells()[2 * 8 + 2]);
     assert!(at(CutoutAction::Restore).is_some_and(|v| v > 0), "restored");
     assert!(at(CutoutAction::Erase).is_some_and(|v| v < 0), "erased");
     assert_eq!(at(CutoutAction::Select), None, "only selected");
@@ -889,8 +930,7 @@ fn switching_the_action_recuts_every_selection() {
     cutout_with_selection(&mut app, 5);
     cutout_with_selection(&mut app, 6);
     cutout_with_selection(&mut app, 7);
-    let style = app.selection_style();
-    app.batch.items[2].bake_selection(style, CutoutAction::Restore);
+    app.batch.items[2].bake_selection(CutoutAction::Restore);
     app.batch.select_item(0);
     assert!(!app.processor.live_preview.is_pending_for(5));
     app.settings.brush.cutout_action = CutoutAction::Erase;
@@ -975,13 +1015,12 @@ fn the_correction_is_built_once() {
     use crate::gui::brush_state::CutoutAction;
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 10);
-    let style = app.selection_style();
     let item = &mut app.batch.items[0];
     item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
-    let first = item.correction_plane(style, CutoutAction::Restore).unwrap();
-    let second = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let first = item.correction_plane(CutoutAction::Restore).unwrap();
+    let second = item.correction_plane(CutoutAction::Restore).unwrap();
     assert!(std::sync::Arc::ptr_eq(&first, &second));
-    let erase = item.correction_plane(style, CutoutAction::Erase).unwrap();
+    let erase = item.correction_plane(CutoutAction::Erase).unwrap();
     assert!(!std::sync::Arc::ptr_eq(&first, &erase), "another action builds anew");
 }
 
@@ -998,12 +1037,11 @@ fn a_render_builds_the_correction_on_its_own_thread() {
     app.batch.items[0].edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
     let dispatched = preview_inputs(&mut app, 10, false).and_then(|i| i.correction);
     assert!(matches!(dispatched, Some(Correction::Build(_))), "the render gets the inputs");
-    let style = app.selection_style();
     let item = &app.batch.items[0];
-    let Some(Correction::Build(inputs)) = item.correction(style, CutoutAction::Restore) else { panic!("built off the UI thread") };
+    let Some(Correction::Build(inputs)) = item.correction(CutoutAction::Restore) else { panic!("built off the UI thread") };
     let (plane, built) = Correction::Build(inputs).resolve();
     item.keep_built_correction(built.expect("a build"));
-    let Some(Correction::Ready(kept)) = item.correction(style, CutoutAction::Restore) else { panic!("the build is kept") };
+    let Some(Correction::Ready(kept)) = item.correction(CutoutAction::Restore) else { panic!("the build is kept") };
     assert!(std::sync::Arc::ptr_eq(&plane, &kept));
 }
 
@@ -1014,16 +1052,15 @@ fn the_correction_cache_lets_go_after_a_bake_and_off_screen() {
     use crate::gui::brush_state::CutoutAction;
     let mut app = app_with_model(SettingsModel::Silueta);
     cutout_with_selection(&mut app, 10);
-    let style = app.selection_style();
     let item = &mut app.batch.items[0];
     item.edits = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, vec![-50; 64])));
-    let plane = item.correction_plane(style, CutoutAction::Restore).unwrap();
+    let plane = item.correction_plane(CutoutAction::Restore).unwrap();
     let held_edits = std::sync::Arc::clone(item.edits.as_ref().unwrap());
     item.drop_hot_tensors();
     assert_eq!(std::sync::Arc::strong_count(&held_edits), 2, "off screen: the cache holds no edits");
     assert_eq!(std::sync::Arc::strong_count(&plane), 1, "off screen: the cache holds no plane");
-    item.correction_plane(style, CutoutAction::Restore).unwrap();
-    assert!(item.bake_selection(style, CutoutAction::Restore));
+    item.correction_plane(CutoutAction::Restore).unwrap();
+    assert!(item.bake_selection(CutoutAction::Restore));
     let baked = item.edits.as_ref().unwrap();
     assert_eq!(std::sync::Arc::strong_count(baked), 2, "baked: the working copy and its step, the cache none");
 }
@@ -1132,7 +1169,7 @@ fn the_cached_segmentation_recuts_only_the_step_it_cut() {
 fn dot(i: usize) -> crate::gui::selection_queue::SelectionOp {
     let (x, y) = ((i % 8) as f32 + 0.5, (i / 8) as f32 + 0.5);
     let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Square, 1.0, &[(x, y, 0.5)], super::fixtures::HARD);
-    crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims: (8, 8) }
+    crate::gui::selection_queue::SelectionOp::Stroke { drawn, dims: (8, 8), source: None }
 }
 
 /// Selection edits run off the UI thread in order: two strokes queued
