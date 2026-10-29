@@ -176,7 +176,7 @@ pub const WORK_FRAME: std::time::Duration = std::time::Duration::from_millis(33)
 /// install's progress: about fifteen a second.
 pub const ANIM_FRAME: std::time::Duration = std::time::Duration::from_millis(66);
 
-/// An image's fade-in, on the canvas and in its thumbnail.
+/// A thumbnail's fade-in once its picture is built.
 pub const IMAGE_FADE_SECS: f32 = 0.2;
 
 /// A fade's length: `secs`, or none while animations are off.

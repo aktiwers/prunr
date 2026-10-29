@@ -644,12 +644,6 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
     let selected = app.batch.selected_item();
     if let Some((item, texture)) = selected.and_then(|i| Some((i, i.source_texture.as_ref()?))) {
         let img_rect = compute_img_rect(canvas_rect, item.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
-        let fade = ui.ctx().animate_bool_with_time(
-            egui::Id::new(("canvas_fade", app.canvas_switch_id)),
-            true,
-            theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
-        );
-        let alpha = prunr_core::math::round_u8(fade * 255.0);
         // Undone back to the original: the source reveals over the cut.
         if item.reveal_progress().is_some() {
             draw_checkerboard(ui, img_rect, app.settings.dark_checker);
@@ -657,7 +651,7 @@ fn render_loaded(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         // A drag on a photo with no result yet (No model's first one)
         // shows its quick frames over it.
         let texture = item.quick.texture().or(item.photo_look.as_ref()).unwrap_or(texture);
-        paint_image_or_reveal(ui, img_rect, item, texture, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+        paint_image_or_reveal(ui, img_rect, item, texture, Color32::WHITE);
         // Magic Brush authors selections on the source before any Process,
         // so the selection shows here too.
         draw_face_preview(ui, item, img_rect);
