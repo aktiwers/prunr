@@ -108,8 +108,6 @@ pub(crate) fn any_differ(ops: &[SelectionMade], shown: &[SelectionMade]) -> bool
 /// as it is to be drawn now.
 pub(crate) struct Replay {
     pub(crate) strokes: StrokeHistory,
-    /// The step it fills in is that one stroke's own, not a new one.
-    pub(crate) alone: bool,
     pub(crate) dims: (u32, u32),
     /// The photo each stroke's feather follows.
     pub(crate) source: Option<Arc<image::RgbaImage>>,
@@ -118,7 +116,7 @@ pub(crate) struct Replay {
 impl Replay {
     /// What the step it lands on records.
     fn record(&self) -> Made {
-        match (self.alone, self.strokes.ops.first()) {
+        match (self.strokes.own_step, self.strokes.ops.first()) {
             (true, Some(op)) => Made::One(op.clone()),
             _ => Made::Redrawn { from: self.strokes.from, ops: Arc::clone(&self.strokes.ops) },
         }

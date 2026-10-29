@@ -1066,14 +1066,15 @@ pub(crate) struct StrokeAdjustment {
 
 impl StrokeAdjustment {
     /// The strokes as the sliders at `now` draw them: Last sets each
-    /// moved slider's value, All moves each stroke by as much.
+    /// moved slider's value on the latest stroke, All moves each stroke by
+    /// as much.
     pub(crate) fn at(&self, now: crate::gui::brush_state::StrokeValues) -> super::timeline::StrokeHistory {
         use crate::gui::brush_state::StrokeReach;
-        let (from, reach) = (self.from, self.reach);
-        self.strokes.changed(|drawn| {
-            let values = drawn.values();
-            drawn.at(if reach == StrokeReach::Last { values.moved(from, now) } else { values.adjusted(from, now) })
-        })
+        let from = self.from;
+        match self.reach {
+            StrokeReach::Last => self.strokes.latest_changed(|drawn| drawn.at(drawn.values().moved(from, now))),
+            _ => self.strokes.changed(|drawn| drawn.at(drawn.values().adjusted(from, now))),
+        }
     }
 }
 

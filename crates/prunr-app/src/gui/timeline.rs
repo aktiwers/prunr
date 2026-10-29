@@ -422,16 +422,29 @@ pub(crate) struct StrokeHistory {
     pub(crate) selection: Option<StoredSelection>,
     pub(crate) edits: Option<StoredSelection>,
     pub(crate) ops: Arc<Vec<super::selection_queue::SelectionMade>>,
+    /// The ops are the shown step's own one stroke, made on the step
+    /// before it; else a redraw of several steps from `from`.
+    pub(crate) own_step: bool,
 }
 
 impl StrokeHistory {
-    fn from_step(start: &DocState, ops: Vec<super::selection_queue::SelectionMade>) -> Self {
-        Self { from: start.id, selection: start.selection.clone(), edits: start.edits.clone(), ops: Arc::new(ops) }
+    fn from_step(start: &DocState, ops: Vec<super::selection_queue::SelectionMade>, own_step: bool) -> Self {
+        Self { from: start.id, selection: start.selection.clone(), edits: start.edits.clone(), ops: Arc::new(ops), own_step }
     }
 
     /// The same strokes, each as `change` makes it.
     pub(crate) fn changed(&self, change: impl Fn(&super::brush_state::StrokeDrawn) -> super::brush_state::StrokeDrawn) -> Self {
         Self { ops: Arc::new(self.ops.iter().map(|op| op.changed(&change)).collect()), ..self.clone() }
+    }
+
+    /// The same strokes with the latest one as `change` makes it.
+    pub(crate) fn latest_changed(&self, change: impl Fn(&super::brush_state::StrokeDrawn) -> super::brush_state::StrokeDrawn) -> Self {
+        use super::selection_queue::SelectionMade;
+        let latest = self.ops.iter().rposition(|op| matches!(op, SelectionMade::Stroke(_)));
+        let ops = self.ops.iter().enumerate()
+            .map(|(i, op)| if Some(i) == latest { op.changed(&change) } else { op.clone() })
+            .collect();
+        Self { ops: Arc::new(ops), ..self.clone() }
     }
 }
 
@@ -503,21 +516,27 @@ impl Timeline {
                 (None, _) => step,
             };
             ops.reverse();
-            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory::from_step(start, ops));
+            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory::from_step(start, ops, false));
         }
         None
     }
 
-    /// The shown step's stroke, while it is the newest step, to draw
-    /// again from the step before it.
+    /// The shown step's latest stroke, while the step is the newest, to
+    /// draw again: its own stroke from the step before it, or the strokes
+    /// a redraw of every stroke drew, the latest among them.
     pub(crate) fn latest_stroke(&self) -> Option<StrokeHistory> {
         use super::selection_queue::{Made, SelectionMade};
-        let shown = self.current();
-        let stroke = match &shown.made {
-            Some(Made::One(stroke @ SelectionMade::Stroke(_))) if !self.can_redo() => stroke.clone(),
-            _ => return None,
-        };
-        Some(StrokeHistory::from_step(self.previous()?, vec![stroke]))
+        if self.can_redo() {
+            return None;
+        }
+        match &self.current().made {
+            Some(Made::One(stroke @ SelectionMade::Stroke(_))) => Some(StrokeHistory::from_step(self.previous()?, vec![stroke.clone()], true)),
+            Some(Made::Redrawn { from, ops }) if ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))) => {
+                let start = self.states.range(..self.cursor).find(|s| s.id == *from)?;
+                Some(StrokeHistory::from_step(start, ops.to_vec(), false))
+            }
+            _ => None,
+        }
     }
 
     /// Whether step `id` is the shown one and nothing is ahead of it.
