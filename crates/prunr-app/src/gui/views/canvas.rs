@@ -151,7 +151,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if let Some(tool) = app.active_tool().filter(|_| !modal_open && app.batch.selected_item().is_some()) {
         let facts = super::tool_strip::StripFacts {
             model: app.settings.model,
-            encoder_pending: app.magic_brush_preparing(),
             reroll_refusal: app.reroll_refusal(),
         };
         let depth_before = app.settings.brush.magic_depth;

@@ -345,22 +345,6 @@ fn show_flyout(id: egui::Id, chip: &Response, popup: egui::Popup<'_>, body: impl
         });
 }
 
-/// A flyout under the whole of `anchor` and as wide, toggled by
-/// `toggle`: a strip's dots opening its full panel under the strip.
-/// Behaves like `flyout_for`; the body lays out as panel rows.
-pub(super) fn flyout_under(id: egui::Id, toggle: &Response, anchor: egui::Rect, body: impl FnOnce(&mut Ui)) {
-    let popup = egui::Popup::new(id, toggle.ctx.clone(), anchor, toggle.layer_id)
-        .open_memory(toggle.clicked().then_some(egui::SetOpenCommand::Toggle))
-        .align(egui::RectAlign::BOTTOM_START)
-        .gap(10.0);
-    show_flyout(id, toggle, popup, |ui| {
-        let frame = theme::panel_frame();
-        frame.show(ui, |ui| {
-            ui.set_width(anchor.width() - frame.total_margin().sum().x);
-            panel_rows(ui, body);
-        });
-    });
-}
 
 /// The accent outline on the chip whose popup is open, so the eye finds
 /// its way back from the panel to the control that opened it.
@@ -407,6 +391,48 @@ pub fn slider_row_f32(
     logarithmic: bool,
     format: impl Fn(f32) -> String,
 ) -> ChipChange {
+    slider_f32(ui, label, None, value, range, logarithmic, format)
+}
+
+/// `slider_row_f32` with its name in a column `name_width` wide, so the
+/// sliders stacked in one column of a strip line up.
+pub(super) fn slider_cell_f32(
+    ui: &mut Ui,
+    label: &str,
+    name_width: f32,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    logarithmic: bool,
+    format: impl Fn(f32) -> String,
+) -> ChipChange {
+    slider_f32(ui, label, Some(name_width), value, range, logarithmic, format)
+}
+
+/// The width of the widest of `names` as a strip names its sliders.
+/// Kept per `key`, so the names are laid out once, not every frame.
+pub(super) fn names_width(ui: &Ui, key: impl std::hash::Hash, names: impl FnOnce() -> Vec<&'static str>) -> f32 {
+    let id = egui::Id::new(("names_width", key));
+    if let Some(width) = ui.data(|d| d.get_temp::<f32>(id)) {
+        return width;
+    }
+    let font = egui::FontId::proportional(theme::FONT_SIZE_SECONDARY);
+    let width = names().iter()
+        .map(|n| ui.painter().layout_no_wrap((*n).to_owned(), font.clone(), Color32::WHITE).size().x)
+        .fold(0.0, f32::max)
+        .ceil();
+    ui.data_mut(|d| d.insert_temp(id, width));
+    width
+}
+
+fn slider_f32(
+    ui: &mut Ui,
+    label: &str,
+    name_width: Option<f32>,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    logarithmic: bool,
+    format: impl Fn(f32) -> String,
+) -> ChipChange {
     let (lo, hi) = (*range.start() as f64, *range.end() as f64);
     let value_w = value_box_width(ui, (label, lo.to_bits(), hi.to_bits(), logarithmic), || {
         sample_values(lo, hi, logarithmic).map(|v| format(v as f32)).collect()
@@ -414,6 +440,7 @@ pub fn slider_row_f32(
     let (change, resp) = labelled_slider(
         ui,
         label,
+        name_width,
         egui::Slider::new(value, range)
             .custom_formatter(move |v, _| format(v as f32))
             .logarithmic(logarithmic),
@@ -446,18 +473,27 @@ pub fn slider_row<T: egui::emath::Numeric>(
     let (lo, hi) = (range.start().to_f64(), range.end().to_f64());
     // Every caller's range is whole numbers, whose widest text is an end.
     let value_w = value_box_width(ui, (label, lo.to_bits(), hi.to_bits(), false), || vec![format!("{lo}"), format!("{hi}")]);
-    let (change, resp) = labelled_slider(ui, label, egui::Slider::new(value, range), value_w);
+    let (change, resp) = labelled_slider(ui, label, None, egui::Slider::new(value, range), value_w);
     paint_handle(ui, &resp, slider_fraction(value.to_f64(), lo, hi, false));
     change
 }
 
-fn labelled_slider(ui: &mut Ui, label: &str, slider: egui::Slider<'_>, value_w: f32) -> (ChipChange, Response) {
+/// A slider named `label`: in a panel row, or with its name beside it,
+/// in a column `name_width` wide when given.
+fn labelled_slider(ui: &mut Ui, label: &str, name_width: Option<f32>, slider: egui::Slider<'_>, value_w: f32) -> (ChipChange, Response) {
     if in_panel_rows(ui) {
         return panel_slider(ui, label, slider, value_w);
     }
     let room = crate::gui::automation::record::room(ui);
     let text = label;
-    let label = ui.label(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+    let name = egui::Label::new(RichText::new(text).color(theme::TEXT_SECONDARY).size(theme::FONT_SIZE_SECONDARY));
+    let label = match name_width {
+        Some(width) => ui.allocate_ui_with_layout(egui::vec2(width, ui.spacing().interact_size.y), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_width(width);
+            ui.add(name)
+        }).inner,
+        None => ui.add(name),
+    };
     crate::gui::automation::record::clip(ui.ctx(), text, label.rect, room);
     let resp = add_slider(ui, slider, value_w).labelled_by(label.id);
     (ChipChange { changed: resp.changed(), commit: slider_settled(&resp) }, resp)
@@ -1208,24 +1244,73 @@ pub(super) fn choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice
 
 /// `choice_buttons` with the picked option in `picked` (Erase's warm red).
 pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], value: &mut T, picked: Color32) -> bool {
+    choice_pills(ui, options, None, value, picked)
+}
+
+/// An icon a choice button draws in its square `rect`, in `color`.
+pub(super) type IconPaint = fn(&egui::Painter, egui::Rect, Color32);
+
+/// `choice_buttons` drawing each option as its icon from `icons`: its
+/// name is its tooltip's title and its name in the tree.
+pub(super) fn icon_choice_buttons<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], icons: &[IconPaint], value: &mut T) -> bool {
+    choice_pills(ui, options, Some(icons), value, theme::ACCENT_BRIGHT)
+}
+
+/// An icon that turns `on` on and off, drawn as a one-pill segmented
+/// control like `icon_choice_buttons`. Returns true when it changed.
+pub(super) fn icon_toggle(ui: &mut Ui, name: &str, description: &str, icon: IconPaint, on: &mut bool) -> bool {
+    segmented(ui, |ui| {
+        ui.horizontal(|ui| {
+            pill_style(ui, theme::ACCENT_BRIGHT);
+            let clicked = icon_pill(ui, *on, true, icon, name, description).clicked();
+            if clicked {
+                *on = !*on;
+            }
+            clicked
+        })
+        .inner
+    })
+}
+
+/// The look of a segmented control's pills, the picked one in `picked`.
+fn pill_style(ui: &mut Ui, picked: Color32) {
+    ui.spacing_mut().button_padding = egui::vec2(11.0, 5.0);
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    let v = ui.visuals_mut();
+    v.selection.stroke.color = Color32::WHITE;
+    v.selection.bg_fill = picked;
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
+        w.corner_radius = egui::CornerRadius::same(theme::PILL_RADIUS);
+        w.bg_stroke = egui::Stroke::NONE;
+    }
+    v.widgets.inactive.fg_stroke.color = theme::TEXT_SECONDARY;
+}
+
+/// A pill drawing `icon`, named `name` in its tooltip and the tree.
+fn icon_pill(ui: &mut Ui, selected: bool, enabled: bool, icon: IconPaint, name: &str, description: &str) -> Response {
+    // The pill holds an em space as wide as the icon it draws.
+    let text = RichText::new("\u{2003}").size(ICON_CHOICE_SIZE);
+    let resp = ui.add_enabled_ui(enabled, |ui| ui.selectable_label(selected, text)).inner;
+    let color = ui.style().interact_selectable(&resp, selected).text_color();
+    icon(ui.painter(), egui::Rect::from_center_size(resp.rect.center(), egui::Vec2::splat(ICON_CHOICE_SIZE)), color);
+    tooltip(resp, name, description, None)
+}
+
+fn choice_pills<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], icons: Option<&[IconPaint]>, value: &mut T, picked: Color32) -> bool {
     segmented(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().button_padding = egui::vec2(11.0, 5.0);
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                let v = ui.visuals_mut();
-                v.selection.stroke.color = Color32::WHITE;
-                v.selection.bg_fill = picked;
-                for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
-                    w.corner_radius = egui::CornerRadius::same(theme::PILL_RADIUS);
-                    w.bg_stroke = egui::Stroke::NONE;
-                }
-                v.widgets.inactive.fg_stroke.color = theme::TEXT_SECONDARY;
+                pill_style(ui, picked);
                 let mut changed = false;
-                for opt in options {
+                for (i, opt) in options.iter().enumerate() {
                     let selected = *value == opt.value;
-                    let text = RichText::new(opt.name).size(theme::FONT_SIZE_SECONDARY);
-                    let resp = ui.add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, text)).inner;
-                    let resp = if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) };
+                    let resp = match icons.and_then(|icons| icons.get(i).copied()) {
+                        Some(icon) => icon_pill(ui, selected, opt.enabled, icon, opt.name, opt.description),
+                        None => {
+                            let text = RichText::new(opt.name).size(theme::FONT_SIZE_SECONDARY);
+                            let resp = ui.add_enabled_ui(opt.enabled, |ui| ui.selectable_label(selected, text)).inner;
+                            if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) }
+                        }
+                    };
                     if resp.clicked() && !selected {
                         *value = opt.value;
                         changed = true;
@@ -1236,6 +1321,10 @@ pub(super) fn choice_buttons_picked<T: Copy + PartialEq>(ui: &mut Ui, options: &
             .inner
         })
 }
+
+/// An icon choice's glyph size: the shapes read at the size of the
+/// strip's text beside them.
+const ICON_CHOICE_SIZE: f32 = 16.0;
 
 /// A dropdown (a rounded field with a chevron) for a choice too
 /// long for a segmented row; in panel rows its name sits in the name

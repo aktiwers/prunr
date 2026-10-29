@@ -1,34 +1,25 @@
-//! The Paint Brush panel (what its strip does not show), and the brush
-//! knobs the strip and the panel share.
+//! The brushes' mode switch and the Paint Brush's shapes, on the tool
+//! strip.
 
 use egui::Ui;
 
-use crate::gui::brush_state::{BrushSettings, CutoutAction, StrokeReach};
+use crate::gui::brush_state::{BrushSettings, CutoutAction, Tool};
 use crate::gui::theme;
-use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use prunr_core::brush::BrushShape;
 use prunr_core::selection::BrushMode;
 
 use super::chip;
-use super::fmt;
 
-/// What a brush panel or the tool strip changed this frame.
+/// What the tool strip changed this frame.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct BrushChipOutcome {
-    pub reset_brush_requested: bool,
+    /// That brush's settings go back to the default preset.
+    pub reset: Option<Tool>,
     /// A slider settled or a choice was made: the brush settings persist.
     pub committed: bool,
     /// Restore / Erase / Select changed: the selection is applied anew.
     pub action_changed: bool,
-}
-
-impl BrushChipOutcome {
-    pub fn merge(&mut self, other: Self) {
-        self.reset_brush_requested |= other.reset_brush_requested;
-        self.committed |= other.committed;
-        self.action_changed |= other.action_changed;
-    }
 }
 
 /// On a background-removal model: what the selection does to the cut-out.
@@ -56,54 +47,29 @@ pub(super) fn mode_buttons(ui: &mut Ui, model: SettingsModel, s: &mut BrushSetti
 }
 
 const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
-    chip::Choice { value: BrushShape::Circle, name: "Circle", description: "", enabled: true },
-    chip::Choice { value: BrushShape::Square, name: "Square", description: "", enabled: true },
-    chip::Choice { value: BrushShape::Line, name: "Line", description: "", enabled: true },
+    chip::Choice { value: BrushShape::Circle, name: "Circle", description: "A round brush", enabled: true },
+    chip::Choice { value: BrushShape::Square, name: "Square", description: "A square brush", enabled: true },
+    chip::Choice { value: BrushShape::Line, name: "Line", description: "A straight line from where you press to where you let go", enabled: true },
 ];
 
-/// The Paint Brush panel: what the strip does not show.
-pub(super) fn flyout_body(ui: &mut Ui, s: &mut BrushSettings, reach: &mut StrokeReach, model: SettingsModel) -> BrushChipOutcome {
-    let mut outcome = BrushChipOutcome::default();
-    if chip::popover_header(ui, "Paint Brush", Some(("Reset the brush", false))) {
-        outcome.reset_brush_requested = true;
-    }
-    reach_row(ui, reach);
-    outcome.committed |= chip::choice_row(ui, "Shape", &BRUSH_SHAPES, &mut s.shape);
-    if shows(model, Surface::SelectionStrokes) {
-        outcome.committed |= render_shared_selection_section(ui, s);
-    }
-    outcome
+const SHAPE_ICONS: [chip::IconPaint; 3] = [circle_icon, square_icon, line_icon];
+
+// The shapes on a 24-unit grid, as the strip's board draws them.
+fn circle_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    painter.circle_stroke(rect.center(), rect.width() * 7.0 / 24.0, egui::Stroke::new(rect.width() / 12.0, color));
 }
 
-/// The selection's Feather, in both brushes' panels. True when it
-/// committed this frame.
-pub(super) fn render_shared_selection_section(ui: &mut egui::Ui, s: &mut BrushSettings) -> bool {
-    chip::panel_section(ui, "Selection", None);
-    let feather = chip::slider_row_f32(ui, "Feather", &mut s.edge_feather, 0.0..=20.0, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0)));
-    super::hint(ui, "Soften the selection edge.");
-    feather.commit
+fn square_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let square = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(rect.width() * 13.0 / 24.0));
+    painter.rect_stroke(square, 1.0, egui::Stroke::new(rect.width() / 12.0, color), egui::StrokeKind::Middle);
 }
 
-
-const REACHES: [chip::Choice<StrokeReach>; 3] = [
-    chip::Choice { value: StrokeReach::Next, name: "Next", description: "", enabled: true },
-    chip::Choice { value: StrokeReach::Last, name: "Last", description: "", enabled: true },
-    chip::Choice { value: StrokeReach::All, name: "All", description: "", enabled: true },
-];
-
-/// What the sliders adjust, the same in both brushes' panels.
-pub(super) fn reach_row(ui: &mut Ui, reach: &mut StrokeReach) {
-    chip::choice_row(ui, "Sliders adjust", &REACHES, reach);
-    super::hint(ui, super::tool_strip::ADJUST_REACH);
+fn line_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let at = |x: f32, y: f32| rect.lerp_inside(egui::vec2(x / 24.0, y / 24.0));
+    painter.line_segment([at(5.0, 19.0), at(19.0, 5.0)], egui::Stroke::new(rect.width() * 2.4 / 24.0, color));
 }
 
-/// The eraser's Expand region slider, in the flyout and the tool strip.
-pub(super) fn expand_region_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {
-    chip::slider_row_f32(ui, "Expand region", &mut s.inpaint_grow, -16.0..=16.0, false, |v| fmt::signed_px(v, 0))
-}
-
-
-/// The eraser's Feather slider, in the flyout and the tool strip.
-pub(super) fn feather_row(ui: &mut egui::Ui, s: &mut BrushSettings) -> chip::ChipChange {
-    chip::slider_row_f32(ui, "Feather", &mut s.inpaint_feather, 0.0..=32.0, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)))
+/// The Paint Brush's shape, as three icons.
+pub(super) fn shape_buttons(ui: &mut Ui, s: &mut BrushSettings) -> bool {
+    chip::icon_choice_buttons(ui, &BRUSH_SHAPES, &SHAPE_ICONS, &mut s.shape)
 }

@@ -14,9 +14,9 @@ impl PrunrApp {
     /// What the tool strip or a brush panel changed: persist on a
     /// settle, reset from the active preset, flip Auto-apply.
     pub(crate) fn apply_brush_change(&mut self, change: crate::gui::views::brush_chip::BrushChipOutcome) {
-        if change.reset_brush_requested {
+        if let Some(tool) = change.reset {
             let resolved = self.settings.resolve_active_preset(None);
-            self.settings.brush.reset_popover_fields_from(&resolved.brush);
+            self.settings.brush.reset_tool_from(tool, &resolved.brush);
         }
         if change.committed {
             self.settings.save();

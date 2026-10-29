@@ -1,37 +1,36 @@
-//! The Magic Brush panel: what its strip does not show.
+//! The Magic Brush's own knobs on the tool strip: what a click picks and
+//! whether specks go, how sure a pick must be or how far around it reaches.
 
 use egui::Ui;
 
-use crate::gui::brush_state::{BrushSettings, StrokeReach};
-use crate::gui::knob_catalog::{shows, Surface};
-use crate::gui::theme;
-use crate::gui::views::chip;
+use crate::gui::brush_state::{BrushSettings, DEPTH_RANGE};
+use crate::gui::views::{chip, fmt};
 
-use super::brush_chip::BrushChipOutcome;
+/// What a Magic Brush click picks, which its slider then tunes.
+const PICK_BY: [chip::Choice<bool>; 2] = [
+    chip::Choice { value: false, name: "Object", description: "Pick the object under the click; Confidence sets how sure it must be", enabled: true },
+    chip::Choice { value: true, name: "Depth", description: "Pick everything about as far away as the click; Range sets how far around it", enabled: true },
+];
 
-/// `encoder_pending` shows a spinner while the encoder runs.
-pub(crate) fn flyout_body(ui: &mut Ui, bs: &mut BrushSettings, reach: &mut StrokeReach, encoder_pending: bool, model: crate::gui::settings::SettingsModel) -> BrushChipOutcome {
-    let mut outcome = BrushChipOutcome::default();
-    chip::popover_header(ui, "Magic Brush", None);
-    super::brush_chip::reach_row(ui, reach);
+/// Object or Depth, and the Remove specks icon beside them.
+pub(super) fn pick(ui: &mut Ui, s: &mut BrushSettings) -> bool {
+    let picked = chip::choice_buttons(ui, &PICK_BY, &mut s.magic_depth);
+    let specks = chip::icon_toggle(ui, "Remove specks", "Drop tiny islands and fill pinholes where the model is unsure.", specks_icon, &mut s.magic_remove_specks);
+    picked | specks
+}
 
-    if encoder_pending {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label(
-                egui::RichText::new(prunr_core::Step::LoadingMagicBrush.label())
-                    .color(theme::TEXT_SECONDARY)
-                    .size(theme::FONT_SIZE_BODY),
-            );
-        });
-        ui.add_space(6.0);
+// Scattered dots on a 24-unit grid, as the strip's board draws them.
+fn specks_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    for (x, y, r) in [(6.0, 7.0, 1.8), (17.0, 6.0, 1.4), (11.0, 12.0, 2.2), (18.0, 16.0, 1.8), (7.0, 18.0, 1.4)] {
+        painter.circle_filled(rect.lerp_inside(egui::vec2(x / 24.0, y / 24.0)), rect.width() * r / 24.0, color);
     }
+}
 
-    let specks = chip::toggle_row(ui, "Remove specks", &mut bs.magic_remove_specks);
-    outcome.committed |= specks.commit;
-    super::hint(ui, "Drop tiny islands and fill pinholes where the model is unsure.");
-    if shows(model, Surface::SelectionStrokes) {
-        outcome.committed |= super::brush_chip::render_shared_selection_section(ui, bs);
+/// Confidence for an object pick, Range for a depth pick, in one place.
+pub(super) fn reading(ui: &mut Ui, s: &mut BrushSettings, name_width: f32) -> bool {
+    if s.magic_depth {
+        chip::slider_cell_f32(ui, "Range", name_width, &mut s.magic_depth_range, DEPTH_RANGE, false, |v| fmt::plain(v, 2)).commit
+    } else {
+        chip::slider_cell_f32(ui, "Confidence", name_width, &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit
     }
-    outcome
 }

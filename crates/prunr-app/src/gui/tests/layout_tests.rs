@@ -165,7 +165,8 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
     }
     click(&mut harness, title);
     harness.run_steps(4);
-    let fit = |h: &Harness<'_, PrunrApp>| h.ctx.data(|d| d.get_temp::<f32>(crate::gui::views::tool_strip::fit_id(tool)));
+    use crate::gui::views::tool_strip::{fit_id, Fit};
+    let fit = |h: &Harness<'_, PrunrApp>| h.ctx.data(|d| d.get_temp::<Fit>(fit_id(tool, model)));
     let settled = fit(&harness);
     if settled.is_none() {
         return Some("the strip measured nothing".to_string());
@@ -176,19 +177,21 @@ fn strip_clash(width: f32, model: SettingsModel, tool: Tool) -> Option<String> {
             return Some(format!("the strip keeps re-laying out: {settled:?} then {:?}", fit(&harness)));
         }
     }
-    if !names(&harness).iter().any(|n| n == "Last stroke") {
-        return Some("no tag saying what the sliders adjust".to_string());
+    if !names(&harness).iter().any(|n| n == "Last") {
+        return Some("no Next / Last / All saying what the sliders adjust".to_string());
     }
     let all = controls(&harness, |_| true);
     let rect_of = |name: &str| all.iter().find(|(n, _)| n == name).map(|(_, r)| *r);
     let canvas_right = rect_of("Select all")?[0];
-    let more = rect_of(&format!("More {title} settings"))?;
-    // The strip's last control: one starting past the sidebar's edge is
-    // left out of the scan below, so it is checked on its own.
-    if more[2] > canvas_right {
-        return Some(format!("its '...' ends at {} under the sidebar at {canvas_right}", more[2]));
+    let reset = rect_of("Reset the brush")?;
+    // The strip's last controls: one starting past the sidebar's edge is
+    // left out of the scan below, so they are checked on their own.
+    for (name, r) in [("Reset", Some(reset)), ("Try another", rect_of("Try another"))] {
+        if let Some(r) = r.filter(|r| r[2] > canvas_right) {
+            return Some(format!("its {name} ends at {} under the sidebar at {canvas_right}", r[2]));
+        }
     }
-    let strip_top = more[1] - 60.0;
+    let strip_top = reset[1] - 60.0;
     let strip = controls(&harness, |r| r[1] >= TOOLBAR_BOTTOM && r[1] >= strip_top && r[3] <= strip_top + 200.0 && r[0] < canvas_right);
     if let Some((name, r)) = strip.iter().find(|(_, r)| r[2] > canvas_right) {
         return Some(format!("{name:?} ends at {} under the sidebar at {canvas_right}", r[2]));
