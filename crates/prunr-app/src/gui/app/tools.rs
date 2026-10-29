@@ -598,14 +598,17 @@ impl PrunrApp {
     }
 
     /// A brush slider moved on the selected image: its latest stroke
-    /// takes the new value, or with "all strokes" on, every stroke since
-    /// its picture changed moves by as much.
+    /// takes the new value, or every stroke since its picture changed
+    /// moves by as much, or (Next) only the strokes after it are drawn
+    /// with it.
     pub(crate) fn adjust_strokes(&mut self) {
+        use crate::gui::brush_state::StrokeReach;
         let now = self.settings.brush.stroke_values();
-        if self.brush_state.adjust_all {
+        if self.brush_state.reach == StrokeReach::All {
             return self.adjust_every_stroke(now);
         }
-        if let Some(from) = self.brush_state.seen.replace(now).filter(|from| *from != now) {
+        let moved = self.brush_state.seen.replace(now).filter(|from| *from != now);
+        if let (StrokeReach::Last, Some(from)) = (self.brush_state.reach, moved) {
             if let Some(last) = self.batch.selected_idx_clamped().and_then(|idx| self.batch.items[idx].retunable_stroke()) {
                 last.wanted = last.wanted.moved(from, now);
             }

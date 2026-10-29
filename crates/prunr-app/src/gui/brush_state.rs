@@ -533,14 +533,6 @@ impl StrokeDrawn {
             Self::Paint { path, size, stamp } => path.render(width, height, *size, *stamp),
         }
     }
-
-    /// The brush that drew it.
-    pub(crate) fn tool(&self) -> Tool {
-        match self {
-            Self::Magic { .. } | Self::Depth { .. } => Tool::Magic,
-            Self::Paint { .. } => Tool::Paint,
-        }
-    }
 }
 
 /// `value` where a slider moved from `from` to `to`: where it went, or
@@ -549,13 +541,40 @@ fn moved_to<T: PartialEq>(value: T, from: T, to: T) -> T {
     if from == to { value } else { to }
 }
 
+/// Which strokes the brushes' sliders adjust besides the next ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StrokeReach {
+    Next,
+    #[default]
+    Last,
+    All,
+}
+
+impl StrokeReach {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Next => "Next stroke",
+            Self::Last => "Last stroke",
+            Self::All => "All strokes",
+        }
+    }
+
+    /// The one after it, round: Next, Last, All.
+    pub(crate) fn following(self) -> Self {
+        match self {
+            Self::Next => Self::Last,
+            Self::Last => Self::All,
+            Self::All => Self::Next,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BrushState {
     enabled: bool,
     active: Option<ActiveStroke>,
-    /// The sliders adjust every stroke on the image, not the latest one.
-    /// Not saved: each start begins at the latest stroke.
-    pub(crate) adjust_all: bool,
+    /// Not saved: each start adjusts the latest stroke.
+    pub(crate) reach: StrokeReach,
     /// The slider values last frame, so a move is seen with where it came from.
     pub(crate) seen: Option<StrokeValues>,
 }

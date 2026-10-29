@@ -4,7 +4,7 @@
 use egui::{Align2, Id, Order, Rect, RichText, Ui};
 use egui_material_icons::icons::ICON_MORE_HORIZ;
 
-use crate::gui::brush_state::{BrushSettings, Tool, BRUSH_RADIUS_RANGE, DEPTH_RANGE};
+use crate::gui::brush_state::{BrushSettings, StrokeReach, Tool, BRUSH_RADIUS_RANGE, DEPTH_RANGE};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
@@ -41,8 +41,6 @@ pub(crate) struct StripFacts {
     pub encoder_pending: bool,
     /// Why "Try another" can't run now (`None`: it can).
     pub reroll_refusal: Option<&'static str>,
-    /// The sliders redraw the image's latest stroke, which this brush drew.
-    pub adjusts_last: bool,
 }
 
 /// What the strip asks of the app this frame.
@@ -52,7 +50,7 @@ pub(crate) struct StripChange {
     pub try_another: bool,
 }
 
-pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, adjust_all: &mut bool, facts: StripFacts) -> StripChange {
+pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut BrushSettings, reach: &mut StrokeReach, facts: StripFacts) -> StripChange {
     let mut strip = StripChange::default();
     let action_before = brush.cutout_action;
     let change = &mut strip.brush;
@@ -86,13 +84,10 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                     if !two_rows {
                         change.committed |= second_knobs(ui, tool, brush, facts.model, fill_knobs);
                     }
-                    if facts.adjusts_last || *adjust_all {
-                        let reach = if *adjust_all { "All strokes" } else { "Last stroke" };
-                        let text = RichText::new(reach).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY);
-                        let resp = ui.add(egui::Button::new(text).frame(false));
-                        if chip::tooltip(resp, reach, ADJUST_REACH, None).clicked() {
-                            *adjust_all = !*adjust_all;
-                        }
+                    let text = RichText::new(reach.name()).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY);
+                    let resp = ui.add(egui::Button::new(text).frame(false));
+                    if chip::tooltip(resp, reach.name(), ADJUST_REACH, None).clicked() {
+                        *reach = reach.following();
                     }
                     ui.separator();
                     dots = Some(chip::tooltip(
@@ -122,7 +117,7 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
             ui.ctx().data_mut(|d| d.insert_temp(fit_id, framed.inner));
             if let Some(dots) = dots {
                 chip::flyout_under(Id::new(("tool_strip_more", tool.title())), &dots, strip_rect, |ui| {
-                    change.merge(panel(ui, tool, brush, adjust_all, facts));
+                    change.merge(panel(ui, tool, brush, reach, facts));
                 });
             }
         });
@@ -142,12 +137,12 @@ fn try_another_label() -> &'static str {
 }
 
 /// What the brushes' sliders adjust, said beside the switch.
-pub(super) const ADJUST_REACH: &str = "The sliders adjust your last stroke, or every stroke on this image since it last changed. The strokes after it are drawn with them too.";
+pub(super) const ADJUST_REACH: &str = "Next: only the strokes you draw from now on. Last: your latest stroke too. All: every stroke on this image since it last changed, too.";
 
-fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, adjust_all: &mut bool, facts: StripFacts) -> BrushChipOutcome {
+fn panel(ui: &mut Ui, tool: Tool, brush: &mut BrushSettings, reach: &mut StrokeReach, facts: StripFacts) -> BrushChipOutcome {
     match tool {
-        Tool::Paint => brush_chip::flyout_body(ui, brush, adjust_all, facts.model),
-        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, adjust_all, facts.encoder_pending, facts.model),
+        Tool::Paint => brush_chip::flyout_body(ui, brush, reach, facts.model),
+        Tool::Magic => magic_brush_chip::flyout_body(ui, brush, reach, facts.encoder_pending, facts.model),
     }
 }
 
