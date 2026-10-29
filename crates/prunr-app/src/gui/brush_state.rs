@@ -162,6 +162,11 @@ pub(crate) fn default_edge_colour(generated: bool) -> prunr_core::inpaint_blend:
     use prunr_core::inpaint_blend::EdgeColour;
     if generated { EdgeColour::Off } else { EdgeColour::AlongEdge }
 }
+/// A fill's Sharpen as shipped. A generated fill (SD, RORem) draws its own
+/// detail; sharpening on top crunches it.
+pub(crate) fn default_sharpen(generated: bool) -> f32 {
+    if generated { 0.0 } else { 0.6 }
+}
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
@@ -219,9 +224,7 @@ impl BrushSettings {
 
     /// The settings `model` starts from when no preset has an entry for it.
     pub fn floor_for(model: prunr_models::ModelId) -> Self {
-        // SD draws its own detail; sharpening on top crunches it.
-        let inpaint_sharpen = if model.is_sd_family() { 0.0 } else { Self::default().inpaint_sharpen };
-        Self { inpaint_sharpen, ..Self::default() }
+        Self { inpaint_sharpen: default_sharpen(model.is_sd_family()), ..Self::default() }
     }
 
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
@@ -283,12 +286,10 @@ impl BrushSettings {
         self.sd_use_taesd = source.sd_use_taesd;
     }
 
-    /// The eraser's region knobs: Expand region, Feather, Sharpen.
+    /// The eraser's region knobs on the brush strip: Expand region, Feather.
     pub fn take_inpaint_tuning_from(&mut self, source: &Self) {
-        self.inpaint_sharpen = source.inpaint_sharpen;
         self.inpaint_feather = source.inpaint_feather;
         self.inpaint_grow = source.inpaint_grow;
-        self.inpaint_fill_scale = source.inpaint_fill_scale;
     }
 
     /// The prompt a fill runs with: the user's, or the shipped one when
@@ -337,7 +338,7 @@ impl Default for BrushSettings {
             mode: BrushMode::Add,
             cutout_action: CutoutAction::default(),
             shape: BrushShape::Circle,
-            inpaint_sharpen: 0.6,
+            inpaint_sharpen: default_sharpen(false),
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
             inpaint_fill_scale: Default::default(),
@@ -1010,9 +1011,11 @@ mod tests {
         assert_eq!(s.radius, d.radius);
         assert_eq!(s.hardness, d.hardness);
         assert_eq!(s.shape, d.shape);
-        assert_eq!(s.inpaint_sharpen, d.inpaint_sharpen);
         assert_eq!(s.inpaint_feather, d.inpaint_feather);
         assert_eq!(s.inpaint_grow, d.inpaint_grow);
+        // The fill's scale and sharpness are the eraser's Advanced, with its own Reset.
+        assert_eq!(s.inpaint_sharpen, 1.7);
+        assert_eq!(s.inpaint_fill_scale, prunr_core::inpaint::FillScale::Quarter);
 
         // strength + mode carry user intent (seg pipeline + Add/Subtract).
         assert!((s.strength - 0.42).abs() < f32::EPSILON, "strength must survive popover reset");
@@ -1050,7 +1053,6 @@ mod tests {
         assert!((target.radius - 99.0).abs() < f32::EPSILON);
         assert!((target.hardness - 0.1).abs() < f32::EPSILON);
         assert_eq!(target.shape, BrushShape::Square);
-        assert!((target.inpaint_sharpen - 1.3).abs() < f32::EPSILON);
         assert!((target.inpaint_feather - 7.0).abs() < f32::EPSILON);
         assert!((target.inpaint_grow - (-3.0)).abs() < f32::EPSILON);
 
