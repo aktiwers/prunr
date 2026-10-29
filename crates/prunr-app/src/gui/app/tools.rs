@@ -597,17 +597,26 @@ impl PrunrApp {
         self.adjust_strokes();
     }
 
-    /// A brush slider moved: with "all strokes" on, every stroke on the
-    /// selected image since its picture changed is drawn again, moved by
-    /// as much as the slider moved; otherwise the latest stroke is.
+    /// A brush slider moved on the selected image: its latest stroke
+    /// takes the new value, or with "all strokes" on, every stroke since
+    /// its picture changed moves by as much.
     pub(crate) fn adjust_strokes(&mut self) {
-        use crate::gui::selection_queue::{Replay, SelectionOp};
         let now = self.settings.brush.stroke_values();
-        if !self.brush_state.adjust_all {
-            self.brush_state.seen = Some(now);
-            self.maybe_retune_last_stroke();
-            return;
+        if self.brush_state.adjust_all {
+            return self.adjust_every_stroke(now);
         }
+        if let Some(from) = self.brush_state.seen.replace(now).filter(|from| *from != now) {
+            if let Some(last) = self.batch.selected_idx_clamped().and_then(|idx| self.batch.items[idx].retunable_stroke()) {
+                last.wanted = last.wanted.moved(from, now);
+            }
+        }
+        self.maybe_retune_last_stroke();
+    }
+
+    /// Every stroke on the selected image since its picture changed drawn
+    /// again, moved by as much as the sliders moved since the drag began.
+    fn adjust_every_stroke(&mut self, now: crate::gui::brush_state::StrokeValues) {
+        use crate::gui::selection_queue::{Replay, SelectionOp};
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item_id = self.batch.items[idx].id;
         // One redraw at a time, after the image's other edits and runs.
@@ -643,9 +652,9 @@ impl PrunrApp {
         self.queue_selection_op(item_id, SelectionOp::Replay(Arc::new(replay)), AfterLanding::Nothing);
     }
 
-    /// The selected image's latest stroke and a slider of its brush moved:
-    /// draw it again at the new values.
-    pub(crate) fn maybe_retune_last_stroke(&mut self) {
+    /// The selected image's latest stroke wants other values: draw it
+    /// again with them.
+    fn maybe_retune_last_stroke(&mut self) {
         if self.processor.retune_in_flight() {
             return;
         }
@@ -655,8 +664,7 @@ impl PrunrApp {
         if !item.is_idle() {
             return;
         }
-        let to = self.settings.brush.stroke_values();
-        let Some((drawn, for_hash)) = item.retunable_stroke().and_then(|s| Some((s.drawn.at(to)?, s.committed_hash))) else { return };
+        let Some((drawn, for_hash)) = item.retunable_stroke().filter(|s| s.wanted.values_differ(&s.drawn)).map(|s| (s.wanted.clone(), s.committed_hash)) else { return };
         // Asked for only once a retune runs: a handle the job unpacks, not
         // a decode on every frame.
         let (item_id, source_dims, base) = (item.id, item.dimensions, item.pre_stroke_selection());

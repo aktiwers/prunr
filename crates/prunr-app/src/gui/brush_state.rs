@@ -461,11 +461,20 @@ impl StrokeDrawn {
         Self::Paint { path: std::sync::Arc::new(path), size, stamp }
     }
 
-    /// The stroke at the values `to`; `None` when they are the ones it
-    /// has. Each keeps what made it (its mode, its pick, its path).
-    pub(crate) fn at(&self, to: StrokeValues) -> Option<Self> {
-        let drawn = self.with(|_| to.size, |_| to.hardness, |_| to.opacity, |_| to.reading, |_| to.range);
-        drawn.values_differ(self).then_some(drawn)
+    /// The stroke with each slider that moved from `from` to `to` at its
+    /// new value, the others as it has them. Each keeps what made it (its
+    /// mode, its pick, its path).
+    pub(crate) fn moved(&self, from: StrokeValues, to: StrokeValues) -> Self {
+        self.with(
+            |size| moved_to(size, from.size, to.size),
+            |hardness| moved_to(hardness, from.hardness, to.hardness),
+            |opacity| moved_to(opacity, from.opacity, to.opacity),
+            |reading| prunr_core::MaskReading {
+                confidence: moved_to(reading.confidence, from.reading.confidence, to.reading.confidence),
+                remove_specks: moved_to(reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
+            },
+            |range| moved_to(range, from.range, to.range),
+        )
     }
 
     /// The stroke moved by as much as the sliders moved from `from` to
@@ -479,7 +488,7 @@ impl StrokeDrawn {
             |opacity| offset(opacity, from.opacity, to.opacity, 0.0..=1.0),
             |reading| prunr_core::MaskReading {
                 confidence: offset(reading.confidence, from.reading.confidence, to.reading.confidence, 0.0..=1.0),
-                remove_specks: if from.reading.remove_specks == to.reading.remove_specks { reading.remove_specks } else { to.reading.remove_specks },
+                remove_specks: moved_to(reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
             },
             |range| offset(range, from.range, to.range, DEPTH_RANGE),
         )
@@ -506,7 +515,8 @@ impl StrokeDrawn {
         }
     }
 
-    fn values_differ(&self, other: &Self) -> bool {
+    /// Whether a redraw of one at the other's values would change it.
+    pub(crate) fn values_differ(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Magic { reading: a, .. }, Self::Magic { reading: b, .. }) => a != b,
             (Self::Depth { range: a, .. }, Self::Depth { range: b, .. }) => a != b,
@@ -531,6 +541,12 @@ impl StrokeDrawn {
             Self::Paint { .. } => Tool::Paint,
         }
     }
+}
+
+/// `value` where a slider moved from `from` to `to`: where it went, or
+/// as it was when it did not move.
+fn moved_to<T: PartialEq>(value: T, from: T, to: T) -> T {
+    if from == to { value } else { to }
 }
 
 #[derive(Default)]

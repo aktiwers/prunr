@@ -1053,6 +1053,8 @@ pub(crate) struct StrokeAdjustment {
 /// The latest stroke on an image and the selection it committed.
 pub(crate) struct LastStroke {
     pub(crate) drawn: crate::gui::brush_state::StrokeDrawn,
+    /// The stroke as its sliders ask for it, drawn once nothing holds it.
+    pub(crate) wanted: crate::gui::brush_state::StrokeDrawn,
     /// The selection the stroke committed: another author changing it
     /// ends the retune.
     pub(crate) committed_hash: u64,
@@ -1285,7 +1287,7 @@ impl BatchItem {
     /// it owns the selection and its step.
     pub(crate) fn keep_last_stroke(&mut self, drawn: crate::gui::brush_state::StrokeDrawn) {
         let step = self.timeline.current().id;
-        self.last_stroke = self.selection_hash.map(|committed_hash| LastStroke { drawn, committed_hash, step });
+        self.last_stroke = self.selection_hash.map(|committed_hash| LastStroke { wanted: drawn.clone(), drawn, committed_hash, step });
     }
 
     /// Clear every selection-related cache: mask, hash, texture, pending build.
