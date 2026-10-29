@@ -18,6 +18,10 @@
 //!   box) use `is_selected`, i.e. at least half coverage;
 //! - continuous consumers (Delete / Copy alpha, the segmentation
 //!   correction, invert) use the coverage or the signed cell as-is.
+//!
+//! Beside the cells, a plane painted with an eraser keeps how each of its
+//! strokes fills (the fill layer): where the fill replaces the photo and
+//! the band it fades into it over, each stroke with its own.
 
 use std::sync::{Arc, OnceLock};
 
@@ -61,6 +65,48 @@ impl CellRect {
 
 /// Magnitude of a fully selected cell.
 pub const FULL: i8 = 127;
+
+/// A fill-layer cell: 0 where no eraser stroke reaches; the band width in
+/// whole pixels (to 127) where the fill fades into the photo, with this
+/// bit set where the fill replaces the photo in full.
+pub const FILL_CORE: u8 = 0x80;
+
+/// The band a fill-layer cell fades over.
+#[inline]
+pub fn fill_band(cell: u8) -> u8 {
+    cell & !FILL_CORE
+}
+
+/// The cells of a `w`-wide plane inside `r`, row by row.
+fn crop_rows<T: Copy>(plane: &[T], w: usize, r: CellRect) -> Vec<T> {
+    let cw = r.width() as usize;
+    (r.y0..=r.y1).flat_map(|y| {
+        let start = y as usize * w + r.x0 as usize;
+        plane[start..start + cw].iter().copied()
+    }).collect()
+}
+
+/// A copy of a `w`-wide plane with `patch` (`r`'s size) written over `r`.
+fn paste_rows<T: Copy>(plane: &[T], w: usize, r: CellRect, patch: &[T]) -> Vec<T> {
+    let cw = r.width() as usize;
+    let mut out = plane.to_vec();
+    for (row, y) in (r.y0..=r.y1).enumerate() {
+        let start = y as usize * w + r.x0 as usize;
+        out[start..start + cw].copy_from_slice(&patch[row * cw..(row + 1) * cw]);
+    }
+    out
+}
+
+/// Two eraser strokes' fill at one cell: in full where either fills in
+/// full, over the wider band.
+#[inline]
+fn merge_fill(existing: u8, newer: u8) -> u8 {
+    match (existing, newer) {
+        (e, 0) => e,
+        (0, n) => n,
+        (e, n) => ((e | n) & FILL_CORE) | fill_band(e).max(fill_band(n)),
+    }
+}
 
 /// Cells at or above this magnitude count as selected for region
 /// consumers (≈ 0.5 coverage).
@@ -167,17 +213,19 @@ pub struct MaskArtifact {
     /// `width × height` cells; writers go through the brush painters or
     /// `from_cells`, which pin that invariant.
     data: Arc<Vec<i8>>,
+    /// One cell per cell (`FILL_CORE`) once an eraser stroke is in it.
+    fill: Option<Arc<Vec<u8>>>,
     /// `(any cell non-zero, any cell selected)`, computed once per
     /// plane: at build, or on first query after painting (painting
     /// resets it). Always exact, O(1) after the first read.
     flags: OnceLock<(bool, bool)>,
 }
 
-/// Equal by size and cells; the flags are derived from the cells and may
-/// not have been computed yet.
+/// Equal by size, cells and fill layer; the flags are derived from the
+/// cells and may not have been computed yet.
 impl PartialEq for MaskArtifact {
     fn eq(&self, other: &Self) -> bool {
-        (self.width, self.height) == (other.width, other.height) && self.data == other.data
+        (self.width, self.height) == (other.width, other.height) && self.data == other.data && self.fill == other.fill
     }
 }
 
@@ -192,17 +240,40 @@ impl MaskArtifact {
     /// All-zero mask at source image resolution.
     pub fn new_empty(width: u32, height: u32) -> Self {
         let cells = vec![0; (width as usize) * (height as usize)];
-        Self { width, height, data: Arc::new(cells), flags: OnceLock::from((false, false)) }
+        Self { width, height, data: Arc::new(cells), fill: None, flags: OnceLock::from((false, false)) }
     }
 
     pub fn from_cells(width: u32, height: u32, cells: Vec<i8>) -> Self {
         debug_assert_eq!(cells.len(), (width as usize) * (height as usize), "cell count != width × height");
         let flags = OnceLock::from(scan_flags(&cells));
-        Self { width, height, data: Arc::new(cells), flags }
+        Self { width, height, data: Arc::new(cells), fill: None, flags }
     }
 
     pub fn cells(&self) -> &[i8] {
         &self.data
+    }
+
+    /// How its eraser strokes fill, one `FILL_CORE` cell per cell; `None`
+    /// when no eraser stroke is in it.
+    pub fn fill_layer(&self) -> Option<&[u8]> {
+        self.fill.as_deref().map(Vec::as_slice)
+    }
+
+    /// The same cells with `layer` as their fill layer (one per cell).
+    pub fn with_fill_layer(mut self, layer: Vec<u8>) -> Self {
+        debug_assert_eq!(layer.len(), self.data.len(), "fill layer != cell count");
+        self.fill = Some(Arc::new(layer));
+        self
+    }
+
+    /// `f` over the fill layers of this plane and `other` (all zero for a
+    /// plane without one); `None` when neither has one.
+    fn fill_with(&self, other: &Self, f: impl Fn(usize, u8, u8) -> u8 + Sync) -> Option<Arc<Vec<u8>>> {
+        if self.fill.is_none() && other.fill.is_none() {
+            return None;
+        }
+        let at = |layer: &Option<Arc<Vec<u8>>>, i: usize| layer.as_ref().map_or(0, |l| l[i]);
+        Some(Arc::new((0..self.data.len()).into_par_iter().map(|i| f(i, at(&self.fill, i), at(&other.fill, i))).collect()))
     }
 
     /// Mutable cells; copies the plane first only when a snapshot still
@@ -246,13 +317,12 @@ impl MaskArtifact {
 
     /// The cells inside `r` as their own plane.
     pub fn crop(&self, r: CellRect) -> Self {
-        let (w, cw) = (self.width as usize, r.width() as usize);
-        let mut cells = Vec::with_capacity(cw * r.height() as usize);
-        for y in r.y0..=r.y1 {
-            let start = y as usize * w + r.x0 as usize;
-            cells.extend_from_slice(&self.data[start..start + cw]);
+        let w = self.width as usize;
+        let cropped = Self::from_cells(r.width(), r.height(), crop_rows(&self.data, w, r));
+        match &self.fill {
+            Some(layer) => cropped.with_fill_layer(crop_rows(layer, w, r)),
+            None => cropped,
         }
-        Self::from_cells(r.width(), r.height(), cells)
     }
 
     /// Strokes kept as crops (`crop` at their `bounds`), merged in order by
@@ -261,6 +331,7 @@ impl MaskArtifact {
     pub fn from_patches<'a>(width: u32, height: u32, patches: impl IntoIterator<Item = (CellRect, &'a Self)>) -> Self {
         let w = width as usize;
         let mut cells = vec![0i8; w * height as usize];
+        let mut fill: Option<Vec<u8>> = None;
         for (r, patch) in patches {
             debug_assert!(r.x1 < width && r.y1 < height && (patch.width, patch.height) == (r.width(), r.height()), "patch outside the plane");
             let cw = r.width() as usize;
@@ -270,23 +341,34 @@ impl MaskArtifact {
                 for (cell, &newer) in cells[start..start + cw].iter_mut().zip(src) {
                     *cell = merge_cell(*cell, newer);
                 }
+                if let Some(layer) = &patch.fill {
+                    let fill = fill.get_or_insert_with(|| vec![0; cells.len()]);
+                    for (cell, &newer) in fill[start..start + cw].iter_mut().zip(&layer[row * cw..(row + 1) * cw]) {
+                        *cell = merge_fill(*cell, newer);
+                    }
+                }
             }
         }
-        Self::from_cells(width, height, cells)
+        let plane = Self::from_cells(width, height, cells);
+        match fill {
+            Some(fill) => plane.with_fill_layer(fill),
+            None => plane,
+        }
     }
 
     /// A copy of this plane with `patch` written over the cells at `r`;
     /// the inverse of `crop`. `patch` must be `r`'s size.
     pub fn paste(&self, r: CellRect, patch: &Self) -> Self {
         debug_assert_eq!((patch.width, patch.height), (r.width(), r.height()), "patch != rect size");
-        let (w, cw) = (self.width as usize, r.width() as usize);
-        let mut cells = self.data.as_ref().clone();
-        for (row, y) in (r.y0..=r.y1).enumerate() {
-            let start = y as usize * w + r.x0 as usize;
-            cells[start..start + cw].copy_from_slice(&patch.data[row * cw..(row + 1) * cw]);
-        }
+        let w = self.width as usize;
+        let cells = paste_rows(&self.data, w, r, &patch.data);
+        let fill = (self.fill.is_some() || patch.fill.is_some()).then(|| {
+            let mine = self.fill.as_deref().cloned().unwrap_or_else(|| vec![0; self.data.len()]);
+            let theirs = patch.fill.as_deref().cloned().unwrap_or_else(|| vec![0; patch.data.len()]);
+            Arc::new(paste_rows(&mine, w, r, &theirs))
+        });
         // Flags on first query: an undo that is not read again skips the scan.
-        Self { width: self.width, height: self.height, data: Arc::new(cells), flags: OnceLock::new() }
+        Self { width: self.width, height: self.height, data: Arc::new(cells), fill, flags: OnceLock::new() }
     }
 
     #[inline]
@@ -319,6 +401,8 @@ impl MaskArtifact {
         Ok(Self::from_cells(self.width, self.height, data))
     }
 
+    /// A plane of other cells and no fill layer: an inversion or a change
+    /// of meaning leaves the eraser strokes' fill behind.
     fn map(&self, f: impl Fn(i8) -> i8 + Sync) -> Self {
         let data = self.data.par_iter().map(|&v| f(v)).collect();
         Self::from_cells(self.width, self.height, data)
@@ -327,18 +411,25 @@ impl MaskArtifact {
     /// Union with `other` as the newer stroke or candidate, using the
     /// brush merge rule (`merge_cell`). Shift modifier.
     pub fn add_mask(&self, other: &Self) -> Result<Self, SelectionError> {
-        self.map_with(other, merge_cell)
+        let mut merged = self.map_with(other, merge_cell)?;
+        merged.fill = self.fill_with(other, |_, e, n| merge_fill(e, n));
+        Ok(merged)
     }
 
     /// `stroke` combined with this selection, which is only how much is
     /// selected: an Add stroke grows it and a Subtract stroke carves it
     /// away. It is kept negative, so as it is it reads as an erase.
+    ///
+    /// The fill layers merge too: an Add stroke's fill joins, and a
+    /// Subtract stroke takes the fill out where it carves.
     pub fn merge_stroke(&self, stroke: &Self) -> Result<Self, SelectionError> {
-        self.map_with(stroke, |a, b| {
+        let mut merged = self.map_with(stroke, |a, b| {
             let held = a.unsigned_abs();
             let mag = if b >= 0 { held.max(b as u8) } else { held.saturating_sub(b.unsigned_abs()) };
             -(mag as i8)
-        })
+        })?;
+        merged.fill = self.fill_with(stroke, |i, e, n| if stroke.data[i] < 0 { 0 } else { merge_fill(e, n) });
+        Ok(merged)
     }
 
     /// The same area as a restore: every cell's amount, made positive.
@@ -358,19 +449,24 @@ impl MaskArtifact {
     pub fn content_hash(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let digests: Vec<u64> = self
-            .data
-            .par_chunks(HASH_CHUNK)
-            .map(|chunk| {
-                let mut h = DefaultHasher::new();
-                chunk.hash(&mut h);
-                h.finish()
-            })
-            .collect();
+        fn digests<T: Hash + Sync>(plane: &[T]) -> Vec<u64> {
+            plane
+                .par_chunks(HASH_CHUNK)
+                .map(|chunk| {
+                    let mut h = DefaultHasher::new();
+                    chunk.hash(&mut h);
+                    h.finish()
+                })
+                .collect()
+        }
         let mut h = DefaultHasher::new();
         self.width.hash(&mut h);
         self.height.hash(&mut h);
-        digests.hash(&mut h);
+        digests(&self.data).hash(&mut h);
+        // A plane without a fill layer hashes as it always did.
+        if let Some(fill) = &self.fill {
+            digests(fill).hash(&mut h);
+        }
         h.finish()
     }
 
@@ -468,6 +564,9 @@ impl MaskArtifact {
     /// The cells within `area` (where it is painted at all), as they are
     /// here; the rest go. `None` when none is left, or the planes are of
     /// other sizes.
+    ///
+    /// An eraser stroke's fill reaches past its cells; where `area`'s fill
+    /// reaches, this plane's fill stays too.
     pub fn within(&self, area: &MaskArtifact) -> Option<MaskArtifact> {
         if (self.width, self.height) != (area.width, area.height) {
             return None;
@@ -475,7 +574,18 @@ impl MaskArtifact {
         let cells: Vec<i8> = self.data.iter().zip(area.data.iter())
             .map(|(&cell, &a)| if a == 0 { 0 } else { cell })
             .collect();
-        cells.iter().any(|&c| c != 0).then(|| Self::from_cells(self.width, self.height, cells))
+        let fill = self.fill.as_ref().map(|layer| {
+            let reached = |i: usize| area.data[i] != 0 || area.fill.as_ref().is_some_and(|f| f[i] != 0);
+            layer.iter().enumerate().map(|(i, &f)| if reached(i) { f } else { 0 }).collect::<Vec<u8>>()
+        });
+        let kept = cells.iter().any(|&c| c != 0) || fill.as_ref().is_some_and(|f| f.iter().any(|&c| c != 0));
+        kept.then(|| {
+            let plane = Self::from_cells(self.width, self.height, cells);
+            match fill {
+                Some(fill) => plane.with_fill_layer(fill),
+                None => plane,
+            }
+        })
     }
 
     /// The bounding rectangle of the non-zero cells; `None` on a blank plane.
@@ -534,7 +644,29 @@ impl MaskArtifact {
     pub fn resampled(&self, w: u32, h: u32) -> Self {
         let mut cells = vec![0i8; (w as usize) * (h as usize)];
         self.for_each_resampled(w, h, |i, v| cells[i] = v);
-        Self { width: w, height: h, data: Arc::new(cells), flags: OnceLock::new() }
+        Self { width: w, height: h, data: Arc::new(cells), fill: None, flags: OnceLock::new() }
+    }
+
+    /// The fill layer nearest-neighbour resampled to `w × h`, by the same
+    /// index rule as `region_mask`; `None` without one.
+    pub fn fill_layer_at(&self, w: u32, h: u32) -> Option<Vec<u8>> {
+        let layer = self.fill.as_ref()?;
+        if (w, h) == (self.width, self.height) {
+            return Some(layer.as_ref().clone());
+        }
+        let mut out = vec![0u8; (w as usize) * (h as usize)];
+        let (sw, sh) = (self.width as u64, self.height as u64);
+        if sw == 0 || sh == 0 {
+            return Some(out);
+        }
+        let xs: Vec<usize> = (0..w as u64).map(|tx| ((tx * sw) / w as u64) as usize).collect();
+        for ty in 0..h as u64 {
+            let src = &layer[(((ty * sh) / h as u64) * sw) as usize..];
+            for (dx, &sx) in xs.iter().enumerate() {
+                out[(ty * w as u64) as usize + dx] = src[sx];
+            }
+        }
+        Some(out)
     }
 
     /// The selected region as a binary mask (255 where `is_selected`),
@@ -575,7 +707,8 @@ impl MaskArtifact {
     /// The plane a first stroke makes on an empty selection: its Add part,
     /// kept negative.
     pub fn into_selection(self) -> Self {
-        self.map(|b| if b > 0 { -b } else { 0 })
+        let fill = self.fill.clone();
+        Self { fill, ..self.map(|b| if b > 0 { -b } else { 0 }) }
     }
 }
 
@@ -588,6 +721,35 @@ mod tests {
         MaskArtifact::from_cells(w, h, data)
     }
 
+
+    /// The fill layer travels with the cells: a crop and a patch keep it,
+    /// `within` keeps it where the area's fill reaches, an inversion
+    /// leaves it behind, and it counts in the hash only when there is one.
+    #[test]
+    fn the_fill_layer_travels_with_the_cells() {
+        let plane = mask(4, 1, vec![0, 127, 127, 0]).with_fill_layer(vec![3, FILL_CORE | 3, FILL_CORE | 3, 3]);
+        let r = CellRect { x0: 1, y0: 0, x1: 3, y1: 0 };
+        assert_eq!(plane.crop(r).fill_layer(), Some(&[FILL_CORE | 3, FILL_CORE | 3, 3][..]));
+        assert_eq!(MaskArtifact::from_patches(4, 1, [(r, &plane.crop(r))]).fill_layer(), Some(&[0, FILL_CORE | 3, FILL_CORE | 3, 3][..]));
+        assert_eq!(plane.within(&plane).and_then(|p| p.fill_layer().map(<[u8]>::to_vec)), Some(vec![3, FILL_CORE | 3, FILL_CORE | 3, 3]));
+        assert!(plane.invert().fill_layer().is_none());
+        let bare = mask(4, 1, vec![0, 127, 127, 0]);
+        assert_ne!(plane.content_hash(), bare.content_hash());
+        assert_ne!(plane, bare);
+    }
+
+    /// An Add stroke's fill joins the selection's, in full where either
+    /// fills in full and over the wider band; a Subtract stroke takes the
+    /// fill out where it carves.
+    #[test]
+    fn strokes_merge_their_fill() {
+        let held = mask(3, 1, vec![-127, 0, 0]).with_fill_layer(vec![FILL_CORE | 2, 2, 0]);
+        let add = mask(3, 1, vec![0, 127, 0]).with_fill_layer(vec![9, FILL_CORE | 9, 9]);
+        assert_eq!(held.merge_stroke(&add).unwrap().fill_layer(), Some(&[FILL_CORE | 9, FILL_CORE | 9, 9][..]));
+        let carve = mask(3, 1, vec![-127, 0, 0]);
+        assert_eq!(held.merge_stroke(&carve).unwrap().fill_layer(), Some(&[0, 2, 0][..]));
+        assert!(mask(3, 1, vec![-127, 0, 0]).merge_stroke(&carve).unwrap().fill_layer().is_none(), "no eraser stroke, no layer");
+    }
 
     #[test]
     fn a_selection_as_a_restore_keeps_its_amounts_positive() {

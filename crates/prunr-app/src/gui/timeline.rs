@@ -90,23 +90,33 @@ impl Payload for MaskArtifact {
         (self.width, self.height)
     }
 
+    /// The size, the cells, and the fill layer after them when there is one.
     fn encode(&self) -> std::io::Result<Vec<u8>> {
-        let mut raw = Vec::with_capacity(8 + self.cells().len());
+        let fill = self.fill_layer().unwrap_or_default();
+        let mut raw = Vec::with_capacity(8 + self.cells().len() + fill.len());
         raw.extend_from_slice(&self.width.to_le_bytes());
         raw.extend_from_slice(&self.height.to_le_bytes());
         raw.extend(self.cells().iter().map(|&c| c as u8));
+        raw.extend_from_slice(fill);
         zstd::encode_all(raw.as_slice(), super::history_disk::ZSTD_LEVEL)
     }
 
     fn decode(bytes: &[u8]) -> std::io::Result<Self> {
         let raw = zstd::decode_all(bytes)?;
         let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "selection plane does not match its size");
-        let (head, cells) = raw.split_first_chunk::<8>().ok_or_else(bad)?;
+        let (head, rest) = raw.split_first_chunk::<8>().ok_or_else(bad)?;
         let (w, h) = super::history_disk::read_dims(head);
-        if cells.len() != (w as usize) * (h as usize) {
-            return Err(bad());
-        }
-        Ok(MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect()))
+        let n = (w as usize) * (h as usize);
+        let (cells, fill) = match rest.len() {
+            len if len == n => (rest, None),
+            len if len == 2 * n => (&rest[..n], Some(rest[n..].to_vec())),
+            _ => return Err(bad()),
+        };
+        let plane = MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect());
+        Ok(match fill {
+            Some(fill) => plane.with_fill_layer(fill),
+            None => plane,
+        })
     }
 }
 
@@ -788,6 +798,8 @@ mod tests {
         for (w, h) in [(1, 1), (3, 7), (64, 48), (257, 129)] {
             let plane = MaskArtifact::from_cells(w, h, (0..w * h).map(|_| next() as i8).collect());
             assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane, "{w}x{h} mask");
+            let filled = plane.clone().with_fill_layer((0..w * h).map(|_| next() as u8).collect());
+            assert_eq!(MaskArtifact::decode(&filled.encode().unwrap()).unwrap(), filled, "{w}x{h} mask with its fill layer");
             let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(next().to_le_bytes()));
             assert_eq!(image::RgbaImage::decode(&img.encode().unwrap()).unwrap(), img, "{w}x{h} image");
             let (wb, hb) = (w.to_le_bytes(), h.to_le_bytes());
