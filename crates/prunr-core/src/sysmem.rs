@@ -104,9 +104,7 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// Available memory counts, also when it is none: macOS reports 0
-    /// while its compressor holds more than is free. No total reported is
-    /// unknown.
+    /// A 0 available is a figure; no total reported is unknown.
     #[test]
     fn available_memory_counts_also_when_it_is_none() {
         assert_eq!(reported_available(4, 16), Some(4));
