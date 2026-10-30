@@ -141,7 +141,7 @@ Common flags:
 | Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
 | 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
-| 4xNomos2 RealPLKSR | ~31 MB | **on-demand** | whole image, in parts | Fast upscale with natural skin and hair texture; can crackle on flat snow |
+| 4xNomos2 RealPLKSR | ~31 MB | **on-demand** | whole image, in parts | Fast upscale with natural skin and hair texture; can crackle on flat snow. Short of memory, it keeps its in-between results at half precision (within 1/255) |
 | DDColor | ~270 MB | **on-demand** | 512×512 | Colorize black-and-white photos |
 | GFPGAN v1.4 / RestoreFormer++ | ~340 / ~295 MB | **on-demand** | 512×512 per face | Restore faces: the crispest / closest to the person's own features |
 | Depth Anything V2 Small | ~95 MB | **on-demand** | 518 long side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
