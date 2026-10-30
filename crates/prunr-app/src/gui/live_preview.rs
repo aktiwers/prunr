@@ -72,17 +72,28 @@ impl AlphaMadeOf {
 /// The cut-out of `inputs.original` by `seg`: finished from the kept mask
 /// when only the look changed since it was made, else from a new mask,
 /// which comes back to keep (not a quick frame's, made small).
-fn cut_out(inputs: &DispatchInputs, seg: &Arc<SegTensor>) -> Result<(RgbaImage, Option<KeptAlpha>), String> {
+fn cut_out(inputs: &DispatchInputs, seg: &Arc<SegTensor>) -> Result<(RgbaImage, Option<KeptAlpha>), prunr_core::CoreError> {
     let settings = inputs.settings.mask_settings();
     let made_of = AlphaMadeOf::of(inputs, seg, &settings);
     if let Some(kept) = inputs.kept_alpha.as_ref().filter(|kept| kept.made_of.same(&made_of)) {
         return Ok((prunr_core::finish_with_mask(&inputs.original, &kept.mask, &settings), None));
     }
     let opts = prunr_core::PostprocessOpts::new(&settings, seg.model).with_correction(inputs.correction_plane());
-    let mask = prunr_core::mask_from_flat(&seg.data, seg.height as usize, seg.width as usize, &inputs.original, &opts)
-        .map_err(|e| e.message())?;
+    let mask = prunr_core::mask_from_flat(&seg.data, seg.height as usize, seg.width as usize, &inputs.original, &opts)?;
     let rgba = prunr_core::finish_with_mask(&inputs.original, &mask, &settings);
     Ok((rgba, (!inputs.quick).then(|| KeptAlpha { mask: Arc::new(mask), made_of })))
+}
+
+/// What a render that failed tells the user: a refusal for memory, in its
+/// own words. Any other failure is logged; its words are not theirs.
+fn refusal(error: prunr_core::CoreError) -> Option<String> {
+    match error {
+        prunr_core::CoreError::TooLarge { .. } => Some(error.to_string()),
+        other => {
+            tracing::warn!(error = %other, "live preview failed");
+            None
+        }
+    }
 }
 
 /// Throttle cadence during a continuous drag, and the shortest wait
@@ -329,10 +340,10 @@ pub struct LivePreview {
     result_rx: mpsc::Receiver<Finished>,
     clock: Arc<dyn Clock>,
     /// The images whose latest render was refused, until a full-size
-    /// render lands.
+    /// render lands or their previews are cancelled.
     refused: HashSet<u64>,
-    /// Refusals not yet told.
-    untold: Vec<String>,
+    /// Refusals not yet told, by image.
+    untold: Vec<(u64, String)>,
     /// Images whose due render waits for its photo's decode.
     awaiting_decode: Vec<u64>,
 }
@@ -617,7 +628,7 @@ impl LivePreview {
             // the drag refuses again.
             if let Some(why) = done.refused {
                 if self.refused.insert(done.item_id) {
-                    self.untold.push(why);
+                    self.untold.push((done.item_id, why));
                 }
             }
             if let Some(mut r) = done.result {
@@ -634,7 +645,7 @@ impl LivePreview {
 
     /// Why renders were refused since last asked: once per image until a
     /// full-size render of it lands, so a drag does not repeat it.
-    pub(crate) fn take_refusals(&mut self) -> Vec<String> {
+    pub(crate) fn take_refusals(&mut self) -> Vec<(u64, String)> {
         std::mem::take(&mut self.untold)
     }
 
@@ -678,6 +689,7 @@ impl LivePreview {
         }
         self.pending.remove(&item_id);
         self.owed.remove(&item_id);
+        self.refused.remove(&item_id);
     }
 
     /// Cancel all in-flight + pending previews. Called on batch clear or shutdown.
@@ -686,6 +698,7 @@ impl LivePreview {
         self.in_flight.clear();
         self.pending.clear();
         self.owed.clear();
+        self.refused.clear();
     }
 }
 
@@ -1225,7 +1238,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
             .map_or_else(fresh_base, |cached| Ok((Some(cached), None, None)));
         match base {
             Ok(base) => base,
-            Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
+            Err(error) => return RunOutput { refused: refusal(error), ..RunOutput::default() },
         }
     } else {
         (None, None, None)
@@ -1244,7 +1257,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
                 return match cut_out(&inputs, seg) {
                     Ok((masked, built_alpha)) => RunOutput { rgba: Some(Arc::new(masked)), built_alpha, ..RunOutput::default() },
-                    Err(why) => RunOutput { refused: Some(why), ..RunOutput::default() },
+                    Err(error) => RunOutput { refused: refusal(error), ..RunOutput::default() },
                 };
             }
             // SubjectOutline: compose subject + edges; no model run.
@@ -1487,7 +1500,7 @@ mod tests {
         };
         refuse(&mut lp, 1);
         refuse(&mut lp, 2);
-        assert_eq!(lp.take_refusals(), vec!["too large, 1 GB free".to_string()]);
+        assert_eq!(lp.take_refusals(), vec![(7, "too large, 1 GB free".to_string())]);
         // A drag's quick frame is small enough to land; the full size is
         // still refused.
         in_flight(&mut lp, 7, 3);
@@ -1500,7 +1513,11 @@ mod tests {
         send_result(&lp, 7, 5);
         assert_eq!(lp.drain_results().len(), 1);
         refuse(&mut lp, 6);
-        assert_eq!(lp.take_refusals(), vec!["too large, 6 GB free".to_string()], "after a full render landed, told again");
+        assert_eq!(lp.take_refusals(), vec![(7, "too large, 6 GB free".to_string())], "after a full render landed, told again");
+        // A run's start cancels the previews of a state the image leaves.
+        lp.cancel(7);
+        refuse(&mut lp, 8);
+        assert_eq!(lp.take_refusals(), vec![(7, "too large, 8 GB free".to_string())], "after a cancel, told again");
     }
 
     /// A worker's non-final Mask result for item `id` under `generation`.
@@ -2261,6 +2278,19 @@ mod tests {
         }
         let quick = DispatchInputs { quick: true, ..inputs(base, &photo, &seg, None) };
         assert!(cut_out(&quick, &seg).expect("cut").1.is_none(), "a quick frame's mask is not kept");
+    }
+
+    /// Only a render refused for memory is told: one that fails for
+    /// another reason (a tensor that does not fit its shape) is dropped,
+    /// its words not for the user.
+    #[test]
+    fn only_a_memory_refusal_is_told() {
+        use crate::gui::item_settings::ItemSettings;
+        let photo = Arc::new(RgbaImage::new(4, 4));
+        let seg = Arc::new(SegTensor { data: vec![0.5; 3], height: 2, width: 2, model: ModelKind::Silueta });
+        let inputs = DispatchInputs { seg_tensor: Some(seg), ..DispatchInputs::new(PreviewKind::Mask, 0, photo, ItemSettings::default()) };
+        let output = run_preview(inputs, &AtomicBool::new(false));
+        assert!(output.rgba.is_none() && output.refused.is_none());
     }
 
     /// What a 24 MP cut-out costs per drag frame, quick and settled.

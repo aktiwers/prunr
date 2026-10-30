@@ -98,8 +98,11 @@ impl PrunrApp {
         if !results.is_empty() {
             self.apply_completed_previews(ctx, results);
         }
-        for why in self.processor.live_preview.take_refusals() {
-            self.toasts.warning(prunr_core::plain::reason(why));
+        // Named: off-screen images refuse too, each its own toast.
+        for (id, why) in self.processor.live_preview.take_refusals() {
+            if let Some(item) = self.batch.find_by_id(id) {
+                self.toasts.warning(format!("{}: {}", item.filename, prunr_core::plain::reason(why)));
+            }
         }
         // Ticked after the landing: a landed frame frees its image for the
         // next, which builds on the caches it left. The closure borrows
