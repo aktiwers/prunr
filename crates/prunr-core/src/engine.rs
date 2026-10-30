@@ -1248,16 +1248,23 @@ pub fn gpu_providers_now() -> Option<Vec<&'static str>> {
 }
 
 /// The lighter copy of `id`'s weights a session tries before its own,
-/// when one is on disk: FP16 on a GPU in `eps` that gains from it, INT8
-/// on the CPU. Never on macOS, where CoreML converts to FP16 itself.
+/// when one is on disk: FP16 on a GPU in `eps` that gains from it (for a
+/// model that keeps it for small cards, only when its own weights do not
+/// fit the card), INT8 on the CPU. Never on macOS, where CoreML converts
+/// to FP16 itself.
 fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) -> Option<Weights> {
     if cfg!(target_os = "macos") {
-        None
-    } else if cpu_only {
-        prunr_models::has_int8_variant(id).then_some(Weights::Int8)
-    } else {
-        (prunr_models::has_fp16_variant(id) && !fp16_eps(id, eps).is_empty()).then_some(Weights::Fp16)
+        return None;
     }
+    if cpu_only {
+        return prunr_models::has_int8_variant(id).then_some(Weights::Int8);
+    }
+    let gains = fp16_eps(id, eps);
+    let half = match prunr_models::half_precision_need(id) {
+        Some(_) => gains.first().is_some_and(|ep| crate::memory::runs_half_precision(id, ep.as_str(), crate::memory::card_free_mb(ep.as_str()))),
+        None => prunr_models::has_fp16_variant(id) && !gains.is_empty(),
+    };
+    half.then_some(Weights::Fp16)
 }
 
 /// The providers in `eps` where `id` gains from its FP16 copy. One on the
