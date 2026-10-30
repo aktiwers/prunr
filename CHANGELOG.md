@@ -61,6 +61,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 ### Changed
 
 - A brush at full Hardness draws a smooth edge: the pixels its rim cuts are shaded by how much of them it covers, where each was all or nothing.
+- A background picture set to Cover resamples only the part that shows, straight to the image's size: a wide picture behind a portrait was first enlarged whole (a 288 MB step for a 6000 × 1000 picture behind a 4000 px portrait).
 - Upscale, Colorize and Depth let their model go after five idle minutes, as the other models already did, giving back up to a few GB; the next use loads it again in 1 to 3 seconds.
 - The command line runs several images at once by default, as the app does: half the cores on the processor, two on a graphics card, fewer when memory is short (`-j` still sets it). On four 12 MP photos on the processor Silueta finished 27% sooner and U2Net 18%; BiRefNet runs one at a time on the processor either way.
 - When memory runs low, an upscaled image off screen moves its full-size upscale (about 0.8 GB at 4× of a 12 MP photo) compressed to disk; the first Refine change after you come back to it reads it in again. The image on screen, and every image while memory is fine, keeps it in memory so Sharpen and AI blend answer at once.
