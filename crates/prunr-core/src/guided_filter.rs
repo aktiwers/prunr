@@ -111,6 +111,108 @@ pub fn guided_filter_alpha(
     out
 }
 
+/// Rows per band of `guided_filter_alpha_colour`.
+const COLOUR_BAND_ROWS: usize = 128;
+
+/// `guided_filter_alpha` following the photo's colour, not only its
+/// brightness (He et al.'s colour guide: a 3 × 3 covariance per pixel), so
+/// an edge between two colours of the same brightness is kept too.
+///
+/// Worked a band of `COLOUR_BAND_ROWS` rows at a time, each with its
+/// windows' margin, so the planes held at once are a band's, not the
+/// photo's.
+///
+/// Peak working set besides the output mask (w·h bytes): about 22 f32
+/// planes of w × (`COLOUR_BAND_ROWS` + 4·radius) rows: 84 MB for a 6000 px
+/// wide photo at radius 8.
+pub fn guided_filter_alpha_colour(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsilon: f32) -> GrayImage {
+    colour_guided_in_bands(guide, mask, radius, epsilon, COLOUR_BAND_ROWS)
+}
+
+fn colour_guided_in_bands(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsilon: f32, band_rows: usize) -> GrayImage {
+    let (w, h) = (mask.width() as usize, mask.height() as usize);
+    let mut out = GrayImage::new(mask.width(), mask.height());
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let r = radius as usize;
+    let epsilon = f64::from(if epsilon >= MIN_EPSILON { epsilon } else { MIN_EPSILON });
+    let band_rows = band_rows.max(1);
+    for y0 in (0..h).step_by(band_rows) {
+        let y1 = (y0 + band_rows).min(h);
+        // A row's coefficients average over r rows each way, and each
+        // coefficient's means over r more: the band reads 2r beyond.
+        let (in0, in1) = (y0.saturating_sub(2 * r), (y1 + 2 * r).min(h));
+        let band = colour_band(guide, mask, in0..in1, radius, epsilon);
+        let from = (y0 - in0) * w;
+        out.as_mut()[y0 * w..y1 * w].copy_from_slice(&band[from..from + (y1 - y0) * w]);
+    }
+    out
+}
+
+/// The colour-guided filter over `rows` alone, as if they were the whole
+/// image: exact for every row at least 2·radius inside them, and at the
+/// image's own top and bottom.
+fn colour_band(guide: &RgbaImage, mask: &GrayImage, rows: std::ops::Range<usize>, radius: u32, epsilon: f64) -> Vec<u8> {
+    const INV_255: f32 = 1.0 / 255.0;
+    let w = mask.width() as usize;
+    let (bw, bh) = (mask.width(), rows.len() as u32);
+    let n = w * rows.len();
+    let pixels = &guide.as_raw()[rows.start * w * 4..rows.end * w * 4];
+    let channel = |c: usize| -> Vec<f32> { pixels.par_chunks_exact(4).map(|p| f32::from(p[c]) * INV_255).collect() };
+    let (gr, gg, gb) = (channel(0), channel(1), channel(2));
+    let p: Vec<f32> = mask.as_raw()[rows.start * w..rows.end * w].par_iter().map(|&v| f32::from(v) * INV_255).collect();
+    let mut scratch = vec![0.0f32; n];
+    let mut mean = |x: &[f32], y: Option<&[f32]>| -> Vec<f32> {
+        let mut out = vec![0.0f32; n];
+        match y {
+            None => box_filter_into(x, bw, bh, radius, &mut out),
+            Some(y) => {
+                scratch.par_iter_mut().zip(x.par_iter().zip(y)).for_each(|(s, (a, b))| *s = a * b);
+                box_filter_into(&scratch, bw, bh, radius, &mut out);
+            }
+        }
+        out
+    };
+    let (mr, mg, mb, mp) = (mean(&gr, None), mean(&gg, None), mean(&gb, None), mean(&p, None));
+    let (mrp, mgp, mbp) = (mean(&gr, Some(&p)), mean(&gg, Some(&p)), mean(&gb, Some(&p)));
+    let (mrr, mrg, mrb) = (mean(&gr, Some(&gr)), mean(&gr, Some(&gg)), mean(&gr, Some(&gb)));
+    let (mgg, mgb, mbb) = (mean(&gg, Some(&gg)), mean(&gg, Some(&gb)), mean(&gb, Some(&gb)));
+    drop(p);
+    // a = (Σ + εI)⁻¹ · cov(I, p), b = mean(p) − a · mean(I); in f64, as the
+    // cofactors subtract near-equal products on flat regions.
+    let coefficients: Vec<[f32; 4]> = (0..n).into_par_iter().map(|i| {
+        let (r, g, b, q) = (f64::from(mr[i]), f64::from(mg[i]), f64::from(mb[i]), f64::from(mp[i]));
+        let cov = [f64::from(mrp[i]) - r * q, f64::from(mgp[i]) - g * q, f64::from(mbp[i]) - b * q];
+        // f32 rounding on flat regions can take a variance below zero.
+        let s11 = (f64::from(mrr[i]) - r * r).max(0.0) + epsilon;
+        let s22 = (f64::from(mgg[i]) - g * g).max(0.0) + epsilon;
+        let s33 = (f64::from(mbb[i]) - b * b).max(0.0) + epsilon;
+        let (s12, s13, s23) = (f64::from(mrg[i]) - r * g, f64::from(mrb[i]) - r * b, f64::from(mgb[i]) - g * b);
+        let (c11, c12, c13) = (s22 * s33 - s23 * s23, s13 * s23 - s12 * s33, s12 * s23 - s13 * s22);
+        let (c22, c23, c33) = (s11 * s33 - s13 * s13, s13 * s12 - s11 * s23, s11 * s22 - s12 * s12);
+        let det = s11 * c11 + s12 * c12 + s13 * c13;
+        if det <= 0.0 {
+            return [0.0, 0.0, 0.0, q as f32];
+        }
+        let a = [
+            (c11 * cov[0] + c12 * cov[1] + c13 * cov[2]) / det,
+            (c12 * cov[0] + c22 * cov[1] + c23 * cov[2]) / det,
+            (c13 * cov[0] + c23 * cov[1] + c33 * cov[2]) / det,
+        ];
+        [a[0] as f32, a[1] as f32, a[2] as f32, (q - a[0] * r - a[1] * g - a[2] * b) as f32]
+    }).collect();
+    drop((mr, mg, mb, mp, mrp, mgp, mbp, mrr, mrg, mrb, mgg, mgb, mbb));
+    let part = |k: usize| -> Vec<f32> { coefficients.par_iter().map(|c| c[k]).collect() };
+    let (ar, ag, ab, bb) = (part(0), part(1), part(2), part(3));
+    drop(coefficients);
+    let (ar, ag, ab, bb) = (mean(&ar, None), mean(&ag, None), mean(&ab, None), mean(&bb, None));
+    (0..n).into_par_iter().map(|i| {
+        let q = ar[i] * gr[i] + ag[i] * gg[i] + ab[i] * gb[i] + bb[i];
+        crate::math::round_u8(q.clamp(0.0, 1.0) * 255.0)
+    }).collect()
+}
+
 /// O(1)-per-pixel box mean, windows clipped at the borders and averaged
 /// over the pixels they cover.
 pub(crate) fn box_filter(src: &[f32], w: u32, h: u32, radius: u32) -> Vec<f32> {
@@ -300,6 +402,37 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The colour guide keeps an edge between two colours of the same
+    /// brightness, which the brightness guide blurs.
+    #[test]
+    fn the_colour_guide_keeps_an_edge_of_equal_brightness() {
+        let (w, h) = (40u32, 20u32);
+        let guide = RgbaImage::from_fn(w, h, |x, _| if x < w / 2 { image::Rgba([200, 50, 50, 255]) } else { image::Rgba([50, 126, 50, 255]) });
+        let mask = GrayImage::from_fn(w, h, |x, _| image::Luma([if x < w / 2 { 255 } else { 0 }]));
+        let colour = guided_filter_alpha_colour(&guide, &mask, 4, 1e-4);
+        let brightness = guided_filter_alpha(&guide, &mask, 4, 1e-4);
+        let (inside, outside) = (w / 2 - 3, w / 2 + 2);
+        assert!(colour.get_pixel(inside, 10)[0] >= 230 && colour.get_pixel(outside, 10)[0] <= 25, "colour keeps the edge");
+        assert!(brightness.get_pixel(outside, 10)[0] > 40, "brightness alone blurs it");
+    }
+
+    /// Bands give the same mask as one pass over the whole image: each
+    /// band reads the margin its windows need.
+    #[test]
+    fn colour_bands_match_one_pass() {
+        let (w, h) = (37u32, 61u32);
+        let guide = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) * 5 % 256) as u8, 255]));
+        let mask = GrayImage::from_fn(w, h, |x, y| image::Luma([if (x + y) % 17 < 9 { 230 } else { 20 }]));
+        for radius in [1, 3, 8] {
+            let whole = colour_guided_in_bands(&guide, &mask, radius, 1e-4, h as usize);
+            for band_rows in [1, 5, 16] {
+                let banded = colour_guided_in_bands(&guide, &mask, radius, 1e-4, band_rows);
+                let worst = whole.as_raw().iter().zip(banded.as_raw()).map(|(a, b)| a.abs_diff(*b)).max();
+                assert!(worst <= Some(1), "radius {radius}, bands of {band_rows}: off by {worst:?}");
+            }
+        }
     }
 
     /// Against the brute-force reference: a 16×16 grid where windows clip

@@ -75,6 +75,8 @@ pub struct MaskRecipe {
     pub refine_edges: bool,
     guided_radius: u32,
     guided_epsilon_bits: u32,
+    #[serde(default)]
+    refine_guide: crate::RefineGuide,
     feather_bits: u32,
     #[serde(rename = "fill_style")]
     pub effect: SubjectEffect,
@@ -121,6 +123,7 @@ impl From<&crate::MaskSettings> for MaskRecipe {
             refine_edges: m.refine_edges,
             guided_radius: m.guided_radius,
             guided_epsilon_bits: m.guided_epsilon.to_bits(),
+            refine_guide: m.refine_guide,
             feather_bits: m.feather.to_bits(),
             effect: m.effect,
             decoration_bits: DecorationBits::from(&m.decoration),
@@ -657,6 +660,7 @@ mod tests {
                 ..crate::MaskSettings::default()
             })), RequiredTier::MaskRerun),
             ("guided radius only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { guided_radius: 16, ..Default::default() })), RequiredTier::MaskRerun),
+            ("refine guide only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { refine_guide: crate::RefineGuide::Colour, ..Default::default() })), RequiredTier::MaskRerun),
             ("guided epsilon only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { guided_epsilon: 2e-3, ..Default::default() })), RequiredTier::MaskRerun),
             ("feather only → mask", base.clone(), with(|r| r.mask = mask_with(crate::MaskSettings { feather: 1.5, ..Default::default() })), RequiredTier::MaskRerun),
             // Off → SubjectOutline: the kept cut-out data stays; only the lines run.

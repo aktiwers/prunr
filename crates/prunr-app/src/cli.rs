@@ -73,6 +73,11 @@ pub struct Cli {
     #[arg(long, default_value_t = 8)]
     pub edge_width: u32,
 
+    /// What --refine-edges follows in the photo: brightness, or color too
+    /// (also an edge between two colors of the same brightness, slower).
+    #[arg(long, default_value = "brightness", value_name = "brightness|color")]
+    pub refine_guide: prunr_core::RefineGuide,
+
     /// Soften the cut-out's edge by this many pixels (fractions allowed).
     #[arg(long, default_value_t = 0.0, value_parser = finite)]
     pub feather: f32,
@@ -596,6 +601,7 @@ impl Cli {
             edge_shift: MaskSettings::edge_shift_for_grow(self.edge_shift),
             refine_edges: self.refine_edges,
             guided_radius: self.edge_width.clamp(1, 64),
+            refine_guide: self.refine_guide,
             feather: self.feather.max(0.0),
             effect: self.effect.unwrap_or_default(),
             decoration: self.decoration(),
@@ -1804,6 +1810,11 @@ mod tests {
         assert_eq!(white.outline_color, [255, 255, 255]);
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--outline", "120"]).is_err());
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
+        for spelling in ["color", "colour"] {
+            let cli = super::Cli::parse_from(["prunr", "a.png", "--refine-edges", "--refine-guide", spelling]);
+            assert_eq!(cli.mask_settings().refine_guide, prunr_core::RefineGuide::Colour);
+        }
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png"]).mask_settings().refine_guide, prunr_core::RefineGuide::Brightness);
     }
 
     /// An `-o` name without an extension saves a PNG, whatever the mode.

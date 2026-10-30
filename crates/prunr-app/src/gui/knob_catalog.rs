@@ -25,6 +25,7 @@ pub enum StaticKnob {
     RefineEdges,
     GuidedRadius,
     GuidedEpsilon,
+    RefineGuide,
     Feather,
     SubjectEffect,
     BgEffect,
@@ -62,6 +63,7 @@ impl StaticKnob {
         StaticKnob::RefineEdges,
         StaticKnob::GuidedRadius,
         StaticKnob::GuidedEpsilon,
+        StaticKnob::RefineGuide,
         StaticKnob::Feather,
         StaticKnob::SubjectEffect,
         StaticKnob::BgEffect,
@@ -331,6 +333,7 @@ pub fn spec(knob: StaticKnob) -> KnobSpec {
         | StaticKnob::RefineEdges
         | StaticKnob::GuidedRadius
         | StaticKnob::GuidedEpsilon
+        | StaticKnob::RefineGuide
         | StaticKnob::Feather
         | StaticKnob::SubjectEffect
         | StaticKnob::Decoration
@@ -658,6 +661,12 @@ mod tests {
             StaticKnob::RefineEdges => new.refine_edges = !base.refine_edges,
             StaticKnob::GuidedRadius => new.guided_radius = base.guided_radius + 1,
             StaticKnob::GuidedEpsilon => new.guided_epsilon = base.guided_epsilon * 2.0,
+            StaticKnob::RefineGuide => {
+                new.refine_guide = match base.refine_guide {
+                    prunr_core::RefineGuide::Brightness => prunr_core::RefineGuide::Colour,
+                    prunr_core::RefineGuide::Colour => prunr_core::RefineGuide::Brightness,
+                }
+            }
             StaticKnob::Feather => new.feather = base.feather + 0.5,
             StaticKnob::SubjectEffect => {
                 new.effect = match base.effect {
@@ -787,6 +796,7 @@ mod tests {
             refine_edges => Knob(K::RefineEdges),
             guided_radius => Knob(K::GuidedRadius),
             guided_epsilon => Knob(K::GuidedEpsilon),
+            refine_guide => Knob(K::RefineGuide),
             feather => Knob(K::Feather),
             line_mode => Elsewhere("line_mode_cache_impact_matches_recipe_diff: every pair of modes"),
             line_strength => Knob(K::LineStrength),

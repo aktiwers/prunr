@@ -237,12 +237,11 @@ fn tensor_to_mask_core(
 
     if mask_settings.refine_edges {
         if let Some(rgba) = base {
-            mask = guided_filter_alpha(
-                rgba,
-                &mask,
-                mask_settings.guided_radius,
-                mask_settings.guided_epsilon,
-            );
+            let (radius, epsilon) = (mask_settings.guided_radius, mask_settings.guided_epsilon);
+            mask = match mask_settings.refine_guide {
+                crate::RefineGuide::Brightness => guided_filter_alpha(rgba, &mask, radius, epsilon),
+                crate::RefineGuide::Colour => crate::guided_filter::guided_filter_alpha_colour(rgba, &mask, radius, epsilon),
+            };
         }
     }
 

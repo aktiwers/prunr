@@ -29,6 +29,8 @@ pub struct ItemSettings {
     pub guided_radius: u8,
     /// Guided filter regularization. Only used when refine_edges.
     pub guided_epsilon: f32,
+    /// What Refine edges follows in the photo. Only used when refine_edges.
+    pub refine_guide: prunr_core::RefineGuide,
     /// Gaussian blur sigma applied to mask (softens edges, color-agnostic).
     pub feather: f32,
 
@@ -160,6 +162,7 @@ impl Default for ItemSettings {
             refine_edges: false,
             guided_radius: 8,
             guided_epsilon: 1e-4,
+            refine_guide: prunr_core::RefineGuide::default(),
             feather: 0.0,
             line_mode: LineMode::Off,
             line_strength: 0.5,
@@ -302,6 +305,7 @@ impl ItemSettings {
             refine_edges: self.refine_edges,
             guided_radius: self.guided_radius as u32,
             guided_epsilon: self.guided_epsilon,
+            refine_guide: self.refine_guide,
             feather: self.feather,
             effect: self.effect,
             decoration: self.decoration,
@@ -579,6 +583,7 @@ mod tests {
             contrast: 0.3,
             edge_shift: 2.0,
             refine_edges: true,
+            refine_guide: prunr_core::RefineGuide::Colour,
             ..ItemSettings::default()
         };
         let m = s.mask_settings();
@@ -586,6 +591,7 @@ mod tests {
         assert_eq!(m.contrast, 0.3);
         assert_eq!(m.edge_shift, 2.0);
         assert!(m.refine_edges);
+        assert_eq!(m.refine_guide, prunr_core::RefineGuide::Colour);
     }
 
     #[test]
@@ -654,6 +660,7 @@ mod tests {
             refine_edges: true,
             guided_radius: 12,
             guided_epsilon: 5e-4,
+            refine_guide: prunr_core::RefineGuide::Colour,
             feather: 1.5,
             line_mode: LineMode::EdgesOnly,
             line_strength: 0.3,

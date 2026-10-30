@@ -144,6 +144,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                                 "Guided filter for fine edge detail");
                             opt_row(ui, "--edge-width <n>",
                                 "How far refinement looks from the edge, in px (default 8)");
+                            opt_row(ui, "--refine-guide <g>",
+                                "What refinement follows: brightness (default) or color");
                             opt_row(ui, "--feather <n>",
                                 "Soften the edge by n px; fractions allowed");
                         });
