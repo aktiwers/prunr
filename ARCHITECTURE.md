@@ -346,7 +346,7 @@ Feather runs after the guided filter: sharpen to colour edges first, then soften
 | `--bench`        | Configuration                                         | Median |
 |------------------|-------------------------------------------------------|-------:|
 | `guided_filter`  | 512² / 2048²                                          | 4.4 / 74 ms |
-| `edge_shift`     | 1 / 2.5 / 10 / 20 / 50 px                             | 7.7 / 13 / 15 / 16 / 19 ms |
+| `edge_shift`     | 1 / 2.5 / 10 / 20 / 50 px                             | 7.7 / 13 / 15 / 16 / 19.5 ms |
 | `sam_decode`     | 256² logits → selection plane                         | 8 ms |
 | `sam_preprocess` | photo → 1024² tensor                                  | 48 ms |
 | `edge_compose`   | `edge_plane` (2 px); lines only plain / solid          | 32; 11 / 9 ms |
