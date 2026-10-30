@@ -48,9 +48,10 @@ fn finish_into(rgba: &mut RgbaImage, mask: &GrayImage, settings: &MaskSettings) 
     crate::decorate::apply_decoration(rgba, &settings.decoration);
 }
 
-/// `postprocess_from_flat` up to its mask, for a caller that keeps it:
-/// a change of the look alone (`MaskRecipe::alpha_part` unchanged) then
-/// finishes from it with `finish_with_mask`. Refused as that is.
+/// The mask `postprocess_from_flat` cuts with, for a caller that keeps
+/// it: it holds while the tensor, the photo and the mask settings other
+/// than the look are unchanged. Refused when its work does not fit, as
+/// the whole pass is.
 pub fn mask_from_flat(
     tensor: &[f32],
     tensor_h: usize,
