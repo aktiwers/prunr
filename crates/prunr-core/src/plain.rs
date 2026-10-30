@@ -18,10 +18,14 @@ pub enum Kind {
 }
 
 const NO_PERMISSION: &[&str] = &["(os error 13)", "(os error 5)", "permission denied", "access is denied"];
-const DISK_FULL: &[&str] = &["(os error 28)", "(os error 39)", "(os error 112)", "no space left on device", "not enough space on the disk"];
+const DISK_FULL: &[&str] = &[
+    "(os error 28)", "(os error 39)", "(os error 112)", "(os error 122)", "(os error 27)",
+    "no space left on device", "not enough space on the disk", "disk quota exceeded", "file too large",
+];
+const MEMORY: &[&str] = &["memory limit exceeded"];
 const FILE_GONE: &[&str] = &["(os error 2)", "(os error 3)", "no such file or directory", "cannot find the file specified", "cannot find the path specified"];
 const UNREADABLE: &[&str] = &[
-    "image format error:", "format error decoding", "image format could not be determined", "the image format",
+    crate::types::IMAGE_ENDS_EARLY, "format error decoding", "image format could not be determined", "the image format",
     "does not support the format features", "svg parse error",
 ];
 const OFFLINE: &[&str] = &[
@@ -48,7 +52,8 @@ impl Kind {
         if crate::ep_compat::is_out_of_memory(raw) {
             return Some(if crate::ep_compat::is_card_out_of_memory(raw) { Kind::CardMemory } else { Kind::Memory });
         }
-        const BY_TEXT: [(Kind, &[&str]); 6] = [
+        const BY_TEXT: [(Kind, &[&str]); 7] = [
+            (Kind::Memory, MEMORY),
             (Kind::NoPermission, NO_PERMISSION),
             (Kind::DiskFull, DISK_FULL),
             (Kind::FileGone, FILE_GONE),
@@ -167,7 +172,33 @@ mod tests {
     #[test]
     fn a_short_read_alone_is_not_an_unreadable_image() {
         assert_eq!(Kind::of("failed to fill whole buffer"), None);
-        assert_eq!(Kind::of("Image format error: unexpected end of file"), Some(Kind::Unreadable));
+        let truncated = image::ImageError::IoError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        let error = crate::CoreError::from(truncated);
+        assert_eq!(Kind::of(&error.to_string()), Some(Kind::Unreadable));
+        assert_eq!(Kind::of(&error.message()), Some(Kind::Unreadable), "also without the prefix, as the CLI says it");
+    }
+
+    /// An image error is not an unreadable image by its prefix alone: a
+    /// write that runs out of room or an allocation past the decoder's
+    /// limit says what it is.
+    #[test]
+    fn an_image_error_reads_by_its_cause() {
+        assert_eq!(Kind::of("Image format error: Disk quota exceeded (os error 122)"), Some(Kind::DiskFull));
+        assert_eq!(Kind::of("Image format error: File too large (os error 27)"), Some(Kind::DiskFull));
+        assert_eq!(Kind::of("Image format error: Memory limit exceeded"), Some(Kind::Memory));
+        assert_eq!(Kind::of("Image format error: Format error decoding Png: CRC error"), Some(Kind::Unreadable));
+    }
+
+    /// A new kind joins `ALL`: this match fails to build until it is
+    /// handled, and the count follows.
+    #[test]
+    fn every_kind_is_in_all() {
+        let listed = |kind: Kind| match kind {
+            Kind::CardMemory | Kind::Memory | Kind::CardStopped | Kind::NoPermission | Kind::DiskFull
+            | Kind::FileGone | Kind::Unreadable | Kind::Offline | Kind::ModelFailed => Kind::ALL.contains(&kind),
+        };
+        assert!(Kind::ALL.iter().all(|&kind| listed(kind)));
+        assert_eq!(Kind::ALL.len(), 9);
     }
 
     /// Ten-something os errors are not the two they start like.
