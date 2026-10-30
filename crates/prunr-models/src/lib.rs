@@ -27,11 +27,10 @@ pub enum ModelId {
     /// is installed.
     /// Bundle is the output of `scripts/export_lcm_inpaint.py`.
     SdV15LcmInpaintFp16,
-    /// TAESD (Tiny AutoEncoder for SD) FP16. Two-part bundle: encoder
-    /// and decoder, ~5 MB each. Drop-in replacement for SD 1.5's standard
-    /// VAE — ~3× faster decode at slight quality cost. Used when installed
-    /// and the user's Fast-VAE toggle says so; left on auto, it follows
-    /// the LCM scheduler.
+    /// TAESD (Tiny AutoEncoder for SD) FP16, its decoder alone (~2.6 MB):
+    /// stands in for SD 1.5's VAE decoder, ~3× faster at a slight quality
+    /// cost. Used when installed and the Fast decoder switch says so; left
+    /// on auto, it follows the LCM scheduler.
     ///
     /// Bundle is the output of `scripts/export_taesd.py`.
     TaesdFp16,
@@ -1368,13 +1367,6 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             subdir: "taesd-fp16-1.0.0",
             parts: &[
                 ModelPart {
-                    key: "encoder",
-                    filename: "encoder.onnx",
-                    url: "https://github.com/aktiwers/prunr/releases/download/taesd-v1.0.0/encoder.onnx",
-                    sha256: "e60041ed5718ff2dd5d3bff24be82e07c9e26b10850b5837468f7bd352625f98",
-                    size_bytes: 2463603,
-                },
-                ModelPart {
                     key: "decoder",
                     filename: "decoder.onnx",
                     url: "https://github.com/aktiwers/prunr/releases/download/taesd-v1.0.0/decoder.onnx",
@@ -2317,6 +2309,8 @@ pub fn on_demand_dir() -> Option<std::path::PathBuf> {
 const RETIRED_FILES: &[&str] = &[
     // Nomos2 in one piece, before it shipped in parts.
     "4xNomos2_realplksr_dysample.onnx",
+    // TAESD's encoder: the eraser encodes with Stable Diffusion's own VAE.
+    "taesd-fp16-1.0.0/encoder.onnx",
 ];
 
 /// Remove the retired files; the bytes freed. Run off the UI thread.
@@ -3232,13 +3226,13 @@ mod tests {
     #[test]
     fn no_retired_file_is_one_a_model_reads() {
         for d in REGISTRY {
-            let live: Vec<&str> = match d.source {
-                ModelSource::OnDemand { filename, fp16, .. } => std::iter::once(filename).chain(fp16.map(|v| v.filename)).collect(),
-                ModelSource::MultiPartOnDemand { subdir, .. } => vec![subdir],
+            let live: Vec<String> = match d.source {
+                ModelSource::OnDemand { filename, fp16, .. } => std::iter::once(filename).chain(fp16.map(|v| v.filename)).map(String::from).collect(),
+                ModelSource::MultiPartOnDemand { subdir, parts, .. } => std::iter::once(subdir.to_string()).chain(parts.iter().map(|part| format!("{subdir}/{}", part.filename))).collect(),
                 ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => Vec::new(),
             };
             for name in live {
-                assert!(!RETIRED_FILES.contains(&name), "{:?} reads {name}", d.id);
+                assert!(!RETIRED_FILES.contains(&name.as_str()), "{:?} reads {name}", d.id);
             }
         }
     }
