@@ -83,6 +83,9 @@ impl PrunrApp {
                 item.release_result_texture();
             }
         }
+        if crate::gui::memory::under_memory_pressure() {
+            self.batch.free_off_screen_photos();
+        }
     }
 
     /// Build the picture behind the result off the UI thread: the
