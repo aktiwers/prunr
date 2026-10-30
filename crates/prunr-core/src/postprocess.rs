@@ -466,7 +466,7 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
             let spacing = dot_spacing.clamp(2, 32) as i32;
             let (w, h) = rgba.dimensions();
             let half = spacing / 2;
-            let max_r_sq = (half * half) as u32;
+            let radii_sq = halftone_radii_sq(spacing);
             let row_stride = (w * 4) as usize;
 
             // Read each pixel's own luma before writing it: a cell's
@@ -477,11 +477,10 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
                 for x in 0..w as usize {
                     let p = x * 4;
                     let luma = luma_u8(row[p], row[p + 1], row[p + 2]);
-                    let r_sq = max_r_sq * (255 - luma as u32) / 255;
                     let cx = ((x as i32) / spacing) * spacing + half;
                     let dx = x as i32 - cx;
-                    let dist_sq = (dx * dx + dy * dy) as u32;
-                    let v = if dist_sq <= r_sq { 0u8 } else { 255 };
+                    let dist_sq = (dx * dx + dy * dy) as f32;
+                    let v = if dist_sq < radii_sq[luma as usize] { 0u8 } else { 255 };
                     row[p] = v; row[p + 1] = v; row[p + 2] = v;
                 }
             };
@@ -494,6 +493,35 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
         }
         SubjectEffect::GradientMap { stops } => gradient_map(rgba, &stops),
     }
+}
+
+/// Each luma's squared dot radius in cells `spacing` px wide, so that a
+/// dot covers its cell's dark share: past the inscribed circle it grows
+/// into the corners, and black prints solid. White prints no dot.
+fn halftone_radii_sq(spacing: i32) -> [f32; 256] {
+    let s = f64::from(spacing);
+    let edge = s / 2.0;
+    let coverage = |r: f64| {
+        let disc = std::f64::consts::PI * r * r;
+        // The four caps of the disc past the cell's sides.
+        let caps = if r <= edge { 0.0 } else { 4.0 * (r * r * (edge / r).acos() - edge * (r * r - edge * edge).sqrt()) };
+        (disc - caps) / (s * s)
+    };
+    std::array::from_fn(|luma| {
+        let dark = (255 - luma) as f64 / 255.0;
+        match luma {
+            255 => return 0.0,
+            0 => return f32::INFINITY,
+            _ => {}
+        }
+        // Coverage rises to 1 at the cell's corners and no farther.
+        let (mut lo, mut hi) = (0.0, edge * std::f64::consts::SQRT_2);
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if coverage(mid) < dark { lo = mid } else { hi = mid }
+        }
+        (hi * hi) as f32
+    })
 }
 
 /// Map each pixel's luma through `stops` spaced evenly from black (the
@@ -1271,6 +1299,22 @@ mod tests {
             let _ = postprocess_from_flat(&tensor, 320, 320, &original, &PostprocessOpts::new(&mask, ModelKind::Silueta))
                 .expect("postprocess succeeds");
         });
+    }
+
+    /// A halftone's ink covers each grey's dark share: black prints
+    /// solid, white prints nothing, and mid grey about half.
+    #[test]
+    fn halftone_ink_follows_the_darkness() {
+        let ink = |grey: u8| {
+            let mut img = image::RgbaImage::from_pixel(64, 64, image::Rgba([grey, grey, grey, 255]));
+            apply_subject_effect(&mut img, crate::types::SubjectEffect::Halftone { dot_spacing: 8 });
+            img.pixels().filter(|p| p[0] == 0).count() as f32 / (64.0 * 64.0)
+        };
+        assert_eq!(ink(0), 1.0, "black is solid");
+        assert_eq!(ink(255), 0.0, "white has no dots");
+        let mid = ink(128);
+        assert!((mid - 0.5).abs() < 0.1, "mid grey inks {mid}");
+        assert!(ink(64) > ink(128) && ink(128) > ink(192), "darker greys ink more");
     }
 
     /// Halftone regression: on a uniform-luma input, pixels at the
