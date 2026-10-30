@@ -458,7 +458,7 @@ fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     use prunr_core::BgEffect;
     match s.split_once(':') {
         None if s == "blur" => Ok(BgEffect::BlurredSource { radius: 12 }),
-        None if s == "lens" => Ok(BgEffect::LensBlur { amount_pct: 50 }),
+        None if s == "lens" => Ok(BgEffect::LensBlur { amount_pct: prunr_core::depth::LENS_BLUR_START_PCT }),
         None if s == "bw" => Ok(BgEffect::DesaturatedSource),
         Some(("blur", n)) => match n.parse::<u32>() {
             Ok(radius @ 1..=64) => Ok(BgEffect::BlurredSource { radius }),

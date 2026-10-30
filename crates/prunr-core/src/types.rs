@@ -756,7 +756,7 @@ impl BgEffect {
         BgEffect::None,
         BgEffect::BlurredSource { radius: 12 },
         BgEffect::DesaturatedSource,
-        BgEffect::LensBlur { amount_pct: 50 },
+        BgEffect::LensBlur { amount_pct: crate::depth::LENS_BLUR_START_PCT },
     ];
 
     pub fn name(&self) -> &'static str {

@@ -51,7 +51,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
     let summary: std::borrow::Cow<'static, str> = if !installed {
         get_model::BADGE.into()
     } else if picking {
-        "Click the image\u{2026}".into()
+        PICKING_FOCUS.into()
     } else {
         summary(look).into()
     };
@@ -104,31 +104,27 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
     change
 }
 
-
-/// What starting a blur gives at Amount 0: half, so picking Point or
-/// Tilt-shift shows a blur at once.
-const STARTING_BLUR_PCT: u8 = 50;
-
-/// `picked` passed on, with a blur picked at Amount 0 starting at
-/// `STARTING_BLUR_PCT`.
 fn blur_picked(picked: bool, look: &mut DepthLook) -> bool {
-    if picked && look.blur != LensBlurMode::Off && look.blur_pct == 0 {
-        look.blur_pct = STARTING_BLUR_PCT;
+    if picked {
+        look.start_blur();
     }
     picked
 }
 
 /// "Set focus", on the strip beside the blur it aims: true when clicked.
 fn focus_button(ui: &mut Ui, picking: bool) -> bool {
-    let text = if picking { "Click the image\u{2026}" } else { "Set focus" };
-    let resp = chip::named(chip::button(ui, chip::ButtonKind::Secondary, text), "Set focus");
+    let resp = chip::button(ui, chip::ButtonKind::Secondary, if picking { PICKING_FOCUS } else { "Set focus" });
     chip::tooltip(resp, "Set focus", "Click the image where it should be sharp.", None).clicked()
 }
+
+/// What the chip face and the focus button say while the next click on
+/// the image sets the focus.
+const PICKING_FOCUS: &str = "Click the image\u{2026}";
 
 /// The chip face: what the look does, or Off.
 fn summary(look: &DepthLook) -> String {
     let mut parts: Vec<&str> = Vec::new();
-    if look.blur != LensBlurMode::Off && look.blur_pct > 0 {
+    if look.blurs() {
         parts.push(if look.blur == LensBlurMode::TiltShift { "Tilt-shift" } else { "Lens blur" });
     }
     if look.fog_pct > 0 {
