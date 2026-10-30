@@ -952,6 +952,7 @@ mod tests {
                 seed: Some(42),
                 use_taesd: false,
                 scheduler: prunr_core::inpaint_sd::SchedulerKind::DpmPp2MKarras,
+                strength: 0.6,
                 tuning: prunr_core::inpaint_sd::SdTuning { keep_loaded: true, ov_device: Some("GPU".into()), tall_crop: true, margin_mb: 512, cpu_only: true, mem: prunr_core::inpaint_sd::SdMemPlan { memory_pattern: Some(false), device_initializers: true, intra_threads: 4 } },
                 fill_scale: prunr_core::inpaint::FillScale::Quarter,
                 soft_edge_px: 22.0,
