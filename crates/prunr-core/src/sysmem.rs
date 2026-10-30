@@ -15,7 +15,8 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
 /// The memory free to take: what the system reports available, else its
 /// total; `None` when it reports neither.
 pub fn available_ram_bytes() -> Option<u64> {
-    memory_now().0
+    let (available, total, _) = memory_now();
+    first_reported(available, total)
 }
 
 /// What a photo's buffers may use: the memory available now plus free
@@ -24,17 +25,24 @@ pub fn available_ram_bytes() -> Option<u64> {
 /// there serves them; a model's weights, read every step, are held to RAM
 /// by the model checks instead.
 pub fn room_for_buffers_bytes() -> Option<u64> {
-    let (available, free_swap) = memory_now();
-    available.map(|available| available + free_swap)
+    let (available, total, free_swap) = memory_now();
+    // macOS compresses memory and makes swap files as it needs them, so
+    // the free swap it reports (part of one file at rest) says nothing of
+    // the room: a 294 MP Refine needing 13.1 GB was refused on an idle
+    // 16 GB Mac, and ran there in 11 s, also beside 12.9 GB held by
+    // another process. A photo is held to the machine's memory instead.
+    if cfg!(target_os = "macos") {
+        return (total > 0).then_some(total);
+    }
+    first_reported(available, total).map(|available| available + free_swap)
 }
 
-/// `available_ram_bytes` and the free swap, from one reading.
-fn memory_now() -> (Option<u64>, u64) {
-    let (available, total, free_swap) = with_system(|sys| {
+/// Available memory, total memory and free swap, from one reading.
+fn memory_now() -> (u64, u64, u64) {
+    with_system(|sys| {
         sys.refresh_memory();
         (sys.available_memory(), sys.total_memory(), sys.free_swap())
-    });
-    (first_reported(available, total), free_swap)
+    })
 }
 
 /// The first figure the system reported (0 is none).
