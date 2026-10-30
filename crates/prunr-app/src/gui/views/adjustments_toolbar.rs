@@ -434,6 +434,9 @@ fn render_mask_group(
                 mask_refine(ui, s, change, false);
                 hint(ui, "Snap the mask to color edges in the photo, for hair and leaves. Slower.");
                 ui.add_enabled_ui(s.refine_edges, |ui| {
+                    let followed = chip::choice_row(ui, "Follow", &REFINE_GUIDES, &mut s.refine_guide);
+                    aggregate_bool(followed, StaticKnob::RefineGuide, change);
+                    hint(ui, "Brightness suits most photos. Color also finds an edge between two colors of the same brightness, and takes several times as long.");
                     let r = chip::slider_row(ui, "Edge width (px)", &mut s.guided_radius, 1..=64);
                     aggregate_knob(r, StaticKnob::GuidedRadius, change);
                     let mut detail = detail_from_epsilon(s.guided_epsilon);
@@ -443,9 +446,6 @@ fn render_mask_group(
                     }
                     aggregate_knob(dt, StaticKnob::GuidedEpsilon, change);
                     hint(ui, "Edge width: how far from the edge refinement looks. Detail: higher follows finer color edges.");
-                    let followed = chip::choice_row(ui, "Follow", &REFINE_GUIDES, &mut s.refine_guide);
-                    aggregate_bool(followed, StaticKnob::RefineGuide, change);
-                    hint(ui, "Brightness suits most photos. Color also finds an edge between two colors of the same brightness, and takes several times as long.");
                 });
             });
             chip::step(ui, 4, s.feather > 0.0, |ui| {
