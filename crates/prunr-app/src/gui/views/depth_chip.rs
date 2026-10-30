@@ -72,7 +72,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 change.open_store |= get_model::button(ui, DEPTH_MODEL);
                 return;
             }
-            change.picked(chip::choice_buttons(ui, &BLUR_MODES, &mut look.blur));
+            change.picked(blur_picked(chip::choice_buttons(ui, &BLUR_MODES, &mut look.blur), look));
             if look.blur != LensBlurMode::Off {
                 change.pick_focus |= focus_button(ui, picking);
             }
@@ -87,7 +87,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
             if !installed {
                 change.open_store |= get_model::button(ui, DEPTH_MODEL);
             }
-            change.picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur));
+            change.picked(blur_picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur), look));
             change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
             hint(ui, "Blurs what is far from the focus.");
             if look.focus.is_some() && chip::button(ui, chip::ButtonKind::Secondary, "Auto focus").clicked() {
@@ -104,6 +104,19 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
     change
 }
 
+
+/// What starting a blur gives at Amount 0: half, so picking Point or
+/// Tilt-shift shows a blur at once.
+const STARTING_BLUR_PCT: u8 = 50;
+
+/// `picked` passed on, with a blur picked at Amount 0 starting at
+/// `STARTING_BLUR_PCT`.
+fn blur_picked(picked: bool, look: &mut DepthLook) -> bool {
+    if picked && look.blur != LensBlurMode::Off && look.blur_pct == 0 {
+        look.blur_pct = STARTING_BLUR_PCT;
+    }
+    picked
+}
 
 /// "Set focus", on the strip beside the blur it aims: true when clicked.
 fn focus_button(ui: &mut Ui, picking: bool) -> bool {
