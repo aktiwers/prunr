@@ -309,7 +309,8 @@ impl BrushSettings {
 
     /// Put `tool`'s knobs back as `source` has them: the Paint Brush's
     /// Size, Hardness and Shape, the Magic Brush's Confidence, Range and
-    /// Remove specks, and either's eraser Expand region and Feather.
+    /// Remove specks, and either's Feather (a selection's, or an eraser's
+    /// with its Expand region).
     /// `strength` and `mode` carry user intent across a reset and stay;
     /// an eraser's tuning belongs to its Advanced.
     pub(crate) fn reset_tool_from(&mut self, tool: Tool, source: &Self) {
@@ -327,6 +328,7 @@ impl BrushSettings {
         }
         self.inpaint_feather = source.inpaint_feather;
         self.inpaint_grow = source.inpaint_grow;
+        self.edge_feather = source.edge_feather;
     }
 }
 
@@ -1092,6 +1094,7 @@ mod tests {
         assert_eq!(s.shape, d.shape);
         assert_eq!(s.inpaint_feather, d.inpaint_feather);
         assert_eq!(s.inpaint_grow, d.inpaint_grow);
+        assert_eq!(s.edge_feather, d.edge_feather);
         // The fill's scale and sharpness are the eraser's Advanced, with its own Reset.
         assert_eq!(s.inpaint_sharpen, 1.7);
         assert_eq!(s.inpaint_fill_scale, prunr_core::inpaint::FillScale::Quarter);
