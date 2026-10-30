@@ -250,7 +250,7 @@ impl<F: Fn(u8, u8) -> u8 + Copy + Sync> Planes<F> {
                 gather(other, taps, y);
                 let inv = 1.0 - frac;
                 for (a, &b) in out.iter_mut().zip(other.iter()) {
-                    *a = (*a as f32 * inv + b as f32 * frac + 0.5) as u8;
+                    *a = crate::math::round_u8(*a as f32 * inv + b as f32 * frac);
                 }
             }
         };
