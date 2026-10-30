@@ -658,17 +658,27 @@ pub fn rgba_view(img: &DynamicImage) -> std::borrow::Cow<'_, RgbaImage> {
 /// layout (converted when it is not RGBA), or RGBA already (borrowed).
 pub trait AsRgba {
     fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage>;
+    /// Width and height, with no conversion.
+    fn size(&self) -> (u32, u32);
 }
 
 impl AsRgba for DynamicImage {
     fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage> {
         rgba_view(self)
     }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width(), self.height())
+    }
 }
 
 impl AsRgba for RgbaImage {
     fn as_rgba(&self) -> std::borrow::Cow<'_, RgbaImage> {
         std::borrow::Cow::Borrowed(self)
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.dimensions()
     }
 }
 
