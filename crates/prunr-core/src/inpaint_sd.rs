@@ -1278,6 +1278,18 @@ pub(crate) struct SdSession {
     /// after it, and a tall crop's decode then ran out of a 12 GB card.
     /// It hands the spare back after each crop's last step.
     unet_on_cuda: bool,
+    /// Last, so it drops after every part.
+    _give_back: GiveBackOnDrop,
+}
+
+/// Hands a dropped bundle's memory back to the system, after its parts.
+struct GiveBackOnDrop;
+
+impl Drop for GiveBackOnDrop {
+    fn drop(&mut self) {
+        crate::sysmem::return_freed_memory();
+        tracing::info!(rss_mb = process_rss_mb(), "SD session bundle dropped (idle release or process exit)");
+    }
 }
 
 const TEXT_CACHE_ENTRIES: usize = 8;
@@ -1614,6 +1626,7 @@ impl SdSession {
             text_cache: Mutex::new(Vec::new()),
             picks,
             unet_on_cuda,
+            _give_back: GiveBackOnDrop,
         })
     }
 }
@@ -2447,15 +2460,6 @@ fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, residen
         tuning.tall_crop = false;
     }
     crate::memory::fit(need(false), room)
-}
-
-impl Drop for SdSession {
-    fn drop(&mut self) {
-        tracing::info!(
-            rss_mb = process_rss_mb(),
-            "SD session bundle dropped (idle release or process exit)",
-        );
-    }
 }
 
 // ── SD-1.5 noise schedule and samplers ──────────────────────────────────

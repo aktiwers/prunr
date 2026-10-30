@@ -237,6 +237,43 @@ fn sd_soft_edge_follows_each_parts_band() {
 /// 328×607 painted region inside a larger photo, so it tiles today),
 /// guided, 20 steps, fixed seed. Ignored by default; prints the stage
 /// timings the pipeline logs at info level.
+/// A session loaded and dropped for each fill, as the app runs one
+/// without Keep loaded, gives its memory back: after five fills the
+/// process holds about what it held after the first. Ignored by default
+/// (five model loads); the model is picked as for `sd_bench`.
+#[test]
+#[ignore]
+fn sd_reloads_give_their_memory_back() {
+    let _ = tracing_subscriber::fmt::try_init();
+    if skip_if_no_ort("sd_reloads") { return; }
+    let (id, _, guidance, scheduler) = bench_model();
+    if skip_if_model_missing("sd_reloads", id) { return; }
+    let (w, h) = (768u32, 768u32);
+    let image = RgbaImage::from_fn(w, h, |x, y| Rgba([(x / 3 % 256) as u8, (y / 3 % 256) as u8, 128, 255]));
+    let mask = rect_mask(w, h, 256, 256, 256, 256);
+    let progress = prunr_core::Progress::none();
+    let mut held_mb = Vec::new();
+    for seed in 0..5 {
+        let req = SdInpaintRequest {
+            num_inference_steps: 4,
+            guidance_scale: guidance,
+            scheduler,
+            seed: Some(seed),
+            tuning: inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB),
+            ..Default::default()
+        };
+        let run = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).map(|r| r.rgba);
+        // Only the first load may skip for a busy machine; a later refusal
+        // is what this test is for.
+        let filled = if seed == 0 { fill_or_skip("sd_reloads", run) } else { Some(run.unwrap_or_else(|e| panic!("fill {seed}: {e}"))) };
+        if filled.is_none() { return; }
+        held_mb.push(prunr_core::sysmem::process_rss_mb().expect("this process's memory"));
+    }
+    eprintln!("[sd_reloads] {id:?} process memory after each fill (MB): {held_mb:?}");
+    let grown = held_mb[4].saturating_sub(held_mb[0]);
+    assert!(grown < 1000, "the process kept {grown} MB more after five fills than after one: {held_mb:?}");
+}
+
 #[test]
 #[ignore]
 fn sd_bench() {

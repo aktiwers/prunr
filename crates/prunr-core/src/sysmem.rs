@@ -36,6 +36,20 @@ pub fn total_ram_bytes() -> Option<u64> {
     (total > 0).then_some(total)
 }
 
+/// Hand the heap's free pages back to the system. Once glibc frees a large
+/// block it raises its mmap threshold to that size, so the next large
+/// buffers come from its heap, which it keeps after they are dropped: a
+/// Stable Diffusion session loaded and dropped for each fill kept about
+/// 1.5 GB more each time on Linux with CUDA, until the fourth fill was
+/// refused for memory. Other allocators give large blocks back on free.
+pub fn return_freed_memory() {
+    // SAFETY: malloc_trim only releases pages malloc holds free.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Current process RSS in MB; `None` when sysinfo can't read the process.
 pub fn process_rss_mb() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
