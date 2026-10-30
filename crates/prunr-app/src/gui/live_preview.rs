@@ -328,7 +328,8 @@ pub struct LivePreview {
     result_tx: mpsc::Sender<Finished>,
     result_rx: mpsc::Receiver<Finished>,
     clock: Arc<dyn Clock>,
-    /// The images whose latest render was refused, until one lands.
+    /// The images whose latest render was refused, until a full-size
+    /// render lands.
     refused: HashSet<u64>,
     /// Refusals not yet told.
     untold: Vec<String>,
@@ -604,8 +605,10 @@ impl LivePreview {
             self.in_flight.remove(&done.item_id);
             // Told once per image: the memory a refusal names changes as
             // the drag refuses again.
-            if let Some(why) = done.refused.filter(|_| self.refused.insert(done.item_id)) {
-                self.untold.push(why);
+            if let Some(why) = done.refused {
+                if self.refused.insert(done.item_id) {
+                    self.untold.push(why);
+                }
             }
             if let Some(mut r) = done.result {
                 // A quick frame lands where the full size is refused.
@@ -619,8 +622,8 @@ impl LivePreview {
         out
     }
 
-    /// Why renders were refused since last asked: once per image until
-    /// one of its renders lands, so a drag does not repeat it every frame.
+    /// Why renders were refused since last asked: once per image until a
+    /// full-size render of it lands, so a drag does not repeat it.
     pub(crate) fn take_refusals(&mut self) -> Vec<String> {
         std::mem::take(&mut self.untold)
     }
