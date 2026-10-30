@@ -76,31 +76,39 @@ fn root_in(prunr_data_dir: Option<PathBuf>, os_cache_dir: Option<PathBuf>, macos
     }
 }
 
-/// Where macOS kept the cache before it moved to `Caches`: nothing
-/// reads it any more.
-fn retired_root_in(prunr_data_dir: Option<PathBuf>, macos: bool) -> Option<PathBuf> {
-    prunr_data_dir.filter(|_| macos).map(|d| d.join("ep_cache"))
+/// Where macOS kept compiled models before: under `Application Support`
+/// before the cache moved to `Caches`, and 0.4.8's CoreML cache. Nothing
+/// reads them any more.
+fn retired_roots_in(prunr_data_dir: Option<PathBuf>, os_cache_dir: Option<PathBuf>, macos: bool) -> Vec<PathBuf> {
+    if !macos {
+        return Vec::new();
+    }
+    let moved = prunr_data_dir.map(|d| d.join("ep_cache"));
+    let coreml_0_4 = os_cache_dir.map(|d| d.join("prunr").join("coreml"));
+    moved.into_iter().chain(coreml_0_4).collect()
 }
 
-/// Remove the cache macOS kept under `Application Support` before it
-/// moved (up to a few GB of compiled models). Returns the bytes freed;
-/// nothing to do once it is gone. Run off the UI thread.
-pub fn remove_retired_root() -> u64 {
-    let Some(old) = retired_root_in(prunr_models::data_dir(), cfg!(target_os = "macos")) else { return 0 };
-    if !old.exists() {
-        return 0;
-    }
-    let bytes = walk_dir_size(&old, 0).unwrap_or(0);
-    match std::fs::remove_dir_all(&old) {
-        Ok(()) => {
-            tracing::info!(dir = %old.display(), bytes, "removed the retired EP cache");
-            bytes
-        }
-        Err(e) => {
-            tracing::warn!(%e, dir = %old.display(), "failed to remove the retired EP cache");
-            0
-        }
-    }
+/// Remove the compiled models macOS kept where nothing reads them now
+/// (up to a few GB). Returns the bytes freed; nothing to do once they are
+/// gone. Run off the UI thread.
+pub fn remove_retired_roots() -> u64 {
+    retired_roots_in(prunr_models::data_dir(), dirs::cache_dir(), cfg!(target_os = "macos"))
+        .into_iter()
+        .filter(|old| old.exists())
+        .map(|old| {
+            let bytes = walk_dir_size(&old, 0).unwrap_or(0);
+            match std::fs::remove_dir_all(&old) {
+                Ok(()) => {
+                    tracing::info!(dir = %old.display(), bytes, "removed a retired compiled-model cache");
+                    bytes
+                }
+                Err(e) => {
+                    tracing::warn!(%e, dir = %old.display(), "failed to remove a retired compiled-model cache");
+                    0
+                }
+            }
+        })
+        .sum()
 }
 
 /// Pure path builder — no filesystem side effects; `cache_dir_for`
@@ -740,14 +748,16 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nor is it left behind");
     }
 
-    /// Only macOS has a retired cache, and it is never the live one.
+    /// Only macOS has retired caches, and none is the live one.
     #[test]
-    fn the_retired_cache_is_macos_application_support_only() {
+    fn the_retired_caches_are_macos_only_and_never_the_live_one() {
         let data = PathBuf::from("/Users/a/Library/Application Support/prunr");
         let caches = PathBuf::from("/Users/a/Library/Caches");
-        assert_eq!(retired_root_in(Some(data.clone()), true), Some(data.join("ep_cache")));
-        assert_ne!(retired_root_in(Some(data.clone()), true), root_in(Some(data.clone()), Some(caches.clone()), true));
-        assert_eq!(retired_root_in(Some(data.clone()), false), None, "elsewhere that is the live cache");
+        let retired = retired_roots_in(Some(data.clone()), Some(caches.clone()), true);
+        assert_eq!(retired, [data.join("ep_cache"), caches.join("prunr").join("coreml")]);
+        let live = root_in(Some(data.clone()), Some(caches.clone()), true).expect("a live root");
+        assert!(retired.iter().all(|old| !live.starts_with(old) && !old.starts_with(&live)));
+        assert!(retired_roots_in(Some(data.clone()), Some(caches.clone()), false).is_empty(), "elsewhere data/ep_cache is the live cache");
         assert_eq!(root_in(Some(data.clone()), Some(caches), false), Some(data.join("ep_cache")));
     }
 
