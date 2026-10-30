@@ -772,12 +772,12 @@ impl PrunrApp {
             self.sync_selected_batch_textures(ctx);
         }
 
-        self.batch.enforce_tensor_budget();
-
+        let mut dropped = self.batch.enforce_tensor_budget();
         if crate::gui::memory::under_memory_pressure() {
             self.batch.move_to_disk_under_pressure();
-            self.batch.evict_all_tensors();
+            dropped += self.batch.evict_all_tensors();
         }
+        self.tell_dropped_cutouts(dropped);
     }
 
     /// Answer `item_id` from a batch just sent with its own settings.
@@ -817,7 +817,8 @@ impl PrunrApp {
         let processed = item.verdict(crate::gui::capability::Need::Processed, self.settings.model.role()).allows_request();
         let rerun = failed && processed && item.lines_need_a_run();
         tracing::info!(item_id, token, outcome, rerun, "spare line scales landed");
-        self.batch.enforce_tensor_budget();
+        let dropped = self.batch.enforce_tensor_budget();
+        self.tell_dropped_cutouts(dropped);
         if rerun && self.batch.is_selected(item_id) {
             self.process_items(|i| i.id == item_id, None);
         }
