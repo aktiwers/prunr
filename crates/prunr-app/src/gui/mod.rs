@@ -83,16 +83,22 @@ pub fn run() -> eframe::Result {
 
     let app_factory = || Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>));
 
-    let primary = eframe::run_native("prunr", make_options(), app_factory());
-    if let Err(ref e) = primary {
-        log_startup_error("the graphics renderer failed", e);
-        let fallback = eframe::run_native("prunr", on_opengl(make_options()), app_factory());
-        if let Err(ref e2) = fallback {
-            log_startup_error("the OpenGL renderer also failed", e2);
+    // wgpu runs only Metal on macOS: no OpenGL to fall back to.
+    let first = match eframe::run_native("prunr", make_options(), app_factory()) {
+        Err(e) if !cfg!(target_os = "macos") => e,
+        result => {
+            if let Err(e) = &result {
+                log_startup_error(&[("the graphics renderer", e)]);
+            }
+            return result;
         }
-        return fallback;
+    };
+    tracing::warn!(%first, "the graphics renderer failed; trying OpenGL");
+    let fallback = eframe::run_native("prunr", on_opengl(make_options()), app_factory());
+    if let Err(second) = &fallback {
+        log_startup_error(&[("the graphics renderer", &first), ("OpenGL", second)]);
     }
-    primary
+    fallback
 }
 
 /// `options` on wgpu's OpenGL backend alone: wgpu picks Vulkan, DirectX 12
@@ -107,15 +113,17 @@ fn on_opengl(mut options: eframe::NativeOptions) -> eframe::NativeOptions {
 
 /// Write startup failures to a log file next to the executable so users on
 /// machines without a console (Windows GUI subsystem) can still diagnose.
-fn log_startup_error(stage: &str, err: &eframe::Error) {
-    tracing::error!(stage, %err, "startup failed");
+fn log_startup_error(failures: &[(&str, &eframe::Error)]) {
+    for (stage, err) in failures {
+        tracing::error!(stage, %err, "startup failed");
+    }
     let Ok(exe) = std::env::current_exe() else { return };
     let Some(dir) = exe.parent() else { return };
-    let path = dir.join("prunr-startup-error.log");
+    let errors: String = failures.iter().map(|(stage, err)| format!("Stage: {stage}\nError: {err}\n")).collect();
     let _ = std::fs::write(
-        &path,
+        dir.join("prunr-startup-error.log"),
         format!(
-            "Prunr startup error\nStage: {stage}\nError: {err}\nPlatform: {}\n\n\
+            "Prunr startup error\n{errors}Platform: {}\n\n\
              Please report this at https://github.com/aktiwers/prunr/issues\n",
             std::env::consts::OS,
         ),
