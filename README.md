@@ -144,7 +144,7 @@ Common flags:
 | 4xNomos2 RealPLKSR | ~31 MB | **on-demand** | whole image, in parts | Fast upscale with natural skin and hair texture; can crackle on flat snow. Short of memory, it keeps its in-between results at half precision (within 1/255) |
 | DDColor | ~270 MB | **on-demand** | 512×512 | Colorize black-and-white photos |
 | GFPGAN v1.4 / RestoreFormer++ | ~340 / ~295 MB | **on-demand** | 512×512 per face | Restore faces: the crispest / closest to the person's own features |
-| Depth Anything V2 Small | ~95 MB | **on-demand** | 518 long side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
+| Depth Anything V2 Small | ~95 MB | **on-demand** | 518 short side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
 
 The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 for the common cases. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 

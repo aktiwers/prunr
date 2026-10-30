@@ -41,7 +41,7 @@ fn depth_maps_a_photo_and_reports_its_step() {
     let sink = Arc::new(RecordingSink::default());
     let depth = estimate_depth(&engine, &src, &Progress::new(sink.clone())).expect("estimate_depth");
     assert_eq!(check_contract(&sink.updates()), Ok(()));
-    assert_eq!(depth.dimensions(), (518, 392));
+    assert_eq!(depth.dimensions(), (686, 518));
     assert!(depth.at(0.5, 0.95) > depth.at(0.5, 0.05), "the floor's near edge is nearer than the sky");
     let rgb = image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(src.clone()).to_rgb8());
     let decoded = estimate_depth_decoded(&engine, &rgb, &Progress::none()).expect("estimate_depth_decoded");

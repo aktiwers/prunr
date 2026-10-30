@@ -1844,7 +1844,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         // Measured: 366 MB peak RSS on the CPU EP, session load included
-        // (518×392 input); headroom for a square photo's 518×518.
+        // (784×518 input, a 3:2 photo).
         needs: Needs {
             cpu: Cost::measured(450, 0, "i5-11600KF, input 518 px on the short side, 2026-10-30"),
             mac_cpu: Priced::Same(Cost::measured(900, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 518 px on the short side, 2026-10-30")),
