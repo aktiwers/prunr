@@ -230,9 +230,12 @@ fn tensor_to_mask_core(
 
     let mut mask = resize_gray_lanczos3(&mask, ow, oh);
 
-    // Edge shift: positive erodes (shrinks foreground), negative dilates (expands it)
+    // Edge shift: positive erodes (shrinks foreground), negative dilates
+    // (expands it). Clamped here, where every source of the setting meets:
+    // the shift's planes grow with it.
     if mask_settings.edge_shift.abs() > 0.01 {
-        crate::morphology::shift_mask(&mut mask, mask_settings.edge_shift);
+        let max = MaskSettings::EDGE_SHIFT_MAX_PX;
+        crate::morphology::shift_mask(&mut mask, mask_settings.edge_shift.clamp(-max, max));
     }
 
     if mask_settings.refine_edges {

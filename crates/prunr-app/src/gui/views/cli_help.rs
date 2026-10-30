@@ -139,7 +139,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--contrast <n>",
                                 "Edge contrast 0\u{2013}1, 1 is a hard edge (default 0)");
                             opt_row(ui, "--edge-shift <n>",
-                                "Grow (+) or shrink (\u{2212}) the edge, in px");
+                                "Grow (+) or shrink (\u{2212}) the edge, up to 20 px");
                             opt_row(ui, "--refine-edges",
                                 "Guided filter for fine edge detail");
                             opt_row(ui, "--edge-width <n>",
