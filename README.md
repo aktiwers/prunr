@@ -100,7 +100,7 @@ Common flags:
 | `--line-composition <M>` | With `--lines-after-bg`: `lines-only`, `subject-filled`, `engraving`, `ghost` |
 | `--line-scale <S>` | `fine`, `bold`, `fused` (default) |
 | `--line-color <HEX>` | Paint all lines one colour |
-| `--large-image <P>` | Images above 8000 px: `downscale` (default, to 4096 px) or `process` (keep the original size) |
+| `--large-image <P>` | Images above 8000 px: `process` (default, keep the original size) or `downscale` (to 4096 px) |
 | `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
 | `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
 | `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |

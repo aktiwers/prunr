@@ -60,6 +60,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- **Photos over 8,000 px are cut out at their full size.** The fixed limit is gone: an 8192 × 5464 camera photo used to be refused. Each photo is checked against the memory its full-size work needs (about 0.7 GB at 75 MP, 3.4 GB with Refine edges) and refused only when that is not free, with a message saying how much it needs. The command line keeps big photos at their size too; `--large-image downscale` still shrinks them to 4096 px, each one when its turn comes instead of all of them before the first one starts.
 - A model that does not fit in the free memory of the graphics card (or of a Mac) runs on the CPU when it fits there, instead of not running.
 - Settings mentions the Stable Diffusion eraser (its memory check, Keep it loaded, the memory guard, the CPU-only warning) only once an SD eraser is installed.
 - **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.30.0), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.

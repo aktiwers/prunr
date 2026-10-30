@@ -492,10 +492,9 @@ fn items_are_found_by_id_through_the_batch() {
 
 /// Core entry points no contract test calls by name, each with the call
 /// path to one that does; each link is a call one way or the other.
-const EXERCISED_THROUGH: [&[&str]; 8] = [
+const EXERCISED_THROUGH: [&[&str]; 7] = [
     &["process_image_with_mask", "process_image"],
     &["process_image_from_decoded", "process_image_with_mask", "process_image"],
-    &["process_image_unchecked", "process_image_from_decoded", "process_image_with_mask", "process_image"],
     &["infer_only", "infer_after_first_look"],
     &["first_look", "infer_after_first_look"],
     &["process_lama", "tile_compose"],

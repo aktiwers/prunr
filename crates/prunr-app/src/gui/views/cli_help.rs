@@ -258,8 +258,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--large-image downscale", "Auto-shrink to 4096 px (default)");
-                            opt_row(ui, "--large-image process", "Process at full resolution");
+                            opt_row(ui, "--large-image process", "Keep photos over 8000 px at full size (default)");
+                            opt_row(ui, "--large-image downscale", "Shrink photos over 8000 px to 4096 px first");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -280,8 +280,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     section_heading(ui, "Examples");
                     example_row(ui, toasts, "prunr -m birefnet-lite portrait.jpg",
                         "Best detail for hair, leaves, fine edges");
-                    example_row(ui, toasts, "prunr --large-image process poster.png",
-                        "Full-resolution processing for large images");
+                    example_row(ui, toasts, "prunr --large-image downscale poster.png",
+                        "A faster, smaller result for a very large image");
                     example_row(ui, toasts, "prunr -q photo.jpg -o output.png",
                         "Quiet mode for scripting");
                     example_row(ui, toasts, "prunr --debug photo.jpg 2> prunr.log",

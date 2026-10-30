@@ -274,6 +274,20 @@ fn test_format_support_png_jpeg_webp_bmp() {
 // Large image handling
 // ============================================================
 
+/// A photo past 8,000 px on a side runs at its own size when it fits the
+/// free memory; it used to be refused for its size alone.
+#[test]
+fn a_photo_past_8000_px_is_cut_out_at_its_size() {
+    use std::io::Cursor;
+    if skip_if_no_ort("a_photo_past_8000_px_is_cut_out_at_its_size") { return; }
+    let engine = OrtEngine::new(ModelKind::Silueta, 1).expect("Engine");
+    let wide = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8200, 100, image::Rgb([100, 150, 200])));
+    let mut buf = Vec::new();
+    wide.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
+    let result = process_image(&buf, &engine, &prunr_core::Progress::none()).expect("cut out at its size");
+    assert_eq!(result.rgba_image.dimensions(), (8200, 100));
+}
+
 #[test]
 fn test_downscale_image_preserves_aspect_ratio() {
     // 8000x4000 → max_dim 4096 → 4096x2048 (aspect preserved)
