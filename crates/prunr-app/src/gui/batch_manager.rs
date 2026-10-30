@@ -641,7 +641,7 @@ impl BatchManager {
     pub(crate) fn free_off_screen_photos(&mut self, rendering: impl Fn(u64) -> bool) {
         let selected_id = self.selected_id();
         let released = self.items.iter_mut()
-            .filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id))
+            .filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id) && item.source.readable_again())
             .map(BatchItem::release_photo)
             .filter(|&held| held)
             .count();
@@ -1208,6 +1208,15 @@ mod tests {
             item.source_texture = Some(texture());
             bm.items.push(item);
         }
+        // A file edited since it was opened can't give the photo back.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edited.png");
+        std::fs::write(&path, b"before").unwrap();
+        let mut edited = item_with_cache(5, 0);
+        edited.source = ImageSource::file(path.clone());
+        edited.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+        bm.items.push(edited);
+        std::fs::write(&path, b"after, longer").unwrap();
         bm.selected_index = 0;
         crate::gui::tests::fixtures::put_in(&mut bm.items[2], BatchStatus::Processing);
         bm.free_off_screen_photos(|id| id == 4);
@@ -1216,6 +1225,7 @@ mod tests {
         assert!(bm.items[1].source_rgba.is_none() && bm.items[1].source_texture.is_none(), "off screen and idle");
         assert!(kept(&bm.items[2]), "off screen, processing");
         assert!(kept(&bm.items[3]), "off screen, its preview queued");
+        assert!(bm.items[4].source_rgba.is_some(), "off screen, its file edited since");
     }
 
     // ── request_decode_bytes / request_thumbnail (thread-spawning) ──────

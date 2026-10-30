@@ -36,6 +36,9 @@ impl PrunrApp {
             if let Some(idx) = idx {
                 self.evict_background_item_caches(idx);
                 self.batch.items[idx].set_on_screen(true);
+                // A failed decode is tried again on each visit: memory may
+                // have been short, or the file has come back.
+                self.batch.items[idx].decode_failed = false;
             }
             self.show_original = false;
         }
@@ -248,6 +251,21 @@ mod background_item_tests {
     use std::sync::Arc;
     use crate::gui::item::UpscaleCache;
     use crate::gui::tests::fixtures::push_test_item;
+
+    /// A photo whose decode failed is tried again when its image is
+    /// shown again: the failure may have been memory short at the time.
+    #[test]
+    fn a_failed_decode_is_tried_again_when_the_image_is_shown() {
+        let mut app = super::PrunrApp::new_for_test();
+        push_test_item(&mut app, 1);
+        push_test_item(&mut app, 2).decode_failed = true;
+        app.batch.select_item(0);
+        let ctx = egui::Context::default();
+        app.reconcile_selected(&ctx);
+        app.batch.select_item(1);
+        app.reconcile_selected(&ctx);
+        assert!(app.batch.items[1].decode_pending);
+    }
 
     /// An image not on screen drops its upscale's enlarged reference (the
     /// size of the output); the model's output and input stay, so Refine

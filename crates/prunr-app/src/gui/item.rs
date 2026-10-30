@@ -386,6 +386,15 @@ impl ImageSource {
         prunr_core::load_image_from_bytes(&bytes).map_err(|e| e.to_string())
     }
 
+    /// The bytes still read as they did when opened: a photo let go can be
+    /// decoded again. A moved or edited file can't give it back.
+    pub(crate) fn readable_again(&self) -> bool {
+        match self {
+            Self::Path(path, stamp) => stamp.is_some() && FileStamp::at(path) == *stamp,
+            Self::Bytes(_) => true,
+        }
+    }
+
     /// Whether both name the same image: one path, or one shared buffer.
     pub(crate) fn same_as(&self, other: &Self) -> bool {
         match (self, other) {
