@@ -166,7 +166,7 @@ fn images_decode_through_the_upright_loaders() {
         }
         for (n, line) in production_lines(text) {
             let code = code_part(line);
-            if ["image::open(", "load_from_memory", "ImageReader::"].iter().any(|p| code.contains(p)) {
+            if ["image::open(", "load_from_memory", "ImageReader::", "jpeg_decoder::"].iter().any(|p| code.contains(p)) {
                 found.push(format!("{rel}:{n}: use prunr_core::load_image_from_{{path,bytes}} / image_dimensions_from_{{path,bytes}}"));
             }
         }

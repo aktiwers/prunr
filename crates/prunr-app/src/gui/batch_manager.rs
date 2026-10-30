@@ -560,7 +560,7 @@ impl BatchManager {
                 // 50-image batch they were N × ~50 MB co-resident.
                 let thumb = (|| -> Option<image::RgbaImage> {
                     let bytes = source.load_bytes().ok()?;
-                    let img = prunr_core::load_image_from_bytes(&bytes).ok()?;
+                    let img = prunr_core::load_image_to_fit_from_bytes(&bytes, THUMB_MAX_PX).ok()?;
                     drop(bytes);
                     let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
