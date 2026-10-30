@@ -103,10 +103,12 @@ impl PrunrApp {
         if item.backdrop_tex_pending.is_some() || item.backdrop_texture.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
-        let build: Box<dyn FnOnce() -> Option<image::RgbaImage> + Send> = match backdrop {
+        use crate::gui::background_io::BackdropBuilt;
+        use crate::gui::image_texture::PreparedImage;
+        let build: Box<dyn FnOnce() -> BackdropBuilt + Send> = match backdrop {
             Backdrop::Image(_) => {
                 let Some(bg) = item.bg_image.clone() else { return };
-                Box::new(move || Some(bg.image.to_rgba8()))
+                Box::new(move || BackdropBuilt::Picture(Some(PreparedImage::from_rgba(&bg.image.to_rgba8())), None))
             }
             Backdrop::Effect(effect) => {
                 let Some(photo) = item.backdrop_photo() else { return };
@@ -116,11 +118,19 @@ impl PrunrApp {
                     item.backdrop_texture = None;
                     return;
                 }
-                // A parked cut-out is unpacked on the build's thread.
+                // A parked cut-out is unpacked on the build's thread, where a
+                // new result with the shown backdrop's alpha keeps it.
                 let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
+                let (shown, apart_from_cut) = (item.shown_backdrop_made(), item.backdrop_key_apart_from_cut());
                 Box::new(move || {
                     let cutout = cutout.and_then(|c| c.load());
-                    photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
+                    let alpha = cutout.as_deref().map(prunr_core::formats::alpha_fingerprint);
+                    if alpha.is_some() && shown.map(|made| made.alpha) == alpha {
+                        return BackdropBuilt::Same;
+                    }
+                    let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
+                    let picture = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
+                    BackdropBuilt::Picture(picture.map(|rgba| PreparedImage::from_rgba(&rgba)), made)
                 })
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,
@@ -129,8 +139,7 @@ impl PrunrApp {
         let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
         let ctx = ctx.clone();
         self.batch.bg_io.decode_slots.spawn(move || {
-            let ci = build().map(|rgba| crate::gui::image_texture::PreparedImage::from_rgba(&rgba));
-            let _ = tx.send((item_id, key, ci));
+            let _ = tx.send((item_id, key, build()));
             ctx.request_repaint();
         });
     }

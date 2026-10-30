@@ -375,6 +375,22 @@ fn unmultiply_alpha(buf: &mut [u8]) {
     }
 }
 
+/// A fingerprint of `rgba`'s alpha and size: equal for the same alpha,
+/// different, but for a hash collision, for any other.
+pub fn alpha_fingerprint(rgba: &RgbaImage) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write_u32(rgba.width());
+    hasher.write_u32(rgba.height());
+    let eight = rgba.as_raw().chunks_exact(32);
+    let rest = eight.remainder();
+    for pixels in eight {
+        hasher.write_u64(pixels.chunks_exact(4).enumerate().fold(0, |word, (i, px)| word | u64::from(px[3]) << (8 * i)));
+    }
+    rest.chunks_exact(4).for_each(|px| hasher.write_u8(px[3]));
+    hasher.finish()
+}
+
 /// The alpha channel of `rgba` as a grey plane.
 pub fn alpha_plane(rgba: &RgbaImage) -> GrayImage {
     let alpha = rgba.as_raw().chunks_exact(4).map(|px| px[3]).collect();
@@ -1034,6 +1050,14 @@ mod tests {
         let mut opaque = vec![100, 200, 50, 255];
         unmultiply_alpha(&mut opaque);
         assert_eq!(opaque, vec![100, 200, 50, 255]);
+    }
+
+    #[test]
+    fn an_alpha_fingerprint_follows_the_alpha_alone() {
+        let image = |alpha: u8, red: u8| RgbaImage::from_fn(9, 5, |x, _| image::Rgba([red, 0, 0, if x == 4 { alpha } else { 255 }]));
+        assert_eq!(alpha_fingerprint(&image(7, 0)), alpha_fingerprint(&image(7, 200)), "colour is not part of it");
+        assert_ne!(alpha_fingerprint(&image(7, 0)), alpha_fingerprint(&image(8, 0)));
+        assert_ne!(alpha_fingerprint(&RgbaImage::new(4, 2)), alpha_fingerprint(&RgbaImage::new(2, 4)), "nor the shape");
     }
 
     #[test]

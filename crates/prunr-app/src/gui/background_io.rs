@@ -155,6 +155,15 @@ pub struct ThumbMsg {
     pub image: Option<(u32, u32, Vec<u8>)>,
 }
 
+/// What a backdrop build sends back.
+pub(crate) enum BackdropBuilt {
+    /// The picture (`None`: none could be made), and what it was made of
+    /// when it follows the cut-out.
+    Picture(Option<crate::gui::image_texture::PreparedImage>, Option<crate::gui::item::BackdropMade>),
+    /// The cut-out is the one the shown backdrop was made of: it stays.
+    Same,
+}
+
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
@@ -190,8 +199,8 @@ pub struct BackgroundIO {
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
     /// A per-item bg image decoded and built off-thread; its `to_rgba8()`
     /// copy (~32 MB on a 4K bg) stays off the UI thread.
-    pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
-    pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<crate::gui::image_texture::PreparedImage>)>,
+    pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, BackdropBuilt)>,
+    pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, BackdropBuilt)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
     pub decode_slots: Arc<DecodeSlots>,

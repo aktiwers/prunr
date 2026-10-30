@@ -530,6 +530,15 @@ fn same_result(seen: Option<&std::sync::Weak<image::RgbaImage>>, now: Option<&Ar
     }
 }
 
+/// What a backdrop that follows the cut-out was made of: its key apart
+/// from the cut-out, and the cut-out's alpha (`alpha_fingerprint`). A new
+/// result with the same alpha keeps that backdrop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BackdropMade {
+    pub(crate) apart_from_cut: u64,
+    pub(crate) alpha: u64,
+}
+
 /// Which cut-out a backdrop made of it is for: the result it last saw,
 /// and a count that moves each time the result is another one.
 #[derive(Default)]
@@ -1005,6 +1014,8 @@ pub(crate) struct BatchItem {
     lens_focus: Option<LensFocus>,
     /// The cut-out Blurred photo and Lens blur fill the subject from.
     backdrop_cut: BackdropCut,
+    /// What the backdrop texture under that key was made of.
+    backdrop_made: Option<(u64, BackdropMade)>,
 
     /// Shared selection mask (Paint and Magic Brush), a signed i8 plane at
     /// source resolution. Survives Process; an erase that lands clears it, as
@@ -1896,13 +1907,42 @@ impl BatchItem {
         self.selection_mask.as_ref().is_some_and(|m| m.has_selected_region())
     }
 
-    /// A picture built for the backdrop lands when it is still the
-    /// item's backdrop (`true`); a stale or empty build frees the slot
-    /// for the next frame to build the current one.
+    /// A backdrop build's answer: a picture to upload, or the shown
+    /// backdrop kept under `key` (its cut-out had the same alpha). False
+    /// when nothing goes up.
+    pub(crate) fn land_backdrop_built(
+        &mut self,
+        key: u64,
+        built: super::background_io::BackdropBuilt,
+        upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding, egui::TextureOptions),
+    ) -> bool {
+        use super::background_io::BackdropBuilt;
+        match built {
+            BackdropBuilt::Same => {
+                clear_if(&mut self.backdrop_tex_pending, key);
+                if self.backdrop_key() == Some(key) {
+                    if let (Some((shown, _)), Some((made, _))) = (self.backdrop_texture.as_mut(), self.backdrop_made.as_mut()) {
+                        if shown == made {
+                            (*shown, *made) = (key, key);
+                        }
+                    }
+                }
+                false
+            }
+            BackdropBuilt::Picture(image, made) => {
+                let landed = self.land_backdrop(key, image, upload);
+                if landed {
+                    self.backdrop_made = made.map(|made| (key, made));
+                }
+                landed
+            }
+        }
+    }
+
     /// The picture built for the backdrop arrives: handed to `upload`
     /// while it is still the backdrop (it stays pending until
     /// `install_backdrop`). False when it was dropped.
-    pub(crate) fn land_backdrop(
+    fn land_backdrop(
         &mut self,
         key: u64,
         image: Option<super::image_texture::PreparedImage>,
@@ -2900,6 +2940,7 @@ impl BatchItem {
             backdrop_texture: None,
             lens_focus: None,
             backdrop_cut: BackdropCut::default(),
+            backdrop_made: None,
             backdrop_tex_pending: None,
             selection_mask: None,
             selection_hash: None,
@@ -2984,6 +3025,23 @@ impl BatchItem {
     /// What the background texture is built from: the picture or effect
     /// and, for an effect, which photo it is made from.
     pub(crate) fn backdrop_key(&self) -> Option<u64> {
+        self.backdrop_key_with_cut(true)
+    }
+
+    /// `backdrop_key` without the cut-out's part.
+    pub(crate) fn backdrop_key_apart_from_cut(&self) -> Option<u64> {
+        self.backdrop_key_with_cut(false)
+    }
+
+    /// What the shown backdrop was made of, when only its cut-out can
+    /// differ from what the backdrop is now asked to be.
+    pub(crate) fn shown_backdrop_made(&self) -> Option<BackdropMade> {
+        let (texture_key, _) = self.backdrop_texture.as_ref()?;
+        let (key, made) = self.backdrop_made?;
+        (key == *texture_key && Some(made.apart_from_cut) == self.backdrop_key_apart_from_cut()).then_some(made)
+    }
+
+    fn backdrop_key_with_cut(&self, with_cut: bool) -> Option<u64> {
         use super::item_settings::Backdrop;
         let backdrop = self.settings.backdrop();
         let key = backdrop.picture_key()?;
@@ -3002,7 +3060,7 @@ impl BatchItem {
                     let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
                     depth.rotate_left(29) ^ focus.rotate_left(43)
                 });
-                let cut = effect.takes_cutout().then(|| self.backdrop_cut.version.rotate_left(53));
+                let cut = (with_cut && effect.takes_cutout()).then(|| self.backdrop_cut.version.rotate_left(53));
                 key ^ lens.unwrap_or(0) ^ cut.unwrap_or(0)
             }
             _ => key,
@@ -3790,6 +3848,41 @@ mod tests {
         assert!(weak.upgrade().is_none(), "the cache does not keep the old result alive");
         refresh(&mut item);
         assert_ne!(item.backdrop_key(), again, "the subject at another depth is another focus");
+    }
+
+    /// A new cut-out with the shown backdrop's alpha keeps that backdrop
+    /// under its new key, with nothing uploaded; another blur is built anew.
+    #[test]
+    fn a_new_cut_out_with_the_same_alpha_keeps_the_backdrop() {
+        use crate::gui::background_io::BackdropBuilt;
+        use crate::gui::image_texture::{ImageTexture, PreparedImage};
+        let ctx = egui::Context::default();
+        let texture = ImageTexture::single(ctx.load_texture("backdrop", egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]), egui::TextureOptions::LINEAR));
+        let mut item = fixture_item(1);
+        item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.refresh_backdrop_cut();
+        let first = item.backdrop_key().expect("a backdrop");
+        let made = BackdropMade { apart_from_cut: item.backdrop_key_apart_from_cut().expect("a backdrop"), alpha: 7 };
+        let mut uploads = 0;
+        let picture = PreparedImage::from_rgba(&image::RgbaImage::new(2, 2));
+        assert!(item.land_backdrop_built(first, BackdropBuilt::Picture(Some(picture), Some(made)), |_, _, _| uploads += 1));
+        assert!(item.install_backdrop(first, texture));
+        assert_eq!(item.shown_backdrop_made(), Some(made));
+
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.refresh_backdrop_cut();
+        let second = item.backdrop_key().expect("a backdrop");
+        assert_ne!(second, first);
+        assert_eq!(item.shown_backdrop_made(), Some(made), "only the cut-out differs");
+        item.backdrop_tex_pending = Some(second);
+        assert!(!item.land_backdrop_built(second, BackdropBuilt::Same, |_, _, _| uploads += 1));
+        assert_eq!(item.backdrop_texture.as_ref().map(|(key, _)| *key), Some(second), "the shown backdrop is kept");
+        assert_eq!(item.backdrop_tex_pending, None);
+        assert_eq!(uploads, 1);
+
+        item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 20 };
+        assert_eq!(item.shown_backdrop_made(), None, "another blur is built anew");
     }
 
     /// Blurred photo is made again for each cut-out; Black & white photo
