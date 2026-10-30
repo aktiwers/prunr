@@ -104,21 +104,26 @@ impl DepthSource {
     }
 }
 
-/// A batch save writes up to this many images at once.
-pub(crate) const SAVE_AT_ONCE: usize = 3;
-
 /// The depth one export (a save, a copy, a drag) measures: one engine
-/// for all its images, and the last map of each image being saved kept,
-/// so an image's backdrop, faded lines and Depth map file measure it
-/// once between them.
+/// for all its images, and the last maps kept, so an image's backdrop,
+/// faded lines and Depth map file measure it once between them.
 #[derive(Default)]
 pub(crate) struct ExportDepth {
     measurer: prunr_core::depth::Measurer,
     /// Newest last, about 1 MB each.
     last: std::sync::Mutex<std::collections::VecDeque<(ImageSource, Arc<prunr_core::depth::DepthMap>)>>,
+    /// How many maps stay (at least one).
+    keep: usize,
 }
 
 impl ExportDepth {
+    /// For an export writing `at_once` images at a time. It keeps twice
+    /// as many maps: a large image's second measure can come after
+    /// several small images' first.
+    pub(crate) fn for_images_at_once(at_once: usize) -> Self {
+        Self { keep: 2 * at_once, ..Self::default() }
+    }
+
     fn measure(&self, source: &ImageSource, original: Option<&image::RgbaImage>) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
         let last = || self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(map) = last().iter().find(|(seen, _)| seen.same_as(source)).map(|(_, map)| Arc::clone(map)) {
@@ -129,11 +134,11 @@ impl ExportDepth {
             None => self.measurer.measure_decoded(&source.decode()?),
         };
         let map = Arc::new(measured.map_err(|e| e.to_string())?);
-        let mut last = last();
-        if last.len() == SAVE_AT_ONCE {
-            last.pop_front();
+        let mut kept = last();
+        if kept.len() >= self.keep.max(1) {
+            kept.pop_front();
         }
-        last.push_back((source.clone(), Arc::clone(&map)));
+        kept.push_back((source.clone(), Arc::clone(&map)));
         Ok(map)
     }
 }

@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::background_io::SaveDone;
-use crate::gui::item::{BatchItem, ExportDepth, SaveMark, SAVE_AT_ONCE};
+use crate::gui::item::{BatchItem, ExportDepth, SaveMark};
 use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
@@ -150,7 +150,7 @@ impl PrunrApp {
                     filename,
                     result,
                     bg: item.export_bg(),
-                    pixels: u64::from(w) * u64::from(h),
+                    pixel_count: u64::from(w) * u64::from(h),
                 }
             })
             .collect();
@@ -161,7 +161,7 @@ impl PrunrApp {
         let count = items.len();
         self.toasts.info(format!("Saving {}\u{2026}", crate::gui::views::fmt::count(count, "image", "images")));
         let tx = self.batch.bg_io.save_done_tx.clone();
-        spawn_save_batch(folder, items, self.settings.export_format, tx);
+        spawn_save_batch(folder, items, self.settings.export_format, Arc::clone(&self.batch.bg_io.decode_slots), tx);
     }
 
     /// A save finished: the images it wrote are saved as they were, and
@@ -465,23 +465,25 @@ struct BatchSave {
     result: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
     depth: Option<crate::gui::item::DepthExport>,
-    /// The result's width × height.
-    pixels: u64,
+    pixel_count: u64,
 }
+
+/// A batch save writes up to this many images at once.
+const SAVE_AT_ONCE: usize = 3;
 
 /// What one image of a batch save holds at its peak, per pixel: its
 /// pixels unpacked, the copy with the background baked in, and JPEG's
 /// RGB copy.
 const SAVE_BYTES_PER_PX: u64 = 12;
 
-/// How many images of a batch save are written at once: one per two
-/// cores (each encoder runs on one), at most `SAVE_AT_ONCE`, and no more
+/// How many images of a batch save are written at once: one per writer
+/// (each encoder runs on one core), at most `SAVE_AT_ONCE`, and no more
 /// than `room` holds of the largest (`None`: memory unknown).
-fn saves_at_once(largest_pixels: u64, room: Option<u64>, cores: usize) -> usize {
+fn saves_at_once(largest_pixels: u64, room: Option<u64>, writers: usize) -> usize {
     let by_memory = room.map_or(usize::MAX, |room| {
         usize::try_from(room / (largest_pixels * SAVE_BYTES_PER_PX).max(1)).unwrap_or(usize::MAX)
     });
-    (cores / 2).min(SAVE_AT_ONCE).min(by_memory).max(1)
+    writers.min(SAVE_AT_ONCE).min(by_memory).max(1)
 }
 
 /// `save` on each of `jobs`, up to `at_once` at a time; the outcomes in
@@ -507,20 +509,22 @@ fn each_at_once<J: Send, R: Send>(jobs: Vec<J>, at_once: usize, save: impl Fn(J)
 }
 
 /// Encode + write N images into `folder` (named by `drag_export::export_name`)
-/// on a background thread, a few at once (`saves_at_once`); report
-/// aggregate counts when done.
+/// on a background thread, a few at once (`saves_at_once`), each in one
+/// of the background `slots`; report aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<BatchSave>,
     format: prunr_core::ExportFormat,
+    slots: Arc<crate::gui::background_io::DecodeSlots>,
     tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
-        let largest = items.iter().map(|item| item.pixels).max().unwrap_or(0);
-        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        let at_once = saves_at_once(largest, prunr_core::sysmem::room_for_buffers_bytes(), cores);
-        let measure = ExportDepth::default();
+        let largest = items.iter().map(|item| item.pixel_count).max().unwrap_or(0);
+        let writers = crate::gui::drag_export_state::writers();
+        let at_once = saves_at_once(largest, prunr_core::sysmem::room_for_buffers_bytes(), writers);
+        let measure = ExportDepth::for_images_at_once(at_once);
         let saved = each_at_once(items, at_once, |BatchSave { mark, filename, result, bg, depth, .. }| {
+            let _slot = slots.acquire();
             let depth = depth.map(|depth| depth.write(&folder, &measure));
             let out_path = folder.join(crate::gui::drag_export::export_name(&filename, format));
             let written = result.load()
@@ -545,17 +549,17 @@ fn spawn_save_batch(
 mod save_at_once_tests {
     use super::{each_at_once, saves_at_once, SAVE_BYTES_PER_PX};
 
-    /// One image per two cores, three at most, and only as many of the
+    /// One image per writer, three at most, and only as many of the
     /// largest as memory holds; never none.
     #[test]
-    fn a_batch_save_writes_as_many_at_once_as_cores_and_memory_allow() {
+    fn a_batch_save_writes_as_many_at_once_as_writers_and_memory_allow() {
         let twelve_mp = 12_000_000;
         let one = twelve_mp * SAVE_BYTES_PER_PX;
-        for (room, cores, at_once) in [
-            (None, 16, 3), (None, 4, 2), (None, 2, 1), (None, 1, 1),
-            (Some(10 * one), 8, 3), (Some(2 * one), 8, 2), (Some(one), 8, 1), (Some(one / 2), 8, 1),
+        for (room, writers, at_once) in [
+            (None, 4, 3), (None, 2, 2), (None, 1, 1),
+            (Some(10 * one), 4, 3), (Some(2 * one), 4, 2), (Some(one), 4, 1), (Some(one / 2), 4, 1),
         ] {
-            assert_eq!(saves_at_once(twelve_mp, room, cores), at_once, "room {room:?}, {cores} cores");
+            assert_eq!(saves_at_once(twelve_mp, room, writers), at_once, "room {room:?}, {writers} writers");
         }
     }
 
