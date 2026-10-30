@@ -45,6 +45,10 @@ dunce = { workspace = true }
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"
 
+# macOS's own memory pressure level.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 # Graphics memory on Windows: DXGI's budget for this process and what it
 # holds, which counts CUDA's allocations under WDDM too.
 [target.'cfg(windows)'.dependencies]
