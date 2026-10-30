@@ -685,6 +685,12 @@ impl BgEffect {
         matches!(self, BgEffect::LensBlur { .. })
     }
 
+    /// Whether its picture depends on the cut-out: a blur is made of the
+    /// photo with the subject filled from the background around it.
+    pub fn takes_cutout(self) -> bool {
+        matches!(self, BgEffect::BlurredSource { .. } | BgEffect::LensBlur { .. })
+    }
+
     pub const ALL: &'static [Self] = &[
         BgEffect::None,
         BgEffect::BlurredSource { radius: 12 },

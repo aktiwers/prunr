@@ -140,6 +140,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Fixed
 
+- Blurred photo and Lens blur no longer glow with the subject's colour around the cut-out: the backdrop is made from the photo with the subject filled in from the background around it. A stroke or an edge change makes it again in the background, about as fast as the blur itself (a quarter of a second at 12 MP).
 - **Upscaled photos no longer show faint lines where the tiles meet.** Real-ESRGAN x2 started some tiles on an odd pixel, which shifted how it groups pixels, and left lines up to 91/255 off; its tiles now start on even pixels. Every Real-ESRGAN-style upscaler (x4, x2, Siax-CX, Superscale) also blends its tiles over 64 px instead of 16: along the seams a 1024 x 768 photo now lands within 12/255 (x4; 18 for x2) of an upscale in one piece, against 25 (27) before, for about 8% more time on a graphics card and 17% on the processor.
 - **An upscale or erase that runs out of graphics memory finishes.** An upscale tries again in smaller tiles on the graphics card, then on the processor; LaMa and MI-GAN go on on the processor. Each says so while it runs, and the next image goes straight to what worked until the card has a gigabyte more free. Before, the run stopped with an error. The command line's `--upscale` does the same.
 - The image list's rows no longer overlap and jump while their thumbnails load.

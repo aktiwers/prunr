@@ -95,6 +95,7 @@ impl PrunrApp {
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let backdrop = item.settings.backdrop();
         item.refresh_lens_focus();
+        item.refresh_backdrop_cut();
         let Some(key) = item.backdrop_key() else {
             item.backdrop_texture = None;
             return;
@@ -116,7 +117,7 @@ impl PrunrApp {
                     return;
                 }
                 // A parked cut-out is unpacked on the build's thread.
-                let cutout = item.result_pixels().filter(|_| effect.needs_depth());
+                let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
                 Box::new(move || {
                     let cutout = cutout.and_then(|c| c.load());
                     photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))

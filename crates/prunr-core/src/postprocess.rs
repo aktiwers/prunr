@@ -499,10 +499,13 @@ pub(crate) fn posterize_u8(v: u8, n: u16) -> u8 {
 /// The picture `effect` makes from `source`, opaque, at the source's
 /// size; `None` for no effect, and for a lens blur without `depth`. A
 /// lens blur focuses on the subject of `cutout` (`depth::backdrop_focus`).
-/// It goes behind a result like a background image does.
+/// It goes behind a result like a background image does. Blurred photo
+/// and Lens blur blur a clean plate of the photo (`clean_plate`), so the
+/// subject's colour does not halo the backdrop around the cut-out.
 ///
 /// Peak working set: the source as RGBA plus the output (2 × w·h·4 bytes;
-/// 96 MB at 12 MP); a lens blur, `depth::lens_blur`'s (~4 × w·h·4).
+/// 96 MB at 12 MP), the clean plate (w·h·5 while it is made); a lens
+/// blur, `depth::lens_blur`'s (~4 × w·h·4).
 pub fn effect_backdrop(
     source: &RgbaImage,
     effect: crate::types::BgEffect,
@@ -510,9 +513,10 @@ pub fn effect_backdrop(
     cutout: Option<&RgbaImage>,
 ) -> Option<RgbaImage> {
     use crate::types::BgEffect;
+    let plate = || cutout.filter(|_| effect.takes_cutout()).and_then(|cutout| clean_plate(source, cutout));
     let mut img = match effect {
         BgEffect::None => return None,
-        BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(source, radius.clamp(1, 64) as f32),
+        BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(plate().as_ref().unwrap_or(source), radius.clamp(1, 64) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
             apply_subject_effect(&mut img, crate::types::SubjectEffect::Desaturate);
@@ -521,13 +525,84 @@ pub fn effect_backdrop(
         BgEffect::LensBlur { amount_pct } => {
             let depth = depth?;
             let focus = crate::depth::Focus::Depth(crate::depth::backdrop_focus(depth, cutout));
-            crate::depth::lens_blur(source, depth, focus, crate::math::pct(amount_pct))
+            crate::depth::lens_blur(plate().as_ref().unwrap_or(source), depth, focus, crate::math::pct(amount_pct))
         }
     };
     for p in img.pixels_mut() {
         p.0[3] = 255;
     }
     Some(img)
+}
+
+/// Subject alpha up to this is background a backdrop is made of.
+const PLATE_BACKGROUND_MAX: u8 = 8;
+
+/// Background kept around the subject's box for the fill to draw from.
+const PLATE_MARGIN: u32 = 32;
+
+/// The fill is made at 1/`PLATE_STEP` of the photo's size: it only goes
+/// under the subject and is blurred after, so it needs no detail, and a
+/// rebuild after each stroke costs about what the blur does.
+const PLATE_STEP: u32 = 4;
+
+/// `source` with the subject of `cutout` filled smoothly from the
+/// background around it (`inpaint_blend::push_pull`), so a blur of it
+/// carries no subject colour past the subject's edge. A cut-out of
+/// another size (an upscale) is read at the photo's. `None` with no
+/// subject, or no background to fill from.
+///
+/// Works on the subject's box plus `PLATE_MARGIN`: the alpha at full
+/// size, the background's colour and share per `PLATE_STEP`² cell, the
+/// fill per channel at that size. Peak working set: the output
+/// (w·h·4 bytes) and the alpha (w·h); the cells are 1/16 of the box.
+fn clean_plate(source: &RgbaImage, cutout: &RgbaImage) -> Option<RgbaImage> {
+    let (w, h) = source.dimensions();
+    let alpha = GrayImage::from_fn(cutout.width(), cutout.height(), |x, y| image::Luma([cutout.get_pixel(x, y).0[3]]));
+    let alpha = if alpha.dimensions() == (w, h) { alpha } else { resize_gray_lanczos3(&alpha, w, h) };
+    let b = crate::inpaint::mask_bbox(&alpha, PLATE_BACKGROUND_MAX + 1, PLATE_MARGIN)?;
+    let (cw, ch) = (b.w.div_ceil(PLATE_STEP) as usize, b.h.div_ceil(PLATE_STEP) as usize);
+    let cell_of = |x: u32, y: u32| (y / PLATE_STEP) as usize * cw + (x / PLATE_STEP) as usize;
+    let background = |x: u32, y: u32| alpha.get_pixel(b.x + x, b.y + y).0[0] <= PLATE_BACKGROUND_MAX;
+    let mut count = vec![0u32; cw * ch];
+    let mut sum = vec![[0.0f32; 3]; cw * ch];
+    for (x, y) in (0..b.h).flat_map(|y| (0..b.w).map(move |x| (x, y))).filter(|&(x, y)| background(x, y)) {
+        let cell = cell_of(x, y);
+        count[cell] += 1;
+        let p = source.get_pixel(b.x + x, b.y + y).0;
+        for c in 0..3 {
+            sum[cell][c] += f32::from(p[c]);
+        }
+    }
+    if count.iter().all(|&n| n == 0) {
+        return None;
+    }
+    let per_cell = (PLATE_STEP * PLATE_STEP) as f32;
+    let weight: Vec<f32> = count.iter().map(|&n| n as f32 / per_cell).collect();
+    let fills: Vec<Vec<f32>> = (0..3)
+        .map(|c| {
+            let mean: Vec<f32> = sum.iter().zip(&count).map(|(s, &n)| if n > 0 { s[c] / n as f32 } else { 0.0 }).collect();
+            crate::inpaint_blend::push_pull(&mean, &weight, cw, ch)
+        })
+        .collect();
+    drop((count, sum, weight));
+    let sample = |plane: &[f32], x: u32, y: u32| {
+        let at = |v: u32| (v as f32 + 0.5) / PLATE_STEP as f32 - 0.5;
+        let (fx, fy) = (at(x).clamp(0.0, (cw - 1) as f32), at(y).clamp(0.0, (ch - 1) as f32));
+        let (x0, y0) = (fx as usize, fy as usize);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let top = plane[y0 * cw + x0] * (1.0 - tx) + plane[y0 * cw + x1] * tx;
+        let bottom = plane[y1 * cw + x0] * (1.0 - tx) + plane[y1 * cw + x1] * tx;
+        top * (1.0 - ty) + bottom * ty
+    };
+    let mut out = source.clone();
+    for (x, y) in (0..b.h).flat_map(|y| (0..b.w).map(move |x| (x, y))).filter(|&(x, y)| !background(x, y)) {
+        let px = out.get_pixel_mut(b.x + x, b.y + y);
+        for (c, plane) in fills.iter().enumerate() {
+            px.0[c] = crate::math::round_u8(sample(plane, x, y));
+        }
+    }
+    Some(out)
 }
 
 /// Put `effect`'s picture of `photo` under what `rgba` leaves transparent,
@@ -695,6 +770,69 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Blurred photo and Lens blur blur the background alone: the subject's
+    /// colour does not spread past its edge onto the backdrop around it,
+    /// the halo it drew there. With no cut-out the whole photo blurs.
+    #[test]
+    fn a_blurred_backdrop_carries_no_subject_colour_past_its_edge() {
+        use crate::types::BgEffect;
+        let (red, blue) = (image::Rgba([220, 30, 30, 255]), image::Rgba([30, 30, 220, 255]));
+        let photo = RgbaImage::from_fn(64, 32, |x, _| if x < 32 { red } else { blue });
+        let cutout = RgbaImage::from_fn(64, 32, |x, _| if x < 32 { red } else { image::Rgba([0, 0, 0, 0]) });
+        let blur = |cutout| effect_backdrop(&photo, BgEffect::BlurredSource { radius: 8 }, None, cutout).unwrap();
+        let outside = blur(Some(&cutout)).get_pixel(34, 16).0;
+        assert!(outside[0] < 40 && outside[2] > 200, "background only: {outside:?}");
+        assert!(blur(None).get_pixel(34, 16).0[0] > 80, "no cut-out, no subject to leave out");
+    }
+
+    /// The plate changes the photo only under the subject, and fills it
+    /// with the background's colours, also from a cut-out of another size.
+    #[test]
+    fn a_clean_plate_fills_only_under_the_subject() {
+        let photo = RgbaImage::from_fn(96, 64, |x, y| {
+            let inside = (32..64).contains(&x) && (16..48).contains(&y);
+            if inside { image::Rgba([250, 20, 20, 255]) } else { image::Rgba([20, (y * 3) as u8, 200, 255]) }
+        });
+        let subject = |w: u32, h: u32| RgbaImage::from_fn(w, h, |x, y| {
+            let (x, y) = (x * 96 / w, y * 64 / h);
+            image::Rgba([0, 0, 0, if (32..64).contains(&x) && (16..48).contains(&y) { 255 } else { 0 }])
+        });
+        for cutout in [subject(96, 64), subject(192, 128)] {
+            let plate = clean_plate(&photo, &cutout).expect("a subject with background around it");
+            for (x, y, p) in plate.enumerate_pixels() {
+                let deep_inside = (36..60).contains(&x) && (20..44).contains(&y);
+                let outside = !(30..66).contains(&x) || !(14..50).contains(&y);
+                if outside {
+                    assert_eq!(p, photo.get_pixel(x, y), "({x},{y}) is the photo");
+                } else if deep_inside {
+                    assert!(p.0[0] < 60 && p.0[2] > 150, "({x},{y}) holds the background's colour: {:?}", p.0);
+                }
+            }
+        }
+        assert!(clean_plate(&photo, &RgbaImage::new(96, 64)).is_none(), "no subject, no plate");
+    }
+
+    /// What the clean plate costs beside the blur it goes into.
+    /// `cargo test --profile profiling -p prunr-core --lib time_the_clean_plate -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn time_the_clean_plate() {
+        let (w, h) = (4000u32, 3000u32);
+        let photo = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8, 255]));
+        let cutout = RgbaImage::from_fn(w, h, |x, y| {
+            let (dx, dy) = (x as f32 - 2000.0, y as f32 - 1500.0);
+            image::Rgba([0, 0, 0, if dx * dx / 1.0e6 + dy * dy / 1.2e6 < 1.0 { 255 } else { 0 }])
+        });
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let plate = clean_plate(&photo, &cutout);
+            let plated = t.elapsed();
+            let t = std::time::Instant::now();
+            let _ = crate::blur::blur_rgba(&photo, 24.0);
+            eprintln!("plate {plated:?} (made: {}), blur {:?}", plate.is_some(), t.elapsed());
+        }
+    }
 
 
     /// Gamma above 1 removes more of the soft edge and below 1 keeps
