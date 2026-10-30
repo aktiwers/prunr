@@ -314,16 +314,17 @@ impl BrushSettings {
     }
 
     /// Put `tool`'s knobs back as `source` has them: the Paint Brush's
-    /// Size, Hardness and Shape, the Magic Brush's Confidence, Range and
-    /// Remove specks, and either's Feather (a selection's, or an eraser's
-    /// with its Expand region).
-    /// `strength` and `mode` carry user intent across a reset and stay;
-    /// an eraser's tuning belongs to its Advanced.
+    /// Size, Hardness, Opacity and Shape, the Magic Brush's Confidence,
+    /// Range and Remove specks, and either's Feather (a selection's, or an
+    /// eraser's with its Expand region).
+    /// `mode` carries user intent across a reset and stays; an eraser's
+    /// tuning belongs to its Advanced.
     pub(crate) fn reset_tool_from(&mut self, tool: Tool, source: &Self) {
         match tool {
             Tool::Paint => {
                 self.radius = source.radius;
                 self.hardness = source.hardness;
+                self.strength = source.strength;
                 self.shape = source.shape;
             }
             Tool::Magic => {
@@ -1109,8 +1110,7 @@ mod tests {
         assert_eq!(s.inpaint_sharpen, 1.7);
         assert_eq!(s.inpaint_fill_scale, prunr_core::inpaint::FillScale::Quarter);
 
-        // strength + mode carry user intent (seg pipeline + Add/Subtract).
-        assert!((s.strength - 0.42).abs() < f32::EPSILON, "strength must survive popover reset");
+        assert_eq!(s.strength, d.strength);
         assert_eq!(s.mode, BrushMode::Add, "mode must survive popover reset");
         assert_eq!(s.cutout_action, CutoutAction::Erase, "the cut-out action must survive popover reset");
 
@@ -1134,6 +1134,7 @@ mod tests {
             inpaint_sharpen: 1.3,
             inpaint_feather: 7.0,
             inpaint_grow: -3.0,
+            strength: 0.6,
             ..BrushSettings::default()
         };
         let mut target = BrushSettings::default();
@@ -1149,8 +1150,8 @@ mod tests {
         assert!((target.inpaint_feather - 7.0).abs() < f32::EPSILON);
         assert!((target.inpaint_grow - (-3.0)).abs() < f32::EPSILON);
 
-        // strength + mode carry user intent across reset — must not change.
-        assert!((target.strength - 0.42).abs() < f32::EPSILON);
+        assert!((target.strength - 0.6).abs() < f32::EPSILON);
+        // mode carries user intent across reset — must not change.
         assert_eq!(target.mode, BrushMode::Add);
     }
 
