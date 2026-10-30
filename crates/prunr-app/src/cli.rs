@@ -60,9 +60,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.0, value_parser = finite)]
     pub contrast: f32,
 
-    /// Shift the cut-out's edge in pixels: positive grows the subject,
-    /// negative shrinks it.
-    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = finite)]
+    /// Shift the cut-out's edge in pixels, -20 to 20: positive grows the
+    /// subject, negative shrinks it.
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = edge_shift_px)]
     pub edge_shift: f32,
 
     /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
@@ -452,6 +452,11 @@ impl CliBackdrop<'_> {
 /// mean nothing as a knob.
 fn finite(s: &str) -> Result<f32, String> {
     s.parse::<f32>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("'{s}' is not a finite number"))
+}
+
+fn edge_shift_px(s: &str) -> Result<f32, String> {
+    let max = prunr_core::MaskSettings::EDGE_SHIFT_MAX_PX;
+    finite(s).and_then(|v| if v.abs() <= max { Ok(v) } else { Err(format!("'{s}' is not a shift from -{max} to {max} pixels")) })
 }
 
 fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
@@ -1956,6 +1961,12 @@ mod tests {
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");
+    }
+
+    #[test]
+    fn an_edge_shift_past_the_slider_s_reach_is_refused() {
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--edge-shift", "20"]).is_ok());
+        assert!(super::Cli::try_parse_from(["prunr", "a.png", "--edge-shift", "-20.5"]).is_err());
     }
 
     /// `--edge-shift` reads like the GUI's Shift edge: + grows the subject,

@@ -344,6 +344,11 @@ pub enum ShadowKind {
 }
 
 impl MaskSettings {
+    /// The farthest Shift edge moves the edge either way, in pixels: what
+    /// the slider and `--edge-shift` offer, and what the pipeline applies
+    /// whatever a preset or `PRUNR_EDGE_SHIFT` says.
+    pub const EDGE_SHIFT_MAX_PX: f32 = 20.0;
+
     /// The pipeline's `edge_shift` (+ erodes) for a shift as people read
     /// it, + grows the subject: what the Shift edge slider, `--edge-shift`
     /// and `PRUNR_EDGE_SHIFT` take. Its own inverse.

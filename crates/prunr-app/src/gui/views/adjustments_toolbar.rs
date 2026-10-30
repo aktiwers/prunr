@@ -369,7 +369,8 @@ fn mask_gamma(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
 
 fn mask_shift(ui: &mut Ui, s: &mut ItemSettings, change: &mut ToolbarChange) {
     let mut grow = prunr_core::MaskSettings::edge_shift_for_grow(s.edge_shift);
-    let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -20.0..=20.0, false, |v| fmt::signed_px(v, 1));
+    let max = prunr_core::MaskSettings::EDGE_SHIFT_MAX_PX;
+    let shift = chip::slider_row_f32(ui, "Shift edge", &mut grow, -max..=max, false, |v| fmt::signed_px(v, 1));
     if shift.changed {
         s.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(grow);
     }
