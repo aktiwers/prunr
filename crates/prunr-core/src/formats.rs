@@ -1037,6 +1037,26 @@ mod tests {
     }
 
     #[test]
+    fn an_alpha_plane_is_each_pixels_alpha() {
+        let rgba = RgbaImage::from_fn(3, 2, |x, y| image::Rgba([9, 9, 9, (x * 10 + y) as u8]));
+        let alpha = alpha_plane(&rgba);
+        assert_eq!(alpha.dimensions(), (3, 2));
+        assert_eq!(alpha.as_raw(), &vec![0, 10, 20, 1, 11, 21]);
+    }
+
+    /// Only the turns that swap width and height copy the image.
+    #[test]
+    fn only_quarter_turns_swap_the_sides() {
+        use image::metadata::Orientation::*;
+        for (turn, swaps) in [
+            (NoTransforms, false), (Rotate90, true), (Rotate180, false), (Rotate270, true),
+            (FlipHorizontal, false), (FlipVertical, false), (Rotate90FlipH, true), (Rotate270FlipH, true),
+        ] {
+            assert_eq!(turns_a_quarter(turn), swaps, "{turn:?}");
+        }
+    }
+
+    #[test]
     fn a_decode_may_take_what_is_free_and_refuses_more() {
         let (mb, cap) = (1u64 << 20, DECODE_CAP_UNREAD);
         assert_eq!(decode_allowance(600 * mb, false, Some(8000 * mb)), Ok(8000 * mb), "past the old 512 MB cap when it fits");
