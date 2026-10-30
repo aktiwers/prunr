@@ -22,6 +22,20 @@ pub fn available_ram_bytes() -> Option<u64> {
     first_reported(available, total)
 }
 
+/// What a photo's buffers may use: the memory available now plus free
+/// swap; `None` when free memory cannot be read. Buffers touched once or
+/// twice sit in swap at little cost, so the system pushing idle memory
+/// there serves them (a 75 MP Refine needing 3.4 GB with 1.7 GB available
+/// ran in 5.5 s against 5 s, 2 GB of it in swap); a model's weights, read
+/// every step, are held to RAM by the model checks instead.
+pub fn room_for_buffers_bytes() -> Option<u64> {
+    let free_swap = with_system(|sys| {
+        sys.refresh_memory();
+        sys.free_swap()
+    });
+    available_ram_bytes().map(|available| available + free_swap)
+}
+
 /// The first figure the system reported (0 is none).
 fn first_reported(available: u64, total: u64) -> Option<u64> {
     [available, total].into_iter().find(|&bytes| bytes > 0)

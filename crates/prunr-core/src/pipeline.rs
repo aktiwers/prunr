@@ -69,9 +69,10 @@ pub fn full_size_bytes(w: u32, h: u32, lines: bool, refine: bool) -> u64 {
 }
 
 /// Refuses a `w` × `h` photo whose full-size work does not fit the memory
-/// free now; with no reading of free memory it runs.
+/// and swap free now (`sysmem::room_for_buffers_bytes`); with no reading
+/// of free memory it runs.
 pub fn room_for_photo(w: u32, h: u32, lines: bool, refine: bool) -> Result<(), CoreError> {
-    crate::sysmem::available_ram_bytes().map_or(Ok(()), |free| fits_in(w, h, full_size_bytes(w, h, lines, refine), free))
+    crate::sysmem::room_for_buffers_bytes().map_or(Ok(()), |free| fits_in(w, h, full_size_bytes(w, h, lines, refine), free))
 }
 
 fn fits_in(width: u32, height: u32, need: u64, free: u64) -> Result<(), CoreError> {
