@@ -83,20 +83,26 @@ pub fn run() -> eframe::Result {
 
     let app_factory = || Box::new(|cc: &eframe::CreationContext<'_>| Ok(Box::new(app::PrunrApp::new(cc)) as Box<dyn eframe::App>));
 
-    // OpenGL drivers are unreliable on Windows-on-Mac VMs and older Intel
-    // GPUs; wgpu does better there.
     let primary = eframe::run_native("prunr", make_options(), app_factory());
     if let Err(ref e) = primary {
-        log_startup_error("glow/OpenGL renderer failed", e);
-        let mut opts = make_options();
-        opts.renderer = eframe::Renderer::Wgpu;
-        let fallback = eframe::run_native("prunr", opts, app_factory());
+        log_startup_error("the graphics renderer failed", e);
+        let fallback = eframe::run_native("prunr", on_opengl(make_options()), app_factory());
         if let Err(ref e2) = fallback {
-            log_startup_error("wgpu renderer also failed", e2);
+            log_startup_error("the OpenGL renderer also failed", e2);
         }
         return fallback;
     }
     primary
+}
+
+/// `options` on wgpu's OpenGL backend alone: wgpu picks Vulkan, DirectX 12
+/// or Metal first, and a driver that fails there (a virtual machine, older
+/// Intel graphics) may still run OpenGL.
+fn on_opengl(mut options: eframe::NativeOptions) -> eframe::NativeOptions {
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::GL;
+    }
+    options
 }
 
 /// Write startup failures to a log file next to the executable so users on
@@ -114,4 +120,16 @@ fn log_startup_error(stage: &str, err: &eframe::Error) {
             std::env::consts::OS,
         ),
     );
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    /// The second try asks wgpu for OpenGL alone, not again for the
+    /// backend that just failed.
+    #[test]
+    fn the_fallback_runs_on_opengl_alone() {
+        let options = super::on_opengl(eframe::NativeOptions::default());
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &options.wgpu_options.wgpu_setup else { panic!("a new wgpu setup") };
+        assert_eq!(setup.instance_descriptor.backends, eframe::wgpu::Backends::GL);
+    }
 }
