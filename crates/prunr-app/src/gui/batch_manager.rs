@@ -546,11 +546,11 @@ impl BatchManager {
         if let Some(result) = result {
             self.bg_io.decode_slots.spawn(move || {
                 // A parked result unpacks here, off the UI thread.
-                let image = result.load().map(|rgba| {
+                let image = crate::panics::caught("a thumbnail", || result.load().map(|rgba| {
                     let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
                     (thumb.width(), thumb.height(), thumb.into_raw())
-                });
+                })).flatten();
                 let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
         } else {
@@ -558,13 +558,13 @@ impl BatchManager {
             self.bg_io.decode_slots.spawn(move || {
                 // Source bytes, DynamicImage and full RGBA drop before the send: on a
                 // 50-image batch they were N × ~50 MB co-resident.
-                let thumb = (|| -> Option<image::RgbaImage> {
+                let thumb = crate::panics::caught("a thumbnail", || -> Option<image::RgbaImage> {
                     let bytes = source.load_bytes().ok()?;
                     let img = prunr_core::load_image_to_fit_from_bytes(&bytes, THUMB_MAX_PX).ok()?;
                     drop(bytes);
                     let (w, h) = fit_dimensions(img.width(), img.height(), THUMB_MAX_PX, THUMB_MAX_PX);
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
-                })();
+                }).flatten();
                 let image = thumb.map(|t| (t.width(), t.height(), t.into_raw()));
                 let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
             });
