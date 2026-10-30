@@ -62,7 +62,8 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
 
 /// Reinhard Lab mean+stddev transfer of `source`'s statistics onto
 /// `target`, against the model's colour drift. Sizes may differ (image-wide
-/// statistics over what shows). Alpha unchanged. Statistics fold as rows go, so no Lab
+/// statistics). Alpha unchanged, and so is the colour under a fully
+/// transparent pixel. Statistics fold as rows go, so no Lab
 /// copy is kept: no working set beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     color_match_to(target, &LabStats::of(source));
@@ -74,7 +75,7 @@ fn color_match_to(target: &mut RgbaImage, s: &LabStats) {
     // A uniform-colour target (stddev 0) would otherwise give NaN pixels.
     let scale = |i: usize| s.std[i] / t.std[i].max(1e-6);
     let (kl, ka, kb) = (scale(0), scale(1), scale(2));
-    target.as_mut().par_chunks_exact_mut(4).for_each(|px| {
+    target.as_mut().par_chunks_exact_mut(4).filter(|px| px[3] > 0).for_each(|px| {
         let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
         let (ro, go, bo) = lab_to_srgb(
             (l - t.mean[0]) * kl + s.mean[0],
@@ -143,7 +144,7 @@ impl LabStats {
             .fold(Moments::default(), Moments::merge);
         Self {
             mean: moments.mean.map(|v| v as f32),
-            std: std::array::from_fn(|i| if moments.n == 0.0 { 0.0 } else { (moments.m2[i] / moments.n).sqrt() as f32 }),
+            std: std::array::from_fn(|i| if moments.weight == 0.0 { 0.0 } else { (moments.m2[i] / moments.weight).sqrt() as f32 }),
         }
     }
 }
@@ -153,31 +154,31 @@ impl LabStats {
 /// as exact as the two-pass mean then variance, in one pass.
 #[derive(Default, Clone, Copy)]
 struct Moments {
-    n: f64,
+    weight: f64,
     mean: [f64; 3],
     m2: [f64; 3],
 }
 
 impl Moments {
     fn push(&mut self, v: [f32; 3], weight: f64) {
-        self.n += weight;
+        self.weight += weight;
         for ((value, mean), m2) in v.iter().zip(&mut self.mean).zip(&mut self.m2) {
             let d = f64::from(*value) - *mean;
-            *mean += d * weight / self.n;
+            *mean += d * weight / self.weight;
             *m2 += weight * d * (f64::from(*value) - *mean);
         }
     }
 
     fn merge(a: Self, b: Self) -> Self {
-        let n = a.n + b.n;
-        if n == 0.0 {
+        let weight = a.weight + b.weight;
+        if weight == 0.0 {
             return a;
         }
-        let mut out = Self { n, ..a };
+        let mut out = Self { weight, ..a };
         for i in 0..3 {
             let d = b.mean[i] - a.mean[i];
-            out.mean[i] = a.mean[i] + d * b.n / n;
-            out.m2[i] = a.m2[i] + b.m2[i] + d * d * a.n * b.n / n;
+            out.mean[i] = a.mean[i] + d * b.weight / weight;
+            out.m2[i] = a.m2[i] + b.m2[i] + d * d * a.weight * b.weight / weight;
         }
         out
     }
@@ -408,7 +409,7 @@ mod tests {
             let (sa, ta) = (alpha(source), alpha(target));
             let ch: [Channel; 3] = [|p| p.0, |p| p.1, |p| p.2];
             let (ss, ts) = (ch.map(|f| stats(&s, &sa, f)), ch.map(|f| stats(&t, &ta, f)));
-            for (px, l) in target.pixels_mut().zip(&t) {
+            for (px, l) in target.pixels_mut().zip(&t).filter(|(px, _)| px.0[3] > 0) {
                 let v = [l.0, l.1, l.2];
                 let m: [f32; 3] = std::array::from_fn(|i| (v[i] - ts[i].0) * (ss[i].1 / ts[i].1.max(1e-6)) + ss[i].0);
                 let (r, g, b) = lab_to_srgb(m[0], m[1], m[2]);
