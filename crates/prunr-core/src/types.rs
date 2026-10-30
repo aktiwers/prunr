@@ -62,9 +62,19 @@ impl CoreError {
     }
 }
 
+/// How a decode that ran out of file says so: the decoder reports a short
+/// read, which also ends downloads and stored files, so on its own it says
+/// nothing of the image.
+pub(crate) const IMAGE_ENDS_EARLY: &str = "the image file ends early";
+
 impl From<image::ImageError> for CoreError {
     fn from(e: image::ImageError) -> Self {
-        CoreError::ImageFormat(e.to_string())
+        match &e {
+            image::ImageError::IoError(io) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+                CoreError::ImageFormat(format!("{IMAGE_ENDS_EARLY} ({e})"))
+            }
+            _ => CoreError::ImageFormat(e.to_string()),
+        }
     }
 }
 
