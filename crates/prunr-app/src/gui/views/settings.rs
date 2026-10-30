@@ -245,8 +245,8 @@ fn no_tall_crop_text() -> &'static str {
     use prunr_core::inpaint_sd::one_crop_side;
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TEXT.get_or_init(|| format!(
-        "runs, but at Auto fill scale an area over {} px is filled smaller. Close other apps to fill up to {} px at full size",
-        one_crop_side(false), one_crop_side(true),
+        "runs, but at Auto fill scale an area over {short} px is filled smaller. Close other apps to fill one up to {long} × {short} px at full size",
+        short = one_crop_side(false), long = one_crop_side(true),
     ))
 }
 
