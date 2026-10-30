@@ -88,10 +88,16 @@ fn box_line(line: &mut [u8], scratch: &mut [u8], width: usize, radii: &[usize; P
 /// plus per thread a row's scratch and a band of `TRANSPOSE_BLOCK`
 /// columns (h·64 bytes, 256 KB for a 4000 px tall photo).
 pub fn blur_rgba(src: &RgbaImage, sigma: f32) -> RgbaImage {
-    let (w, h) = src.dimensions();
     let mut out = src.clone();
+    blur_rgba_in_place(&mut out, sigma);
+    out
+}
+
+/// `blur_rgba` over `img` itself.
+pub fn blur_rgba_in_place(out: &mut RgbaImage, sigma: f32) {
+    let (w, h) = out.dimensions();
     if sigma <= 0.0 || w == 0 || h == 0 {
-        return out;
+        return;
     }
     let radii = box_radii(sigma);
     let (w, h) = (w as usize, h as usize);
@@ -125,7 +131,6 @@ pub fn blur_rgba(src: &RgbaImage, sigma: f32) -> RgbaImage {
             let _ = &dp;
         },
     );
-    out
 }
 
 #[cfg(test)]
