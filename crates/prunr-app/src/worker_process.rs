@@ -711,7 +711,7 @@ pub fn run_worker() -> ! {
                         let raw_bytes = std::fs::read(&tensor_path)
                             .map_err(|e| format!("Failed to read tensor: {e}"))?;
                         let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-                        let original = prunr_app::subprocess::ipc::read_photo(&photo)?;
+                        let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
                         progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
@@ -794,7 +794,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to read seg tensor: {e}"))?;
                         let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
 
-                        let original = prunr_app::subprocess::ipc::read_photo(&photo)?;
+                        let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
                         let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..cmd_mask };
