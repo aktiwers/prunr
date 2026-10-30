@@ -21,8 +21,8 @@ const NO_PERMISSION: &[&str] = &["(os error 13)", "(os error 5)", "permission de
 const DISK_FULL: &[&str] = &["(os error 28)", "(os error 39)", "(os error 112)", "no space left on device", "not enough space on the disk"];
 const FILE_GONE: &[&str] = &["(os error 2)", "(os error 3)", "no such file or directory", "cannot find the file specified", "cannot find the path specified"];
 const UNREADABLE: &[&str] = &[
-    "format error decoding", "image format could not be determined", "the image format", "does not support the format features",
-    "svg parse error", "failed to fill whole buffer", "unexpected end of file",
+    "image format error:", "format error decoding", "image format could not be determined", "the image format",
+    "does not support the format features", "svg parse error",
 ];
 const OFFLINE: &[&str] = &[
     "error sending request", "dns error", "failed to lookup address", "connection refused", "connection reset",
@@ -34,8 +34,12 @@ const MODEL_FAILED: &[&str] = &[
 ];
 
 impl Kind {
-    /// The kind of failure `raw` reports; `None` for a message Prunr wrote.
+    /// The kind of failure `raw` reports; `None` for a message Prunr wrote,
+    /// one of these sentences included, so a text already plain stays.
     pub fn of(raw: &str) -> Option<Self> {
+        if Self::ALL.iter().any(|kind| raw.contains(kind.sentence())) {
+            return None;
+        }
         let lower = raw.to_ascii_lowercase();
         let has = |marks: &[&str]| marks.iter().any(|mark| lower.contains(mark));
         if crate::ep_compat::is_device_lost(raw) {
@@ -54,6 +58,11 @@ impl Kind {
         ];
         BY_TEXT.iter().find(|(_, marks)| has(marks)).map(|&(kind, _)| kind)
     }
+
+    const ALL: [Kind; 9] = [
+        Kind::CardMemory, Kind::Memory, Kind::CardStopped, Kind::NoPermission, Kind::DiskFull,
+        Kind::FileGone, Kind::Unreadable, Kind::Offline, Kind::ModelFailed,
+    ];
 
     pub fn sentence(self) -> &'static str {
         match self {
@@ -141,6 +150,24 @@ mod tests {
         let io = std::io::Error::from_raw_os_error(13);
         assert_eq!(reason(&io), Kind::NoPermission.sentence());
         assert_eq!(reason("Eraser (Big-LaMa) is not installed"), "Eraser (Big-LaMa) is not installed");
+    }
+
+    /// A line that already holds a plain sentence is left whole, so a
+    /// second pass keeps what it says around it (a file's name).
+    #[test]
+    fn a_plain_sentence_is_not_rewritten_again() {
+        for kind in Kind::ALL {
+            let line = format!("photo.jpg: could not read: {}", kind.sentence());
+            assert_eq!(error(&line), line, "{kind:?}");
+        }
+    }
+
+    /// A short read is not taken for an image's fault: a download or a
+    /// stored file can end early too.
+    #[test]
+    fn a_short_read_alone_is_not_an_unreadable_image() {
+        assert_eq!(Kind::of("failed to fill whole buffer"), None);
+        assert_eq!(Kind::of("Image format error: unexpected end of file"), Some(Kind::Unreadable));
     }
 
     /// Ten-something os errors are not the two they start like.
