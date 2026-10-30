@@ -30,7 +30,7 @@ use rayon::prelude::*;
 use crate::guided_filter::{box_filter, box_filter_into};
 use crate::inpaint::{mask_bbox, Bbox};
 use crate::math::SendMutPtr;
-use crate::selection::{fill_band, BrushMode, MaskArtifact, FILL_CORE, FULL};
+use crate::selection::{fill_band, BrushMode, MaskArtifact, FILL_CORE, FULL, MAX_BAND_PX};
 
 /// Default ring width for [`color_match_inpainted`] (pixels). Fixed in
 /// absolute pixels on purpose: the inpaint patch size doesn't grow with
@@ -59,7 +59,12 @@ pub enum Band<'a> {
     PerPixel(&'a GrayImage),
 }
 
-impl Band<'_> {
+impl<'a> Band<'a> {
+    /// A band per pixel where there is one, else `uniform` for every pixel.
+    pub fn of(map: Option<&'a GrayImage>, uniform: f32) -> Self {
+        map.map_or(Self::Uniform(uniform), Self::PerPixel)
+    }
+
     /// The width at pixel `i` of the image.
     #[inline]
     pub fn at(&self, i: usize) -> f32 {
@@ -87,27 +92,25 @@ impl Band<'_> {
 }
 
 /// A hole and its per-pixel band in one grey image, as a mask file holds
-/// them: 0 outside the hole, 255 less the band inside (bands to 127 px).
+/// them: 0 outside the hole, 255 less the band inside (bands to
+/// `MAX_BAND_PX`, so a hole pixel stays at 128 or more).
 pub fn pack_band(hole: &GrayImage, band: &GrayImage) -> GrayImage {
-    GrayImage::from_fn(hole.width(), hole.height(), |x, y| {
-        let inside = hole.get_pixel(x, y).0[0] >= 128;
-        image::Luma([if inside { 255 - band.get_pixel(x, y).0[0].min(127) } else { 0 }])
-    })
+    let packed = hole.as_raw().iter().zip(band.as_raw())
+        .map(|(&m, &b)| if m >= 128 { 255 - b.min(MAX_BAND_PX) } else { 0 })
+        .collect();
+    GrayImage::from_raw(hole.width(), hole.height(), packed).expect("one byte per pixel")
 }
 
 /// The hole a packed mask holds, and its per-pixel band; no band when the
 /// mask holds the hole alone (every pixel of it 255).
-pub fn unpack_band(packed: GrayImage) -> (GrayImage, Option<GrayImage>) {
+pub fn unpack_band(mut packed: GrayImage) -> (GrayImage, Option<GrayImage>) {
     if packed.as_raw().iter().all(|&v| v == 0 || v == 255) {
         return (packed, None);
     }
-    let band = GrayImage::from_fn(packed.width(), packed.height(), |x, y| {
-        let v = packed.get_pixel(x, y).0[0];
-        image::Luma([if v >= 128 { 255 - v } else { 0 }])
-    });
-    let mut hole = packed;
-    hole.pixels_mut().for_each(|p| p.0[0] = if p.0[0] >= 128 { 255 } else { 0 });
-    (hole, Some(band))
+    let band = packed.as_raw().iter().map(|&v| if v >= 128 { 255 - v } else { 0 }).collect();
+    let band = GrayImage::from_raw(packed.width(), packed.height(), band).expect("one byte per pixel");
+    packed.as_mut().iter_mut().for_each(|v| *v = if *v >= 128 { 255 } else { 0 });
+    (packed, Some(band))
 }
 
 /// The region a fill replaces: what was painted, grown by `grow_px`, then
@@ -144,46 +147,68 @@ pub fn fill_preview(painted: &crate::selection::MaskArtifact, grow_px: f32, edge
 /// `fill_preview` grow both as for a whole region). A Subtract stroke
 /// carves its grown region.
 ///
-/// Peak working set: the painted region and the two grown ones, a byte
-/// per pixel each (each grown in its bounding box), and the stroke's
-/// cells and fill layer, a byte per pixel each.
+/// Worked in the painted bounds grown by the reach: peak, the stroke's
+/// cells and fill layer (a byte per pixel each, at full size) and the
+/// painted region and the two grown ones within those bounds.
 pub fn eraser_stroke(painted: &MaskArtifact, mode: BrushMode, grow_px: f32, band_px: u8) -> MaskArtifact {
     let (w, h) = (painted.width, painted.height);
-    let region = painted.region_mask(w, h);
+    let band = if mode == BrushMode::Add { band_px.min(MAX_BAND_PX) } else { 0 };
+    let Some(painted_at) = painted.bounds_where(MaskArtifact::is_selected) else {
+        return MaskArtifact::new_empty(w, h);
+    };
+    // Past the reach every cell is 0, so the bounds fill as the whole
+    // plane would: a grow stops inside them, and a shrink of what lies
+    // inside them reads their edge as the plane's.
+    let reach = grow_px.abs().ceil() as u32 + band as u32 + 2;
+    let r = painted_at.grown(reach, w, h);
+    let region = painted.crop(r).region_mask(r.width(), r.height());
     let core = fill_region(&region, grow_px, 0.0);
-    let sign = if mode == BrushMode::Add { FULL } else { -FULL };
-    let plane = MaskArtifact::from_cells(w, h, core.as_raw().iter().map(|&c| if c >= 128 { sign } else { 0 }).collect());
-    if mode == BrushMode::Subtract {
-        return plane;
-    }
-    let band = band_px.min(fill_band(u8::MAX));
-    let hole = fill_region(&region, grow_px, band as f32);
+    let hole = (band > 0).then(|| fill_region(&region, grow_px, band as f32));
     drop(region);
-    let layer = core.as_raw().iter().zip(hole.as_raw())
-        .map(|(&c, &o)| if c >= 128 { FILL_CORE | band } else if o >= 128 { band } else { 0 })
-        .collect();
-    plane.with_fill_layer(layer)
+    let sign = if mode == BrushMode::Add { FULL } else { -FULL };
+    let (mut cells, mut layer) = (vec![0i8; (w * h) as usize], (mode == BrushMode::Add).then(|| vec![0u8; (w * h) as usize]));
+    for (row, y) in (r.y0..=r.y1).enumerate() {
+        let (at, cw) = ((y * w + r.x0) as usize, r.width() as usize);
+        let core = &core.as_raw()[row * cw..(row + 1) * cw];
+        for (cell, &c) in cells[at..at + cw].iter_mut().zip(core) {
+            *cell = if c >= 128 { sign } else { 0 };
+        }
+        if let Some(layer) = layer.as_mut() {
+            let hole = hole.as_ref().map(|o| &o.as_raw()[row * cw..(row + 1) * cw]);
+            for (x, (f, &c)) in layer[at..at + cw].iter_mut().zip(core).enumerate() {
+                *f = if c >= 128 { FILL_CORE | band } else if hole.is_some_and(|o| o[x] >= 128) { band } else { 0 };
+            }
+        }
+    }
+    MaskArtifact::from_cells(w, h, cells).with_fill_layer(layer)
+}
+
+/// The band an erase fades over: one width, or a map with each pixel's.
+enum Bands {
+    Uniform(f32),
+    PerPixel(GrayImage),
 }
 
 /// What an erase replaces (`eraser_fill`): the hole, and the band the fill
 /// fades into the photo over at each of its pixels.
 pub struct EraserFill {
     pub hole: GrayImage,
-    /// `None`: one band, `width`, for the whole hole.
-    band: Option<GrayImage>,
-    width: f32,
+    bands: Bands,
 }
 
 impl EraserFill {
     pub fn band(&self) -> Band<'_> {
-        self.band.as_ref().map_or(Band::Uniform(self.width), Band::PerPixel)
+        match &self.bands {
+            Bands::Uniform(px) => Band::Uniform(*px),
+            Bands::PerPixel(map) => Band::PerPixel(map),
+        }
     }
 
     /// The hole and its band as a mask file holds them (`pack_band`).
-    pub fn packed(&self) -> GrayImage {
-        match &self.band {
-            Some(band) => pack_band(&self.hole, band),
-            None => self.hole.clone(),
+    pub fn packed(&self) -> std::borrow::Cow<'_, GrayImage> {
+        match &self.bands {
+            Bands::PerPixel(map) => std::borrow::Cow::Owned(pack_band(&self.hole, map)),
+            Bands::Uniform(_) => std::borrow::Cow::Borrowed(&self.hole),
         }
     }
 }
@@ -199,44 +224,41 @@ pub fn eraser_fill(plane: &MaskArtifact, grow_px: f32, band_px: f32, (w, h): (u3
     let layer = plane.fill_layer_at(w, h).filter(|layer| layer.iter().any(|&c| c != 0));
     let mut region = plane.region_mask(w, h);
     let Some(layer) = layer else {
-        return EraserFill { hole: fill_region(&region, grow_px, band_px), band: None, width: band_px };
+        return EraserFill { hole: fill_region(&region, grow_px, band_px), bands: Bands::Uniform(band_px) };
     };
     // Selected cells no eraser stroke made fill as a whole region does.
-    region.as_mut().iter_mut().zip(&layer).for_each(|(r, &f)| if f != 0 { *r = 0 });
+    region.as_mut().iter_mut().zip(layer.iter()).for_each(|(r, &f)| if f != 0 { *r = 0 });
     let other = region.as_raw().iter().any(|&r| r != 0).then(|| fill_region(&region, grow_px, band_px));
     drop(region);
-    let other_band = crate::math::round_u8(band_px).min(fill_band(u8::MAX));
-    let band: Vec<u8> = layer.iter().enumerate().map(|(i, &f)| {
-        let theirs = other.as_ref().is_some_and(|o| o.as_raw()[i] >= 128).then_some(other_band);
-        match (f, theirs) {
-            (0, None) => 0,
-            (0, Some(b)) => b,
-            (f, theirs) => fill_band(f).max(theirs.unwrap_or(0)),
-        }
-    }).collect();
-    let hole = GrayImage::from_fn(w, h, |x, y| {
-        let i = (y * w + x) as usize;
+    let other_band = crate::math::round_u8(band_px).min(MAX_BAND_PX);
+    let n = (w * h) as usize;
+    let (mut hole, mut band) = (vec![0u8; n], vec![0u8; n]);
+    for (i, &f) in layer.iter().enumerate() {
         let theirs = other.as_ref().is_some_and(|o| o.as_raw()[i] >= 128);
-        image::Luma([if layer[i] != 0 || theirs { 255 } else { 0 }])
-    });
-    let mut widths = band.iter().zip(hole.as_raw()).filter(|(_, &m)| m >= 128).map(|(&b, _)| b);
-    let first = widths.next().unwrap_or(0);
-    if widths.all(|b| b == first) {
-        return EraserFill { hole, band: None, width: first as f32 };
+        hole[i] = if f != 0 || theirs { 255 } else { 0 };
+        band[i] = fill_band(f).max(if theirs { other_band } else { 0 });
     }
-    EraserFill { band: Some(GrayImage::from_raw(w, h, band).expect("one band per pixel")), hole, width: 0.0 }
+    let mut widths = band.iter().zip(&hole).filter(|(_, &m)| m != 0).map(|(&b, _)| b);
+    let first = widths.next().unwrap_or(0);
+    let bands = if widths.all(|b| b == first) {
+        Bands::Uniform(first as f32)
+    } else {
+        Bands::PerPixel(GrayImage::from_raw(w, h, band).expect("one byte per pixel"))
+    };
+    EraserFill { hole: GrayImage::from_raw(w, h, hole).expect("one byte per pixel"), bands }
 }
 
 /// What an erase of `plane` will touch, for the overlay: `eraser_fill`'s
 /// hole, at full strength where the fill replaces the photo and at half
 /// in the band (as `fill_preview` shows a whole region).
 pub fn eraser_preview(plane: &MaskArtifact, grow_px: f32, band_px: f32) -> MaskArtifact {
-    let Some(layer) = plane.fill_layer().filter(|layer| layer.iter().any(|&c| c != 0)) else {
+    let Some(layer) = plane.fill_layer() else {
         return fill_preview(plane, grow_px, band_px);
     };
-    let other: Vec<i8> = plane.cells().iter().zip(layer).map(|(&c, &f)| if f != 0 { 0 } else { c }).collect();
-    let other = other.iter().any(|&c| MaskArtifact::is_selected(c))
-        .then(|| fill_preview(&MaskArtifact::from_cells(plane.width, plane.height, other), grow_px, band_px));
+    let other = plane.has_unlayered_selection().then(|| {
+        let cells = plane.cells().iter().zip(layer).map(|(&c, &f)| if f != 0 { 0 } else { c }).collect();
+        fill_preview(&MaskArtifact::from_cells(plane.width, plane.height, cells), grow_px, band_px)
+    });
     let cells = layer.iter().enumerate().map(|(i, &f)| {
         let own = if f & FILL_CORE != 0 { FULL } else if f != 0 { FULL / 2 } else { 0 };
         own.max(other.as_ref().map_or(0, |o| o.cells()[i]))
@@ -353,10 +375,11 @@ pub fn color_match_inpainted(
 /// pixel within `ring_px` of the edge, the photo's mean just outside less
 /// the fill's mean just inside (one `ring_px` box), spread over the whole
 /// region by push-pull interpolation and faded out from the edge over the
-/// `edge_colour_reach` of each pixel's `band`. A region bordering different surroundings (dark hair on one
-/// side, pale sky on the other) then meets each, which one mean shift for
-/// the region cannot; the fade keeps a difference that is content, not
-/// cast (an edge across a face), from spreading through the fill.
+/// `edge_colour_reach` of each pixel's `band`. A region bordering
+/// different surroundings (dark hair on one side, pale sky on the other)
+/// then meets each, which one mean shift for the region cannot; the fade
+/// keeps a difference that is content, not cast (an edge across a face),
+/// from spreading through the fill.
 ///
 /// Leaves `inpainted` as it is when the mask is empty, dimensions
 /// disagree, or no fill pixel has photo within `ring_px`.
@@ -411,8 +434,6 @@ pub fn match_colour_along_edge(
     if !weight.iter().any(|&w| w > 0.0) {
         return;
     }
-    // 1 at the edge, where the fill box is half inside, to 0 once the
-    // pixel's reach box lies wholly in the fill.
     let fade = edge_fade(&inside, bbox, img_w, band);
     let (mut plane, mut sum) = (vec![0.0f32; n], vec![0.0f32; n]); // reused per channel
     let mut offset = vec![0.0f32; n];
@@ -458,16 +479,18 @@ fn edge_fade(inside: &[f32], bbox: Bbox, img_w: usize, band: Band) -> Vec<f32> {
     if let Band::Uniform(px) = band {
         return box_filter(inside, bbox.w, bbox.h, edge_colour_reach(px).max(1)).into_iter().map(fade_of).collect();
     }
-    let bw = bbox.w as usize;
+    let (bw, bx) = (bbox.w as usize, bbox.x as usize);
     // Band widths are whole pixels under 256, so their reaches fit a byte.
-    let reach: Vec<u8> = (0..inside.len())
-        .map(|i| edge_colour_reach(band.at((bbox.y as usize + i / bw) * img_w + bbox.x as usize + i % bw)) as u8)
+    let reach: Vec<u8> = (0..bbox.h as usize)
+        .flat_map(|row| {
+            let at = (bbox.y as usize + row) * img_w + bx;
+            (at..at + bw).map(|i| edge_colour_reach(band.at(i)) as u8)
+        })
         .collect();
-    let mut reaches: Vec<u8> = reach.iter().zip(inside).filter(|(_, &i)| i > 0.5).map(|(&r, _)| r).collect();
-    reaches.sort_unstable();
-    reaches.dedup();
+    let mut present = [false; 256];
+    reach.iter().zip(inside).filter(|(_, &i)| i > 0.5).for_each(|(&r, _)| present[r as usize] = true);
     let mut fade = vec![0.0f32; inside.len()];
-    for r in reaches {
+    for r in (0..=u8::MAX).filter(|&r| present[r as usize]) {
         let share = box_filter(inside, bbox.w, bbox.h, (r as u32).max(1));
         for ((f, &at), &s) in fade.iter_mut().zip(&reach).zip(&share) {
             if at == r {
@@ -1078,6 +1101,39 @@ mod tests {
                 None => stroke.into_selection(),
             })
         }).expect("a stroke")
+    }
+
+    /// An eraser stroke worked within its bounds draws exactly what the
+    /// whole plane would: growing, shrinking, and at the plane's edges.
+    #[test]
+    fn an_eraser_stroke_in_its_bounds_draws_as_the_whole_plane() {
+        let whole = |painted: &MaskArtifact, mode: BrushMode, grow: f32, band: u8| {
+            let (w, h) = (painted.width, painted.height);
+            let region = painted.region_mask(w, h);
+            let core = fill_region(&region, grow, 0.0);
+            let sign = if mode == BrushMode::Add { FULL } else { -FULL };
+            let plane = MaskArtifact::from_cells(w, h, core.as_raw().iter().map(|&c| if c >= 128 { sign } else { 0 }).collect());
+            if mode == BrushMode::Subtract {
+                return plane;
+            }
+            let hole = fill_region(&region, grow, band as f32);
+            let layer = core.as_raw().iter().zip(hole.as_raw())
+                .map(|(&c, &o)| if c >= 128 { FILL_CORE | band } else if o >= 128 { band } else { 0 })
+                .collect::<Vec<u8>>();
+            plane.with_fill_layer(layer)
+        };
+        for (centre, r) in [((50, 50), 10), ((3, 4), 6), ((96, 97), 8), ((50, 2), 12)] {
+            for mode in [BrushMode::Add, BrushMode::Subtract] {
+                let painted = disc(100, centre, r, mode);
+                for (grow, band) in [(0.0, 0u8), (3.0, 6), (-4.0, 9), (-2.5, 0), (8.0, 20)] {
+                    let cropped = eraser_stroke(&painted, mode, grow, band);
+                    let full = whole(&painted, mode, grow, band);
+                    assert!(cropped.cells() == full.cells(), "{centre:?} r{r} {mode:?} grow {grow} band {band}: cells");
+                    let layer = |m: &MaskArtifact| m.fill_layer().map(<[u8]>::to_vec).filter(|l| l.iter().any(|&f| f != 0));
+                    assert!(layer(&cropped) == layer(&full), "{centre:?} r{r} {mode:?} grow {grow} band {band}: fill");
+                }
+            }
+        }
     }
 
     /// One eraser stroke fills exactly as its region did with one Expand

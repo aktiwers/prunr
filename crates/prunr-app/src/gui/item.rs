@@ -1076,7 +1076,9 @@ impl StrokeAdjustment {
         let (from, tool) = (self.from, self.tool);
         match self.reach {
             StrokeReach::Last => self.strokes.latest_changed(tool, |drawn| drawn.at(drawn.values().moved(from, now))),
-            _ => self.strokes.changed(tool, |drawn| drawn.at(drawn.values().adjusted(from, now))),
+            StrokeReach::All => self.strokes.changed(tool, |drawn| drawn.at(drawn.values().adjusted(from, now))),
+            // Next starts no adjustment: the strokes stay as drawn.
+            StrokeReach::Next => self.strokes.clone(),
         }
     }
 }

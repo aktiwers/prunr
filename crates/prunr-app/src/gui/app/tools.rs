@@ -11,8 +11,8 @@ use crate::gui::selection_queue::SelectionOp;
 use super::PrunrApp;
 
 impl PrunrApp {
-    /// What the tool strip or a brush panel changed: persist on a
-    /// settle, reset from the active preset, flip Auto-apply.
+    /// What the tool strip changed: persist on a settle, reset from the
+    /// active preset, re-cut on a switch of Restore / Erase / Select.
     pub(crate) fn apply_brush_change(&mut self, change: crate::gui::views::brush_chip::BrushChipOutcome) {
         if let Some(tool) = change.reset {
             let resolved = self.settings.resolve_active_preset(None);
@@ -576,13 +576,13 @@ impl PrunrApp {
         }
         let Some(tool) = tool else { return };
         if item.adjusting.is_none() {
+            let Some(from) = seen.filter(|&(id, from)| id == item_id && from != now).map(|(_, from)| from) else { return };
             let strokes = match reach {
                 StrokeReach::Next => None,
                 StrokeReach::Last => item.timeline.latest_stroke(tool),
-                StrokeReach::All => item.timeline.strokes_since_picture().filter(|h| h.latest_of(tool).is_some()),
+                StrokeReach::All => item.timeline.strokes_of(tool),
             };
-            let moved_from = seen.filter(|&(id, from)| id == item_id && from != now).map(|(_, from)| from);
-            let (Some(from), Some(strokes)) = (moved_from, strokes) else { return };
+            let Some(strokes) = strokes else { return };
             let (shown, step, landed) = (Arc::clone(&strokes.ops), item.timeline.current().id, strokes.own_step);
             item.adjusting = Some(StrokeAdjustment { reach, tool, from, strokes, shown, step, landed });
         }

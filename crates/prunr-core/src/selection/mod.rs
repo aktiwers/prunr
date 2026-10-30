@@ -67,9 +67,12 @@ impl CellRect {
 pub const FULL: i8 = 127;
 
 /// A fill-layer cell: 0 where no eraser stroke reaches; the band width in
-/// whole pixels (to 127) where the fill fades into the photo, with this
-/// bit set where the fill replaces the photo in full.
+/// whole pixels (to `MAX_BAND_PX`) where the fill fades into the photo,
+/// with this bit set where the fill replaces the photo in full.
 pub const FILL_CORE: u8 = 0x80;
+
+/// The widest band a fill-layer cell holds: the bits below `FILL_CORE`.
+pub const MAX_BAND_PX: u8 = !FILL_CORE;
 
 /// The band a fill-layer cell fades over.
 #[inline]
@@ -119,10 +122,30 @@ fn paste_rows<T: Copy>(plane: &[T], w: usize, r: CellRect, patch: &[T]) -> Vec<T
 /// full, over the wider band.
 #[inline]
 fn merge_fill(existing: u8, newer: u8) -> u8 {
-    match (existing, newer) {
-        (e, 0) => e,
-        (0, n) => n,
-        (e, n) => ((e | n) & FILL_CORE) | fill_band(e).max(fill_band(n)),
+    ((existing | newer) & FILL_CORE) | fill_band(existing).max(fill_band(newer))
+}
+
+/// Visit every cell of a `sw × sh` plane's `out_w × out_h` nearest-
+/// neighbour resample as `(output index, cell)`, row by row: the cells
+/// and their fill layer sample the same source cells.
+fn for_each_resampled<T: Copy>(plane: &[T], (sw, sh): (u32, u32), out_w: u32, out_h: u32, mut f: impl FnMut(usize, T)) {
+    if (out_w, out_h) == (sw, sh) {
+        for (i, &v) in plane.iter().enumerate() {
+            f(i, v);
+        }
+        return;
+    }
+    if sw == 0 || sh == 0 {
+        return;
+    }
+    let (sw, sh) = (sw as u64, sh as u64);
+    let xs: Vec<usize> = (0..out_w as u64).map(|tx| ((tx * sw) / out_w as u64) as usize).collect();
+    for ty in 0..out_h as u64 {
+        let src_row = &plane[(((ty * sh) / out_h as u64) * sw) as usize..];
+        let row_base = (ty * out_w as u64) as usize;
+        for (dx, &sx) in xs.iter().enumerate() {
+            f(row_base + dx, src_row[sx]);
+        }
     }
 }
 
@@ -237,6 +260,8 @@ pub struct MaskArtifact {
     /// plane: at build, or on first query after painting (painting
     /// resets it). Always exact, O(1) after the first read.
     flags: OnceLock<(bool, bool)>,
+    /// Whether a selected cell lies outside the fill layer, once asked.
+    unlayered: OnceLock<bool>,
 }
 
 /// Equal by size, cells and fill layer; the flags are derived from the
@@ -258,13 +283,13 @@ impl MaskArtifact {
     /// All-zero mask at source image resolution.
     pub fn new_empty(width: u32, height: u32) -> Self {
         let cells = vec![0; (width as usize) * (height as usize)];
-        Self { width, height, data: Arc::new(cells), fill: None, flags: OnceLock::from((false, false)) }
+        Self { width, height, data: Arc::new(cells), fill: None, flags: OnceLock::from((false, false)), unlayered: OnceLock::from(false) }
     }
 
     pub fn from_cells(width: u32, height: u32, cells: Vec<i8>) -> Self {
         debug_assert_eq!(cells.len(), (width as usize) * (height as usize), "cell count != width × height");
         let flags = OnceLock::from(scan_flags(&cells));
-        Self { width, height, data: Arc::new(cells), fill: None, flags }
+        Self { width, height, data: Arc::new(cells), fill: None, flags, unlayered: OnceLock::new() }
     }
 
     pub fn cells(&self) -> &[i8] {
@@ -277,11 +302,25 @@ impl MaskArtifact {
         self.fill.as_deref().map(Vec::as_slice)
     }
 
-    /// The same cells with `layer` as their fill layer (one per cell).
-    pub fn with_fill_layer(mut self, layer: Vec<u8>) -> Self {
-        debug_assert_eq!(layer.len(), self.data.len(), "fill layer != cell count");
-        self.fill = Some(Arc::new(layer));
+    /// The same cells with `layer` as their fill layer (one per cell), or
+    /// none.
+    pub fn with_fill_layer(mut self, layer: impl Into<Option<Vec<u8>>>) -> Self {
+        self.fill = layer.into().map(|layer| {
+            debug_assert_eq!(layer.len(), self.data.len(), "fill layer != cell count");
+            Arc::new(layer)
+        });
+        self.unlayered = OnceLock::new();
         self
+    }
+
+    /// Whether a selected cell lies outside the fill layer: a region no
+    /// eraser stroke drew, which an erase grows by the Expand and Feather
+    /// set now. O(1) after the first read.
+    pub fn has_unlayered_selection(&self) -> bool {
+        *self.unlayered.get_or_init(|| match &self.fill {
+            None => self.has_selected_region(),
+            Some(layer) => self.data.par_iter().zip(layer.par_iter()).any(|(&c, &f)| f == 0 && Self::is_selected(c)),
+        })
     }
 
     /// `f` over the fill layers of this plane and `other` (all zero for a
@@ -298,6 +337,7 @@ impl MaskArtifact {
     /// shares it, so the mid-stroke buffer paints in place.
     pub(crate) fn cells_mut(&mut self) -> &mut [i8] {
         self.flags = OnceLock::new();
+        self.unlayered = OnceLock::new();
         Arc::make_mut(&mut self.data).as_mut_slice()
     }
 
@@ -336,11 +376,8 @@ impl MaskArtifact {
     /// The cells inside `r` as their own plane.
     pub fn crop(&self, r: CellRect) -> Self {
         let w = self.width as usize;
-        let cropped = Self::from_cells(r.width(), r.height(), crop_rows(&self.data, w, r));
-        match &self.fill {
-            Some(layer) => cropped.with_fill_layer(crop_rows(layer, w, r)),
-            None => cropped,
-        }
+        Self::from_cells(r.width(), r.height(), crop_rows(&self.data, w, r))
+            .with_fill_layer(self.fill.as_ref().map(|layer| crop_rows(layer, w, r)))
     }
 
     /// Strokes kept as crops (`crop` at their `bounds`), merged in order by
@@ -367,11 +404,7 @@ impl MaskArtifact {
                 }
             }
         }
-        let plane = Self::from_cells(width, height, cells);
-        match fill {
-            Some(fill) => plane.with_fill_layer(fill),
-            None => plane,
-        }
+        Self::from_cells(width, height, cells).with_fill_layer(fill)
     }
 
     /// A copy of this plane with `patch` written over the cells at `r`;
@@ -381,12 +414,13 @@ impl MaskArtifact {
         let w = self.width as usize;
         let cells = paste_rows(&self.data, w, r, &patch.data);
         let fill = (self.fill.is_some() || patch.fill.is_some()).then(|| {
-            let mine = self.fill.as_deref().cloned().unwrap_or_else(|| vec![0; self.data.len()]);
-            let theirs = patch.fill.as_deref().cloned().unwrap_or_else(|| vec![0; patch.data.len()]);
+            let blank = |n: usize| std::borrow::Cow::Owned(vec![0u8; n]);
+            let mine = self.fill.as_deref().map_or_else(|| blank(self.data.len()), |f| std::borrow::Cow::Borrowed(f.as_slice()));
+            let theirs = patch.fill.as_deref().map_or_else(|| blank(patch.data.len()), |f| std::borrow::Cow::Borrowed(f.as_slice()));
             Arc::new(paste_rows(&mine, w, r, &theirs))
         });
         // Flags on first query: an undo that is not read again skips the scan.
-        Self { width: self.width, height: self.height, data: Arc::new(cells), fill, flags: OnceLock::new() }
+        Self { width: self.width, height: self.height, data: Arc::new(cells), fill, flags: OnceLock::new(), unlayered: OnceLock::new() }
     }
 
     #[inline]
@@ -597,13 +631,7 @@ impl MaskArtifact {
             layer.iter().enumerate().map(|(i, &f)| if reached(i) { f } else { 0 }).collect::<Vec<u8>>()
         });
         let kept = cells.iter().any(|&c| c != 0) || fill.as_ref().is_some_and(|f| f.iter().any(|&c| c != 0));
-        kept.then(|| {
-            let plane = Self::from_cells(self.width, self.height, cells);
-            match fill {
-                Some(fill) => plane.with_fill_layer(fill),
-                None => plane,
-            }
-        })
+        kept.then(|| Self::from_cells(self.width, self.height, cells).with_fill_layer(fill))
     }
 
     /// The bounding rectangle of the non-zero cells, and of the fill an
@@ -623,27 +651,8 @@ impl MaskArtifact {
         bounds_of(&self.data, self.width as usize, pred)
     }
 
-    /// Visit every cell of an `out_w × out_h` nearest-neighbour resample
-    /// as `(output index, cell)`, row by row.
-    fn for_each_resampled(&self, out_w: u32, out_h: u32, mut f: impl FnMut(usize, i8)) {
-        if (out_w, out_h) == (self.width, self.height) {
-            for (i, &v) in self.data.iter().enumerate() {
-                f(i, v);
-            }
-            return;
-        }
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-        let (sw, sh) = (self.width as u64, self.height as u64);
-        let xs: Vec<usize> = (0..out_w as u64).map(|tx| ((tx * sw) / out_w as u64) as usize).collect();
-        for ty in 0..out_h as u64 {
-            let src_row = &self.data[(((ty * sh) / out_h as u64) * sw) as usize..];
-            let row_base = (ty * out_w as u64) as usize;
-            for (dx, &sx) in xs.iter().enumerate() {
-                f(row_base + dx, src_row[sx]);
-            }
-        }
+    fn for_each_resampled(&self, out_w: u32, out_h: u32, f: impl FnMut(usize, i8)) {
+        for_each_resampled(&self.data, (self.width, self.height), out_w, out_h, f);
     }
 
     /// Nearest-neighbour resample to `w × h`, cell values carried as-is,
@@ -652,29 +661,19 @@ impl MaskArtifact {
     pub fn resampled(&self, w: u32, h: u32) -> Self {
         let mut cells = vec![0i8; (w as usize) * (h as usize)];
         self.for_each_resampled(w, h, |i, v| cells[i] = v);
-        Self { width: w, height: h, data: Arc::new(cells), fill: None, flags: OnceLock::new() }
+        Self { width: w, height: h, data: Arc::new(cells), fill: None, flags: OnceLock::new(), unlayered: OnceLock::new() }
     }
 
-    /// The fill layer nearest-neighbour resampled to `w × h`, by the same
-    /// index rule as `region_mask`; `None` without one.
-    pub fn fill_layer_at(&self, w: u32, h: u32) -> Option<Vec<u8>> {
+    /// The fill layer nearest-neighbour resampled to `w × h` as
+    /// `region_mask` resamples the cells; `None` without one.
+    pub fn fill_layer_at(&self, w: u32, h: u32) -> Option<std::borrow::Cow<'_, [u8]>> {
         let layer = self.fill.as_ref()?;
         if (w, h) == (self.width, self.height) {
-            return Some(layer.as_ref().clone());
+            return Some(std::borrow::Cow::Borrowed(layer.as_slice()));
         }
         let mut out = vec![0u8; (w as usize) * (h as usize)];
-        let (sw, sh) = (self.width as u64, self.height as u64);
-        if sw == 0 || sh == 0 {
-            return Some(out);
-        }
-        let xs: Vec<usize> = (0..w as u64).map(|tx| ((tx * sw) / w as u64) as usize).collect();
-        for ty in 0..h as u64 {
-            let src = &layer[(((ty * sh) / h as u64) * sw) as usize..];
-            for (dx, &sx) in xs.iter().enumerate() {
-                out[(ty * w as u64) as usize + dx] = src[sx];
-            }
-        }
-        Some(out)
+        for_each_resampled(layer, (self.width, self.height), w, h, |i, v| out[i] = v);
+        Some(std::borrow::Cow::Owned(out))
     }
 
     /// The selected region as a binary mask (255 where `is_selected`),

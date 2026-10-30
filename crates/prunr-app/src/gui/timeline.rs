@@ -113,11 +113,7 @@ impl Payload for MaskArtifact {
             len if len == 2 * n => (&rest[..n], Some(rest[n..].to_vec())),
             _ => return Err(bad()),
         };
-        let plane = MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect());
-        Ok(match fill {
-            Some(fill) => plane.with_fill_layer(fill),
-            None => plane,
-        })
+        Ok(MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect()).with_fill_layer(fill))
     }
 }
 
@@ -538,8 +534,14 @@ impl Timeline {
         use super::selection_queue::Made;
         match &self.current().made {
             Some(Made::One(op)) if op.drawn_by(tool) && !self.can_redo() => Some(StrokeHistory::from_step(self.previous()?, vec![op.clone()], true)),
-            _ => self.strokes_since_picture().filter(|h| h.latest_of(tool).is_some()),
+            _ => self.strokes_of(tool),
         }
+    }
+
+    /// The strokes since the picture last changed, to draw again, when
+    /// `tool` drew one of them.
+    pub(crate) fn strokes_of(&self, tool: Tool) -> Option<StrokeHistory> {
+        self.strokes_since_picture().filter(|h| h.latest_of(tool).is_some())
     }
 
     /// Whether step `id` is the shown one and nothing is ahead of it.
@@ -820,7 +822,7 @@ mod tests {
         for (w, h) in [(1, 1), (3, 7), (64, 48), (257, 129)] {
             let plane = MaskArtifact::from_cells(w, h, (0..w * h).map(|_| next() as i8).collect());
             assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane, "{w}x{h} mask");
-            let filled = plane.clone().with_fill_layer((0..w * h).map(|_| next() as u8).collect());
+            let filled = plane.clone().with_fill_layer((0..w * h).map(|_| next() as u8).collect::<Vec<u8>>());
             assert_eq!(MaskArtifact::decode(&filled.encode().unwrap()).unwrap(), filled, "{w}x{h} mask with its fill layer");
             let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(next().to_le_bytes()));
             assert_eq!(image::RgbaImage::decode(&img.encode().unwrap()).unwrap(), img, "{w}x{h} image");

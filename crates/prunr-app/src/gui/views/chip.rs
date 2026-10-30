@@ -411,15 +411,22 @@ pub(super) fn slider_cell_f32(
 /// The width of the widest of `names` as a strip names its sliders.
 /// Kept per `key`, so the names are laid out once, not every frame.
 pub(super) fn names_width(ui: &Ui, key: impl std::hash::Hash, names: impl FnOnce() -> Vec<&'static str>) -> f32 {
-    let id = egui::Id::new(("names_width", key));
+    cached_width(ui, egui::Id::new(("names_width", key)), || {
+        let font = egui::FontId::proportional(theme::FONT_SIZE_SECONDARY);
+        names().iter()
+            .map(|n| ui.painter().layout_no_wrap((*n).to_owned(), font.clone(), Color32::WHITE).size().x)
+            .fold(0.0, f32::max)
+            .ceil()
+    })
+}
+
+/// A width measured once under `id` and kept: text is laid out only on
+/// the first frame that asks.
+fn cached_width(ui: &Ui, id: egui::Id, measure: impl FnOnce() -> f32) -> f32 {
     if let Some(width) = ui.data(|d| d.get_temp::<f32>(id)) {
         return width;
     }
-    let font = egui::FontId::proportional(theme::FONT_SIZE_SECONDARY);
-    let width = names().iter()
-        .map(|n| ui.painter().layout_no_wrap((*n).to_owned(), font.clone(), Color32::WHITE).size().x)
-        .fold(0.0, f32::max)
-        .ceil();
+    let width = measure();
     ui.data_mut(|d| d.insert_temp(id, width));
     width
 }
@@ -515,17 +522,13 @@ fn sample_values(lo: f64, hi: f64, logarithmic: bool) -> impl Iterator<Item = f6
 /// control after it in its row hold still while the value changes. Kept
 /// per knob (`key`), so the texts are formatted once, not every frame.
 fn value_box_width(ui: &Ui, key: impl std::hash::Hash, texts: impl FnOnce() -> Vec<String>) -> f32 {
-    let id = egui::Id::new(("value_box_width", key));
-    if let Some(width) = ui.data(|d| d.get_temp::<f32>(id)) {
-        return width;
-    }
-    let font = egui::TextStyle::Button.resolve(ui.style());
-    let widest = texts().into_iter()
-        .map(|t| ui.painter().layout_no_wrap(t, font.clone(), Color32::WHITE).size().x)
-        .fold(0.0, f32::max);
-    let width = (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x).ceil();
-    ui.data_mut(|d| d.insert_temp(id, width));
-    width
+    cached_width(ui, egui::Id::new(("value_box_width", key)), || {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let widest = texts().into_iter()
+            .map(|t| ui.painter().layout_no_wrap(t, font.clone(), Color32::WHITE).size().x)
+            .fold(0.0, f32::max);
+        (widest + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x).ceil()
+    })
 }
 
 /// The key under which `panel_rows` marks a panel whose sliders lay out

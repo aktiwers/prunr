@@ -51,6 +51,8 @@ pub enum RuntimeId {
 }
 
 impl RuntimeId {
+    pub const ALL: [RuntimeId; 3] = [Self::OpenVino, Self::Cuda, Self::MiGraphX];
+
     /// The runtimes Settings › Hardware offers to download. DirectML is
     /// not one: Windows ships it built in. CUDA and OpenVINO come as
     /// add-ons on Windows and Linux (`is_addon`): beside DirectML, CUDA
@@ -169,12 +171,12 @@ impl RuntimeId {
             .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
             .filter(|e| e.file_name().to_str().is_some_and(|name| name.starts_with(&prefix) && name != current))
             .map(|e| e.path())
-            .filter(|dir| !prunr_core::ort_runtime::removal_mark(dir).is_some_and(|mark| mark.is_file()))
+            .filter(|dir| !prunr_core::ort_runtime::marked_to_go(dir))
             .collect()
     }
 
     fn removal_pending(self) -> bool {
-        self.removal_mark().is_some_and(|mark| mark.is_file())
+        self.install_dir().is_some_and(|dir| prunr_core::ort_runtime::marked_to_go(&dir))
     }
 
     /// The library its install holds: the runtime's, or the add-on's.
@@ -291,7 +293,7 @@ impl RuntimeId {
         }
     }
 
-    /// The first-launch prompt's install-button label.
+    /// The first-launch prompt's and Settings' update-button label.
     pub fn update_button_label(self) -> &'static str {
         match self {
             Self::OpenVino if self.is_addon() => "Update OpenVINO",
@@ -319,6 +321,7 @@ impl RuntimeId {
         format!("An earlier version is in use. Update ({}); the earlier one is removed at the next start.", self.download_size(nvidia_here))
     }
 
+    /// The first-launch prompt's and Settings' install-button label.
     pub fn install_button_label(self) -> &'static str {
         match self {
             Self::OpenVino if self.is_addon() => "Install OpenVINO",
@@ -561,15 +564,16 @@ pub fn finish_uninstalls() {
     }
 }
 
-/// The installs of a runtime Prunr offers in `store` with their removal
-/// mark beside them; nothing else there, marked or not.
+/// The installs of any runtime Prunr installs (offered on this platform
+/// or not) in `store` with their removal mark beside them; nothing else
+/// there, marked or not.
 fn marked_installs(store: &Path) -> Vec<PathBuf> {
     let Ok(read) = std::fs::read_dir(store) else { return Vec::new() };
-    let ours = |name: &str| [RuntimeId::OpenVino, RuntimeId::Cuda, RuntimeId::MiGraphX].iter().any(|rt| name.starts_with(&format!("{}-", rt.short_name())));
+    let ours = |name: &str| RuntimeId::ALL.iter().any(|rt| name.strip_prefix(rt.short_name()).is_some_and(|rest| rest.starts_with('-')));
     read.filter_map(Result::ok)
         .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()) && e.file_name().to_str().is_some_and(ours))
         .map(|e| e.path())
-        .filter(|dir| prunr_core::ort_runtime::removal_mark(dir).is_some_and(|mark| mark.is_file()))
+        .filter(|dir| prunr_core::ort_runtime::marked_to_go(dir))
         .collect()
 }
 

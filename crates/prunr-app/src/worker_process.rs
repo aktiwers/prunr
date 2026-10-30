@@ -926,7 +926,7 @@ pub fn run_worker() -> ! {
                             sd_req.as_ref().is_some_and(|r| r.tuning.cpu_only), &progress,
                         ).map_err(|e| e.message())?;
                         progress.step(prunr_core::Step::Blending);
-                        let band = band.as_deref().map_or(prunr_core::inpaint_blend::Band::Uniform(feather_px), prunr_core::inpaint_blend::Band::PerPixel);
+                        let band = prunr_core::inpaint_blend::Band::of(band.as_deref(), feather_px);
                         Ok((prunr_core::inpaint_blend::finalize_inpaint(
                             filled.rgba, &image, &mask, band, sharpen, edge_colour,
                         ), filled.scale))

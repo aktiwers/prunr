@@ -271,11 +271,7 @@ fn disk_usage_in(dir: &std::path::Path) -> u64 {
 }
 
 fn update_bit(runtime: RuntimeId) -> u8 {
-    match runtime {
-        RuntimeId::OpenVino => 1,
-        RuntimeId::Cuda => 2,
-        RuntimeId::MiGraphX => 4,
-    }
+    1 << runtime as u8
 }
 
 fn registry_bits() -> u128 {

@@ -580,11 +580,12 @@ impl BatchManager {
             item.selection_tex_pending = None;
             return;
         };
+        let Some(mask) = item.selection_mask.clone() else { return };
+        let style = style.for_plane(&mask);
         let key = (hash, style);
         if item.current_selection_texture(style).is_some() || item.selection_tex_pending == Some(key) {
             return;
         }
-        let Some(mask) = item.selection_mask.clone() else { return };
         item.selection_tex_pending = Some(key);
         // A patch applies only to a texture of the same style.
         let base = item.selection_texture.as_ref()

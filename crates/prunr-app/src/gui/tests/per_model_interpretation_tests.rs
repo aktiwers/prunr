@@ -321,7 +321,7 @@ fn a_brushs_sliders_reach_only_its_own_strokes() {
     use crate::gui::brush_state::{StrokeDrawn, StrokeReach, Tool};
     use crate::gui::selection_queue::SelectionMade;
     let depth_pick = |app: &mut PrunrApp| {
-        let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
+        let depth = depth_ramp();
         land(app, 9, StrokeDrawn::Depth { around: depth.at(0.9, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
     };
     let feathers = |app: &PrunrApp| -> Vec<(Tool, f32)> {
@@ -335,8 +335,7 @@ fn a_brushs_sliders_reach_only_its_own_strokes() {
     };
 
     let mut app = app_for_strokes();
-    // A photo for Feather to soften against.
-    app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]))));
+    give_photo(&mut app);
     paint_down(&mut app, 4.0, 8.0);
     paint_down(&mut app, 12.0, 8.0);
     depth_pick(&mut app);
@@ -373,6 +372,16 @@ fn app_for_strokes() -> PrunrApp {
     item.dimensions = (32, 32);
     super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
     app
+}
+
+/// A 32 × 32 depth map that deepens left to right.
+fn depth_ramp() -> std::sync::Arc<prunr_core::depth::DepthMap> {
+    std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()))
+}
+
+/// Image 9 gets a plain 32 × 32 photo, for Feather to soften against.
+fn give_photo(app: &mut PrunrApp) {
+    app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]))));
 }
 
 /// A Paint Brush stroke down column `x` at Size `size` on image 9,
@@ -502,7 +511,7 @@ fn a_slider_moves_only_its_own_strokes() {
     use crate::gui::selection_queue::SelectionMade;
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
-    let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(32, 32, (0..1024).map(|i| (i % 32) as f32 / 31.0).collect()));
+    let depth = depth_ramp();
     land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
     app.settings.brush.magic_depth_range = 0.05;
     adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
@@ -601,7 +610,7 @@ fn feather_softens_only_the_strokes_its_reach_takes() {
     use crate::gui::brush_state::{StrokeDrawn, StrokeReach};
     use crate::gui::selection_queue::SelectionMade;
     let mut app = app_for_strokes();
-    app.batch.items[0].source_rgba = Some(std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]))));
+    give_photo(&mut app);
     paint_down(&mut app, 8.0, 8.0);
     paint_down(&mut app, 24.0, 8.0);
     let left = |app: &PrunrApp| -> Vec<i8> {

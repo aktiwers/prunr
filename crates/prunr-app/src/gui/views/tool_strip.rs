@@ -4,7 +4,7 @@
 
 use egui::{Align2, Id, Order, Rect, RichText, Ui};
 
-use crate::gui::brush_state::{BrushSettings, StrokeReach, Tool, BRUSH_RADIUS_RANGE, EXPAND_RANGE, FEATHER_RANGE, FILL_FEATHER_RANGE};
+use crate::gui::brush_state::{BrushSettings, StrokeReach, Tool, BRUSH_RADIUS_RANGE, EXPAND_RANGE, FEATHER_RANGE, FILL_FEATHER_RANGE, UNIT_RANGE};
 use crate::gui::knob_catalog::{shows, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::theme;
@@ -60,18 +60,28 @@ enum Cell {
     Reading,
 }
 
+const SIZE: &str = "Size";
+const HARDNESS: &str = "Hardness";
+const OPACITY: &str = "Opacity";
+const FEATHER: &str = "Feather";
+const EXPAND: &str = "Expand region";
+
 impl Cell {
     /// The names a slider cell shows, which its column's names line up to.
     fn names(self) -> &'static [&'static str] {
         match self {
-            Cell::Size => &["Size"],
-            Cell::Hardness => &["Hardness"],
-            Cell::Opacity => &["Opacity"],
-            Cell::SelectionFeather | Cell::FillFeather => &["Feather"],
-            Cell::Expand => &["Expand region"],
-            Cell::Reading => &["Confidence", "Range"],
-            _ => &[],
+            Cell::Size => &[SIZE],
+            Cell::Hardness => &[HARDNESS],
+            Cell::Opacity => &[OPACITY],
+            Cell::SelectionFeather | Cell::FillFeather => &[FEATHER],
+            Cell::Expand => &[EXPAND],
+            Cell::Reading => &[magic_brush_chip::CONFIDENCE, magic_brush_chip::RANGE],
+            Cell::Empty | Cell::Mode | Cell::Reach | Cell::Shape | Cell::Reset | Cell::Pick => &[],
         }
+    }
+
+    fn is_slider(self) -> bool {
+        !self.names().is_empty()
     }
 }
 
@@ -85,13 +95,12 @@ struct Grid {
     narrow: Option<Narrow>,
 }
 
-/// A grid's three-row form: `columns` in place of its own, and `below`
-/// on a third row from the strip's left edge. `drops`: the grid column
-/// it no longer has, whose width it saves.
+/// A grid's three-row form: `columns` in place of its own, which drop
+/// its last column, and `below` on a third row from the strip's left
+/// edge.
 struct Narrow {
     columns: &'static [[Cell; 2]],
-    below: &'static [Cell],
-    drops: usize,
+    below: Cell,
 }
 
 const PAINT_SELECTING: Grid = Grid {
@@ -120,7 +129,7 @@ const MAGIC_ERASING: Grid = Grid {
     columns: &[[Cell::Mode, Cell::Reach], [Cell::Reading, Cell::Empty], [Cell::Expand, Cell::FillFeather]],
     end: [Cell::Pick, Cell::Reset],
     // Feather takes the room under Confidence; Expand region goes below.
-    narrow: Some(Narrow { columns: &[[Cell::Mode, Cell::Reach], [Cell::Reading, Cell::FillFeather]], below: &[Cell::Expand], drops: 2 }),
+    narrow: Some(Narrow { columns: &[[Cell::Mode, Cell::Reach], [Cell::Reading, Cell::FillFeather]], below: Cell::Expand }),
 };
 
 /// The brush's grid on `model`: strokes shape a selection, or an
@@ -166,7 +175,7 @@ struct Plan {
 /// that leaves room for it.
 fn plan(fit: Option<Fit>, room: f32, grid: &Grid) -> Plan {
     let Some(fit) = fit else { return Plan { title: true, third_row: false, slider: SLIDER_WIDTH } };
-    let sliders = grid.columns.iter().filter(|c| c.iter().any(|cell| !cell.names().is_empty())).count().max(1) as f32;
+    let sliders = grid.columns.iter().filter(|c| c.iter().any(|cell| cell.is_slider())).count().max(1) as f32;
     let fixed = fit.core - sliders * fit.at;
     // Whole pixels: a fraction measures back a hair off and never settles.
     let slider_for = |title: f32| ((room - title - fixed) / sliders).floor().clamp(SLIDER_WIDTH_MIN, SLIDER_WIDTH);
@@ -235,13 +244,12 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                         }).inner;
                         if let Some(narrow) = narrow {
                             ui.horizontal(|ui| {
-                                for c in narrow.below {
-                                    let width = names_width(ui, [*c, Cell::Empty]);
-                                    row_cell(ui, |ui| cell(ui, *c, width, &mut knobs));
-                                }
+                                let width = names_width(ui, [narrow.below, Cell::Empty]);
+                                spanning(ui, ROW_HEIGHT, |ui| cell(ui, narrow.below, width, &mut knobs));
                             });
                         }
-                        grid.narrow.as_ref().map_or(0.0, |n| lefts[n.drops + 1] - lefts[n.drops])
+                        let last = grid.columns.len() - 1;
+                        lefts[last + 1] - lefts[last]
                     }).inner;
                     rule(ui, height);
                     cells(ui, grid.end, &mut knobs);
@@ -259,7 +267,9 @@ pub(crate) fn render(ui: &mut Ui, canvas_rect: Rect, tool: Tool, brush: &mut Bru
                 (true, None) => return,
                 (false, _) => Fit { core, at: plan.slider, title, spill: spill_width, core3: fit.map_or(0.0, |f| f.core3) },
             };
-            ui.ctx().data_mut(|d| d.insert_temp(fit_id, measured));
+            if fit != Some(measured) {
+                ui.ctx().data_mut(|d| d.insert_temp(fit_id, measured));
+            }
         });
     let mut change = knobs.change;
     change.action_changed = knobs.brush.cutout_action != action_before;
@@ -293,21 +303,13 @@ fn cells(ui: &mut Ui, column: [Cell; 2], knobs: &mut Knobs) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = ROW_GAP;
         for c in column {
-            row_cell(ui, |ui| cell(ui, c, name_width, knobs));
+            spanning(ui, ROW_HEIGHT, |ui| cell(ui, c, name_width, knobs));
         }
     });
 }
 
 fn names_width(ui: &Ui, column: [Cell; 2]) -> f32 {
     chip::names_width(ui, ("strip", column), || column.iter().flat_map(|c| c.names().iter().copied()).collect())
-}
-
-/// One cell of a row: as tall as the row, its content centred in it.
-fn row_cell(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_height(ROW_HEIGHT);
-        add(ui);
-    });
 }
 
 fn cell(ui: &mut Ui, cell: Cell, name_width: f32, knobs: &mut Knobs) {
@@ -328,20 +330,20 @@ fn cell(ui: &mut Ui, cell: Cell, name_width: f32, knobs: &mut Knobs) {
             }
             false
         }
-        Cell::Size => chip::slider_cell_f32(ui, "Size", name_width, &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit,
-        Cell::Hardness => chip::slider_cell_f32(ui, "Hardness", name_width, &mut s.hardness, 0.0..=1.0, false, fmt::percent_tenths).commit,
-        Cell::Opacity => chip::slider_cell_f32(ui, "Opacity", name_width, &mut s.strength, 0.0..=1.0, false, fmt::percent).commit,
+        Cell::Size => chip::slider_cell_f32(ui, SIZE, name_width, &mut s.radius, BRUSH_RADIUS_RANGE, true, |v| fmt::px(v, 0)).commit,
+        Cell::Hardness => chip::slider_cell_f32(ui, HARDNESS, name_width, &mut s.hardness, UNIT_RANGE, false, fmt::percent_tenths).commit,
+        Cell::Opacity => chip::slider_cell_f32(ui, OPACITY, name_width, &mut s.strength, UNIT_RANGE, false, fmt::percent).commit,
         Cell::SelectionFeather => {
-            chip::slider_cell_f32(ui, "Feather", name_width, &mut s.edge_feather, FEATHER_RANGE, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
+            chip::slider_cell_f32(ui, FEATHER, name_width, &mut s.edge_feather, FEATHER_RANGE, false, |v| fmt::off_or(v, 0.1, |v| fmt::px(v, 0))).commit
         }
         // An eraser stroke keeps its region and band in whole pixels.
         Cell::Expand => {
-            let change = chip::slider_cell_f32(ui, "Expand region", name_width, &mut s.inpaint_grow, EXPAND_RANGE, false, |v| fmt::signed_px(v, 0));
+            let change = chip::slider_cell_f32(ui, EXPAND, name_width, &mut s.inpaint_grow, EXPAND_RANGE, false, |v| fmt::signed_px(v, 0));
             s.inpaint_grow = s.inpaint_grow.round();
             change.commit
         }
         Cell::FillFeather => {
-            let change = chip::slider_cell_f32(ui, "Feather", name_width, &mut s.inpaint_feather, FILL_FEATHER_RANGE, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)));
+            let change = chip::slider_cell_f32(ui, FEATHER, name_width, &mut s.inpaint_feather, FILL_FEATHER_RANGE, false, |v| fmt::off_or(v, 0.5, |v| fmt::px(v, 0)));
             s.inpaint_feather = s.inpaint_feather.round();
             change.commit
         }
@@ -412,7 +414,7 @@ mod tests {
         for model in SettingsModel::ALL.into_iter().filter(|&m| shows(m, Surface::Brushes)) {
             for tool in [Tool::Paint, Tool::Magic] {
                 let g = grid(tool, model);
-                let narrow = g.narrow.iter().flat_map(|n| n.columns.iter().flatten().chain(n.below));
+                let narrow = g.narrow.iter().flat_map(|n| n.columns.iter().flatten().chain(std::iter::once(&n.below)));
                 for &cell in g.columns.iter().flatten().chain(&g.end).chain(narrow) {
                     for depth in [false, true] {
                         let Some(slide) = slider(cell, depth) else { continue };

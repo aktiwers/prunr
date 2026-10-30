@@ -829,9 +829,9 @@ fn run_one_tile(
     }
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
-    let soft = (req.soft_edge_px >= 1.0).then(|| match band {
-        Some(band) => edge_ramp(&padded_mask, Band::PerPixel(&crate::formats::pad_mirrored(band, pw, ph))),
-        None => edge_ramp(&padded_mask, Band::Uniform(req.soft_edge_px)),
+    let soft = (req.soft_edge_px >= 1.0).then(|| {
+        let padded_band = band.map(|band| crate::formats::pad_mirrored(band, pw, ph));
+        edge_ramp(&padded_mask, Band::of(padded_band.as_deref(), req.soft_edge_px))
     });
     let (text_emb_cond_f16, text_emb_uncond_f16, masked_latent, mask_latent, photo_latent) =
         std::thread::scope(|s| -> Result<_, CoreError> {
