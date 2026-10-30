@@ -506,13 +506,26 @@ struct LensFocus {
 
 impl LensFocus {
     fn is_for(&self, depth: &Arc<prunr_core::depth::DepthMap>, result: Option<&Arc<image::RgbaImage>>) -> bool {
-        let same_result = match (&self.result, result) {
-            (None, None) => true,
-            (Some(w), Some(r)) => std::sync::Weak::ptr_eq(w, &Arc::downgrade(r)),
-            _ => false,
-        };
-        same_result && std::sync::Weak::ptr_eq(&self.depth, &Arc::downgrade(depth))
+        same_result(self.result.as_ref(), result) && std::sync::Weak::ptr_eq(&self.depth, &Arc::downgrade(depth))
     }
+}
+
+/// Whether `seen` is `now`, by allocation: a `Weak` pins it, so a new
+/// result can never pass for the old one by address.
+fn same_result(seen: Option<&std::sync::Weak<image::RgbaImage>>, now: Option<&Arc<image::RgbaImage>>) -> bool {
+    match (seen, now) {
+        (None, None) => true,
+        (Some(w), Some(r)) => std::sync::Weak::ptr_eq(w, &Arc::downgrade(r)),
+        _ => false,
+    }
+}
+
+/// Which cut-out a backdrop made of it is for: the result it last saw,
+/// and a count that moves each time the result is another one.
+#[derive(Default)]
+struct BackdropCut {
+    result: Option<std::sync::Weak<image::RgbaImage>>,
+    version: u64,
 }
 
 /// How much of the pipeline a Process run needs on an image.
@@ -977,10 +990,11 @@ pub(crate) struct BatchItem {
     /// next frame doesn't start the same one again.
     pub(crate) backdrop_tex_pending: Option<u64>,
     /// Where a lens-blur backdrop focuses, measured once per depth map
-    /// and result: a preview tick that leaves the subject where it was
-    /// keeps the backdrop it has. Weak handles pin the allocations, so a
-    /// new result can never pass for the old one by address.
+    /// and result. Weak handles pin the allocations, so a new result can
+    /// never pass for the old one by address.
     lens_focus: Option<LensFocus>,
+    /// The cut-out Blurred photo and Lens blur fill the subject from.
+    backdrop_cut: BackdropCut,
 
     /// Shared selection mask (Paint and Magic Brush), a signed i8 plane at
     /// source resolution. Survives Process; an erase that lands clears it, as
@@ -2875,6 +2889,7 @@ impl BatchItem {
             bg_image: None,
             backdrop_texture: None,
             lens_focus: None,
+            backdrop_cut: BackdropCut::default(),
             backdrop_tex_pending: None,
             selection_mask: None,
             selection_hash: None,
@@ -2966,14 +2981,19 @@ impl BatchItem {
             (Backdrop::Effect(_), Some(Pixels::Parked(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
             _ => key,
         };
-        // A lens blur is made with the depth map, focused on the result's subject.
+        // A lens blur is made with the depth map, focused on the result's
+        // subject; a blur fills the subject from the background first.
         Some(match backdrop {
             // Clamped, the far edge would bleed into the near one.
             _ if self.backdrop_repeats() => key ^ TILED_BACKDROP,
-            Backdrop::Effect(effect) if effect.needs_depth() => {
-                let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
-                let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
-                key ^ depth.rotate_left(29) ^ focus.rotate_left(43)
+            Backdrop::Effect(effect) => {
+                let lens = effect.needs_depth().then(|| {
+                    let depth = self.depth.as_ref().map_or(0, |d| Arc::as_ptr(d) as u64);
+                    let focus = self.lens_focus.as_ref().map_or(0, |f| u64::from(f.value.to_bits()));
+                    depth.rotate_left(29) ^ focus.rotate_left(43)
+                });
+                let cut = effect.takes_cutout().then(|| self.backdrop_cut.version.rotate_left(53));
+                key ^ lens.unwrap_or(0) ^ cut.unwrap_or(0)
             }
             _ => key,
         })
@@ -2982,6 +3002,17 @@ impl BatchItem {
     /// The backdrop is a picture repeated across the frame.
     pub(crate) fn backdrop_repeats(&self) -> bool {
         self.settings.backdrop().fit(self.settings.bg_image_fit) == prunr_core::BgImageFit::Tile
+    }
+
+    /// Note a result other than the one the backdrop's cut-out was, so
+    /// Blurred photo and Lens blur are made again.
+    pub(crate) fn refresh_backdrop_cut(&mut self) {
+        if !same_result(self.backdrop_cut.result.as_ref(), self.result_rgba.as_ref()) {
+            self.backdrop_cut = BackdropCut {
+                result: self.result_rgba.as_ref().map(Arc::downgrade),
+                version: self.backdrop_cut.version + 1,
+            };
+        }
     }
 
     /// Measure the lens-blur focus again when the depth map or the result
@@ -3714,11 +3745,11 @@ mod tests {
         assert_eq!(item.selection_texture.as_ref().map(|t| t.key), Some((7, style)), "and installed");
     }
 
-    /// A lens-blur backdrop keys on where it focuses: a new result with
-    /// the subject where it was keeps the key, one with the subject at
-    /// another depth changes it, and the cache holds no result alive.
+    /// A lens-blur backdrop keys on where it focuses and on the cut-out
+    /// its subject is filled from: the same result keeps the key, a new
+    /// one changes it, and the cache holds no result alive.
     #[test]
-    fn a_lens_backdrop_keys_on_its_focus_not_the_result_handle() {
+    fn a_lens_backdrop_keys_on_its_focus_and_its_cut_out() {
         use prunr_core::depth::DepthMap;
         let mut item = fixture_item(1);
         item.settings.bg_effect = prunr_core::BgEffect::LensBlur { amount_pct: 50 };
@@ -3730,17 +3761,43 @@ mod tests {
             }
             Arc::new(img)
         };
+        let refresh = |item: &mut BatchItem| {
+            item.refresh_lens_focus();
+            item.refresh_backdrop_cut();
+        };
         item.result_rgba = Some(cutout([255, 0]));
-        item.refresh_lens_focus();
+        refresh(&mut item);
         let near = item.backdrop_key();
+        refresh(&mut item);
+        assert_eq!(item.backdrop_key(), near, "the same result keeps the key");
         item.result_rgba = Some(cutout([255, 0]));
-        item.refresh_lens_focus();
-        assert_eq!(item.backdrop_key(), near, "a new result with the subject where it was keeps the key");
+        refresh(&mut item);
+        let again = item.backdrop_key();
+        assert_ne!(again, near, "a new cut-out fills the subject anew");
         let weak = item.result_rgba.as_ref().map(Arc::downgrade).expect("a result");
         item.result_rgba = Some(cutout([0, 255]));
         assert!(weak.upgrade().is_none(), "the cache does not keep the old result alive");
-        item.refresh_lens_focus();
-        assert_ne!(item.backdrop_key(), near, "the subject at another depth is another focus");
+        refresh(&mut item);
+        assert_ne!(item.backdrop_key(), again, "the subject at another depth is another focus");
+    }
+
+    /// Blurred photo is made again for each cut-out; Black & white photo
+    /// does not use it and keeps its backdrop.
+    #[test]
+    fn only_a_blurred_backdrop_follows_the_cut_out() {
+        for (effect, follows) in [
+            (prunr_core::BgEffect::BlurredSource { radius: 12 }, true),
+            (prunr_core::BgEffect::DesaturatedSource, false),
+        ] {
+            let mut item = fixture_item(1);
+            item.settings.bg_effect = effect;
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+            item.refresh_backdrop_cut();
+            let before = item.backdrop_key();
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+            item.refresh_backdrop_cut();
+            assert_eq!(item.backdrop_key() != before, follows, "{effect:?}");
+        }
     }
 
     /// The lens backdrop's focus is measured with the faces the depth map

@@ -505,7 +505,7 @@ fn edge_fade(inside: &[f32], bbox: Bbox, img_w: usize, band: Band) -> Vec<f32> {
 /// known samples: halve with weights summed until one cell is left, then
 /// come back up, keeping each known value and taking the coarser level's
 /// (bilinear) everywhere else.
-fn push_pull(value: &[f32], weight: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn push_pull(value: &[f32], weight: &[f32], w: usize, h: usize) -> Vec<f32> {
     // Each level: (w, h, weighted sum, weight).
     let mut levels = vec![(w, h, value.iter().zip(weight).map(|(v, k)| v * k).collect::<Vec<f32>>(), weight.to_vec())];
     while let Some((lw, lh, sum, wt)) = levels.last().filter(|(lw, lh, ..)| *lw > 1 || *lh > 1) {
