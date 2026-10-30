@@ -165,6 +165,74 @@ fn sd_step_previews() {
     }
 }
 
+/// The soft edge on the real model follows each part's own band: two
+/// holes far apart, one with a 4 px band and one with 24 px, fill as each
+/// does with that band for the whole region, and one band for every pixel
+/// fills as that band does. Ignored by default (five runs on one kept
+/// session); the model is picked as for `sd_bench`, and
+/// `PRUNR_SD_PREVIEW_OUT=dir` saves the fills.
+#[test]
+#[ignore]
+fn sd_soft_edge_follows_each_parts_band() {
+    let _ = tracing_subscriber::fmt::try_init();
+    if skip_if_no_ort("sd_soft_edge") { return; }
+    let (id, steps, guidance, scheduler) = bench_model();
+    if skip_if_model_missing("sd_soft_edge", id) { return; }
+    let (w, h) = (1500u32, 700u32);
+    let image = RgbaImage::from_fn(w, h, |x, y| {
+        let stripe = if (x / 40 + y / 40) % 2 == 0 { 40 } else { 0 };
+        Rgba([(60 + x / 9) as u8, (90 + y / 8) as u8 + stripe, 120, 255])
+    });
+    let (left, right) = ((100u32, 260u32, 160u32, 180u32), (1200u32, 260u32, 160u32, 180u32));
+    let mut mask = rect_mask(w, h, left.0, left.1, left.2, left.3);
+    let r = rect_mask(w, h, right.0, right.1, right.2, right.3);
+    mask.pixels_mut().zip(r.pixels()).for_each(|(m, r)| m.0[0] = m.0[0].max(r.0[0]));
+    let req = SdInpaintRequest {
+        prompt: "clean background".to_string(),
+        num_inference_steps: steps,
+        guidance_scale: guidance,
+        scheduler,
+        seed: Some(42),
+        fill_scale: prunr_core::inpaint::FillScale::Full,
+        tuning: inpaint_sd::plan_tuning(true, inpaint_sd::SD_DEFAULT_MARGIN_MB).with_env_overrides(),
+        ..Default::default()
+    };
+    let fill = |soft_edge_px: f32, band: Option<GrayImage>| {
+        let req = SdInpaintRequest { soft_edge_px, soft_edge_band: band.map(std::sync::Arc::new), ..req.clone() };
+        inpaint_sd::process_inpaint_with(&image, &mask, id, req, &prunr_core::Progress::none()).map(|f| f.rgba)
+    };
+    let Some(narrow) = fill_or_skip("sd_soft_edge", fill(4.0, None)) else { return; };
+    let wide = fill(24.0, None).expect("a 24 px band");
+    let wide_again = fill(24.0, None).expect("a 24 px band again");
+    let mixed = fill(24.0, Some(GrayImage::from_fn(w, h, |x, _| image::Luma([if x < w / 2 { 4 } else { 24 }])))).expect("a band per part");
+    let same = fill(24.0, Some(GrayImage::from_pixel(w, h, image::Luma([24])))).expect("one band per pixel");
+    if let Ok(dir) = std::env::var("PRUNR_SD_PREVIEW_OUT") {
+        for (name, img) in [("narrow", &narrow), ("wide", &wide), ("mixed", &mixed), ("same", &same)] {
+            img.save(format!("{dir}/{id:?}_soft_{name}.png")).expect("save a fill");
+        }
+    }
+    // The mean colour difference over a hole and the band around it.
+    let apart = |a: &RgbaImage, b: &RgbaImage, (x0, y0, rw, rh): (u32, u32, u32, u32)| {
+        let pad = 40;
+        let (x0, y0) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
+        let (x1, y1) = ((x0 + rw + 2 * pad).min(w), (y0 + rh + 2 * pad).min(h));
+        let sum: u64 = (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .map(|(x, y)| (0..3).map(|c| a.get_pixel(x, y)[c].abs_diff(b.get_pixel(x, y)[c]) as u64).sum::<u64>())
+            .sum();
+        sum as f64 / ((x1 - x0) * (y1 - y0) * 3) as f64
+    };
+    // A card may differ run to run; that difference is the floor.
+    let noise = apart(&wide, &wide_again, left).max(apart(&wide, &wide_again, right));
+    let (own_left, own_right) = (apart(&mixed, &narrow, left), apart(&mixed, &wide, right));
+    let (other_left, other_right) = (apart(&mixed, &wide, left), apart(&mixed, &narrow, right));
+    let same_vs_wide = apart(&same, &wide, left).max(apart(&same, &wide, right));
+    eprintln!("[sd_soft_edge] {id:?} mean difference: run to run {noise:.3}; each part against its own band {own_left:.3} / {own_right:.3}, against the other band {other_left:.3} / {other_right:.3}; one band per pixel against one band {same_vs_wide:.3}");
+    let floor = noise.max(0.01) * 2.0;
+    assert!(other_left > floor && other_right > floor, "the band changes the fill, or the test shows nothing");
+    assert!(own_left <= floor && own_right <= floor, "each part fills as its own band does");
+    assert!(same_vs_wide <= floor, "one band per pixel fills as one band");
+}
+
 /// Timing run for scripts/sd_bench.sh: the shape of a real erase (a
 /// 328×607 painted region inside a larger photo, so it tiles today),
 /// guided, 20 steps, fixed seed. Ignored by default; prints the stage
