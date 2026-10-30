@@ -105,7 +105,7 @@ fn params(ui: &mut Ui, style: &mut SubjectEffect, quick: bool) -> bool {
             changed
         }
         SubjectEffect::Pixelate { block_size } => chip::slider_row(ui, "Block size (px)", block_size, 2..=64).changed,
-        SubjectEffect::Halftone { dot_spacing } => chip::slider_row(ui, "Dot spacing (px)", dot_spacing, 2..=32).changed,
+        SubjectEffect::Halftone { dot_spacing } => chip::slider_row(ui, "Dot spacing (px)", dot_spacing, SubjectEffect::DOT_SPACING_PX).changed,
         _ if quick => false,
         SubjectEffect::Duotone { dark: shadows, light: highlights }
         | SubjectEffect::CrossProcess { shadow: shadows, highlight: highlights } => {

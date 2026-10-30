@@ -17,6 +17,8 @@ const BAND_ROWS: usize = 64;
 /// The smallest regularization the filter takes; the app's is 1e-4.
 const MIN_EPSILON: f32 = 1e-6;
 
+const INV_255: f32 = 1.0 / 255.0;
+
 /// Refine an alpha mask using a guided filter.
 pub fn guided_filter_alpha(
     guide: &RgbaImage,
@@ -26,15 +28,15 @@ pub fn guided_filter_alpha(
 ) -> GrayImage {
     let (w, h) = (mask.width(), mask.height());
     let n = (w * h) as usize;
-    // A zero (or NaN) epsilon divides zero by zero on a flat region.
-    let epsilon = if epsilon >= MIN_EPSILON { epsilon } else { MIN_EPSILON };
+    // A zero (or NaN, which `max` passes over) epsilon divides zero by
+    // zero on a flat region.
+    let epsilon = epsilon.max(MIN_EPSILON);
 
     let mut guide_f = vec![0.0f32; n];
     let mut mask_f = vec![0.0f32; n];
     let mut ii = vec![0.0f32; n]; // I*I
     let mut ip = vec![0.0f32; n]; // I*p
 
-    const INV_255: f32 = 1.0 / 255.0;
     const REC601_R: f32 = 0.299;
     const REC601_G: f32 = 0.587;
     const REC601_B: f32 = 0.114;
@@ -111,20 +113,17 @@ pub fn guided_filter_alpha(
     out
 }
 
-/// Rows per band of `guided_filter_alpha_colour`.
+/// Rows per band of `guided_filter_alpha_colour`: the planes held at
+/// once are a band's, not the photo's.
 const COLOUR_BAND_ROWS: usize = 128;
 
 /// `guided_filter_alpha` following the photo's colour, not only its
 /// brightness (He et al.'s colour guide: a 3 × 3 covariance per pixel), so
 /// an edge between two colours of the same brightness is kept too.
 ///
-/// Worked a band of `COLOUR_BAND_ROWS` rows at a time, each with its
-/// windows' margin, so the planes held at once are a band's, not the
-/// photo's.
-///
-/// Peak working set besides the output mask (w·h bytes): about 22 f32
-/// planes of w × (`COLOUR_BAND_ROWS` + 4·radius) rows: 84 MB for a 6000 px
-/// wide photo at radius 8.
+/// Peak working set besides the output mask (w·h bytes): 19 f32 planes
+/// of w × (`COLOUR_BAND_ROWS` + 4·radius) rows: 73 MB for a 6000 px wide
+/// photo at radius 8.
 pub fn guided_filter_alpha_colour(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsilon: f32) -> GrayImage {
     colour_guided_in_bands(guide, mask, radius, epsilon, COLOUR_BAND_ROWS)
 }
@@ -136,7 +135,7 @@ fn colour_guided_in_bands(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsi
         return out;
     }
     let r = radius as usize;
-    let epsilon = f64::from(if epsilon >= MIN_EPSILON { epsilon } else { MIN_EPSILON });
+    let epsilon = f64::from(epsilon.max(MIN_EPSILON));
     let band_rows = band_rows.max(1);
     for y0 in (0..h).step_by(band_rows) {
         let y1 = (y0 + band_rows).min(h);
@@ -154,7 +153,6 @@ fn colour_guided_in_bands(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsi
 /// image: exact for every row at least 2·radius inside them, and at the
 /// image's own top and bottom.
 fn colour_band(guide: &RgbaImage, mask: &GrayImage, rows: std::ops::Range<usize>, radius: u32, epsilon: f64) -> Vec<u8> {
-    const INV_255: f32 = 1.0 / 255.0;
     let w = mask.width() as usize;
     let (bw, bh) = (mask.width(), rows.len() as u32);
     let n = w * rows.len();
@@ -162,28 +160,31 @@ fn colour_band(guide: &RgbaImage, mask: &GrayImage, rows: std::ops::Range<usize>
     let channel = |c: usize| -> Vec<f32> { pixels.par_chunks_exact(4).map(|p| f32::from(p[c]) * INV_255).collect() };
     let (gr, gg, gb) = (channel(0), channel(1), channel(2));
     let p: Vec<f32> = mask.as_raw()[rows.start * w..rows.end * w].par_iter().map(|&v| f32::from(v) * INV_255).collect();
-    let mut scratch = vec![0.0f32; n];
-    let mut mean = |x: &[f32], y: Option<&[f32]>| -> Vec<f32> {
-        let mut out = vec![0.0f32; n];
-        match y {
-            None => box_filter_into(x, bw, bh, radius, &mut out),
+    let (mut product, mut row_sums) = (vec![0.0f32; n], Vec::new());
+    // The mean of x, or of x·y, into `out`.
+    let mut mean = |x: &[f32], y: Option<&[f32]>, mut out: Vec<f32>| -> Vec<f32> {
+        let src = match y {
+            None => x,
             Some(y) => {
-                scratch.par_iter_mut().zip(x.par_iter().zip(y)).for_each(|(s, (a, b))| *s = a * b);
-                box_filter_into(&scratch, bw, bh, radius, &mut out);
+                product.par_iter_mut().zip(x.par_iter().zip(y)).for_each(|(s, (a, b))| *s = a * b);
+                &product
             }
-        }
+        };
+        box_filter_with(src, bw, bh, radius, &mut out, &mut row_sums);
         out
     };
-    let (mr, mg, mb, mp) = (mean(&gr, None), mean(&gg, None), mean(&gb, None), mean(&p, None));
-    let (mrp, mgp, mbp) = (mean(&gr, Some(&p)), mean(&gg, Some(&p)), mean(&gb, Some(&p)));
-    let (mrr, mrg, mrb) = (mean(&gr, Some(&gr)), mean(&gr, Some(&gg)), mean(&gr, Some(&gb)));
-    let (mgg, mgb, mbb) = (mean(&gg, Some(&gg)), mean(&gg, Some(&gb)), mean(&gb, Some(&gb)));
+    let plane = || vec![0.0f32; n];
+    let (mr, mg, mb, mut mp) = (mean(&gr, None, plane()), mean(&gg, None, plane()), mean(&gb, None, plane()), mean(&p, None, plane()));
+    let (mut mrp, mut mgp, mut mbp) = (mean(&gr, Some(&p), plane()), mean(&gg, Some(&p), plane()), mean(&gb, Some(&p), plane()));
     drop(p);
+    let (mrr, mrg, mrb) = (mean(&gr, Some(&gr), plane()), mean(&gr, Some(&gg), plane()), mean(&gr, Some(&gb), plane()));
+    let (mgg, mgb, mbb) = (mean(&gg, Some(&gg), plane()), mean(&gg, Some(&gb), plane()), mean(&gb, Some(&gb), plane()));
     // a = (Σ + εI)⁻¹ · cov(I, p), b = mean(p) − a · mean(I); in f64, as the
-    // cofactors subtract near-equal products on flat regions.
-    let coefficients: Vec<[f32; 4]> = (0..n).into_par_iter().map(|i| {
-        let (r, g, b, q) = (f64::from(mr[i]), f64::from(mg[i]), f64::from(mb[i]), f64::from(mp[i]));
-        let cov = [f64::from(mrp[i]) - r * q, f64::from(mgp[i]) - g * q, f64::from(mbp[i]) - b * q];
+    // cofactors subtract near-equal products on flat regions. Each pixel's
+    // a and b replace its mean(I·p) and mean(p), read just before.
+    mrp.par_iter_mut().zip(mgp.par_iter_mut()).zip(mbp.par_iter_mut()).zip(mp.par_iter_mut()).enumerate().for_each(|(i, (((ar, ag), ab), bq))| {
+        let (r, g, b, q) = (f64::from(mr[i]), f64::from(mg[i]), f64::from(mb[i]), f64::from(*bq));
+        let cov = [f64::from(*ar) - r * q, f64::from(*ag) - g * q, f64::from(*ab) - b * q];
         // f32 rounding on flat regions can take a variance below zero.
         let s11 = (f64::from(mrr[i]) - r * r).max(0.0) + epsilon;
         let s22 = (f64::from(mgg[i]) - g * g).max(0.0) + epsilon;
@@ -193,20 +194,20 @@ fn colour_band(guide: &RgbaImage, mask: &GrayImage, rows: std::ops::Range<usize>
         let (c22, c23, c33) = (s11 * s33 - s13 * s13, s13 * s12 - s11 * s23, s11 * s22 - s12 * s12);
         let det = s11 * c11 + s12 * c12 + s13 * c13;
         if det <= 0.0 {
-            return [0.0, 0.0, 0.0, q as f32];
+            (*ar, *ag, *ab) = (0.0, 0.0, 0.0);
+            return;
         }
         let a = [
             (c11 * cov[0] + c12 * cov[1] + c13 * cov[2]) / det,
             (c12 * cov[0] + c22 * cov[1] + c23 * cov[2]) / det,
             (c13 * cov[0] + c23 * cov[1] + c33 * cov[2]) / det,
         ];
-        [a[0] as f32, a[1] as f32, a[2] as f32, (q - a[0] * r - a[1] * g - a[2] * b) as f32]
-    }).collect();
-    drop((mr, mg, mb, mp, mrp, mgp, mbp, mrr, mrg, mrb, mgg, mgb, mbb));
-    let part = |k: usize| -> Vec<f32> { coefficients.par_iter().map(|c| c[k]).collect() };
-    let (ar, ag, ab, bb) = (part(0), part(1), part(2), part(3));
-    drop(coefficients);
-    let (ar, ag, ab, bb) = (mean(&ar, None), mean(&ag, None), mean(&ab, None), mean(&bb, None));
+        (*ar, *ag, *ab) = (a[0] as f32, a[1] as f32, a[2] as f32);
+        *bq = (q - a[0] * r - a[1] * g - a[2] * b) as f32;
+    });
+    drop((mrg, mrb, mgg, mgb, mbb));
+    let (ar, ag, ab, bb) = (mean(&mrp, None, mr), mean(&mgp, None, mg), mean(&mbp, None, mb), mean(&mp, None, mrr));
+    drop((mrp, mgp, mbp, mp));
     (0..n).into_par_iter().map(|i| {
         let q = ar[i] * gr[i] + ag[i] * gg[i] + ab[i] * gb[i] + bb[i];
         crate::math::round_u8(q.clamp(0.0, 1.0) * 255.0)
@@ -241,14 +242,20 @@ pub(crate) fn box_blur3_into(buf: &mut Vec<f32>, w: u32, h: u32, radius: u32, sc
 /// steps by thousands, and the guided filters' mean(g²) − mean(g)² turned
 /// into noise that painted garbage pixels along erase seams.
 pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mut [f32]) {
+    box_filter_with(src, w, h, radius, dst, &mut Vec::new());
+}
+
+/// [`box_filter_into`] with its row sums in `row_sums`, grown to `src`'s
+/// length: a caller filtering many planes allocates them once.
+fn box_filter_with(src: &[f32], w: u32, h: u32, radius: u32, dst: &mut [f32], row_sums: &mut Vec<f32>) {
     let (w, h, r) = (w as usize, h as usize, radius as usize);
-    debug_assert_eq!(dst.len(), src.len(), "box_filter_into: dst.len() must equal src.len()");
+    debug_assert_eq!(dst.len(), src.len(), "dst.len() must equal src.len()");
     if w == 0 || h == 0 {
         return;
     }
 
     // Pass 1: each pixel's sum over its row window.
-    let mut row_sums = vec![0.0f32; w * h];
+    row_sums.resize(w * h, 0.0);
     let row_pass = |(out, row): (&mut [f32], &[f32])| {
         let mut acc: f64 = row[..(r + 1).min(w)].iter().map(|&v| f64::from(v)).sum();
         for x in 0..w {
@@ -266,6 +273,7 @@ pub(crate) fn box_filter_into(src: &[f32], w: u32, h: u32, radius: u32, dst: &mu
     } else {
         row_sums.chunks_mut(w).zip(src.chunks(w)).for_each(row_pass);
     }
+    let row_sums: &[f32] = row_sums;
 
     // Pass 2: slide down the columns of row sums, a band of rows at a
     // time so bands run in parallel; each band starts its running sums
@@ -317,12 +325,17 @@ mod tests {
     fn a_zero_epsilon_on_a_flat_region_filters_as_a_small_one() {
         let guide = RgbaImage::from_pixel(16, 12, Rgba([120, 120, 120, 255]));
         let mask = GrayImage::from_fn(16, 12, |x, _| Luma([if x < 8 { 255 } else { 0 }]));
-        let small = guided_filter_alpha(&guide, &mask, 2, 1e-4);
-        for eps in [0.0, f32::NAN] {
-            let out = guided_filter_alpha(&guide, &mask, 2, eps);
-            assert!(out.pixels().zip(small.pixels()).all(|(a, b)| a[0].abs_diff(b[0]) <= 1), "eps {eps}");
+        for (name, filter) in FILTERS {
+            let small = filter(&guide, &mask, 2, 1e-4);
+            for eps in [0.0, f32::NAN] {
+                let out = filter(&guide, &mask, 2, eps);
+                assert!(out.pixels().zip(small.pixels()).all(|(a, b)| a[0].abs_diff(b[0]) <= 1), "{name}, eps {eps}");
+            }
         }
     }
+
+    type Filter = fn(&RgbaImage, &GrayImage, u32, f32) -> GrayImage;
+    const FILTERS: [(&str, Filter); 2] = [("brightness", guided_filter_alpha), ("colour", guided_filter_alpha_colour)];
 
     /// A guided filter takes variance as mean(g²) − mean(g)². On a big
     /// region of large values (0-255 squared) that difference must stay
@@ -361,10 +374,12 @@ mod tests {
     fn test_guided_filter_flat_input_produces_flat_output() {
         let guide = RgbaImage::from_pixel(48, 48, Rgba([128, 128, 128, 255]));
         let mask = GrayImage::from_pixel(48, 48, Luma([200]));
-        let result = guided_filter_alpha(&guide, &mask, 4, 1e-4);
-        let (min, max) = result.pixels().map(|p| p[0])
-            .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-        assert!(max - min <= 1, "flat input produced spread {min}..={max}");
+        for (name, filter) in FILTERS {
+            let result = filter(&guide, &mask, 4, 1e-4);
+            let (min, max) = result.pixels().map(|p| p[0])
+                .fold((u8::MAX, u8::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            assert!(max - min <= 1, "{name}: flat input produced spread {min}..={max}");
+        }
     }
 
     #[test]
