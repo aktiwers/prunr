@@ -75,7 +75,7 @@ pub struct Cli {
 
     /// What --refine-edges follows in the photo: brightness, or color too
     /// (also an edge between two colors of the same brightness, slower).
-    #[arg(long, default_value = "brightness", value_name = "brightness|color")]
+    #[arg(long, default_value_t = prunr_core::RefineGuide::default(), value_name = "brightness|color")]
     pub refine_guide: prunr_core::RefineGuide,
 
     /// Soften the cut-out's edge by this many pixels (fractions allowed).

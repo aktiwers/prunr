@@ -195,7 +195,8 @@ pub fn map_file_name(stem: &str) -> String {
 ///
 /// Peak working set: the resized copy and its NCHW tensor at
 /// `DEPTH_SHORT_SIDE` (~8 MB), the model's own scratch
-/// (`ModelDescriptor.needs`), and the returned map (~1 MB).
+/// (`ModelDescriptor.needs`), and the returned map (1.6 MB for a 3:2
+/// photo).
 pub fn estimate_depth(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) -> Result<DepthMap, CoreError> {
     progress.step(Step::EstimatingDepth);
     let (iw, ih) = input_size(src.width(), src.height());

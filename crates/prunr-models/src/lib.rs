@@ -2516,7 +2516,6 @@ pub fn half_precision_copy(id: ModelId) -> Option<HalfPrecisionCopy> {
     }
 }
 
-/// Every model's copy for small cards, with the model.
 pub fn half_precision_copies() -> impl Iterator<Item = (ModelId, HalfPrecisionCopy)> {
     REGISTRY.iter().filter_map(|d| half_precision_copy(d.id).map(|copy| (d.id, copy)))
 }
