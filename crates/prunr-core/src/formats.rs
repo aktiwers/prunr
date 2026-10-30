@@ -181,35 +181,41 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
 
 /// `load_image_from_bytes` decoded only as large as it shows fit inside
 /// a `side × side` square: a JPEG decodes at 1/2, 1/4 or 1/8 of its size,
-/// the reduction made in the DCT, so the full-size image is never made
-/// (a progressive JPEG still reads every coefficient, so it saves memory,
-/// not time). Any other image, and a JPEG this cannot read (CMYK,
-/// 16-bit), decodes whole.
+/// the reduction made in the DCT. Any other image, and a JPEG this cannot
+/// read at a reduced size (CMYK, 16-bit, lossless), decodes whole.
+///
+/// Peak working set, 24 MP JPEG to a 160 px square (1/8 scale):
+/// | JPEG                    | Peak                                 |
+/// |-------------------------|--------------------------------------|
+/// | baseline                | the 1/8 image, ~1 MB                 |
+/// | progressive, 4:2:0      | + every coefficient, 3 B/px: 72 MB   |
+/// | progressive, 4:4:4      | + every coefficient, 6 B/px: 144 MB  |
+/// | not read at reduced size | as `load_image_from_bytes`          |
 pub fn load_image_to_fit_from_bytes(bytes: &[u8], side: u32) -> Result<DynamicImage, CoreError> {
-    scaled_jpeg(bytes, side).map_or_else(|| load_image_from_bytes(bytes), Ok)
+    scaled_jpeg(bytes, side, crate::sysmem::room_for_buffers_bytes()).map_or_else(|| load_image_from_bytes(bytes), Ok)
 }
 
-fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
-    use jpeg_decoder::PixelFormat;
+/// The JPEG at the reduced size that covers `side`, upright; `None` when
+/// it is not one this reads at a reduced size, or its decode does not fit
+/// `free` (the full decode then refuses it with the reason).
+fn scaled_jpeg(bytes: &[u8], side: u32, free: Option<u64>) -> Option<DynamicImage> {
+    use jpeg_decoder::{CodingProcess, PixelFormat};
     if image::guess_format(bytes).ok()? != image::ImageFormat::Jpeg {
         return None;
     }
     let mut decoder = jpeg_decoder::Decoder::new(bytes);
     decoder.read_info().ok()?;
     let info = decoder.info()?;
-    if !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
+    // A lossless JPEG decodes at full size whatever scale is asked.
+    if info.coding_process == CodingProcess::Lossless || !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
         return None;
     }
-    // A progressive JPEG holds the whole photo's coefficients while it
-    // decodes: one too big for the memory free now is left to the full
-    // decode, which refuses it with the reason.
-    let whole = u64::from(info.width) * u64::from(info.height) * 3;
-    decode_allowance(whole, false, crate::sysmem::room_for_buffers_bytes()).ok()?;
     // A square, so a quarter turn after the decode still fits.
     let side = u16::try_from(side).unwrap_or(u16::MAX);
     let (width, height) = decoder.scale(side, side).ok()?;
-    let pixels = decoder.decode().ok()?;
     let (width, height) = (u32::from(width), u32::from(height));
+    decode_allowance(scaled_jpeg_peak(info, (width, height)), false, free).ok()?;
+    let pixels = decoder.decode().ok()?;
     let mut img = match info.pixel_format {
         PixelFormat::RGB24 => DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?),
         _ => DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, pixels)?),
@@ -218,6 +224,19 @@ fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
         img.apply_orientation(turn);
     }
     Some(img)
+}
+
+/// The most a decode of `info` at `scaled` size holds: the scaled image,
+/// and for a progressive JPEG every coefficient of the whole photo, 2
+/// bytes per sample of each colour at full size (4:4:4, the most).
+fn scaled_jpeg_peak(info: jpeg_decoder::ImageInfo, (width, height): (u32, u32)) -> u64 {
+    let colours = info.pixel_format.pixel_bytes() as u64;
+    let image = u64::from(width) * u64::from(height) * colours;
+    let coefficients = match info.coding_process {
+        jpeg_decoder::CodingProcess::DctProgressive => u64::from(info.width) * u64::from(info.height) * colours * 2,
+        _ => 0,
+    };
+    image + coefficients
 }
 
 /// Decode a raster turned the way its EXIF says, as a viewer shows it:
@@ -821,6 +840,20 @@ mod tests {
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(stored.as_raw(), 400, 200, image::ExtendedColorType::Rgb8).unwrap();
         assert_eq!(load_image_to_fit_from_bytes(&png, 40).unwrap().dimensions(), (400, 200));
+    }
+
+    /// A scaled JPEG decode that would not fit the memory free is not
+    /// started; a progressive one counts the whole photo's coefficients.
+    #[test]
+    fn a_scaled_jpeg_decode_checks_its_memory_first() {
+        use image::ImageEncoder;
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).write_image(&[90u8; 400 * 200 * 3], 400, 200, image::ExtendedColorType::Rgb8).unwrap();
+        assert!(scaled_jpeg(&jpeg, 40, Some(1 << 30)).is_some());
+        assert!(scaled_jpeg(&jpeg, 40, Some(10)).is_none(), "too little free: left to the full decode");
+        let info = |coding_process| jpeg_decoder::ImageInfo { width: 6000, height: 4000, pixel_format: jpeg_decoder::PixelFormat::RGB24, coding_process };
+        assert_eq!(scaled_jpeg_peak(info(jpeg_decoder::CodingProcess::DctSequential), (750, 500)), 750 * 500 * 3);
+        assert_eq!(scaled_jpeg_peak(info(jpeg_decoder::CodingProcess::DctProgressive), (750, 500)), 750 * 500 * 3 + 6000 * 4000 * 6);
     }
 
     /// A PNG may put its EXIF after the image data (the PNG rules allow
