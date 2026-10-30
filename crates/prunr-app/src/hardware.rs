@@ -199,8 +199,9 @@ pub fn total_ram_bytes() -> u64 {
 /// Currently-available RAM (bytes). Re-reads on every call — fresh value
 /// for UIs that show live headroom. ~1 ms on Linux. Don't call inside a
 /// per-frame loop; prefer `available_ram_bytes_throttled` for any caller
-/// that fires more than once per second. 0 when the system reports no
-/// memory at all, so the gates refuse rather than guess.
+/// that fires more than once per second. 0 when nothing is free, and when
+/// the system reports no memory at all (`total_ram_bytes` 0 too), so the
+/// gates refuse rather than guess.
 pub fn available_ram_bytes_now() -> u64 {
     prunr_core::sysmem::available_ram_bytes().unwrap_or(0)
 }
