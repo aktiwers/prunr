@@ -1849,14 +1849,14 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             openvino_gpu: Place::Cpu(Why::Slower("0.65x: 770 ms against the CPU's 497 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
-        // Measured: 366 MB peak RSS on the CPU EP, session load included
-        // (784×518 input, a 3:2 photo).
+        // At its widest input, 1036×518 (a 2:1 panorama): a 3:2 photo's
+        // 784×518 takes less (CPU 450, CUDA 1,000 + 700 on the card).
         needs: Needs {
-            cpu: Cost::measured(450, 0, "i5-11600KF, input 518 px on the short side, 2026-10-30"),
-            mac_cpu: Priced::Same(Cost::measured(900, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 518 px on the short side, 2026-10-30")),
-            cuda: Priced::Same(Cost::measured(1_000, 700, "RTX 3060 12 GB, i5-11600KF, input 518 px on the short side, 2026-10-30")),
-            directml: Priced::Same(Cost::measured(400, 500, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Same(Cost::measured(1_400, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 518 px on the short side, 2026-10-30")),
+            cpu: Cost::measured(600, 0, "i5-11600KF, input 1036×518, 2026-10-31"),
+            mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
+            cuda: Priced::Same(Cost::measured(1_000, 900, "RTX 3060 12 GB, i5-11600KF, input 1036×518, 2026-10-31")),
+            directml: Priced::Same(Cost::estimate(500, 650, "measured 400 + 500 at 518 px on the long side (RTX 3060, Windows ML 1.30, 2026-10-28), grown as CUDA's grew to 1036×518")),
+            coreml: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
