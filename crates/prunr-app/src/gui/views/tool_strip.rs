@@ -405,6 +405,28 @@ mod tests {
         }
     }
 
+    /// Reset puts back every slider on the strip it sits on, on every
+    /// model; Opacity carries over a reset.
+    #[test]
+    fn reset_puts_back_every_slider_on_its_strip() {
+        for model in SettingsModel::ALL.into_iter().filter(|&m| shows(m, Surface::Brushes)) {
+            for tool in [Tool::Paint, Tool::Magic] {
+                let g = grid(tool, model);
+                let narrow = g.narrow.iter().flat_map(|n| n.columns.iter().flatten().chain(std::iter::once(&n.below)));
+                for &cell in g.columns.iter().flatten().chain(&g.end).chain(narrow).filter(|&&c| c != Cell::Opacity) {
+                    for depth in [false, true] {
+                        let Some(slide) = slider(cell, depth) else { continue };
+                        let shipped = BrushSettings { magic_depth: depth, ..Default::default() };
+                        let mut brush = shipped.clone();
+                        slide(&mut brush);
+                        brush.reset_tool_from(tool, &shipped);
+                        assert_eq!(brush, shipped, "{model:?}, {}, {:?}{}", tool.title(), cell.names(), if depth { " (depth)" } else { "" });
+                    }
+                }
+            }
+        }
+    }
+
     /// Every slider on every brush strip, on every model, moves a value
     /// its strokes keep, so Next, Last and All decide which strokes it
     /// reaches: a slider the strokes do not keep would change all of them
