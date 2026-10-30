@@ -202,9 +202,6 @@ impl PrunrApp {
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
                 let role = self.settings.model.role();
                 if self.batch.items[idx].verdict(crate::gui::capability::Need::Processed, role).allows_request() {
-                    // A re-run lands in place, so a render of the drag
-                    // finishing after it would cover it.
-                    self.processor.live_preview.cancel(item_id);
                     self.process_items(|item| item.id == item_id, None);
                 }
             }

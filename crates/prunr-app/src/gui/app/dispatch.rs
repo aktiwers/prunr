@@ -308,6 +308,9 @@ impl PrunrApp {
         if tiers.process_count() == 0 { return; }
 
         for id in tiers.all_process_ids() {
+            // A re-run lands in place, keeping the step's version: a render
+            // of the image's drag would still land after it.
+            self.processor.live_preview.cancel(id);
             if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.start_cut(step, cutter);
             }
@@ -337,6 +340,7 @@ impl PrunrApp {
             self.batch.share_settings(shown, &dispatches.iter().map(|(id, _)| *id).collect());
         }
         for (id, source) in dispatches {
+            self.processor.live_preview.cancel(id);
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             item.start_cut(step, Cutter::NoModel);
             item.mark_running();
