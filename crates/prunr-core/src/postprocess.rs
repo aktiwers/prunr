@@ -6,8 +6,8 @@ use crate::color::lerp_rgb;
 use crate::math::sigmoid;
 use crate::selection::MaskArtifact;
 use crate::formats::resize_gray_lanczos3;
-use crate::guided_filter::guided_filter_alpha;
-use crate::types::{MaskSettings, ModelKind};
+use crate::guided_filter::{guided_filter_alpha, guided_filter_alpha_colour};
+use crate::types::{MaskSettings, ModelKind, SubjectEffect};
 
 /// Pixel-count cutover for serial → row-parallel kernels in this module.
 /// Below ~512² rayon's fan-out costs more than the loop saves.
@@ -240,7 +240,7 @@ fn tensor_to_mask_core(
             let (radius, epsilon) = (mask_settings.guided_radius, mask_settings.guided_epsilon);
             mask = match mask_settings.refine_guide {
                 crate::RefineGuide::Brightness => guided_filter_alpha(rgba, &mask, radius, epsilon),
-                crate::RefineGuide::Colour => crate::guided_filter::guided_filter_alpha_colour(rgba, &mask, radius, epsilon),
+                crate::RefineGuide::Colour => guided_filter_alpha_colour(rgba, &mask, radius, epsilon),
             };
         }
     }
@@ -331,8 +331,7 @@ where
 /// Transform the RGB channels of `rgba` according to `style`. Alpha is
 /// preserved. Spatial variants (`Pixelate`) allocate a scratch copy of the
 /// buffer so reads don't race writes; per-pixel variants mutate in place.
-pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEffect) {
-    use crate::types::SubjectEffect;
+pub fn apply_subject_effect(rgba: &mut RgbaImage, style: SubjectEffect) {
     match style {
         SubjectEffect::None => {}
         SubjectEffect::Desaturate => {
@@ -462,10 +461,11 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
             });
         }
         SubjectEffect::Halftone { dot_spacing } => {
-            let spacing = dot_spacing.clamp(2, 32) as i32;
+            let spacing = dot_spacing.clamp(*SubjectEffect::DOT_SPACING_PX.start(), *SubjectEffect::DOT_SPACING_PX.end());
+            let radii_sq = halftone_radii_sq(spacing);
+            let spacing = spacing as i32;
             let (w, h) = rgba.dimensions();
             let half = spacing / 2;
-            let radii_sq = halftone_radii_sq(spacing);
             let row_stride = (w * 4) as usize;
 
             // Read each pixel's own luma before writing it: a cell's
@@ -494,10 +494,17 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: crate::types::SubjectEf
     }
 }
 
-/// Each luma's squared dot radius in cells `spacing` px wide, so that a
-/// dot covers its cell's dark share: past the inscribed circle it grows
+/// Each luma's squared dot radius in cells `spacing` px wide (within
+/// `SubjectEffect::DOT_SPACING_PX`), worked out once per spacing.
+fn halftone_radii_sq(spacing: u32) -> &'static [f32; 256] {
+    const SPACINGS: usize = *SubjectEffect::DOT_SPACING_PX.end() as usize + 1;
+    static TABLES: [std::sync::OnceLock<[f32; 256]>; SPACINGS] = [const { std::sync::OnceLock::new() }; SPACINGS];
+    TABLES[spacing as usize].get_or_init(|| halftone_radii_table(spacing))
+}
+
+/// A dot covers its cell's dark share: past the inscribed circle it grows
 /// into the corners, and black prints solid. White prints no dot.
-fn halftone_radii_sq(spacing: i32) -> [f32; 256] {
+fn halftone_radii_table(spacing: u32) -> [f32; 256] {
     let s = f64::from(spacing);
     let edge = s / 2.0;
     let coverage = |r: f64| {
@@ -506,20 +513,19 @@ fn halftone_radii_sq(spacing: i32) -> [f32; 256] {
         let caps = if r <= edge { 0.0 } else { 4.0 * (r * r * (edge / r).acos() - edge * (r * r - edge * edge).sqrt()) };
         (disc - caps) / (s * s)
     };
-    std::array::from_fn(|luma| {
-        let dark = (255 - luma) as f64 / 255.0;
-        match luma {
-            255 => return 0.0,
-            0 => return f32::INFINITY,
-            _ => {}
+    std::array::from_fn(|luma| match luma {
+        255 => 0.0,
+        0 => f32::INFINITY,
+        _ => {
+            let dark = (255 - luma) as f64 / 255.0;
+            // Coverage rises to 1 at the cell's corners and no farther.
+            let (mut lo, mut hi) = (0.0, edge * std::f64::consts::SQRT_2);
+            for _ in 0..40 {
+                let mid = (lo + hi) / 2.0;
+                if coverage(mid) < dark { lo = mid } else { hi = mid }
+            }
+            (hi * hi) as f32
         }
-        // Coverage rises to 1 at the cell's corners and no farther.
-        let (mut lo, mut hi) = (0.0, edge * std::f64::consts::SQRT_2);
-        for _ in 0..40 {
-            let mid = (lo + hi) / 2.0;
-            if coverage(mid) < dark { lo = mid } else { hi = mid }
-        }
-        (hi * hi) as f32
     })
 }
 
@@ -581,7 +587,7 @@ pub fn effect_backdrop(
         BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(plate().as_ref().unwrap_or(source), radius.clamp(1, 64) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
-            apply_subject_effect(&mut img, crate::types::SubjectEffect::Desaturate);
+            apply_subject_effect(&mut img, SubjectEffect::Desaturate);
             img
         }
         BgEffect::LensBlur { amount_pct } => {

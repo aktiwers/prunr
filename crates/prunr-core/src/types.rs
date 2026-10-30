@@ -838,6 +838,9 @@ impl std::str::FromStr for BgImageFit {
 }
 
 impl SubjectEffect {
+    /// Halftone's dot spacing, in pixels.
+    pub const DOT_SPACING_PX: std::ops::RangeInclusive<u32> = 2..=32;
+
     /// The same style on the image at `scale` times its size: pixel
     /// blocks and halftone dots scale with it, at least a pixel each.
     pub fn at_scale(self, scale: f32) -> Self {
