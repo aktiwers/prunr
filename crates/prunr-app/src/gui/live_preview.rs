@@ -15,7 +15,8 @@
 //! **Do not reintroduce per-tweak cancellation.** `postprocess` doesn't
 //! check the cancel token between stages, so the token only gates the
 //! final send: cancelling mid-drag dropped every result, leaving no live
-//! preview during the drag. The token fires only on `cancel` / `cancel_all`.
+//! preview during the drag. The token fires on `cancel` / `cancel_all`, and
+//! when a settled render replaces one still running.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -307,11 +308,16 @@ struct Owed {
     latest_tweak_at: Instant,
 }
 
-/// State for an in-flight dispatch. Its cancel token fires on `cancel` /
-/// `cancel_all` only.
+/// State for an in-flight dispatch.
 struct InFlight {
     cancel: Arc<AtomicBool>,
     generation: u64,
+}
+
+impl InFlight {
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::Release);
+    }
 }
 
 pub struct LivePreview {
@@ -513,7 +519,7 @@ impl LivePreview {
             let cancel = Arc::new(AtomicBool::new(false));
             // The render it replaces would run on beside it.
             if let Some(replaced) = self.in_flight.insert(id, InFlight { cancel: cancel.clone(), generation }) {
-                replaced.cancel.store(true, Ordering::Release);
+                replaced.stop();
             }
 
             let tx = self.result_tx.clone();
@@ -661,7 +667,7 @@ impl LivePreview {
     /// would show belongs to a state it has left.
     pub fn cancel(&mut self, item_id: u64) {
         if let Some(f) = self.in_flight.remove(&item_id) {
-            f.cancel.store(true, Ordering::Release);
+            f.stop();
         }
         self.pending.remove(&item_id);
         self.owed.remove(&item_id);
@@ -669,9 +675,7 @@ impl LivePreview {
 
     /// Cancel all in-flight + pending previews. Called on batch clear or shutdown.
     pub fn cancel_all(&mut self) {
-        for f in self.in_flight.values() {
-            f.cancel.store(true, Ordering::Release);
-        }
+        self.in_flight.values().for_each(InFlight::stop);
         self.in_flight.clear();
         self.pending.clear();
         self.owed.clear();
