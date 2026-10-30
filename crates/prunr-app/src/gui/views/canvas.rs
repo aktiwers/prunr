@@ -123,7 +123,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     if let Some(progress) = app.processor.dispatch_progress() {
         // A one-image run's tile map belongs over its own image; over
         // another, only the capsule shows, naming the image it works on.
-        let shown = app.batch.selected_item().map(|i| i.id);
+        let shown = app.batch.selected_id();
         let here = progress.is_over(shown);
         let elsewhere = progress.on.filter(|_| !here).and_then(|id| app.batch.find_by_id(id)).map(|i| i.filename.as_str());
         let preview = app.batch.selected_item().filter(|_| here).and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());

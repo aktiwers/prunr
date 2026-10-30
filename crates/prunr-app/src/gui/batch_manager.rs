@@ -204,6 +204,11 @@ impl BatchManager {
         self.selected_item().is_some_and(|b| b.id == id)
     }
 
+    /// The selected image's id (`None` when empty).
+    pub(crate) fn selected_id(&self) -> Option<u64> {
+        self.selected_item().map(|b| b.id)
+    }
+
     /// A cut is queued or under way on some image.
     pub(crate) fn any_awaiting_cut(&self) -> bool {
         self.items.iter().any(BatchItem::awaits_cut)
@@ -573,7 +578,7 @@ impl BatchManager {
         // relieve.
         let total: usize = self.items.iter().map(BatchItem::evictable_tensor_bytes).sum();
         if total <= TENSOR_BUDGET { return 0; }
-        let selected_id = self.selected_item().map(|b| b.id);
+        let selected_id = self.selected_id();
         let mut remaining = total;
         let mut dropped = 0;
         for item in &mut self.items {

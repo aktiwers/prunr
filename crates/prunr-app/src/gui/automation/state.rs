@@ -65,7 +65,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             None if app.picking_depth_focus => "set_focus",
             None => "none",
         },
-        selected: app.batch.selected_item().map(|it| it.id),
+        selected: app.batch.selected_id(),
         busy: busy(app),
         items: app
             .batch

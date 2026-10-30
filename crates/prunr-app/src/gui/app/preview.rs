@@ -110,7 +110,7 @@ impl PrunrApp {
         let role = self.settings.model.role();
         let action = self.settings.brush.cutout_action;
         let batch = &mut self.batch;
-        let shown = batch.selected_item().map(|item| item.id);
+        let shown = batch.selected_id();
         let wait = self.processor.live_preview.tick(shown, |id, kind| {
             let item = batch.find_by_id_mut(id).ok_or(crate::gui::capability::Verdict::Never(crate::gui::capability::Reason::Removed))?;
             Self::build_preview_inputs(item, kind, role, action)
