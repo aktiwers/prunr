@@ -75,7 +75,8 @@ fn shift_by<F: Fn(u8, u8) -> u8 + Copy + Sync>(mask: &mut GrayImage, full: usize
 
 /// A square of half-width `square` followed by two diagonal lines of
 /// half-length `diag`: the offsets with `|dx|, |dy| ≤ square + 2·diag`
-/// and `|dx| + |dy| ≤ 2·(square + diag)`.
+/// and `|dx| + |dy| ≤ 2·(square + diag)`, and with no square, only those
+/// of even `|dx| + |dy|` (what diagonal lines alone reach).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Octagon {
     square: usize,
@@ -115,7 +116,8 @@ impl Octagon {
     /// Whether the window around every pixel of a `w`×`h` mask holds all
     /// of it.
     fn covers(self, w: usize, h: usize) -> bool {
-        self.reach() >= w.max(h) - 1 && self.square + self.diag >= (w + h - 1) / 2
+        // The far corner is the farthest offset any pixel has.
+        self.contains(w as isize - 1, h as isize - 1)
     }
 
     /// What is left of `self` once `base` has run.
@@ -229,25 +231,26 @@ impl<F: Fn(u8, u8) -> u8 + Copy + Sync> Planes<F> {
         let (mw, mh) = (mask.width() as usize, mask.height() as usize);
         let (stride, pick, src) = (self.stride, self.pick, &self.cur);
         let edge = (self.h - mh) / 2;
-        let taps = |shape: Octagon| -> Vec<usize> {
+        // Where each offset of `shape` sits in a row of `src`.
+        let reads_of = |shape: Octagon| -> Vec<usize> {
             let centre = (edge * stride + self.x0 + edge) as isize;
             shape.offsets().map(|(dx, dy)| (centre + dy * stride as isize + dx) as usize).collect()
         };
-        let gather = |out: &mut [u8], taps: &[usize], y: usize| {
+        let gather = |out: &mut [u8], reads: &[usize], y: usize| {
             let at = |t: usize| &src[y * stride + t..][..mw];
-            out.copy_from_slice(at(taps[0]));
-            for &t in &taps[1..] {
+            out.copy_from_slice(at(reads[0]));
+            for &t in &reads[1..] {
                 for (o, &v) in out.iter_mut().zip(at(t)) {
                     *o = pick(*o, v);
                 }
             }
         };
-        let own = taps(own);
-        let partner = partner.map(|(shape, frac)| (taps(shape), frac));
+        let own = reads_of(own);
+        let partner = partner.map(|(shape, frac)| (reads_of(shape), frac));
         let row = |other: &mut Vec<u8>, (y, out): (usize, &mut [u8])| {
             gather(out, &own, y);
-            if let Some((taps, frac)) = &partner {
-                gather(other, taps, y);
+            if let Some((reads, frac)) = &partner {
+                gather(other, reads, y);
                 let inv = 1.0 - frac;
                 for (a, &b) in out.iter_mut().zip(other.iter()) {
                     *a = crate::math::round_u8(*a as f32 * inv + b as f32 * frac);
@@ -255,10 +258,12 @@ impl<F: Fn(u8, u8) -> u8 + Copy + Sync> Planes<F> {
             }
         };
         let rows = mask.as_mut();
+        // Only a blend reads the partner's row.
+        let other_len = if partner.is_some() { mw } else { 0 };
         if self.par {
-            rows.par_chunks_mut(mw).enumerate().for_each_init(|| vec![0u8; mw], row);
+            rows.par_chunks_mut(mw).enumerate().for_each_init(|| vec![0u8; other_len], row);
         } else {
-            let mut b = vec![0u8; mw];
+            let mut b = vec![0u8; other_len];
             rows.chunks_mut(mw).enumerate().for_each(|yr| row(&mut b, yr));
         }
     }
@@ -456,6 +461,30 @@ mod tests {
             }
             let next = Octagon::of(n + 1);
             assert!(next.square + next.diag >= o.square + o.diag, "{n}: {o:?} then {next:?}");
+        }
+    }
+
+    /// The shapes of the shifts the slider uses most, written out apart
+    /// from `Octagon::of`: 1 px grows a dot to 3 × 3; 2 px to 5 × 5 (no
+    /// shape between the square and the lines fills both diagonals' gaps
+    /// at that size, so its corners stay a pixel long); 3 px to the disc
+    /// of dx² + dy² ≤ 12, the octagon from there on.
+    #[test]
+    fn the_small_shifts_grow_a_dot_into_these_shapes() {
+        for n in 1..=3i64 {
+            let inside = |dx: i64, dy: i64| match n {
+                3 => dx * dx + dy * dy <= 12,
+                _ => dx.abs() <= n && dy.abs() <= n,
+            };
+            let c = n + 2;
+            let size = (2 * c + 1) as u32;
+            let mut m = GrayImage::new(size, size);
+            m.put_pixel(c as u32, c as u32, image::Luma([255]));
+            shift_mask(&mut m, -(n as f32));
+            for (x, y, p) in m.enumerate_pixels() {
+                let (dx, dy) = (i64::from(x) - c, i64::from(y) - c);
+                assert_eq!(p[0] == 255, inside(dx, dy), "{n} px at ({dx}, {dy})");
+            }
         }
     }
 

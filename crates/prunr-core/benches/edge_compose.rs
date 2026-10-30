@@ -35,7 +35,7 @@ pub fn bench(c: &mut Criterion) {
     group.bench_function("dilate_round_r20", |b| {
         b.iter(|| black_box(prunr_core::morphology::dilate_round(black_box(&mask), 20)))
     });
-    group.bench_function("dilate_square_r20", |b| {
+    group.bench_function("dilate_octagon_r20", |b| {
         b.iter(|| { let mut m = mask.clone(); prunr_core::morphology::shift_mask(&mut m, -20.0); black_box(m) })
     });
     group.bench_function("edge_plane", |b| {
