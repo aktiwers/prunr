@@ -71,28 +71,23 @@ impl PrunrApp {
         // run uses none (Sketch on Full), so its settings never drift.
         let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
         let current = item.settings.current_recipe(model).mask;
-        // A re-cut the render door would refuse (no cut-out on screen: an
-        // erase or an upscale shown, the photo after an undo) is not asked
-        // for every frame: the check is done for these settings.
+        // Asked once per settings: a re-cut the render door would refuse
+        // (no cut-out on screen: an erase or an upscale shown, the photo
+        // after an undo), or a render refused for memory, never lands.
         let role = self.settings.model.role();
         let recut = item.verdict(crate::gui::capability::Need::Cutout, role);
-        if applied.mask == current || !recut.allows_request() {
-            self.last_drift_check = Some((id, current_settings));
-            return;
-        }
-        self.last_drift_check = None;
+        let mut checked = applied.mask == current || !recut.allows_request();
         let live = &mut self.processor.live_preview;
-        if live.is_pending_for(id) {
+        if !checked && live.is_pending_for(id) {
             // A drag under way: its queued frame goes now instead of at the
             // throttle, and the drag settles on release or stillness, not here.
             live.hurry(id);
-        } else if !live.works_on(id) {
+        } else if !checked && !live.works_on(id) {
             tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
             live.render_now(id, PreviewKind::Mask);
-            // Once for these settings: a render refused for memory never
-            // lands, and would be asked for every frame.
-            self.last_drift_check = Some((id, current_settings));
+            checked = true;
         }
+        self.last_drift_check = checked.then_some((id, current_settings));
     }
 
     /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
