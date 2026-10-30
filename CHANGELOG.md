@@ -70,8 +70,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - A model that does not fit in the free memory of the graphics card (or of a Mac) runs on the CPU when it fits there, instead of not running.
 - Settings mentions the Stable Diffusion eraser (its memory check, Keep it loaded, the memory guard, the CPU-only warning) only once an SD eraser is installed.
 - **Prunr for Mac needs macOS 14 Sonoma or later.** It ships Microsoft's own ONNX Runtime (1.30.0), which includes Core ML, Apple's route to the GPU and Neural Engine, and which needs macOS 14.
-- On a Mac, the compiled-model cache moved from Application Support to Caches. The old folders, up to a few GB, are removed the first time this version starts, 0.4.8's Core ML cache included.
-- Saving a PNG is about 1.6 times faster and the file 2–5 % smaller. Thumbnails of large JPEGs are decoded at a fraction of their size: they appear sooner and no longer hold the whole photo in memory while they are made.
+- On a Mac, compiled models are kept in `~/Library/Caches/prunr`. 0.4.8's Core ML cache there is removed the first time this version starts; each model compiles again once.
+- Saving a PNG is about 1.6 times faster and the file 2–5 % smaller. Thumbnails of JPEGs are decoded at a fraction of their size: most camera photos show theirs sooner, and none is decoded whole just for its thumbnail.
 - Copy selection and Cut put only the selected area on the clipboard, cropped to its edges; they put a full-size image with everything else clear.
 - Knob changes merge into one undo step only when they come less than half a second apart (was 1.2 s), so two knobs set one after the other are two steps.
 - Nomos8k's line in the model picker says it is the slowest upscaler, and its Model Store text says how slow.

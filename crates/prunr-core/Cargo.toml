@@ -31,6 +31,9 @@ image = { workspace = true }
 jpeg-decoder = { version = "0.3.2", default-features = false }
 # image's PNG encoder compresses through zlib-rs: a saved 20 MP cut-out
 # at level 4 takes 0.54 s instead of miniz_oxide's 0.86 s, 5% smaller.
+# The feature switches flate2 to zlib-rs for every crate in the build
+# (runtime and model archives, SVGZ, TIFF), and only while this `png`
+# is the one `image` uses.
 png = { version = "0.18", features = ["zlib-rs"] }
 resvg = { workspace = true }
 rayon = { workspace = true }
