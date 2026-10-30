@@ -343,8 +343,7 @@ impl Settings {
     /// With no model the pipeline is pure CPU on decoded pixels, so the
     /// ORT-memory cap doesn't apply.
     pub fn default_jobs(&self) -> usize {
-        let base = if self.runs_on_host_cpu() { (num_cpus::get() / 2).max(1) } else { 2 };
-        self.cap_jobs_for_model(base)
+        super::memory::default_jobs(self.model.to_model_kind(), self.runs_on_host_cpu(), self.cpu_only())
     }
 
     pub fn max_jobs(&self) -> usize {

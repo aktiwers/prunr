@@ -154,6 +154,14 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     engine_cost_on(model, on) * prunr_core::memory::engines_that_fit(id, on, engines, crate::hardware::card_free_mb_throttled(on))
 }
 
+/// Images at once by default: half the cores on the processor, two on a
+/// graphics card, held to what memory allows for `model`. The app and the
+/// command line start from it.
+pub fn default_jobs(model: Option<ModelKind>, on_host_cpu: bool, cpu_only: bool) -> usize {
+    let base = if on_host_cpu { (num_cpus::get() / 2).max(1) } else { 2 };
+    model.map_or(base, |model| base.min(safe_max_jobs(model, cpu_only)))
+}
+
 /// Engines take at most 50% of available RAM, leaving the rest for image
 /// buffers, history and OS headroom.
 pub fn safe_max_jobs(model: ModelKind, cpu_only: bool) -> usize {
@@ -167,6 +175,17 @@ pub fn safe_max_jobs(model: ModelKind, cpu_only: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Half the cores on the processor, two on a card, never more than
+    /// memory allows for the model; the command line starts from the same.
+    #[test]
+    fn the_default_job_count_follows_where_the_model_runs() {
+        assert_eq!(default_jobs(None, true, false), (num_cpus::get() / 2).max(1));
+        assert_eq!(default_jobs(None, false, false), 2);
+        for model in [ModelKind::Silueta, ModelKind::BiRefNetLite] {
+            assert!(default_jobs(Some(model), true, true) <= safe_max_jobs(model, true), "{model:?}");
+        }
+    }
 
     /// An engine on a card is charged its share of system RAM, measured
     /// there; one where it is not measured yet, its CPU figure.

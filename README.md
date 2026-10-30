@@ -84,7 +84,7 @@ Common flags:
 |------|-------------|
 | `-o, --output <PATH>` | Output file or directory |
 | `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net` |
-| `-j, --jobs <N>` | Parallel jobs (default: 1) |
+| `-j, --jobs <N>` | Images at once (default: as the app: half the cores, 2 on a graphics card, fewer when memory is short) |
 | `-f, --force` | Overwrite existing output |
 | `--cpu` | Force CPU inference |
 | `--gamma <N>` | Removal strength (default: 1.0) |

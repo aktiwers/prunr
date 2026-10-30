@@ -27,9 +27,10 @@ pub struct Cli {
     #[arg(short = 'm', long, default_value = "birefnet-lite")]
     pub model: CliModel,
 
-    /// Number of parallel jobs for batch processing.
-    #[arg(short = 'j', long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
-    pub jobs: usize,
+    /// Images processed at once [default: as the app: half the cores, 2 on
+    /// a graphics card, fewer when memory is short].
+    #[arg(short = 'j', long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    pub jobs: Option<usize>,
 
     /// Images over 8000 px on either side: keep their size, or shrink
     /// them to 4096 px first.
@@ -573,6 +574,16 @@ fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
 }
 
 impl Cli {
+    /// `-j`, or what the app runs at once with this model where it runs.
+    pub fn jobs(&self) -> usize {
+        self.jobs.unwrap_or_else(|| {
+            let model: ModelKind = self.model.into();
+            let id = model.model_id();
+            let on_cpu = self.cpu || prunr_core::engine::model_on_host_cpu(id, prunr_core::memory::provider_for(id, self.cpu));
+            prunr_app::gui::memory::default_jobs(Some(model), on_cpu, self.cpu)
+        })
+    }
+
     /// Whether this run writes to the terminal it was started from. A
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
@@ -1213,7 +1224,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         }
     };
     run_batch_subprocess(
-        &mut to_send, &valid_indices, model, args.jobs, mask, args.cpu,
+        &mut to_send, &valid_indices, model, args.jobs(), mask, args.cpu,
         lines, &backdrop,
         &spinners_arc, &inputs_arc, quiet, &mut land,
     );
@@ -1771,7 +1782,8 @@ mod tests {
     #[test]
     fn zero_jobs_is_refused() {
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "-j", "0"]).is_err());
-        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "-j", "3"]).jobs, 3);
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "-j", "3"]).jobs(), 3);
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "--cpu"]).jobs, None, "no -j: the app's default");
     }
 
     /// `-o` with one input is the output file; with several it is the
