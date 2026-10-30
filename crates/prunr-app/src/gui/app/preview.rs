@@ -125,7 +125,7 @@ impl PrunrApp {
         // ticked image off screen, its map just measured) waits for the
         // decode; nothing else asks for it, and the render would wait for
         // good with the busy pill up.
-        let waiting: Vec<usize> = self.processor.live_preview.pending_photo_renders()
+        let waiting: Vec<usize> = self.processor.live_preview.pending_photo_renders(shown)
             .filter_map(|id| self.batch.index_of(id))
             .collect();
         for idx in waiting {

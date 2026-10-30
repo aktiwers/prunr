@@ -84,7 +84,7 @@ impl PrunrApp {
             }
         }
         if crate::gui::memory::under_memory_pressure() {
-            self.batch.free_off_screen_photos();
+            self.batch.free_off_screen_photos(|id| self.processor.live_preview.works_on(id));
         }
     }
 

@@ -1791,6 +1791,14 @@ impl BatchItem {
         if live { TexTarget::LiveResult(self.result_tex_request) } else { TexTarget::Result(self.result_tex_request) }
     }
 
+    /// The decoded photo, its texture and the selection's go, made again
+    /// when the image is shown.
+    pub(crate) fn release_photo(&mut self) {
+        self.source_texture = None;
+        self.selection_texture = None;
+        super::reclaim::later(self.source_rgba.take());
+    }
+
     /// The result texture goes with the image off screen; one still being
     /// made no longer lands.
     pub(crate) fn release_result_texture(&mut self) {
