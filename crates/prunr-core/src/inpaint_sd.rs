@@ -63,10 +63,17 @@ const SD_LATENT_SIDE: u32 = SD_TILE / VAE_FACTOR;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
-/// The longest region side one crop fills at full size, with 32 px of
-/// photo around it: 704 with the tall crop, else 448.
+/// Photo a crop keeps around its region: 32 px on each side.
+const CROP_CONTEXT: u32 = 64;
+
+/// The longest crop side, with or without the tall crop.
+const fn max_crop_side(tall_crop: bool) -> u32 {
+    if tall_crop { SD_CROP_MAX } else { SD_TILE }
+}
+
+/// The longest region side one crop fills at full size.
 pub const fn one_crop_side(tall_crop: bool) -> u32 {
-    (if tall_crop { SD_CROP_MAX } else { SD_TILE }) - 64
+    max_crop_side(tall_crop) - CROP_CONTEXT
 }
 
 /// The largest region SD fills at full size in one crop.
@@ -438,7 +445,7 @@ fn paint_regions(
     req: &SdInpaintRequest,
     progress: &crate::progress::Progress,
 ) -> Result<RgbaImage, CoreError> {
-    let max_side = if req.tall_crop() { SD_CROP_MAX } else { SD_TILE };
+    let max_side = max_crop_side(req.tall_crop());
     paint_regions_with(image, mask, band, max_side, progress, |crop, crop_mask, crop_band, crop_progress| {
         run_one_tile(bundle, vae, crop, crop_mask, crop_band, req, crop_progress)
     })
@@ -3741,14 +3748,14 @@ mod tests {
     #[test]
     fn one_crop_holds_an_area_of_its_side_with_photo_around_it() {
         use crate::inpaint::{FillScale, Fit};
-        for (tall, max_side) in [(false, SD_TILE), (true, SD_CROP_MAX)] {
-            let side = one_crop_side(tall);
+        for tall in [false, true] {
+            let (side, max_side) = (one_crop_side(tall), max_crop_side(tall));
             let fit = Fit { long: side, short: one_crop_side(false) };
             assert_eq!(FillScale::Auto.factor((side, 100), fit), 1.0, "tall {tall}");
             assert!(FillScale::Auto.factor((side + 1, 100), fit) < 1.0, "tall {tall}");
             let area = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1000 + side - 1, y_max: 1099 };
             let (_, _, w, _) = compute_sd_crop(&area, 4096, 4096, max_side).expect("one crop");
-            assert_eq!(w, side + 64, "tall {tall}");
+            assert_eq!(w, side + CROP_CONTEXT, "tall {tall}");
         }
     }
 
