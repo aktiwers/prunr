@@ -201,7 +201,7 @@ impl BatchManager {
     }
 
     pub(crate) fn is_selected(&self, id: u64) -> bool {
-        self.selected_item().is_some_and(|b| b.id == id)
+        self.selected_id() == Some(id)
     }
 
     /// The selected image's id (`None` when empty).
@@ -1090,7 +1090,7 @@ mod tests {
         bm.items.push(item_with_cache(1, 0));
         bm.items.push(item_with_cache(42, 0));
         bm.selected_index = 1;
-        assert_eq!(bm.selected_item().map(|i| i.id), Some(42));
+        assert_eq!(bm.selected_id(), Some(42));
         assert!(bm.is_selected(42) && !bm.is_selected(1));
         assert_eq!(bm.selected_idx_clamped(), Some(1));
 
