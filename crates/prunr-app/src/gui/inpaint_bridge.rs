@@ -137,7 +137,8 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         // worker has loaded nothing yet.
         if !strokes.is_empty() && matches!(sub_state, SubState::Ready(_)) {
             let free = crate::hardware::available_ram_bytes_throttled();
-            if free > 0 && free < MEMORY_PRESSURE_THRESHOLD_BYTES {
+            // 0 is nothing free, unless the system reports no memory.
+            if crate::hardware::total_ram_bytes() > 0 && free < MEMORY_PRESSURE_THRESHOLD_BYTES {
                 tracing::warn!(
                     free_mb = free / (1024 * 1024),
                     threshold_mb = MEMORY_PRESSURE_THRESHOLD_BYTES / (1024 * 1024),
