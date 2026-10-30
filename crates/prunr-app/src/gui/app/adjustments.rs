@@ -202,6 +202,9 @@ impl PrunrApp {
             DispatchKind::SubprocessAddEdge | DispatchKind::SubprocessFullPipeline => {
                 let role = self.settings.model.role();
                 if self.batch.items[idx].verdict(crate::gui::capability::Need::Processed, role).allows_request() {
+                    // A re-run lands in place, so a render of the drag
+                    // finishing after it would cover it.
+                    self.processor.live_preview.cancel(item_id);
                     self.process_items(|item| item.id == item_id, None);
                 }
             }
@@ -294,6 +297,11 @@ impl PrunrApp {
         if previews_lines && item.lines_need_a_run() {
             dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
+        // A drag shows the lines where they were; its release traces them
+        // on the new cut-out.
+        if dispatch == knob_catalog::DispatchKind::LivePreviewMask && tc.commit && item.lines_traced_on_another_cut() {
+            dispatch = knob_catalog::DispatchKind::SubprocessAddEdge;
+        }
         dispatch
     }
 }
@@ -324,6 +332,41 @@ mod release_tests {
         let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..Default::default() };
         app.apply_toolbar_change(&egui::Context::default(), release, before);
         assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
+    }
+
+    /// A mask drag under lines on the cut-out previews them where they
+    /// were; its release traces them on the new cut-out.
+    #[test]
+    fn a_mask_drags_release_traces_the_lines_again() {
+        use crate::gui::knob_catalog::DispatchKind;
+        use crate::gui::worker::{CompressedEdgeTensors, CompressedTensor, RawEdgeTensors, RawSegTensor};
+        use prunr_core::{EdgeScale, LineMode, ModelKind::Silueta};
+        let mut app = PrunrApp::new_for_test();
+        let item = push_test_item(&mut app, 1);
+        item.settings.line_mode = LineMode::SubjectOutline;
+        item.start_cut(Some(crate::gui::timeline::StepKind::Process), crate::gui::item::Cutter::Model(Silueta));
+        let tensors = EdgeScale::ALL.map(|s| {
+            let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
+            vec![0.5; (h * w) as usize]
+        });
+        let edges = CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare: None });
+        let seg = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+        let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: "CPU".into() };
+        let recipe = item.settings.current_recipe(Silueta);
+        item.apply_tier_result(Ok(result), seg, edges, recipe);
+        item.finish_job();
+        item.settings.feather = 3.0;
+        let drag = super::adjustments_toolbar::ToolbarChange { auto_dispatch: DispatchKind::LivePreviewMask, ..Default::default() };
+        assert_eq!(app.resolve_auto_dispatch(0, &drag), DispatchKind::LivePreviewMask, "a drag frame");
+        let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..drag };
+        assert_eq!(app.resolve_auto_dispatch(0, &release), DispatchKind::SubprocessAddEdge, "the release");
+
+        app.batch.select_item(0);
+        app.processor.live_preview.owe_for_test(1, PreviewKind::Mask);
+        let before = app.batch.items[0].settings;
+        app.apply_toolbar_change(&egui::Context::default(), release, before);
+        assert!(app.batch.items[0].job_run().is_some(), "the lines are traced again");
+        assert!(!app.processor.live_preview.works_on(1), "no render of the drag lands over them");
     }
 
     /// A scale switch previews from the kept lines when they hold the
