@@ -305,7 +305,9 @@ pub enum RefineGuide {
     #[default]
     Brightness,
     /// Its colour too: also the edge between two colours of the same
-    /// brightness, at several times the time.
+    /// brightness, at several times the time. Saved as the CLI and the
+    /// panel spell it.
+    #[serde(rename = "color", alias = "colour")]
     Colour,
 }
 
@@ -1022,6 +1024,16 @@ mod tests {
         assert_eq!(EdgeScale::from_str("BOLD").unwrap(), EdgeScale::Bold);
         assert_eq!(EdgeScale::from_str("fused").unwrap(), EdgeScale::Fused);
         assert!(EdgeScale::from_str("ultra").is_err());
+    }
+
+    /// Saved as the CLI and the panel spell it; a file written with the
+    /// other spelling still loads.
+    #[test]
+    fn the_color_guide_saves_as_color_and_loads_either_spelling() {
+        assert_eq!(serde_json::to_string(&RefineGuide::Colour).unwrap(), "\"color\"");
+        for saved in ["\"color\"", "\"colour\""] {
+            assert_eq!(serde_json::from_str::<RefineGuide>(saved).unwrap(), RefineGuide::Colour, "{saved}");
+        }
     }
 
     #[test]
