@@ -26,7 +26,7 @@ pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("edge_shift_4K");
     group.throughput(Throughput::Elements((w * h) as u64));
     group.sample_size(10);
-    for shift in [1.0f32, 2.5, 10.0, 50.0, -50.0] {
+    for shift in [1.0f32, 2.5, 10.0, 20.0, 50.0, -50.0] {
         group.bench_function(format!("shift_{shift}"), |b| {
             b.iter_batched(
                 || mask.clone(),

@@ -337,7 +337,7 @@ Feather runs after the guided filter: sharpen to colour edges first, then soften
 - **One RGBA allocation** per `postprocess`, shared by the guided filter and the alpha write.
 - **Row-parallel only above 512² pixels.** Alpha writes are memory-bound, so the gain caps at about 1.2× (`apply_mask_inplace` 5.7 → 4.8 ms at 4000×3000, 1.05× end to end). The `#[ignore]` tests `apply_mask_inplace_4k_bench` and `postprocess_4k_bench` reproduce these numbers.
 - **Guided filter**: O(1) box filters over f32 integral images, with each plane freed at its last use. Peak is the four parallel first-stage filters (12 planes, about 576 MB at 4K). Pairing them saves two planes but runs about 9 % slower, so that RAM-for-speed trade is left open.
-- **Edge shift** (`morphology::shift_mask`): N iterated 3×3 min/max passes equal one separable (2N+1)² window, computed with van Herk / Gil-Werman passes. Cost per pixel is the same at any shift, and RAM stays at two mask planes. Line thickness uses the same kernel.
+- **Edge shift** (`morphology::shift_mask`): min or max over a regular octagon of radius N, a (2p+1)² square followed by two diagonal lines of 2m+1 pixels (p + 2m = N, m = round(N(1 − 1/√2))). The vertical and diagonal windows are van Herk / Gil-Werman passes over whole rows; the horizontal one doubles inside a row in cache, because that vectorises. The mask is padded by N with its edge pixels and each pass keeps only whole windows, so a subject the frame cuts keeps its edge there; RAM is two padded planes. The exact disc (`dilate_round`, for Sketch line width and the eraser's Expand) measured 3–12× the octagon at 10–50 px, too slow for a slider dragged live.
 
 ### Criterion microbenches
 
@@ -346,7 +346,7 @@ Feather runs after the guided filter: sharpen to colour edges first, then soften
 | `--bench`        | Configuration                                         | Median |
 |------------------|-------------------------------------------------------|-------:|
 | `guided_filter`  | 512² / 2048²                                          | 4.4 / 74 ms |
-| `edge_shift`     | 1 / 2.5 / 10 / 50 px                                  | 16 / 35 / 15 / 16 ms |
+| `edge_shift`     | 1 / 2.5 / 10 / 20 / 50 px                             | 7.7 / 13 / 15 / 16 / 19 ms |
 | `sam_decode`     | 256² logits → selection plane                         | 8 ms |
 | `sam_preprocess` | photo → 1024² tensor                                  | 48 ms |
 | `edge_compose`   | `edge_plane` (2 px); lines only plain / solid          | 32; 11 / 9 ms |
