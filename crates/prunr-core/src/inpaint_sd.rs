@@ -115,9 +115,9 @@ pub struct SdInpaintRequest {
     pub guidance_scale: f32,
     /// `None` ⇒ random seed each call.
     pub seed: Option<u64>,
-    /// When true, swap the SD bundle's standard VAE legs for TAESD — a
-    /// distilled ~1M-param VAE pair (~3× faster decode, slight quality
-    /// cost). Falls back to the standard VAE when TAESD isn't installed.
+    /// When true, decode with TAESD's distilled decoder (~3× faster,
+    /// slight quality cost) instead of the bundle's own. Falls back to the
+    /// bundle's when TAESD isn't installed.
     pub use_taesd: bool,
     #[serde(default)]
     pub scheduler: SchedulerKind,
@@ -1221,8 +1221,8 @@ fn batch_refused_for_good(error: &str) -> bool {
 
 // ── Session bundle ──────────────────────────────────────────────────────
 
-/// Tiny distilled VAE pair (~1M params each). Never idle-released: it
-/// costs ~10 MB.
+/// TAESD's distilled decoder (~1M params). Never idle-released: it costs
+/// ~5 MB.
 pub(crate) struct TaesdSession {
     decoder: Mutex<Session>,
     decoder_input: String,
@@ -1242,13 +1242,12 @@ impl TaesdSession {
             .ok_or_else(|| CoreError::Inference(
                 prunr_models::not_installed_error(prunr_models::ModelId::TaesdFp16)
             ))?;
-        let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
-        let decoder_path = by_key.get("decoder")
+        let decoder_path = parts.into_iter().find_map(|(key, path)| (key == "decoder").then_some(path))
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
         let decoder = crate::ort_runtime::session_builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
-            .commit_from_file(decoder_path)
+            .commit_from_file(&decoder_path)
             .map_err(|e| CoreError::Inference(format!("TAESD decoder: load: {e}")))?;
         let decoder_input = decoder.inputs().first()
             .ok_or_else(|| CoreError::Inference("TAESD decoder: no inputs".into()))?
@@ -1982,9 +1981,7 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
 /// How latents become pixels: `Standard` is the bundle's own VAE decoder
 /// (~80M params); `Taesd` a distilled one (~1M params, ~3× faster) with
 /// the latent scale baked in, so only `Standard` scales. Encoding always
-/// runs the bundle's own encoder: TAESD's fed the model latents further
-/// from those it was trained on, and saved no measurable time (8.3-9.2 s
-/// an erase either way on an RTX 3060, the encoder loaded regardless).
+/// runs the bundle's own encoder, the one the model was trained on.
 pub(crate) enum VaeBackend<'a> {
     Standard(&'a SdSession),
     Taesd(&'a TaesdSession),

@@ -136,7 +136,7 @@ Common flags:
 | MI-GAN (Eraser) | ~26 MB | **on-demand** | 512×512 (tiled) | Lightweight GAN — sharper detail, less smooth on flat backgrounds |
 | Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint with prompts — phone-app-class quality. **GPU strongly recommended.** |
 | SD 1.5 LCM Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Same, distilled to converge in 4–8 steps — the Fast quality preset |
-| TAESD | ~5 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
+| TAESD | ~2.6 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
 | RORem (Eraser) | ~5.1 GB | **on-demand** | 512×512 (crop or tiled) | Removes large objects and fills with background, never with something new (SDXL, 4 steps). Needs ~15 GB of free RAM |
 | Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
