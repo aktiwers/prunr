@@ -333,6 +333,8 @@ pub struct LivePreview {
     refused: HashSet<u64>,
     /// Refusals not yet told.
     untold: Vec<String>,
+    /// Images whose due render waits for its photo's decode.
+    awaiting_decode: Vec<u64>,
 }
 
 /// A dispatch that ran to its end: its result, or `None` when it could
@@ -367,6 +369,7 @@ impl LivePreview {
             clock,
             refused: HashSet::new(),
             untold: Vec::new(),
+            awaiting_decode: Vec::new(),
         }
     }
 
@@ -470,10 +473,13 @@ impl LivePreview {
         }
 
         // Do NOT send off-screen renders together: each runs in parallel
-        // itself and holds its image's full-size buffers. Oldest first.
+        // itself and holds its image's full-size buffers. Oldest first; one
+        // waiting for its photo holds the lane, so one photo is decoded.
         ready_ids.sort_unstable();
+        let mut off_screen_decoding = false;
         for id in ready_ids {
-            if Some(id) != shown && self.off_screen_running(shown).is_some_and(|busy| busy != id) {
+            let off_screen = Some(id) != shown;
+            if off_screen && (off_screen_decoding || self.off_screen_running(shown).is_some_and(|busy| busy != id)) {
                 continue;
             }
             // Peek, don't remove: when the snapshot isn't ready (a decode in
@@ -501,6 +507,10 @@ impl LivePreview {
                 Err(verdict) => {
                     let why = verdict.reason().map(crate::gui::capability::Reason::text);
                     tracing::debug!(event = "live_preview_tick_unbuilt", item_id = id, ?kind, ?why, "render not built");
+                    if verdict == crate::gui::capability::Verdict::Wait(crate::gui::capability::Reason::Decoding) {
+                        self.awaiting_decode.push(id);
+                        off_screen_decoding |= off_screen;
+                    }
                     if !verdict.allows_request() {
                         self.pending.remove(&id);
                         self.owed.remove(&id);
@@ -633,16 +643,10 @@ impl LivePreview {
         self.in_flight.keys().copied().find(|&id| Some(id) != shown)
     }
 
-    /// The images whose queued render reads the photo (not a Refine or
-    /// Strength re-render of a kept run) and goes next: the shown one,
-    /// and off screen the one the lane takes, so the queue never holds
-    /// every photo decoded at once.
-    pub(crate) fn pending_photo_renders(&self, shown: Option<u64>) -> impl Iterator<Item = u64> + '_ {
-        let photo_renders = || self.pending.iter()
-            .filter(|(_, p)| !matches!(p.kind, PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2))
-            .map(|(id, _)| *id);
-        let lane = self.off_screen_running(shown).or_else(|| photo_renders().filter(|&id| Some(id) != shown).min());
-        photo_renders().filter(move |&id| Some(id) == shown || Some(id) == lane)
+    /// The images whose due render waits for its photo's decode, since
+    /// last asked.
+    pub(crate) fn take_awaiting_decode(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.awaiting_decode)
     }
 
     /// True while a preview waits for its debounce or runs, or a drag
@@ -1645,6 +1649,19 @@ mod tests {
         lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, true))), "a drag's in-between frame is quick");
         (clock, lp)
+    }
+
+    /// Off screen, a render waiting for its photo holds the lane: one
+    /// photo is decoded at a time, the shown one's beside it.
+    #[test]
+    fn one_off_screen_photo_is_decoded_at_a_time() {
+        let mut lp = LivePreview::default();
+        for id in [3, 1, 2, 9] {
+            lp.render_now(id, PreviewKind::Mask);
+        }
+        lp.tick(Some(9), |_, _| Err(WAIT));
+        assert_eq!(lp.take_awaiting_decode(), vec![1, 9]);
+        assert!(lp.take_awaiting_decode().is_empty(), "told once");
     }
 
     /// Images off screen render one at a time, the oldest first; the
