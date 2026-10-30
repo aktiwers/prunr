@@ -17,7 +17,7 @@
 //! final send: cancelling mid-drag dropped every result, leaving no live
 //! preview during the drag. The token fires only on `cancel` / `cancel_all`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -322,8 +322,8 @@ pub struct LivePreview {
     result_tx: mpsc::Sender<Finished>,
     result_rx: mpsc::Receiver<Finished>,
     clock: Arc<dyn Clock>,
-    /// Why each image's latest render was refused, until one lands.
-    refused: HashMap<u64, String>,
+    /// The images whose latest render was refused, until one lands.
+    refused: HashSet<u64>,
     /// Refusals not yet told.
     untold: Vec<String>,
 }
@@ -358,7 +358,7 @@ impl LivePreview {
             result_tx: tx,
             result_rx: rx,
             clock,
-            refused: HashMap::new(),
+            refused: HashSet::new(),
             untold: Vec::new(),
         }
     }
@@ -596,14 +596,16 @@ impl LivePreview {
                 continue;
             }
             self.in_flight.remove(&done.item_id);
-            if let Some(why) = done.refused {
-                if self.refused.get(&done.item_id) != Some(&why) {
-                    self.untold.push(why.clone());
-                    self.refused.insert(done.item_id, why);
-                }
+            // Told once per image: the memory a refusal names changes as
+            // the drag refuses again.
+            if let Some(why) = done.refused.filter(|_| self.refused.insert(done.item_id)) {
+                self.untold.push(why);
             }
             if let Some(mut r) = done.result {
-                self.refused.remove(&r.item_id);
+                // A quick frame lands where the full size is refused.
+                if !r.quick {
+                    self.refused.remove(&r.item_id);
+                }
                 r.is_final = !self.pending.contains_key(&r.item_id) && !self.owed.contains_key(&r.item_id);
                 out.push(r);
             }
@@ -1466,19 +1468,28 @@ mod tests {
     #[test]
     fn a_refused_render_is_told_once_until_one_lands() {
         let mut lp = LivePreview::default();
+        // Each refusal names the memory free at the time.
         let refuse = |lp: &mut LivePreview, generation: u64| {
             in_flight(lp, 7, generation);
-            lp.result_tx.send(Finished { item_id: 7, generation, result: None, refused: Some("too large".into()) }).unwrap();
+            lp.result_tx.send(Finished { item_id: 7, generation, result: None, refused: Some(format!("too large, {generation} GB free")) }).unwrap();
             lp.drain_results();
         };
         refuse(&mut lp, 1);
         refuse(&mut lp, 2);
-        assert_eq!(lp.take_refusals(), vec!["too large".to_string()]);
+        assert_eq!(lp.take_refusals(), vec!["too large, 1 GB free".to_string()]);
+        // A drag's quick frame is small enough to land; the full size is
+        // still refused.
         in_flight(&mut lp, 7, 3);
-        send_result(&lp, 7, 3);
+        let quick = PreviewResult { generation: 3, quick: true, ..PreviewResult::mask_for_test(7, Arc::new(RgbaImage::new(1, 1))) };
+        lp.result_tx.send(Finished { item_id: 7, generation: 3, result: Some(quick), refused: None }).unwrap();
         assert_eq!(lp.drain_results().len(), 1);
         refuse(&mut lp, 4);
-        assert_eq!(lp.take_refusals(), vec!["too large".to_string()], "after a render landed, told again");
+        assert!(lp.take_refusals().is_empty(), "a quick frame landing tells nothing new");
+        in_flight(&mut lp, 7, 5);
+        send_result(&lp, 7, 5);
+        assert_eq!(lp.drain_results().len(), 1);
+        refuse(&mut lp, 6);
+        assert_eq!(lp.take_refusals(), vec!["too large, 6 GB free".to_string()], "after a full render landed, told again");
     }
 
     /// A worker's non-final Mask result for item `id` under `generation`.
