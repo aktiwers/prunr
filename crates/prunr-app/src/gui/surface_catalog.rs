@@ -166,7 +166,7 @@ pub const VISITS: &[Visit] = &[
         visit("faces", Kind::Flyout, &[Click("Faces")], &["More face settings"]),
     )),
     on(Surface::Depth, with(
-        Variants::Fixed(&[panel(&[Expand("All depth settings")], &["Set focus", "Aerial perspective"])]),
+        Variants::Fixed(&[panel(&[Expand("All depth settings")], &["Aerial perspective"])]),
         visit("depth", Kind::Flyout, &[Click("Depth")], &["Off", "Point", "Tilt-shift", "Amount", "Fog"]),
     )),
     on(Surface::Upscale, visit("scale", Kind::Popover, &[Click("Scale")], &["2\u{00d7}"])),

@@ -438,8 +438,8 @@ fn a_colorize_run_holds_its_strength_chip() {
     }
 }
 
-/// No model's Depth chip: Point picks the lens blur, and Set focus waits
-/// for a click on the image.
+/// No model's Depth chip: Point picks the lens blur, and Set focus, on
+/// the strip beside it, waits for a click on the image.
 #[test]
 fn the_depth_chip_s_controls_act() {
     let mut h = loaded_with(|app| {
@@ -447,9 +447,9 @@ fn the_depth_chip_s_controls_act() {
         app.hardware_install_cache.depth = true;
     });
     click(&mut h, "Depth");
+    assert!(!tree(&h).iter().any(|n| n.name.as_deref() == Some("Set focus")), "no focus to set while the blur is off");
     click(&mut h, "Point");
     assert_eq!(h.state().batch.items[0].settings.depth.blur, prunr_core::depth::LensBlurMode::Point);
-    click(&mut h, "All depth settings");
     click(&mut h, "Set focus");
     assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
 }

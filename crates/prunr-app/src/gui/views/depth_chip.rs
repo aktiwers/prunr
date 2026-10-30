@@ -73,6 +73,9 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
                 return;
             }
             change.picked(chip::choice_buttons(ui, &BLUR_MODES, &mut look.blur));
+            if look.blur != LensBlurMode::Off {
+                change.pick_focus |= focus_button(ui, picking);
+            }
             change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
             change.merge(chip::slider_row_pct(ui, "Fog", &mut look.fog_pct, fmt::percent));
         }
@@ -87,15 +90,10 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
             change.picked(chip::choice_row(ui, "Lens blur", &BLUR_MODES, &mut look.blur));
             change.merge(chip::slider_row_pct(ui, "Amount", &mut look.blur_pct, fmt::percent));
             hint(ui, "Blurs what is far from the focus.");
-            ui.horizontal(|ui| {
-                let text = if picking { "Click the image\u{2026}" } else { "Set focus" };
-                let resp = chip::named(chip::button(ui, chip::ButtonKind::Secondary, text), "Set focus");
-                change.pick_focus |= chip::tooltip(resp, "Set focus", "Click the image where it should be sharp.", None).clicked();
-                if look.focus.is_some() && chip::button(ui, chip::ButtonKind::Secondary, "Auto focus").clicked() {
-                    look.focus = None;
-                    change.picked(true);
-                }
-            });
+            if look.focus.is_some() && chip::button(ui, chip::ButtonKind::Secondary, "Auto focus").clicked() {
+                look.focus = None;
+                change.picked(true);
+            }
             hint(ui, focus_text(look));
             change.merge(chip::slider_row_pct(ui, "Fog", &mut look.fog_pct, fmt::percent));
             hint(ui, "Haze that thickens with distance.");
@@ -106,6 +104,13 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
     change
 }
 
+
+/// "Set focus", on the strip beside the blur it aims: true when clicked.
+fn focus_button(ui: &mut Ui, picking: bool) -> bool {
+    let text = if picking { "Click the image\u{2026}" } else { "Set focus" };
+    let resp = chip::named(chip::button(ui, chip::ButtonKind::Secondary, text), "Set focus");
+    chip::tooltip(resp, "Set focus", "Click the image where it should be sharp.", None).clicked()
+}
 
 /// The chip face: what the look does, or Off.
 fn summary(look: &DepthLook) -> String {
