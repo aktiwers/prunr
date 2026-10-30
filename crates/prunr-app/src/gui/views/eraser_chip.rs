@@ -1,13 +1,13 @@
 //! Eraser chips: the SD eraser's Quality, Prompt and Advanced (the
-//! fill's scale and sharpness, steps, guidance, sampler, seed, the fast
-//! decoder and the edge), RORem's Advanced, and the other erasers'
-//! Advanced (the fill's scale, sharpness and edge).
+//! fill's scale and sharpness, steps, guidance, denoising strength,
+//! sampler, seed, the fast decoder and the edge), RORem's Advanced, and
+//! the other erasers' Advanced (the fill's scale, sharpness and edge).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
 
 use crate::gui::brush_state::{
-    default_sharpen, BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE,
+    default_sd_strength, default_sharpen, BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE,
 };
 use prunr_core::inpaint::FillScale;
 use prunr_core::inpaint_blend::EdgeColour;
@@ -38,6 +38,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
     let shipped = SdSchedulerBundle::default_for(quality);
     let tuned = usize::from(brush.sd_steps != shipped.steps)
         + usize::from(differs(brush.sd_guidance_scale, shipped.guidance_scale))
+        + usize::from(differs(brush.sd_strength, default_sd_strength()))
         + usize::from(brush.sd_seed.is_some())
         + usize::from(brush.sd_use_taesd.is_some())
         + usize::from(brush.sd_sampler.is_some())
@@ -49,7 +50,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         icon: ICON_TUNE.codepoint,
         label: "Advanced",
         summary: &summary,
-        tooltip: "How the eraser generates the fill: its scale and sharpness, steps, guidance, sampler, seed and how it meets the photo.",
+        tooltip: "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler, seed and how it meets the photo.",
         tuned: tuned > 0,
         width: theme::POPOVER_WIDTH,
         live: false,
@@ -59,6 +60,7 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         if reset {
             brush.sd_steps = shipped.steps;
             brush.sd_guidance_scale = shipped.guidance_scale;
+            brush.sd_strength = default_sd_strength();
             brush.sd_seed = None;
             brush.sd_use_taesd = None;
             brush.sd_sampler = None;
@@ -77,6 +79,10 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
             |v| if v <= 1.0 + 1e-3 { "Off".to_string() } else { fmt::plain(v, 1) },
         ).commit;
         hint(ui, "How closely the fill follows the prompt and avoids the negative prompt. 1 turns both off; higher follows closer but burns colors.");
+        ui.add_space(theme::SPACE_XS);
+
+        committed |= chip::slider_row_f32(ui, "Denoising strength", &mut brush.sd_strength, 0.0..=1.0, false, fmt::percent).commit;
+        hint(ui, "How much of the painted area is drawn anew. 100% replaces it; lower keeps its shapes and colors, to change something rather than remove it.");
         ui.add_space(theme::SPACE_XS);
 
         committed |= seed_row(ui, brush, shown_seed);

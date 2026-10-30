@@ -308,12 +308,20 @@ fn sd_bench() {
         let mask = rect_mask(w, h, (w - rw) / 2, (h - rh) / 2, rw, rh);
         pairs.push(("synthetic".into(), image, mask));
     }
-    // `PRUNR_SD_BENCH_STEPS=2,4,8`, `PRUNR_SD_BENCH_SEED=7,8` and
-    // `PRUNR_SD_BENCH_FILL=auto,full` run every combination; each
-    // defaults to one value.
+    // `PRUNR_SD_BENCH_STEPS=2,4,8`, `PRUNR_SD_BENCH_SEED=7,8`,
+    // `PRUNR_SD_BENCH_FILL=auto,full`, `PRUNR_SD_BENCH_STRENGTH=1,0.6` and
+    // `PRUNR_SD_BENCH_PROMPT=a|b` (split on `|`) run every combination;
+    // each defaults to one value.
     let nums = |name: &str| -> Vec<u64> { list(name).iter().map(|v| v.parse().expect(name)).collect() };
     let steps_list = { let v = nums("PRUNR_SD_BENCH_STEPS"); if v.is_empty() { vec![steps as u64] } else { v } };
     let seeds = { let v = nums("PRUNR_SD_BENCH_SEED"); if v.is_empty() { vec![42] } else { v } };
+    let strengths: Vec<f32> = {
+        let v: Vec<f32> = list("PRUNR_SD_BENCH_STRENGTH").iter().map(|v| v.parse().expect("PRUNR_SD_BENCH_STRENGTH")).collect();
+        if v.is_empty() { vec![inpaint_sd::FULL_STRENGTH] } else { v }
+    };
+    let prompts: Vec<String> = std::env::var("PRUNR_SD_BENCH_PROMPT")
+        .map(|v| v.split('|').map(str::to_string).collect())
+        .unwrap_or_else(|_| vec!["clean background".to_string()]);
     let fills: Vec<prunr_core::inpaint::FillScale> = {
         let v: Vec<_> = list("PRUNR_SD_BENCH_FILL").iter().map(|v| v.parse().expect("PRUNR_SD_BENCH_FILL")).collect();
         if v.is_empty() { vec![Default::default()] } else { v }
@@ -328,12 +336,16 @@ fn sd_bench() {
     for (stem, image, mask) in &pairs {
         for &steps in &steps_list {
             for &seed in &seeds {
-                for &fill_scale in &fills {
+                for (&fill_scale, &strength, (p, prompt)) in fills.iter()
+                    .flat_map(|f| strengths.iter().map(move |s| (f, s)))
+                    .flat_map(|(f, s)| prompts.iter().enumerate().map(move |p| (f, s, p)))
+                {
                     let req = SdInpaintRequest {
-                        prompt: "clean background".to_string(),
+                        prompt: prompt.clone(),
                         num_inference_steps: steps as u32,
                         guidance_scale: guidance,
                         scheduler,
+                        strength,
                         seed: Some(seed),
                         fill_scale,
                         tuning: tuning.clone(),
@@ -343,10 +355,10 @@ fn sd_bench() {
                     let run = inpaint_sd::process_inpaint_with(image, mask, id, req, &progress).map(|r| r.rgba);
                     let Some(result) = fill_or_skip("sd_bench", run) else { return; };
                     assert_eq!(result.dimensions(), image.dimensions());
-                    eprintln!("[sd_bench] {stem} steps={steps} seed={seed} fill={fill_scale} total {} ms", started.elapsed().as_millis());
+                    eprintln!("[sd_bench] {stem} steps={steps} seed={seed} fill={fill_scale} strength={strength} prompt={prompt:?} total {} ms", started.elapsed().as_millis());
                     if let Some(dir) = &out_dir {
                         let done = inpaint_blend::finalize_inpaint(result, image, mask, inpaint_blend::Band::Uniform(inpaint_blend::DEFAULT_EDGE_BLEND_PX), 0.0, inpaint_blend::EdgeColour::Off);
-                        done.save(format!("{dir}/{stem}_s{steps}_seed{seed}_{fill_scale}.png")).expect("save the bench output");
+                        done.save(format!("{dir}/{stem}_s{steps}_seed{seed}_{fill_scale}_str{strength}_p{p}.png")).expect("save the bench output");
                     }
                 }
             }

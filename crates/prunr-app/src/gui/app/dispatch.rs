@@ -235,6 +235,7 @@ impl PrunrApp {
             sd_guidance_scale: bs.sd_guidance_scale,
             sd_scheduler: bs.sd_scheduler,
             sd_steps: bs.sd_steps,
+            sd_strength: bs.sd_strength,
             rorem_steps: bs.rorem_steps,
             sd_seed: seed,
             use_taesd: bs.sd_use_taesd_effective(),

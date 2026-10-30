@@ -75,6 +75,10 @@ pub struct BrushSettings {
     pub sd_scheduler: SdScheduler,
     /// SD-only: number of denoise steps, within `SdScheduler::steps_range`.
     pub sd_steps: u32,
+    /// SD-only: how much of the region a fill draws anew, 0 to 1
+    /// (`SdInpaintRequest::strength`).
+    #[serde(default = "default_sd_strength")]
+    pub sd_strength: f32,
     /// RORem only: its denoise steps, within `ROREM_STEPS_RANGE`.
     pub rorem_steps: u32,
     /// SD-only: pinned RNG seed; `None` = fresh random per stroke.
@@ -158,6 +162,7 @@ impl From<SdScheduler> for prunr_core::inpaint_sd::SchedulerKind {
 
 fn default_feather() -> f32 { prunr_core::inpaint_blend::DEFAULT_EDGE_BLEND_PX }
 fn default_soft_edge() -> bool { true }
+pub(crate) fn default_sd_strength() -> f32 { prunr_core::inpaint_sd::FULL_STRENGTH }
 pub(crate) fn default_edge_colour(generated: bool) -> prunr_core::inpaint_blend::EdgeColour {
     use prunr_core::inpaint_blend::EdgeColour;
     if generated { EdgeColour::Off } else { EdgeColour::AlongEdge }
@@ -274,6 +279,7 @@ impl BrushSettings {
         self.inpaint_edge_colour = source.inpaint_edge_colour;
         self.sd_soft_edge = source.sd_soft_edge;
         self.sd_sampler = source.sd_sampler;
+        self.sd_strength = source.sd_strength;
         self.take_sd_quality_from(source);
         self.sd_prompt = source.sd_prompt.clone();
         self.sd_negative_prompt = source.sd_negative_prompt.clone();
@@ -353,6 +359,7 @@ impl Default for BrushSettings {
             sd_guidance_scale: default_cfg(),
             sd_scheduler: SdScheduler::default(),
             sd_steps: default_sd_steps(),
+            sd_strength: default_sd_strength(),
             rorem_steps: default_rorem_steps(),
             sd_seed: None,
             sd_use_taesd: None,
@@ -758,6 +765,7 @@ mod tests {
             sd_guidance_scale: 1.5,
             sd_scheduler: SdScheduler::Lcm,
             sd_steps: 8,
+            sd_strength: 1.0,
             rorem_steps: 4,
             sd_seed: None,
             sd_use_taesd: None,
@@ -811,6 +819,7 @@ mod tests {
             sd_guidance_scale: 6.0,
             sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 20,
+            sd_strength: 0.6,
             rorem_steps: 6,
             sd_seed: Some(7),
             sd_use_taesd: Some(false),
@@ -823,7 +832,7 @@ mod tests {
         let full = serde_json::to_value(&probe).unwrap();
         let nothing = serde_json::to_value(loaded_from_nothing()).unwrap();
         let fields = full.as_object().unwrap();
-        assert_eq!(fields.len(), 26, "a new field joins this test");
+        assert_eq!(fields.len(), 27, "a new field joins this test");
         for key in fields.keys() {
             assert_ne!(full[key], nothing[key], "{key}: the probe must differ from the default");
             let mut partial = full.clone();
@@ -1076,6 +1085,7 @@ mod tests {
             sd_guidance_scale: 5.5,
             sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 30,
+            sd_strength: 0.5,
             rorem_steps: 6,
             sd_seed: Some(42),
             sd_use_taesd: Some(true),
@@ -1110,6 +1120,7 @@ mod tests {
         assert!((s.sd_guidance_scale - 5.5).abs() < f32::EPSILON);
         assert_eq!(s.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
         assert_eq!(s.sd_steps, 30);
+        assert_eq!(s.sd_strength, 0.5);
         assert_eq!(s.sd_seed, Some(42));
         assert!(s.magic_depth && s.magic_depth_range == 0.2, "Depth is a strip knob, not the popover's");
     }

@@ -113,6 +113,12 @@ pub struct SdInpaintRequest {
     pub use_taesd: bool,
     #[serde(default)]
     pub scheduler: SchedulerKind,
+    /// How much of the region is drawn anew, 0 to 1. At 1 the fill starts
+    /// from noise; below, it starts from the photo under the region with
+    /// that share of noise mixed in and runs that share of the steps, so
+    /// the photo's shapes and colours carry into the fill.
+    #[serde(default = "full_strength")]
+    pub strength: f32,
     /// How the pipeline runs for this stroke; see `plan_tuning`.
     #[serde(default)]
     pub tuning: SdTuning,
@@ -320,6 +326,18 @@ impl SdInpaintRequest {
     }
 }
 
+/// The strength that draws the whole region anew, from noise.
+pub const FULL_STRENGTH: f32 = 1.0;
+
+fn full_strength() -> f32 { FULL_STRENGTH }
+
+/// How many of `steps` a fill at `strength` leaves out: the first, noisiest
+/// ones. At least one step runs.
+fn steps_skipped(steps: usize, strength: f32) -> usize {
+    let run = (steps as f32 * strength.clamp(0.0, 1.0)).round() as usize;
+    steps - run.clamp(steps.min(1), steps)
+}
+
 impl Default for SdInpaintRequest {
     fn default() -> Self {
         Self {
@@ -330,6 +348,7 @@ impl Default for SdInpaintRequest {
             seed: None,
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
+            strength: full_strength(),
             tuning: SdTuning::default(),
             fill_scale: Default::default(),
             soft_edge_px: 0.0,
@@ -829,6 +848,7 @@ fn run_one_tile(
     }
     let prompt = req.prompt.clone();
     let neg_prompt = if use_cfg { Some(req.negative_prompt.clone()) } else { None };
+    let from_photo = req.strength < FULL_STRENGTH;
     let soft = (req.soft_edge_px >= 1.0).then(|| {
         let padded_band = band.map(|band| crate::formats::pad_mirrored(band, pw, ph));
         edge_ramp(&padded_mask, Band::of(padded_band.as_deref(), req.soft_edge_px))
@@ -841,8 +861,9 @@ fn run_one_tile(
                 s.spawn(move || text_embedding_f16(bundle, &np))
             });
             let vae_h = s.spawn(|| vae_encode(vae, image_to_minus1_plus1_masked(&padded_image, &padded_mask)));
-            // The soft edge holds its band to the photo itself, unmasked.
-            let photo_h = soft.is_some().then(|| s.spawn(|| vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))));
+            // The soft edge holds its band to the photo itself, unmasked,
+            // and a fill below full strength starts from it.
+            let photo_h = (soft.is_some() || from_photo).then(|| s.spawn(|| vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.map(|h| h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))?)
@@ -868,12 +889,19 @@ fn run_one_tile(
     drop(mask_latent);
     let prelude_ms = timer.lap();
 
-    let mut scheduler = Scheduler::new_sd15(req.scheduler, req.num_inference_steps as usize);
+    let steps = req.num_inference_steps as usize;
+    let mut scheduler = Scheduler::new_sd15(req.scheduler, steps);
+    scheduler.skip(steps_skipped(steps, req.strength));
     let seed = req.seed.unwrap_or_else(fresh_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let latent_dim = (1_usize, 4_usize, lh, lw);
     let noise: Vec<f32> = sample_initial_noise(&mut rng, lw, lh).into_raw_vec_and_offset().0;
+    let photo = photo_latent.map(|p| p.into_raw_vec_and_offset().0);
+    let start = photo.as_deref().filter(|_| from_photo).map(|photo| {
+        let (signal, spread) = scheduler.level(0);
+        photo.iter().zip(&noise).map(|(&p, &e)| signal * p + spread * e).collect::<Vec<f32>>()
+    });
 
     let scale = req.guidance_scale;
     let predict = |latent: &[f32], step: UnetStep| {
@@ -896,12 +924,12 @@ fn run_one_tile(
             p.show(x0, progress);
         }
     };
-    let held = soft.as_ref().zip(photo_latent).map(|(ramp, photo)| HeldEdge {
-        photo: photo.into_raw_vec_and_offset().0,
+    let held = soft.as_ref().zip(photo).map(|(ramp, photo)| HeldEdge {
+        photo,
         noise: noise.clone(),
         ramp: pool_cells(pw as usize, ph as usize, |i| ramp[i]),
     });
-    let latent_buf = denoise(&mut scheduler, noise, &mut rng, progress, predict, show, held.as_ref())?;
+    let latent_buf = denoise(&mut scheduler, start.unwrap_or(noise), &mut rng, progress, predict, show, held.as_ref())?;
 
     let unet_ms = timer.lap();
 
@@ -2826,6 +2854,22 @@ impl Scheduler {
         }
     }
 
+    /// Starts the run `k` steps in, at that step's noise level: the
+    /// schedule keeps its spacing and loses its first `k` steps.
+    pub fn skip(&mut self, k: usize) {
+        match self {
+            Scheduler::Lcm(s) => {
+                s.timesteps.drain(..k);
+                s.num_inference -= k;
+            }
+            Scheduler::DpmPp2M(s) => {
+                s.timesteps.drain(..k);
+                s.sigmas.drain(..k);
+                s.num_inference -= k;
+            }
+        }
+    }
+
     /// The (signal, noise) scale of the latent before step `k` (`k` = the
     /// steps run so far): `signal · clean + noise · ε`. After the last
     /// step, either scheduler's latent is clean.
@@ -3523,6 +3567,34 @@ mod tests {
         let fill = RgbaImage::from_pixel(3, 1, Rgba([200, 200, 200, 255]));
         let out = composite_soft(&photo, &fill, &[0.0, 0.5, 1.0], 3);
         assert_eq!([out.get_pixel(0, 0).0[0], out.get_pixel(1, 0).0[0], out.get_pixel(2, 0).0[0]], [0, 100, 200]);
+    }
+
+    #[test]
+    fn a_fill_below_full_strength_runs_its_share_of_the_steps() {
+        for (steps, strength, skipped) in [
+            (8, 1.0, 0), (8, 0.5, 4), (8, 0.0, 7), (8, 0.99, 0), (8, 1.5, 0),
+            (25, 0.3, 17), (25, 0.75, 6), (1, 0.1, 0), (0, 0.5, 0),
+        ] {
+            assert_eq!(steps_skipped(steps, strength), skipped, "{steps} steps at {strength}");
+        }
+    }
+
+    /// A run started `k` steps in takes the rest of the full schedule's
+    /// steps at their own noise levels, and still ends on a clean latent.
+    #[test]
+    fn a_skipped_schedule_is_the_tail_of_the_full_one() {
+        for kind in [SchedulerKind::Lcm, SchedulerKind::DpmPp2MKarras] {
+            let full = Scheduler::new_sd15(kind, 10);
+            for k in [0, 3, 9] {
+                let mut tail = Scheduler::new_sd15(kind, 10);
+                tail.skip(k);
+                assert_eq!(tail.timesteps(), &full.timesteps()[k..], "{kind:?} skip {k}");
+                for i in 0..=tail.timesteps().len() {
+                    assert_eq!(tail.level(i), full.level(k + i), "{kind:?} skip {k} level {i}");
+                }
+                assert_eq!(tail.level(tail.timesteps().len()), (1.0, 0.0), "{kind:?} skip {k} ends clean");
+            }
+        }
     }
 
     #[test]

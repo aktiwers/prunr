@@ -727,6 +727,7 @@ pub(crate) struct InpaintTuning {
     pub sd_guidance_scale: f32,
     pub sd_scheduler: super::brush_state::SdScheduler,
     pub sd_steps: u32,
+    pub sd_strength: f32,
     /// RORem only: its denoise steps.
     pub rorem_steps: u32,
     /// SD-only: `None` = random seed.
@@ -765,6 +766,7 @@ impl Default for InpaintTuning {
             sd_guidance_scale: 1.0,
             sd_scheduler: super::brush_state::SdScheduler::Lcm,
             sd_steps: 8,
+            sd_strength: prunr_core::inpaint_sd::FULL_STRENGTH,
             rorem_steps: prunr_core::inpaint_sd::ROREM_STEPS,
             sd_seed: None,
             use_taesd: false,
@@ -2162,6 +2164,7 @@ pub(crate) fn sd_request(tuning: &InpaintTuning, band_px: f32) -> Option<prunr_c
                 prompt: tuning.sd_prompt.clone(),
                 negative_prompt: tuning.sd_negative_prompt.clone(),
                 num_inference_steps: tuning.sd_steps,
+                strength: tuning.sd_strength,
                 guidance_scale: effective_cfg(tuning.model, tuning.sd_guidance_scale),
                 use_taesd: tuning.use_taesd,
                 scheduler: tuning.sd_sampler.unwrap_or(tuning.sd_scheduler).into(),
@@ -2247,6 +2250,7 @@ mod sd_request_tests {
             sd_guidance_scale: 7.5,
             sd_scheduler: super::super::brush_state::SdScheduler::DpmPlusPlus2MKarras,
             sd_steps: 25,
+            sd_strength: 0.4,
             rorem_steps: 6,
             sd_seed: Some(42),
             use_taesd: true,
@@ -2256,7 +2260,16 @@ mod sd_request_tests {
         assert_eq!(req.num_inference_steps, 6, "its own steps, not SD's");
         assert_eq!(req.scheduler, prunr_core::inpaint_sd::SchedulerKind::Lcm);
         assert!(req.prompt.is_empty() && req.guidance_scale <= 1.0 && !req.use_taesd);
+        assert_eq!(req.strength, prunr_core::inpaint_sd::FULL_STRENGTH, "it always removes");
         assert_eq!(req.seed, Some(42));
+    }
+
+    #[test]
+    fn the_denoising_strength_reaches_both_sd_qualities() {
+        for model in [prunr_models::ModelId::SdV15InpaintFp16, prunr_models::ModelId::SdV15LcmInpaintFp16] {
+            let tuning = InpaintTuning { model, sd_strength: 0.4, ..Default::default() };
+            assert_eq!(sd_request(&tuning, 0.0).unwrap().strength, 0.4, "{model:?}");
+        }
     }
 
     #[test]
