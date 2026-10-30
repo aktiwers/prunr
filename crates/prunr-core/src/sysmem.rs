@@ -41,13 +41,26 @@ pub fn room_for_buffers_bytes() -> Option<u64> {
 fn memory_now() -> (u64, u64, u64) {
     with_system(|sys| {
         sys.refresh_memory();
-        (sys.available_memory(), sys.total_memory(), sys.free_swap())
+        (available_of(sys), sys.total_memory(), sys.free_swap())
     })
 }
 
-/// `available` when the system reports its memory at all. A 0 is nothing
-/// free, not a figure missing: macOS reports 0 while its compressor holds
-/// more than is free, its worst pressure.
+/// On macOS all memory less what is used (apps, wired, compressed), as
+/// Activity Monitor counts it. sysinfo's own figure there is free +
+/// inactive + purgeable less the compressor's pages, floored at 0, which
+/// it reaches while the system still makes room by swapping: under a
+/// 13 GB load on a 16 GB Mac it read 0 where this reads 3.4 GB, and
+/// idle the two agree within half a gigabyte.
+fn available_of(sys: &sysinfo::System) -> u64 {
+    if cfg!(target_os = "macos") {
+        sys.total_memory().saturating_sub(sys.used_memory())
+    } else {
+        sys.available_memory()
+    }
+}
+
+/// `available` when the system reports its memory at all: a 0 is nothing
+/// free, not a figure missing.
 fn reported_available(available: u64, total: u64) -> Option<u64> {
     (total > 0).then_some(available)
 }
