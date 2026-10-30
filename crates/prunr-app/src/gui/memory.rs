@@ -118,7 +118,7 @@ impl AdmissionController {
 /// Available RAM below 20% of total: undo history spills to disk.
 pub fn under_memory_pressure() -> bool {
     let total = crate::hardware::total_ram_bytes();
-    let available = crate::hardware::available_ram_bytes_now();
+    let available = crate::hardware::available_ram_bytes_throttled();
     if total == 0 { return false; }
     (available as f64 / total as f64) < 0.20
 }

@@ -466,13 +466,11 @@ impl LivePreview {
             }
         }
 
-        // A batch re-finish sent every image's render at once and held all
-        // their full-size buffers together, for little gain: each render
-        // runs in parallel itself. Off screen, the oldest image goes first.
+        // Do NOT send off-screen renders together: each runs in parallel
+        // itself and holds its image's full-size buffers. Oldest first.
         ready_ids.sort_unstable();
-        let mut off_screen = self.in_flight.keys().copied().find(|&id| Some(id) != shown);
         for id in ready_ids {
-            if Some(id) != shown && off_screen.is_some_and(|busy| busy != id) {
+            if Some(id) != shown && self.off_screen_running(shown).is_some_and(|busy| busy != id) {
                 continue;
             }
             // Peek, don't remove: when the snapshot isn't ready (a decode in
@@ -517,9 +515,9 @@ impl LivePreview {
             self.generation_counter = self.generation_counter.wrapping_add(1);
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));
-            self.in_flight.insert(id, InFlight { cancel: cancel.clone(), generation });
-            if Some(id) != shown {
-                off_screen = Some(id);
+            // The render it replaces would run on beside it.
+            if let Some(replaced) = self.in_flight.insert(id, InFlight { cancel: cancel.clone(), generation }) {
+                replaced.cancel.store(true, Ordering::Release);
             }
 
             let tx = self.result_tx.clone();
@@ -623,12 +621,21 @@ impl LivePreview {
         std::mem::take(&mut self.untold)
     }
 
-    /// The images with a render queued that reads the photo (not a Refine
-    /// or Strength re-render of a kept run).
-    pub(crate) fn pending_photo_renders(&self) -> impl Iterator<Item = u64> + '_ {
-        self.pending.iter()
+    /// The image off screen with a render running, besides `shown`.
+    fn off_screen_running(&self, shown: Option<u64>) -> Option<u64> {
+        self.in_flight.keys().copied().find(|&id| Some(id) != shown)
+    }
+
+    /// The images whose queued render reads the photo (not a Refine or
+    /// Strength re-render of a kept run) and goes next: the shown one,
+    /// and off screen the one the lane takes, so the queue never holds
+    /// every photo decoded at once.
+    pub(crate) fn pending_photo_renders(&self, shown: Option<u64>) -> impl Iterator<Item = u64> + '_ {
+        let photo_renders = || self.pending.iter()
             .filter(|(_, p)| !matches!(p.kind, PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2))
-            .map(|(id, _)| *id)
+            .map(|(id, _)| *id);
+        let lane = self.off_screen_running(shown).or_else(|| photo_renders().filter(|&id| Some(id) != shown).min());
+        photo_renders().filter(move |&id| Some(id) == shown || Some(id) == lane)
     }
 
     /// True while a preview waits for its debounce or runs, or a drag

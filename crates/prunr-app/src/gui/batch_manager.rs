@@ -636,21 +636,19 @@ impl BatchManager {
     }
 
     /// Under memory pressure, images off screen let go of their decoded
-    /// photo and their photo and selection textures, all made again when
-    /// shown; not while work on one is under way.
-    pub(crate) fn free_off_screen_photos(&mut self) {
-        let selected_id = self.selected_item().map(|b| b.id);
-        for item in self.items.iter_mut().filter(|item| Some(item.id) != selected_id && !item.is_busy()) {
-            item.source_texture = None;
-            item.selection_texture = None;
-            super::reclaim::later(item.source_rgba.take());
-        }
+    /// photo and its textures; not while work on one is under way, or
+    /// while `rendering` (a queued preview reads the photo).
+    pub(crate) fn free_off_screen_photos(&mut self, rendering: impl Fn(u64) -> bool) {
+        let selected_id = self.selected_id();
+        self.items.iter_mut()
+            .filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id))
+            .for_each(BatchItem::release_photo);
     }
 
     /// Evict all tensor caches except the selected item (called under
     /// memory pressure). Returns how many images let go of theirs.
     pub(crate) fn evict_all_tensors(&mut self) -> usize {
-        let selected_id = self.selected_item().map(|b| b.id);
+        let selected_id = self.selected_id();
         self.items.iter_mut().filter(|item| Some(item.id) != selected_id).map(drop_tensors).filter(|&freed| freed > 0).count()
     }
 
@@ -1191,14 +1189,15 @@ mod tests {
         assert!(bm.items[2].cached_tensor.is_none(), "non-selected evicted");
     }
     /// Only images off screen and idle let go of their photo and textures:
-    /// the shown one keeps them, and so does one with work under way.
+    /// the shown one keeps them, and so does one with work or a preview
+    /// under way.
     #[test]
     fn off_screen_idle_images_let_go_of_their_photo_and_textures() {
         use crate::gui::image_texture::ImageTexture;
         let ctx = egui::Context::default();
         let texture = || ImageTexture::single(ctx.load_texture("t", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
         let mut bm = fixture();
-        for id in 1..=3 {
+        for id in 1..=4 {
             let mut item = item_with_cache(id, 0);
             item.source_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
             item.source_texture = Some(texture());
@@ -1206,11 +1205,12 @@ mod tests {
         }
         bm.selected_index = 0;
         crate::gui::tests::fixtures::put_in(&mut bm.items[2], BatchStatus::Processing);
-        bm.free_off_screen_photos();
+        bm.free_off_screen_photos(|id| id == 4);
         let kept = |item: &BatchItem| item.source_rgba.is_some() && item.source_texture.is_some();
         assert!(kept(&bm.items[0]), "the shown image");
         assert!(bm.items[1].source_rgba.is_none() && bm.items[1].source_texture.is_none(), "off screen and idle");
         assert!(kept(&bm.items[2]), "off screen, processing");
+        assert!(kept(&bm.items[3]), "off screen, its preview queued");
     }
 
     // ── request_decode_bytes / request_thumbnail (thread-spawning) ──────
