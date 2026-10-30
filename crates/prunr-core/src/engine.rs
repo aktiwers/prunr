@@ -1260,7 +1260,7 @@ fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) ->
         return prunr_models::has_int8_variant(id).then_some(Weights::Int8);
     }
     let gains = fp16_eps(id, eps);
-    let half = match prunr_models::half_precision_need(id) {
+    let half = match prunr_models::half_precision_copy(id) {
         Some(_) => gains.first().is_some_and(|ep| crate::memory::runs_half_precision(id, ep.as_str(), crate::memory::card_free_mb(ep.as_str()))),
         None => prunr_models::has_fp16_variant(id) && !gains.is_empty(),
     };

@@ -93,7 +93,7 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
 /// and `card_free_mb` short of its own weights. No reading: its own.
 pub fn runs_half_precision(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> bool {
     too_big_for_card(charge_on(id, provider), card_free_mb)
-        && prunr_models::half_precision_need(id).is_some()
+        && prunr_models::half_precision_copy(id).is_some()
         && prunr_models::has_fp16_variant(id)
 }
 
@@ -105,8 +105,8 @@ fn too_big_for_card(own: Option<Charge>, card_free_mb: Option<u64>) -> bool {
 /// `charge_on` for the weights `id` runs on `provider` with `card_free_mb`
 /// free there: its half-precision copy's where `runs_half_precision`.
 pub fn charge_with(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> Option<Charge> {
-    match prunr_models::half_precision_need(id).filter(|_| runs_half_precision(id, provider, card_free_mb)) {
-        Some(half) => Some(Charge { ram_mb: half.host_mb.into(), card_mb: half.card_mb.into() }),
+    match prunr_models::half_precision_copy(id).filter(|_| runs_half_precision(id, provider, card_free_mb)) {
+        Some(copy) => Some(Charge { ram_mb: copy.need.host_mb.into(), card_mb: copy.need.card_mb.into() }),
         None => charge_on(id, provider),
     }
 }

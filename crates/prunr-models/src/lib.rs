@@ -2489,16 +2489,36 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "int8")
 }
 
-/// What `id`'s half-precision copy needs, for a model that runs it only
-/// on a card its own weights do not fit: there the card's memory halves
-/// while the result stays the same to the eye (BiRefNet-lite on an RTX
-/// 3060: 3.85 GB against 7.7 GB, 0.2 % of mask pixels more than 8 levels
-/// off). `None`: the model runs its own weights, or its copy everywhere.
-pub fn half_precision_need(id: ModelId) -> Option<Cost> {
+/// A half-precision copy a model runs only on a card its own weights do
+/// not fit, where the card's memory halves while the result stays the
+/// same to the eye: the file the CUDA add-on brings, and what it needs.
+#[derive(Debug, Clone, Copy)]
+pub struct HalfPrecisionCopy {
+    pub file: OnDemandVariant,
+    pub need: Cost,
+}
+
+/// `id`'s copy for small cards (BiRefNet-lite on an RTX 3060: 3.85 GB
+/// against 7.7 GB, 0.2 % of mask pixels more than 8 levels off). `None`:
+/// the model runs its own weights, or its copy everywhere.
+pub fn half_precision_copy(id: ModelId) -> Option<HalfPrecisionCopy> {
     match id {
-        ModelId::BiRefNetLite => Some(Cost::measured(1_450, 3_850, "RTX 3060 12 GB, i5-11600KF, 341 ms against fp32's 397, 2026-10-30")),
+        ModelId::BiRefNetLite => Some(HalfPrecisionCopy {
+            file: OnDemandVariant {
+                filename: "birefnet_lite_fp16.onnx",
+                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/birefnet_lite_fp16.onnx",
+                sha256: "b32371e6c9c916650df9debbfbb14100b4cf5606b57de6ebb88d63cdaff45d59",
+                size_mb: 110,
+            },
+            need: Cost::measured(1_450, 3_850, "RTX 3060 12 GB, i5-11600KF, 341 ms against fp32's 397, 2026-10-30"),
+        }),
         _ => None,
     }
+}
+
+/// Every model's copy for small cards, with the model.
+pub fn half_precision_copies() -> impl Iterator<Item = (ModelId, HalfPrecisionCopy)> {
+    REGISTRY.iter().filter_map(|d| half_precision_copy(d.id).map(|copy| (d.id, copy)))
 }
 
 /// Whether the half-precision copy of `id` is on disk, without reading it.
@@ -3181,6 +3201,17 @@ mod tests {
     #[test]
     fn the_data_stays_on_this_computer() {
         assert!(!data_dir().expect("a data dir").starts_with(dirs::data_dir().expect("a roaming data dir")));
+    }
+
+    /// A copy for small cards is the file the engine reads as the model's
+    /// half-precision weights, and its address names that file.
+    #[test]
+    fn a_small_card_copy_is_the_file_the_engine_reads() {
+        assert!(half_precision_copies().count() > 0);
+        for (id, copy) in half_precision_copies() {
+            assert_eq!(copy.file.filename, format!("{}_fp16.onnx", id.stable_name()), "{id:?}");
+            assert!(copy.file.url.ends_with(copy.file.filename), "{id:?}");
+        }
     }
 
     /// The sweep removes the retired names it finds and nothing else.

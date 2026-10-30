@@ -207,7 +207,8 @@ impl RuntimeId {
     /// where NVIDIA's libraries are already here (`nvidia_here`).
     pub fn download_label(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
-        let addon = self.addon().map(|addon| Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes)));
+        let copies = if self == Self::Cuda { small_card_copies_bytes() } else { 0 };
+        let addon = self.addon().map(|addon| Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes + copies)));
         match self {
             Self::OpenVino => addon.unwrap_or(Cow::Borrowed("80 MB")),
             Self::Cuda => addon.filter(|_| nvidia_here).unwrap_or(Cow::Borrowed("about 2 GB")),
@@ -376,6 +377,11 @@ pub const NVIDIA_LICENSE_URLS: [&str; 2] = [
     "https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html",
 ];
 
+/// What the small-card copies add to the CUDA add-on's download.
+fn small_card_copies_bytes() -> u64 {
+    prunr_models::half_precision_copies().map(|(_, copy)| u64::from(copy.file.size_mb) * 1024 * 1024).sum()
+}
+
 /// Where the NVIDIA libraries go: inside the CUDA install (the runtime or
 /// the add-on), so uninstalling it removes them too.
 pub fn nvidia_libraries_dir() -> Option<PathBuf> {
@@ -524,6 +530,9 @@ pub enum Uninstalled {
 /// ORT source (uninstalling would brick startup) and when the subdir name
 /// could escape `<data>/runtimes/`.
 pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
+    if runtime == RuntimeId::Cuda {
+        remove_small_card_copies();
+    }
     let dir = runtime.checked_install_dir()?;
     if !dir.exists() {
         return Ok(Uninstalled::Now); // already absent — nothing to do
@@ -613,7 +622,9 @@ fn run_install(
         None => query_pypi(rt, &cancel)?,
     };
     let nvidia = if rt == RuntimeId::Cuda && !nvidia_libraries_installed() { nvidia_wheels(&cancel)? } else { Vec::new() };
-    let total = wheel.size_bytes + nvidia.iter().map(|w| w.size_bytes).sum::<u64>();
+    let copies = if rt == RuntimeId::Cuda { small_card_copies_missing() } else { Vec::new() };
+    let nvidia_bytes = nvidia.iter().map(|w| w.size_bytes).sum::<u64>();
+    let total = wheel.size_bytes + nvidia_bytes + copies.iter().map(|(_, w)| w.size_bytes).sum::<u64>();
 
     let _ = tx.send(InstallEvent::Downloading { bytes_so_far: 0, total_bytes: total });
     let mut on_progress = |so_far: u64, _: u64| {
@@ -633,6 +644,7 @@ fn run_install(
         let target = rt.checked_install_dir()?.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
     }
+    fetch_small_card_copies(&copies, tx, &cancel, (wheel.size_bytes + nvidia_bytes, total))?;
     // The runtime just installed is the one the user wants next start;
     // an add-on starts now, in the runtime already loaded, when that is
     // as new as the add-on (Prunr's own), else at the next start, in it.
@@ -678,6 +690,69 @@ fn start_addon(addon: Addon) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Err("no add-on runs on macOS".to_string())
+    }
+}
+
+/// The copies models run on a card too small for their own weights
+/// (`prunr_models::half_precision_copies`) not on disk yet, each with
+/// where it goes. The CUDA add-on brings them: only a card it runs on
+/// uses them.
+fn small_card_copies_missing() -> Vec<(PathBuf, ri::WheelInfo)> {
+    let Some(dir) = prunr_models::on_demand_dir() else { return Vec::new() };
+    prunr_models::half_precision_copies()
+        .map(|(_, copy)| {
+            let wheel = ri::WheelInfo { url: copy.file.url.into(), sha256: copy.file.sha256.into(), size_bytes: u64::from(copy.file.size_mb) * 1024 * 1024 };
+            (dir.join(copy.file.filename), wheel)
+        })
+        .filter(|(path, _)| !path.is_file())
+        .collect()
+}
+
+/// Each copy into place. One that does not download leaves its model on
+/// its own weights, so it is logged and the install goes on; a cancel
+/// stops the install.
+fn fetch_small_card_copies(
+    copies: &[(PathBuf, ri::WheelInfo)],
+    tx: &mpsc::Sender<InstallEvent>,
+    cancel: &Arc<AtomicBool>,
+    (done_before, total): (u64, u64),
+) -> Result<(), String> {
+    let mut done = done_before;
+    for (path, wheel) in copies {
+        let mut on_progress = |so_far: u64, _: u64| {
+            let _ = tx.send(InstallEvent::Downloading { bytes_so_far: done + so_far, total_bytes: total });
+        };
+        let mut hooks = ri::DownloadHooks { progress: &mut on_progress, cancel: Arc::clone(cancel) };
+        let fetched = spool_for(path).and_then(|spool| {
+            let placed = ri::download_wheel(wheel, &mut hooks, &spool)
+                .and_then(|file| {
+                    drop(file);
+                    std::fs::rename(&spool, path).map_err(|e| format!("place {}: {e}", path.display()))
+                });
+            let _ = std::fs::remove_file(&spool);
+            placed
+        });
+        if let Err(e) = fetched {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(e);
+            }
+            tracing::warn!(file = %path.display(), %e, "a small-card copy did not download; its model keeps its own weights");
+        }
+        done += wheel.size_bytes;
+    }
+    Ok(())
+}
+
+/// Remove the small-card copies the CUDA add-on brought.
+fn remove_small_card_copies() {
+    let Some(dir) = prunr_models::on_demand_dir() else { return };
+    for (_, copy) in prunr_models::half_precision_copies() {
+        let path = dir.join(copy.file.filename);
+        if path.is_file() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(file = %path.display(), %e, "could not remove a small-card copy");
+            }
+        }
     }
 }
 
