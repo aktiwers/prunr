@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{EdgeCacheFile, TensorCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
-use crate::subprocess::manager::{Photo, SubprocessManager, WorkerLines};
+use crate::subprocess::manager::{Photo, SendError, SubprocessManager, WorkerLines};
 use crate::subprocess::ipc::read_and_delete;
 use crate::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
 pub(crate) use crate::subprocess::first_look::Shown;
@@ -1358,7 +1358,7 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
     sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
 }
 
-type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &Photo, MaskSettings) -> Result<(), String>;
+type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &Photo, MaskSettings) -> Result<(), SendError>;
 
 impl CachedTensorWork {
     /// The unpacked tensor, and the photo: decoded, or the file read. A
@@ -1385,15 +1385,17 @@ fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendC
         height: work.tensor.height,
         width: work.tensor.width,
     };
-    let sent = send(sub, work.item_id, &tensor, work.tensor.model, &photo, work.mask);
-    // The raw pixels are several times the file: a temp folder too full
-    // for them may still take the file.
-    if let (Err(err), Photo::Decoded(_)) = (&sent, &photo) {
-        tracing::warn!(item_id = work.item_id, %err, "the decoded photo could not be handed over; sending its file");
-        let photo = work.encoded_photo().map_err(Refused::Unreadable)?;
-        return send(sub, work.item_id, &tensor, work.tensor.model, &photo, work.mask).map_err(Refused::Worker);
+    let mut hand_over = |photo: &Photo| send(sub, work.item_id, &tensor, work.tensor.model, photo, work.mask);
+    match hand_over(&photo) {
+        // The raw pixels are several times the file: a temp folder too
+        // full for them may still take the file.
+        Err(SendError::PhotoFile(err)) if matches!(photo, Photo::Decoded(_)) => {
+            tracing::warn!(item_id = work.item_id, %err, "the decoded photo could not be written; sending its file");
+            hand_over(&work.encoded_photo().map_err(Refused::Unreadable)?)
+        }
+        sent => sent,
     }
-    sent.map_err(Refused::Worker)
+    .map_err(|err| Refused::Worker(err.to_string()))
 }
 
 #[cfg(test)]

@@ -29,6 +29,23 @@ pub enum Photo {
     Decoded(std::sync::Arc<image::RgbaImage>),
 }
 
+/// Why a re-run was not handed over.
+#[derive(Debug)]
+pub enum SendError {
+    /// The photo's temp file could not be written.
+    PhotoFile(String),
+    /// The tensor's temp file or the pipe.
+    Other(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PhotoFile(why) | Self::Other(why) => f.write_str(why),
+        }
+    }
+}
+
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
 pub struct SubprocessManager {
     child: Child,
@@ -297,19 +314,19 @@ impl SubprocessManager {
         photo: &Photo,
         image_kind: super::protocol::IpcKind,
         build_cmd: impl FnOnce(std::path::PathBuf, PhotoFile) -> SubprocessCommand,
-    ) -> Result<(), String> {
+    ) -> Result<(), SendError> {
         let tensor_path = tensor_kind.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor.data))
-            .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
+            .map_err(|e| SendError::Other(format!("Failed to write tensor temp file: {e}")))?;
         let image_path = image_kind.path_for(ipc_temp_dir(), item_id);
         let original = match photo {
             Photo::Encoded(bytes) => std::fs::write(&image_path, bytes.as_slice()).map(|()| PhotoFile::Encoded(image_path)),
             Photo::Decoded(rgba) => super::ipc::write_image(&image_path, rgba).map(|()| PhotoFile::Decoded(image_path)),
         }
-        .map_err(|e| format!("Failed to write image temp file: {e}"))?;
+        .map_err(|e| SendError::PhotoFile(format!("Failed to write image temp file: {e}")))?;
 
         self.send_cmd(&build_cmd(tensor_path, original))
-            .map_err(|e| format!("Failed to send command: {e}"))?;
+            .map_err(|e| SendError::Other(format!("Failed to send command: {e}")))?;
 
         self.in_flight.insert(item_id);
         Ok(())
@@ -327,7 +344,7 @@ impl SubprocessManager {
         model: prunr_core::ModelKind,
         photo: &Photo,
         mask: prunr_core::MaskSettings,
-    ) -> Result<(), String> {
+    ) -> Result<(), SendError> {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
@@ -354,7 +371,7 @@ impl SubprocessManager {
         model: prunr_core::ModelKind,
         photo: &Photo,
         mask: prunr_core::MaskSettings,
-    ) -> Result<(), String> {
+    ) -> Result<(), SendError> {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
