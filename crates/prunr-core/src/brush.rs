@@ -46,6 +46,10 @@ where
     let w_i = target.width as i32;
     let h_i = target.height as i32;
     let inner = outer * stamp.hardness.clamp(0.0, 1.0);
+    // A falloff narrower than a pixel steps at the pixel grid; one pixel
+    // wide and centred on the edge, it shades each pixel the edge cuts by
+    // about how much of it the stamp covers, and keeps the stamp's area.
+    let (inner, outer) = if outer - inner < 1.0 { ((outer - 0.5).max(0.0), outer + 0.5) } else { (inner, outer) };
     let span = (outer - inner).max(1e-6);
     let sign = f32::from(stamp.mode.sign());
     let strength = stamp.strength.clamp(0.0, 1.0);
@@ -167,6 +171,23 @@ mod tests {
             nonzero,
             area as i32
         );
+    }
+
+    /// A hard brush's edge is shaded by how much of each pixel it covers,
+    /// not stepped: the inside stays full, the outside untouched.
+    #[test]
+    fn a_hard_brush_has_a_smooth_edge() {
+        let mut c = MaskArtifact::new_empty(32, 32);
+        paint_circle(&mut c, 16.0, 16.0, 10.0, add(1.0, 1.0));
+        let g = c.cells();
+        assert_eq!(g[16 * 32 + 16], 127);
+        assert_eq!(g[16 * 32 + 22], 127, "well inside");
+        assert_eq!(g[16 * 32 + 28], 0, "outside");
+        let shaded = g.iter().filter(|&&v| v > 0 && v < 127).count();
+        assert!(shaded > 40, "the rim is shaded, {shaded} pixels");
+        let coverage: f32 = g.iter().map(|&v| f32::from(v) / 127.0).sum();
+        let area = std::f32::consts::PI * 100.0;
+        assert!((coverage - area).abs() < area * 0.05, "keeps the disc's area: {coverage} against {area}");
     }
 
     #[test]
