@@ -42,7 +42,10 @@ pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba,
     rgba
 }
 
-/// `postprocess` from a flat `[1,1,H,W]` tensor, as it arrives over IPC.
+/// `postprocess` from a flat `[1,1,H,W]` tensor, as it arrives over IPC:
+/// a first run, a re-run or a live preview. Refused when its full-size
+/// work does not fit (`pipeline::room_for_photo`), so turning on Refine
+/// edges cannot outgrow memory after the run itself fitted.
 pub fn postprocess_from_flat(
     tensor: &[f32],
     tensor_h: usize,
@@ -50,6 +53,8 @@ pub fn postprocess_from_flat(
     original: &impl crate::formats::AsRgba,
     opts: &PostprocessOpts<'_>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
+    let (w, h) = original.size();
+    crate::pipeline::room_for_photo(w, h, false, opts.mask_settings.refine_edges)?;
     let view = flat_view(tensor, tensor_h, tensor_w)?;
     Ok(postprocess(view, original, opts))
 }
