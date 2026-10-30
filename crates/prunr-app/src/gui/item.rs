@@ -107,13 +107,18 @@ impl DepthSource {
 /// The depth one export (a save, a copy, a drag) measures: one engine
 /// for all its images, and the last maps kept, so an image's backdrop,
 /// faded lines and Depth map file measure it once between them.
-#[derive(Default)]
 pub(crate) struct ExportDepth {
     measurer: prunr_core::depth::Measurer,
     /// Newest last, about 1 MB each.
     last: std::sync::Mutex<std::collections::VecDeque<(ImageSource, Arc<prunr_core::depth::DepthMap>)>>,
-    /// How many maps stay (at least one).
+    /// How many maps stay: one for an export of one image at a time.
     keep: usize,
+}
+
+impl Default for ExportDepth {
+    fn default() -> Self {
+        Self { measurer: prunr_core::depth::Measurer::default(), last: std::sync::Mutex::default(), keep: 1 }
+    }
 }
 
 impl ExportDepth {
@@ -135,7 +140,7 @@ impl ExportDepth {
         };
         let map = Arc::new(measured.map_err(|e| e.to_string())?);
         let mut kept = last();
-        if kept.len() >= self.keep.max(1) {
+        if kept.len() >= self.keep {
             kept.pop_front();
         }
         kept.push_back((source.clone(), Arc::clone(&map)));
