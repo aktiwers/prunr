@@ -100,7 +100,8 @@ pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Opt
 /// A re-run's photo, upright; a decoded one's file is removed as read.
 pub fn read_photo(photo: &super::protocol::PhotoFile) -> Result<image::DynamicImage, String> {
     use super::protocol::PhotoFile;
-    match photo {
+    let started = std::time::Instant::now();
+    let read = match photo {
         PhotoFile::Encoded(path) => {
             let bytes = std::fs::read(path).map_err(|e| format!("Failed to read the photo: {e}"))?;
             prunr_core::load_image_from_bytes(&bytes).map_err(|e| format!("Failed to decode the photo: {e}"))
@@ -108,7 +109,9 @@ pub fn read_photo(photo: &super::protocol::PhotoFile) -> Result<image::DynamicIm
         PhotoFile::Decoded(path) => read_image::<image::Rgba<u8>>(path)
             .map(image::DynamicImage::ImageRgba8)
             .ok_or_else(|| "The photo could not be read".to_string()),
-    }
+    };
+    tracing::debug!(decoded = matches!(photo, PhotoFile::Decoded(_)), ms = started.elapsed().as_millis() as u64, "re-run photo read");
+    read
 }
 
 /// A worker's raw RGBA result. Unlike `read_and_delete`, the file goes
