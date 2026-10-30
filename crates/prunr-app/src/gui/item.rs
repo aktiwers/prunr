@@ -2573,8 +2573,7 @@ impl BatchItem {
     /// cut-out built over it are out of date.
     pub(crate) fn faces_changed(&mut self) {
         self.faced_photo = None;
-        self.cached_masked_base = None;
-        self.kept_alpha = None;
+        super::reclaim::later((self.cached_masked_base.take(), self.kept_alpha.take()));
     }
 
     /// The face search `photo` needs, if any: Restore faces is on and
@@ -2746,8 +2745,7 @@ impl BatchItem {
                     self.cached_edge_tensors = Some(new);
                     self.lines_traced_on = traced_on;
                 }
-                self.cached_masked_base = None;
-                self.kept_alpha = None;
+                super::reclaim::later((self.cached_masked_base.take(), self.kept_alpha.take()));
                 // source_rgba stays on every item: live preview re-cuts from it.
                 // Tier 2 reruns report empty active_provider (no inference ran).
                 (!pr.active_provider.is_empty()).then_some(pr.active_provider)
