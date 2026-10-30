@@ -97,6 +97,20 @@ pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Opt
     image
 }
 
+/// A re-run's photo, upright; a decoded one's file is removed as read.
+pub fn read_photo(photo: &super::protocol::PhotoFile) -> Result<image::DynamicImage, String> {
+    use super::protocol::PhotoFile;
+    match photo {
+        PhotoFile::Encoded(path) => {
+            let bytes = std::fs::read(path).map_err(|e| format!("Failed to read the photo: {e}"))?;
+            prunr_core::load_image_from_bytes(&bytes).map_err(|e| format!("Failed to decode the photo: {e}"))
+        }
+        PhotoFile::Decoded(path) => read_image::<image::Rgba<u8>>(path)
+            .map(image::DynamicImage::ImageRgba8)
+            .ok_or_else(|| "The photo could not be read".to_string()),
+    }
+}
+
 /// A worker's raw RGBA result. Unlike `read_and_delete`, the file goes
 /// even when it cannot be read or does not match `w`×`h`.
 pub fn read_result_rgba(path: &std::path::Path, w: u32, h: u32) -> Option<image::RgbaImage> {
@@ -176,6 +190,24 @@ mod tests {
         std::fs::write(&path, [4u8, 0, 0, 0, 4, 0, 0, 0, 1, 2]).unwrap();
         assert_eq!(read_image::<image::Luma<u8>>(&path), None);
         assert!(!path.exists());
+    }
+
+    /// A re-run's photo reads the same from its file as from the pixels
+    /// the app decoded, and the pixels' file goes once read.
+    #[test]
+    fn a_photo_reads_the_same_encoded_or_decoded() {
+        use super::super::protocol::PhotoFile;
+        let dir = tempfile::tempdir().unwrap();
+        let photo = image::RgbaImage::from_fn(5, 3, |x, y| image::Rgba([(x * 40) as u8, (y * 70) as u8, 9, 255]));
+        let encoded = dir.path().join("photo.png");
+        photo.save(&encoded).unwrap();
+        let decoded = dir.path().join("photo.raw");
+        write_image(&decoded, &photo).unwrap();
+        for file in [PhotoFile::Encoded(encoded), PhotoFile::Decoded(decoded.clone())] {
+            assert_eq!(read_photo(&file).expect("reads").to_rgba8(), photo, "{file:?}");
+        }
+        assert!(!decoded.exists());
+        assert!(read_photo(&PhotoFile::Decoded(decoded)).is_err(), "gone");
     }
 
     #[test]

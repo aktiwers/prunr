@@ -138,8 +138,7 @@ pub enum SubprocessCommand {
         tensor_height: u32,
         tensor_width: u32,
         model: ModelKind,
-        #[serde(with = "wire_path")]
-        original_image_path: std::path::PathBuf,
+        original: PhotoFile,
         mask: MaskSettings,
     },
     /// AddEdgeInference tier: seg tensor is cached, run only TEED on the
@@ -147,8 +146,7 @@ pub enum SubprocessCommand {
     /// enabling the outline doesn't re-run seg inference.
     AddEdgeInference {
         item_id: u64,
-        #[serde(with = "wire_path")]
-        image_path: std::path::PathBuf,
+        original: PhotoFile,
         /// Path to temp file with the cached raw f32 seg tensor. It
         /// is NOT deleted by the worker: it comes back as `tensor_cache` on
         /// `ImageDone` for the parent to read-and-delete, saving a copy.
@@ -213,6 +211,23 @@ pub struct InpaintJob {
     pub sharpen: f32,
     #[serde(default)]
     pub edge_colour: prunr_core::inpaint_blend::EdgeColour,
+}
+
+/// A re-run's photo in a temp file: the bytes of its file, or the pixels
+/// the app already decoded as `ipc::write_image` writes them, which
+/// spares the worker decoding it again.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub enum PhotoFile {
+    Encoded(#[serde(with = "wire_path")] std::path::PathBuf),
+    Decoded(#[serde(with = "wire_path")] std::path::PathBuf),
+}
+
+impl PhotoFile {
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Encoded(path) | Self::Decoded(path) => path,
+        }
+    }
 }
 
 /// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
@@ -752,12 +767,12 @@ mod tests {
                 tensor_height: 2,
                 tensor_width: 2,
                 model: ModelKind::Silueta,
-                original_image_path: path(),
+                original: PhotoFile::Encoded(path()),
                 mask: MaskSettings::default(),
             },
             SubprocessCommand::AddEdgeInference {
                 item_id: 1,
-                image_path: path(),
+                original: PhotoFile::Decoded(path()),
                 seg_tensor_path: path(),
                 seg_tensor_height: 2,
                 seg_tensor_width: 2,

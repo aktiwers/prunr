@@ -310,6 +310,9 @@ pub(crate) struct CachedTensorWork {
     /// Unpacked, with the file read, on the bridge thread.
     pub(crate) tensor: CompressedTensor,
     pub(crate) source: super::item::ImageSource,
+    /// The photo decoded, when the app holds it: sent as is, so the
+    /// worker does not decode the file again.
+    pub(crate) photo: Option<Arc<image::RgbaImage>>,
     pub(crate) mask: MaskSettings,
 }
 
@@ -1351,27 +1354,41 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
     sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
 }
 
-type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &[u8], MaskSettings) -> Result<(), String>;
+type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, crate::subprocess::manager::Photo<'_>, MaskSettings) -> Result<(), String>;
 
 impl CachedTensorWork {
-    /// The unpacked tensor and the file. A corrupt cache or an unreadable
-    /// file fails the image; its failure drops the cache, so the next
-    /// Process starts over.
-    fn read_inputs(&self) -> Result<(Vec<f32>, Arc<Vec<u8>>), String> {
+    /// The unpacked tensor, and the photo: decoded, or the file read. A
+    /// corrupt cache or an unreadable file fails the image; its failure
+    /// drops the cache, so the next Process starts over.
+    fn read_inputs(&self) -> Result<(Vec<f32>, CachedPhoto), String> {
         let data = self.tensor.decompress().ok_or("The kept cut-out could not be read. Process again.")?;
-        let bytes = self.source.load_bytes().map_err(super::item::source_unreadable)?;
-        Ok((data, bytes))
+        let photo = match &self.photo {
+            Some(rgba) => CachedPhoto::Decoded(Arc::clone(rgba)),
+            None => CachedPhoto::Encoded(self.source.load_bytes().map_err(super::item::source_unreadable)?),
+        };
+        Ok((data, photo))
     }
 }
 
+/// The photo a cached re-run sends.
+enum CachedPhoto {
+    Decoded(Arc<image::RgbaImage>),
+    Encoded(Arc<Vec<u8>>),
+}
+
 fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendCached) -> Result<(), Refused> {
-    let (data, bytes) = work.read_inputs().map_err(Refused::Unreadable)?;
+    use crate::subprocess::manager::Photo;
+    let (data, photo) = work.read_inputs().map_err(Refused::Unreadable)?;
     let tensor = crate::subprocess::manager::TensorView {
         data: &data,
         height: work.tensor.height,
         width: work.tensor.width,
     };
-    send(sub, work.item_id, &tensor, work.tensor.model, &bytes, work.mask).map_err(Refused::Worker)
+    let photo = match &photo {
+        CachedPhoto::Decoded(rgba) => Photo::Decoded(rgba),
+        CachedPhoto::Encoded(bytes) => Photo::Encoded(bytes),
+    };
+    send(sub, work.item_id, &tensor, work.tensor.model, photo, work.mask).map_err(Refused::Worker)
 }
 
 #[cfg(test)]
@@ -1503,9 +1520,12 @@ mod tests {
         assert!(unreadable.read_inputs().is_err(), "a start that can't be read fails the run, not cut the file instead");
 
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: ModelKind::Silueta }).unwrap();
-        let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, mask: MaskSettings::default() };
+        let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, photo: None, mask: MaskSettings::default() };
         assert_eq!(cached.read_inputs().expect("reads").0, vec![0.5; 4]);
-        let cached = CachedTensorWork { item_id: 5, tensor, source: missing, mask: MaskSettings::default() };
+        let photo = Some(Arc::new(image::RgbaImage::new(1, 1)));
+        let decoded = CachedTensorWork { item_id: 5, tensor: tensor.clone(), source: missing.clone(), photo, mask: MaskSettings::default() };
+        assert!(matches!(decoded.read_inputs().expect("its file is not read").1, CachedPhoto::Decoded(_)), "the decoded photo goes as is");
+        let cached = CachedTensorWork { item_id: 5, tensor, source: missing, photo: None, mask: MaskSettings::default() };
         assert!(cached.read_inputs().is_err_and(|e| e.contains("moved or deleted")));
     }
 
@@ -1539,7 +1559,7 @@ mod tests {
         };
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
-        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), mask: MaskSettings::default() };
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default() };
         let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
@@ -1558,7 +1578,7 @@ mod tests {
         };
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
-        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), mask: MaskSettings::default() };
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default() };
         let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         // Image 1 is cancelled from the start; 2 and 3 from their second look on.

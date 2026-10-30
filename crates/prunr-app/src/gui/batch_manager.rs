@@ -768,6 +768,7 @@ impl BatchManager {
                     item_id: item.id,
                     tensor: item.cached_tensor.clone()?,
                     source: item.source.clone(),
+                    photo: item.source_rgba.clone(),
                     mask: item.settings.mask_settings(),
                 };
                 item.mark_running();
