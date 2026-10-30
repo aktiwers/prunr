@@ -50,7 +50,7 @@ impl PrunrApp {
         let targets: Vec<u64> = if has_selection {
             self.batch.ticked_ids()
         } else {
-            self.batch.selected_item().map(|i| vec![i.id]).unwrap_or_default()
+            self.batch.selected_id().into_iter().collect()
         };
         if !targets.is_empty() {
             self.ask_dialog(DialogRequest::SaveLayers { targets });
