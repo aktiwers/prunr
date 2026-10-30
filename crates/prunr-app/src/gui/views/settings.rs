@@ -240,7 +240,6 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
     }
 }
 
-/// The page list, and Reset to defaults at its foot.
 /// The note for an SD eraser that runs without the tall crop.
 fn no_tall_crop_text() -> &'static str {
     use prunr_core::inpaint_sd::one_crop_side;
@@ -251,6 +250,13 @@ fn no_tall_crop_text() -> &'static str {
     ))
 }
 
+/// Secondary text that wraps to its row: in a horizontal row a label
+/// stretches the page instead.
+fn wrapped(ui: &mut egui::Ui, text: impl Into<String>, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(color)).wrap());
+}
+
+/// The page list, and Reset to defaults at its foot.
 fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
     let painter = ui.painter();
@@ -374,10 +380,10 @@ impl Rows<'_> {
                     ui.add_space(6.0);
                     ui.label(RichText::new(title).size(theme::FONT_SIZE_BODY).color(theme::TEXT_PRIMARY));
                     if !description.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(description).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
+                        wrapped(ui, description, theme::TEXT_SECONDARY);
                     }
                     if let Some(note) = note {
-                        ui.add(egui::Label::new(RichText::new(note).size(theme::FONT_SIZE_SECONDARY).color(theme::ADVISORY_TEXT)).wrap());
+                        wrapped(ui, note, theme::ADVISORY_TEXT);
                     }
                     ui.add_space(6.0);
                 });
@@ -532,7 +538,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                 ui.set_min_height(28.0);
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, color);
-                ui.add(egui::Label::new(RichText::new(format!("{name}: {fit}")).size(theme::FONT_SIZE_SECONDARY).color(color)).wrap());
+                wrapped(ui, format!("{name}: {fit}"), color);
             });
         }
         ui.add_space(4.0);
@@ -659,7 +665,7 @@ fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, name: &str, inten
             let button_width = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY).size().x + 48.0;
             ui.vertical(|ui| {
                 ui.set_width((ui.available_width() - button_width - theme::SPACE_MD).max(120.0));
-                ui.add(egui::Label::new(RichText::new(text).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_PRIMARY)).wrap());
+                wrapped(ui, text, theme::TEXT_PRIMARY);
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_enabled_ui(ctx.installing.is_none(), |ui| button(ui, ButtonKind::Primary, &label)).inner.clicked() {
@@ -724,7 +730,7 @@ fn test_table(ui: &mut egui::Ui, ctx: &HardwareSectionContext) {
         } else {
             Cow::Owned(format!("Time per picture. Left out: {left_out}, which take many minutes each; they go by our tests on similar hardware."))
         };
-        ui.add(egui::Label::new(RichText::new(foot).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY)).wrap());
+        wrapped(ui, foot, theme::TEXT_SECONDARY);
     });
 }
 
