@@ -59,7 +59,7 @@ impl Kind {
         match self {
             Kind::CardMemory => "The graphics card ran out of memory. Close other apps that use it, or try a smaller image.",
             Kind::Memory => "The computer ran out of memory. Close other apps, or try a smaller image.",
-            Kind::CardStopped => "The graphics card stopped responding. Try again; if it keeps happening, update its driver or set Processor to CPU only in Settings.",
+            Kind::CardStopped => "The graphics card stopped responding. Try again; if it keeps happening, update its driver or run on the processor (CPU only).",
             Kind::NoPermission => "Prunr is not allowed to open or save that file. Check its permissions, or choose another folder.",
             Kind::DiskFull => "The disk is full. Free some space and try again.",
             Kind::FileGone => "The file is not there any more: it may have been moved or deleted.",
