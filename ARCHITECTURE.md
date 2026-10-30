@@ -122,7 +122,7 @@ Cancel is per item: the bridge drops queued items and sends `CancelItem` for in-
 | `prunr-control` | Only with `PRUNR_CONTROL_PORT`: local JSON socket; requests are answered on the UI thread |
 | `file-dialog` | One per open file dialog: waits for the user's answer and wakes the frame loop. The dialog itself starts on the UI thread, which macOS needs for its sheet |
 | Upscale | Builds the session off the UI thread (a cold OpenVINO compile takes tens of seconds); Cancel terminates the running ORT call |
-| Background I/O | Short-lived: file listing, decode, thumbnails, texture prep, history spill, save, downloads. Decode-heavy ones share a slot pool capped at the core count so a big batch doesn't stack per-image peaks; a batch save writes up to three images at once (one per two cores, as many as memory holds) |
+| Background I/O | Short-lived: file listing, decode, thumbnails, texture prep, history spill, save, downloads. Decode-heavy ones, and the images a batch save writes a few at a time, share a slot pool capped at the core count so a big batch doesn't stack per-image peaks |
 | rayon global pool | Live preview, LaMa / MI-GAN, SAM |
 
 ### Engine pool (seg worker)
@@ -250,11 +250,11 @@ Mask, edge and post-upscale knob changes on the selected item, and brush re-cuts
 
 **Throttle, not cancel.** The first tweak of a drag opens a 150 ms window and the item dispatches when it closes, so a drag yields a frame every ~150 ms; releasing a slider flushes at once. Runs are never cancelled mid-drag (the pipeline can't stop between stages, so cancelling only threw away finished frames); each dispatch carries a generation and stale results are dropped. Previews honour every mask setting, guided-filter refine included. `UpscaleRerun` is refused here: a multi-second job would look like a hang.
 
-**Reuse.** A drag decompresses the seg tensor once and caches the masked base and edge planes keyed on the knobs that built them, so e.g. a Lines thickness drag only re-dilates. The last full-size mask is kept too (w·h bytes), so a change of the look alone (subject effect, decoration) skips the mask work: 70-100 ms instead of 0.5-1 s at 24 MP.
+**Reuse.** A drag decompresses the seg tensor once and caches the masked base and edge planes keyed on the knobs that built them, so e.g. a Lines thickness drag only re-dilates. The last full-size mask is kept too, so a change of the look alone (subject effect, decoration) skips the mask work.
 
-**One off screen at a time.** Renders of images other than the shown one (a batch re-finish) go one at a time, oldest first: all at once held every image's full-size buffers together for little gain, since each render is parallel itself.
+**One off screen at a time.** Renders of images other than the shown one go one at a time: each is parallel itself, so running them together only stacks their full-size buffers.
 
-**Lines on a moved cut-out.** Under Subject outline a mask drag draws the kept lines where they were traced; releasing it traces them on the new cut-out (an AddEdge run), and the item remembers which mask its lines were traced on, so a later Process does the same.
+**Lines on a moved cut-out.** Under Subject outline a mask drag draws the kept lines where they were traced; releasing it traces them on the new cut-out (an AddEdge run).
 
 ## Presets
 
