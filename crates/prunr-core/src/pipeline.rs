@@ -79,7 +79,7 @@ fn fits_in(width: u32, height: u32, need: u64, free: u64) -> Result<(), CoreErro
     if need <= free {
         return Ok(());
     }
-    Err(CoreError::TooLarge { width, height, need_mb: need >> 20, free_mb: free >> 20 })
+    Err(CoreError::too_large(width, height, need, free))
 }
 
 /// Run the full pipeline on an already-decoded image.

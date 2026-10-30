@@ -158,8 +158,12 @@ fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
 /// graphics card, held to what memory allows for `model`. The app and the
 /// command line start from it.
 pub fn default_jobs(model: Option<ModelKind>, on_host_cpu: bool, cpu_only: bool) -> usize {
-    let base = if on_host_cpu { (num_cpus::get() / 2).max(1) } else { 2 };
-    model.map_or(base, |model| base.min(safe_max_jobs(model, cpu_only)))
+    cap_jobs(model, if on_host_cpu { (num_cpus::get() / 2).max(1) } else { 2 }, cpu_only)
+}
+
+/// `jobs`, held to what memory allows for `model`.
+pub fn cap_jobs(model: Option<ModelKind>, jobs: usize, cpu_only: bool) -> usize {
+    model.map_or(jobs, |model| jobs.min(safe_max_jobs(model, cpu_only)))
 }
 
 /// Engines take at most 50% of available RAM, leaving the rest for image

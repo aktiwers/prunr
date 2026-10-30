@@ -545,7 +545,7 @@ impl PrunrApp {
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
-                    self.toasts.error(format!("Magic Brush could not run: {}", prunr_core::plain::error(&err.to_string())));
+                    self.toasts.error(format!("Magic Brush could not run: {}", prunr_core::plain::reason(err)));
                 }
             }
         }

@@ -12,7 +12,7 @@ use super::brush_state::CutoutAction;
 /// it read (after Denoise), and that input enlarged to the output size
 /// (`reference`) once AI blend or Color match needed it. The raw stays
 /// in memory unless memory runs low while its image is off screen
-/// (`BatchManager::park_offscreen_upscales`); the next Refine reads it
+/// (`BatchManager::move_to_disk_under_pressure`); the next Refine reads it
 /// back.
 #[derive(Clone)]
 pub(crate) struct UpscaleCache {
@@ -642,8 +642,7 @@ pub(crate) enum FacePhoto {
 impl FacePhoto {
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Start(a), Self::Start(b)) => Arc::ptr_eq(a, b),
-            (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
+            (Self::Start(a), Self::Start(b)) | (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
             (Self::Original(a), Self::Original(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
@@ -1359,7 +1358,7 @@ impl BatchItem {
     /// The run or read failed with `why`: nothing is awaited any more.
     pub(crate) fn fail(&mut self, why: String) {
         self.job = None;
-        self.failure = Some(prunr_core::plain::error(&why).to_string());
+        self.failure = Some(prunr_core::plain::reason(why));
     }
 
     /// True while a model works on this image: a cut-out the worker has
@@ -1841,7 +1840,7 @@ impl BatchItem {
             }
             Err(msg) => {
                 self.decode_failed = true;
-                self.failure = Some(prunr_core::plain::error(&msg).to_string());
+                self.failure = Some(prunr_core::plain::reason(msg));
                 false
             }
         }

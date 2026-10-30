@@ -233,10 +233,6 @@ fn sd_soft_edge_follows_each_parts_band() {
     assert!(same_vs_wide <= floor, "one band per pixel fills as one band");
 }
 
-/// Timing run for scripts/sd_bench.sh: the shape of a real erase (a
-/// 328×607 painted region inside a larger photo, so it tiles today),
-/// guided, 20 steps, fixed seed. Ignored by default; prints the stage
-/// timings the pipeline logs at info level.
 /// A session loaded and dropped for each fill, as the app runs one
 /// without Keep loaded, gives its memory back: after five fills the
 /// process holds about what it held after the first. Ignored by default
@@ -274,6 +270,10 @@ fn sd_reloads_give_their_memory_back() {
     assert!(grown < 1000, "the process kept {grown} MB more after five fills than after one: {held_mb:?}");
 }
 
+/// Timing run for scripts/sd_bench.sh: the shape of a real erase (a
+/// 328×607 painted region inside a larger photo, so it tiles today),
+/// guided, 20 steps, fixed seed. Ignored by default; prints the stage
+/// timings the pipeline logs at info level.
 #[test]
 #[ignore]
 fn sd_bench() {

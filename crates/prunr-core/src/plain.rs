@@ -39,26 +39,20 @@ impl Kind {
         let lower = raw.to_ascii_lowercase();
         let has = |marks: &[&str]| marks.iter().any(|mark| lower.contains(mark));
         if crate::ep_compat::is_device_lost(raw) {
-            Some(Kind::CardStopped)
-        } else if crate::ep_compat::is_card_out_of_memory(raw) {
-            Some(Kind::CardMemory)
-        } else if crate::ep_compat::is_out_of_memory(raw) {
-            Some(Kind::Memory)
-        } else if has(NO_PERMISSION) {
-            Some(Kind::NoPermission)
-        } else if has(DISK_FULL) {
-            Some(Kind::DiskFull)
-        } else if has(FILE_GONE) {
-            Some(Kind::FileGone)
-        } else if has(UNREADABLE) {
-            Some(Kind::Unreadable)
-        } else if has(OFFLINE) {
-            Some(Kind::Offline)
-        } else if has(MODEL_FAILED) {
-            Some(Kind::ModelFailed)
-        } else {
-            None
+            return Some(Kind::CardStopped);
         }
+        if crate::ep_compat::is_out_of_memory(raw) {
+            return Some(if crate::ep_compat::is_card_out_of_memory(raw) { Kind::CardMemory } else { Kind::Memory });
+        }
+        const BY_TEXT: [(Kind, &[&str]); 6] = [
+            (Kind::NoPermission, NO_PERMISSION),
+            (Kind::DiskFull, DISK_FULL),
+            (Kind::FileGone, FILE_GONE),
+            (Kind::Unreadable, UNREADABLE),
+            (Kind::Offline, OFFLINE),
+            (Kind::ModelFailed, MODEL_FAILED),
+        ];
+        BY_TEXT.iter().find(|(_, marks)| has(marks)).map(|&(kind, _)| kind)
     }
 
     pub fn sentence(self) -> &'static str {
@@ -85,6 +79,15 @@ pub fn error(raw: &str) -> &str {
             kind.sentence()
         }
         None => raw,
+    }
+}
+
+/// `failure` as a person reads it (`error`), owned.
+pub fn reason(failure: impl std::fmt::Display) -> String {
+    let raw = failure.to_string();
+    match error(&raw) {
+        shown if std::ptr::eq(shown, raw.as_str()) => raw,
+        shown => shown.to_string(),
     }
 }
 
@@ -131,6 +134,13 @@ mod tests {
             assert_eq!(Kind::of(&own), None, "{own}");
             assert_eq!(error(&own), own);
         }
+    }
+
+    #[test]
+    fn a_reason_is_owned_and_plain() {
+        let io = std::io::Error::from_raw_os_error(13);
+        assert_eq!(reason(&io), Kind::NoPermission.sentence());
+        assert_eq!(reason("Eraser (Big-LaMa) is not installed"), "Eraser (Big-LaMa) is not installed");
     }
 
     /// Ten-something os errors are not the two they start like.

@@ -138,7 +138,20 @@ pub(crate) struct FacesResult {
 }
 
 /// A kept engine, what it was built for, and when a run last held it.
-type WarmSlot<T> = Mutex<Option<(WarmEngineKey, Arc<T>, std::time::Instant)>>;
+type WarmSlot<T> = Mutex<Option<Warm<T>>>;
+
+/// A kept engine, what it was built for, and when a run last held it.
+pub(crate) struct Warm<T> {
+    key: WarmEngineKey,
+    engine: Arc<T>,
+    used: std::time::Instant,
+}
+
+impl<T> Warm<T> {
+    fn new(key: WarmEngineKey, engine: Arc<T>) -> Self {
+        Self { key, engine, used: std::time::Instant::now() }
+    }
+}
 
 /// Warm engine for an in-process run (upscale, colorize, depth), shared
 /// with the dispatch thread so a session build (seconds on a cold EP)
@@ -153,7 +166,7 @@ pub(crate) struct WarmEngineKey {
     cpu_only: bool,
 }
 
-fn lock_warm_engine<T>(slot: &WarmSlot<T>) -> std::sync::MutexGuard<'_, Option<(WarmEngineKey, Arc<T>, std::time::Instant)>> {
+fn lock_warm_engine<T>(slot: &WarmSlot<T>) -> std::sync::MutexGuard<'_, Option<Warm<T>>> {
     slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -165,9 +178,9 @@ fn cached_warm_engine(
 ) -> Option<Arc<prunr_core::OrtEngine>> {
     let mut guard = lock_warm_engine(slot);
     match guard.as_mut() {
-        Some((cached, engine, used)) if *cached == key => {
-            *used = std::time::Instant::now();
-            Some(Arc::clone(engine))
+        Some(warm) if warm.key == key => {
+            warm.used = std::time::Instant::now();
+            Some(Arc::clone(&warm.engine))
         }
         Some(_) => {
             *guard = None;
@@ -203,13 +216,13 @@ fn ensure_warm_engine(
         None => key.cpu_only,
     };
     let fresh = Arc::new(prunr_core::OrtEngine::for_model(model, intra_threads, on_cpu)?);
-    *lock_warm_engine(slot) = Some((key, Arc::clone(&fresh), std::time::Instant::now()));
+    *lock_warm_engine(slot) = Some(Warm::new(key, Arc::clone(&fresh)));
     Ok(fresh)
 }
 
 /// Whether the slot holds `key`'s engine. Never evicts.
 fn is_warm(slot: &WarmEngine, key: WarmEngineKey) -> bool {
-    lock_warm_engine(slot).as_ref().is_some_and(|(cached, _, _)| *cached == key)
+    lock_warm_engine(slot).as_ref().is_some_and(|warm| warm.key == key)
 }
 
 /// Refused when a run of `key`'s model fits in memory on neither its GPU
@@ -224,7 +237,7 @@ fn admitted_unless_warm(slot: &WarmEngine, key: WarmEngineKey, descriptor: &prun
 
 /// The slot's engine, taken out; it frees where the result drops.
 fn take_warm_engine(slot: &WarmEngine) -> Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)> {
-    lock_warm_engine(slot).take().map(|(key, engine, _)| (key, engine))
+    lock_warm_engine(slot).take().map(|warm| (warm.key, warm.engine))
 }
 
 /// The slot's engine once no run has held it for `IDLE_RELEASE`, as the
@@ -232,13 +245,13 @@ fn take_warm_engine(slot: &WarmEngine) -> Option<(WarmEngineKey, Arc<prunr_core:
 /// under way holds a clone, which counts as use.
 fn release_if_idle<T>(slot: &WarmSlot<T>, now: std::time::Instant) -> (Option<Arc<T>>, Option<std::time::Duration>) {
     let mut guard = lock_warm_engine(slot);
-    let Some((_, engine, used)) = guard.as_mut() else { return (None, None) };
-    if Arc::strong_count(engine) > 1 {
-        *used = now;
+    let Some(warm) = guard.as_mut() else { return (None, None) };
+    if Arc::strong_count(&warm.engine) > 1 {
+        warm.used = now;
     }
-    match (*used + prunr_core::IDLE_RELEASE).checked_duration_since(now).filter(|wait| !wait.is_zero()) {
+    match (warm.used + prunr_core::IDLE_RELEASE).checked_duration_since(now).filter(|wait| !wait.is_zero()) {
         Some(wait) => (None, Some(wait)),
-        None => (guard.take().map(|(_, engine, _)| engine), None),
+        None => (guard.take().map(|warm| warm.engine), None),
     }
 }
 
@@ -1220,19 +1233,15 @@ impl Processor {
     /// Let the upscale, colorize and depth models go once idle for
     /// `IDLE_RELEASE`; how long until the next one is due.
     pub(crate) fn pump_idle_engines(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
-        let mut next: Option<std::time::Duration> = None;
-        for (name, slot) in [("upscale", &self.upscale.warm), ("colorize", &self.colorize.warm), ("depth", &self.depth.warm)] {
+        let slots = [("upscale", &self.upscale.warm), ("colorize", &self.colorize.warm), ("depth", &self.depth.warm)];
+        slots.into_iter().filter_map(|(name, slot)| {
             let (freed, wait) = release_if_idle(slot, now);
             if let Some(engine) = freed {
                 tracing::info!(model = name, "an idle model was let go");
                 super::reclaim::later(engine);
             }
-            next = match (next, wait) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-        }
-        next
+            wait
+        }).min()
     }
 
     /// Drop every cached model session: the in-process eraser, upscale
@@ -1265,7 +1274,7 @@ impl Processor {
     #[cfg(test)]
     pub(crate) fn warm_upscale_engine_for_test(
         &mut self,
-    ) -> std::sync::MutexGuard<'_, Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>, std::time::Instant)>> {
+    ) -> std::sync::MutexGuard<'_, Option<Warm<prunr_core::OrtEngine>>> {
         lock_warm_engine(&self.upscale.warm)
     }
 
@@ -2562,11 +2571,11 @@ mod tests {
         use std::time::{Duration, Instant};
         let t0 = Instant::now();
         let key = WarmEngineKey { model: prunr_core::ModelKind::RealEsrganX4Plus, cpu_only: false };
-        let slot: WarmSlot<u8> = Mutex::new(Some((key, Arc::new(7), t0)));
+        let slot: WarmSlot<u8> = Mutex::new(Some(Warm { key, engine: Arc::new(7), used: t0 }));
         let (freed, wait) = release_if_idle(&slot, t0 + Duration::from_secs(60));
         assert!(freed.is_none());
         assert_eq!(wait, Some(prunr_core::IDLE_RELEASE - Duration::from_secs(60)));
-        let held = lock_warm_engine(&slot).as_ref().map(|(_, engine, _)| Arc::clone(engine));
+        let held = lock_warm_engine(&slot).as_ref().map(|warm| Arc::clone(&warm.engine));
         let late = t0 + prunr_core::IDLE_RELEASE + Duration::from_secs(1);
         assert_eq!(release_if_idle(&slot, late), (None, Some(prunr_core::IDLE_RELEASE)), "a run holds it: still in use");
         drop(held);
@@ -3201,7 +3210,7 @@ mod warm_cache_tests {
         let (_tx, rx) = mpsc::channel::<WorkerResult>();
         let mut p = Processor::new(tx, rx);
         *p.warm_upscale_engine_for_test() =
-            Some((WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel), std::time::Instant::now()));
+            Some(Warm::new(WarmEngineKey { model: ModelKind::RealEsrganX4Plus, cpu_only: false }, Arc::clone(&sentinel)));
         Some((p, sentinel))
     }
 

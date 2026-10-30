@@ -348,11 +348,7 @@ impl Settings {
 
     pub fn max_jobs(&self) -> usize {
         let base = if self.runs_on_host_cpu() { num_cpus::get() } else { 4 };
-        self.cap_jobs_for_model(base)
-    }
-
-    fn cap_jobs_for_model(&self, jobs: usize) -> usize {
-        self.model.to_model_kind().map_or(jobs, |model| jobs.min(super::memory::safe_max_jobs(model, self.cpu_only())))
+        super::memory::cap_jobs(self.model.to_model_kind(), base, self.cpu_only())
     }
 
     /// A preset's image settings for the active model; factory values for
