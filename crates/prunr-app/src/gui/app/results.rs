@@ -916,10 +916,13 @@ impl PrunrApp {
     pub(crate) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
         let mut landed = false;
         let mut decode_arrived = false;
+        let mut shown_decoded = false;
+        let shown = self.batch.selected_id();
         while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if item.land_decode(result) {
                 decode_arrived = true;
+                shown_decoded |= shown == Some(item_id);
             } else {
                 // A render waiting on this photo would ask for it again
                 // every frame, and fail again.
@@ -927,7 +930,8 @@ impl PrunrApp {
             }
         }
         landed |= decode_arrived;
-        if decode_arrived {
+        // Off-screen photos decode for renders queued behind the shown one.
+        if shown_decoded {
             // Reset zoom entirely, not just the flag: a stale previous_zoom /
             // pan_offset fires the canvas's toggle-back against the old image.
             self.zoom_state.reset();
