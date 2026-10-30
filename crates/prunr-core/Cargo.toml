@@ -41,6 +41,10 @@ instant-clip-tokenizer = "0.1"
 sysinfo = { workspace = true }
 dunce = { workspace = true }
 
+# glibc's malloc_trim, to hand a dropped session's heap back.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 # Graphics memory on Windows: DXGI's budget for this process and what it
 # holds, which counts CUDA's allocations under WDDM too.
 [target.'cfg(windows)'.dependencies]
