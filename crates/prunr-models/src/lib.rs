@@ -217,6 +217,12 @@ pub struct OnDemandVariant {
     pub size_mb: u32,
 }
 
+impl OnDemandVariant {
+    pub fn size_bytes(self) -> u64 {
+        u64::from(self.size_mb) * 1024 * 1024
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ModelSource {
     /// Embedded in the binary.
@@ -2765,13 +2771,20 @@ mod tests {
                 assert!(license.license_url.starts_with("https://"), "{:?} bad license_url", desc.id);
                 assert!(license.source_url.starts_with("https://"), "{:?} bad source_url", desc.id);
                 if let Some(variant) = fp16 {
-                    assert!(!variant.filename.is_empty(), "{:?} fp16 filename empty", desc.id);
-                    assert!(variant.url.starts_with("https://"), "{:?} fp16 non-HTTPS url", desc.id);
-                    assert_eq!(variant.sha256.len(), 64, "{:?} fp16 sha256 not 64 hex chars", desc.id);
-                    assert!(variant.size_mb > 0, "{:?} fp16 size_mb=0", desc.id);
+                    assert_variant_complete(desc.id, variant);
                 }
             }
         }
+        for (id, copy) in half_precision_copies() {
+            assert_variant_complete(id, copy.file);
+        }
+    }
+
+    fn assert_variant_complete(id: ModelId, variant: OnDemandVariant) {
+        assert!(!variant.filename.is_empty(), "{id:?} {} filename empty", variant.filename);
+        assert!(variant.url.starts_with("https://"), "{id:?} {} non-HTTPS url", variant.filename);
+        assert!(variant.sha256.len() == 64 && variant.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "{id:?} {} sha256 not 64 hex chars", variant.filename);
+        assert!(variant.size_mb > 0, "{id:?} {} size_mb=0", variant.filename);
     }
 
     /// A graph whose weights live in separate `.data` files resolves
