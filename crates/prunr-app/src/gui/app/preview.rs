@@ -274,6 +274,7 @@ impl PrunrApp {
                 bold,
             },
             cached_edge, cached_bold, cached_masked_base,
+            kept_alpha: item.kept_alpha.clone(),
             correction,
             faces,
             depth,
@@ -381,6 +382,9 @@ impl PrunrApp {
                 }
                 if let Some((base, recipe, model)) = r.new_masked_base {
                     item.cached_masked_base = Some((base, recipe, model));
+                }
+                if let Some(alpha) = r.new_alpha {
+                    item.kept_alpha = Some(alpha);
                 }
                 if let (Some(reference), Some(run)) = (r.new_reference, item.upscale.as_mut()) {
                     run.reference = Some(reference);

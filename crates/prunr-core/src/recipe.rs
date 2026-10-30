@@ -121,6 +121,14 @@ impl From<&crate::MaskSettings> for MaskRecipe {
     }
 }
 
+impl MaskRecipe {
+    /// What the mask is made of: the recipe less the subject effect and
+    /// the decoration, which go on after it.
+    pub fn alpha_part(self) -> Self {
+        Self { effect: crate::SubjectEffect::default(), decoration_bits: DecorationBits::default(), ..self }
+    }
+}
+
 /// User-facing output scale choice for upscale dispatches. `#[repr(u8)]`
 /// keeps the enum at 1 byte so it fits inside the `ItemSettings`
 /// cache-line budget.
@@ -361,6 +369,29 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The look (effect, decoration) is not part of what the mask is
+    /// made of; every other mask knob is.
+    #[test]
+    fn the_alpha_part_leaves_out_the_look_alone() {
+        let base = crate::MaskSettings::default();
+        let alpha = |m: &crate::MaskSettings| MaskRecipe::from(m).alpha_part();
+        let looks = crate::MaskSettings {
+            effect: SubjectEffect::Sepia,
+            decoration: crate::Decoration { outline_width: 3.0, shadow: crate::ShadowKind::Soft, ..Default::default() },
+            ..base
+        };
+        assert_eq!(alpha(&looks), alpha(&base));
+        assert_ne!(MaskRecipe::from(&looks), MaskRecipe::from(&base));
+        for knob in [
+            crate::MaskSettings { gamma: base.gamma + 0.5, ..base },
+            crate::MaskSettings { refine_edges: !base.refine_edges, ..base },
+            crate::MaskSettings { feather: base.feather + 1.0, ..base },
+            crate::MaskSettings { edge_shift: base.edge_shift + 1.0, ..base },
+        ] {
+            assert_ne!(alpha(&knob), alpha(&base), "{knob:?}");
+        }
+    }
 
     /// Golden recipe JSON and sidecars name the subject effect
     /// `fill_style`; the recipe reads and writes that key.
