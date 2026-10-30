@@ -3,6 +3,8 @@
 //! `skip_if_no_ort` — suites that build sessions skip when no runtime is
 //! installed (`ORT_DYLIB_PATH` or the Runtime Store), unless
 //! `PRUNR_REQUIRE_ORT=1` turns the skip into a failure (CI).
+//! `PRUNR_CUDA_ADDON` names the CUDA add-on's library, for a runtime with
+//! no CUDA of its own.
 
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
@@ -18,7 +20,13 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
 /// Returns `true` when ORT couldn't be initialised, after printing a
 /// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
 pub fn skip_if_no_ort(label: &str) -> bool {
-    let Err(msg) = prunr_core::ort_runtime::runtime_for_tests() else { return false };
+    let Err(msg) = prunr_core::ort_runtime::runtime_for_tests() else {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(addon) = std::env::var_os("PRUNR_CUDA_ADDON") {
+            prunr_core::ort_runtime::use_addon(prunr_core::ort_runtime::Addon::Cuda, addon.into());
+        }
+        return false;
+    };
     eprintln!("[{label}] SKIP: {msg}");
     true
 }
