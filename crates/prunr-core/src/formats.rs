@@ -23,13 +23,30 @@ pub(crate) fn is_opaque(rgba: &[u8]) -> bool {
 }
 
 fn resize_raw_with(src: &[u8], w: u32, h: u32, pixel: PixelType, (dst_w, dst_h): (u32, u32), filter: ResizeFilter, weigh_alpha: bool) -> Vec<u8> {
+    resize_raw_by(src, (w, h), pixel, (dst_w, dst_h), ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter)).use_alpha(weigh_alpha))
+}
+
+fn resize_raw_by(src: &[u8], (w, h): (u32, u32), pixel: PixelType, (dst_w, dst_h): (u32, u32), options: ResizeOptions) -> Vec<u8> {
     let src = ImageRef::new(w, h, src, pixel).expect("buffer matches its dimensions");
     let mut dst = Image::new(dst_w, dst_h, pixel);
-    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter)).use_alpha(weigh_alpha);
-    // The resizer fails only on mismatched pixel types or a bad crop:
-    // both images share `pixel` and no crop is asked.
-    Resizer::new().resize(&src, &mut dst, Some(&options)).expect("same pixel type, no crop");
+    // The resizer fails only on mismatched pixel types or a crop outside
+    // the source: both images share `pixel`, and a crop is only ever the
+    // centred fit, which lies inside it.
+    Resizer::new().resize(&src, &mut dst, Some(&options)).expect("same pixel type, crop inside the source");
     dst.into_vec()
+}
+
+/// `img` scaled to cover `dst_w × dst_h`, what overflows cut evenly from
+/// both sides: only the window that shows is resampled (Lanczos3),
+/// straight to the frame, never the whole picture enlarged first.
+pub fn resize_rgb_covering(img: &DynamicImage, dst_w: u32, dst_h: u32) -> image::RgbImage {
+    let rgb = match img {
+        DynamicImage::ImageRgb8(rgb) => std::borrow::Cow::Borrowed(rgb),
+        other => std::borrow::Cow::Owned(other.to_rgb8()),
+    };
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(ResizeFilter::Lanczos3)).fit_into_destination(Some((0.5, 0.5)));
+    let out = resize_raw_by(rgb.as_raw(), rgb.dimensions(), PixelType::U8x3, (dst_w, dst_h), options);
+    image::RgbImage::from_raw(dst_w, dst_h, out).expect("valid dimensions")
 }
 
 /// SIMD resize of a borrowed RGB image with the given filter.
@@ -474,13 +491,7 @@ fn build_bg_layer(
     }
     match fit {
         BgImageFit::Cover => {
-            let scale = (dst_w as f32 / sw as f32).max(dst_h as f32 / sh as f32);
-            let scaled_w = ((sw as f32 * scale).ceil() as u32).max(dst_w);
-            let scaled_h = ((sh as f32 * scale).ceil() as u32).max(dst_h);
-            let scaled = resize_rgb_lanczos3(bg, scaled_w, scaled_h);
-            let (ox, oy) = ((scaled_w - dst_w) / 2, (scaled_h - dst_h) / 2);
-            let cropped = image::imageops::crop_imm(&scaled, ox, oy, dst_w, dst_h).to_image();
-            image::imageops::replace(&mut out, &cropped.convert(), 0, 0);
+            image::imageops::replace(&mut out, &resize_rgb_covering(bg, dst_w, dst_h).convert(), 0, 0);
         }
         BgImageFit::Contain => {
             let scale = (dst_w as f32 / sw as f32).min(dst_h as f32 / sh as f32);
@@ -1117,6 +1128,22 @@ mod tests {
         let transparent_count = fg.pixels().filter(|p| p[3] == 0).count();
         assert!(opaque_count >= 1, "Contain must paint at least one pixel of bg");
         assert!(transparent_count >= 2, "Contain must letterbox the rest as transparent");
+    }
+
+    /// Cover resamples only the window that shows, and draws what the whole
+    /// picture enlarged and cropped to the middle drew, within rounding.
+    #[test]
+    fn cover_draws_the_middle_window_of_the_picture() {
+        let wide = DynamicImage::ImageRgb8(image::RgbImage::from_fn(300, 100, |x, y| image::Rgb([(x * 255 / 299) as u8, (y * 2) as u8, ((x + y) % 251) as u8])));
+        let (dw, dh) = (80u32, 120u32);
+        let scale = (dw as f32 / 300.0).max(dh as f32 / 100.0);
+        let (sw, sh) = (((300.0 * scale).ceil() as u32).max(dw), ((100.0 * scale).ceil() as u32).max(dh));
+        let enlarged = resize_rgb_lanczos3(&wide, sw, sh);
+        let old = image::imageops::crop_imm(&enlarged, (sw - dw) / 2, (sh - dh) / 2, dw, dh).to_image();
+        let new = resize_rgb_covering(&wide, dw, dh);
+        assert_eq!(new.dimensions(), (dw, dh));
+        let diff: f64 = old.as_raw().iter().zip(new.as_raw()).map(|(&a, &b)| f64::from(a.abs_diff(b))).sum::<f64>() / old.as_raw().len() as f64;
+        assert!(diff < 2.0, "mean difference {diff}");
     }
 
     #[test]
