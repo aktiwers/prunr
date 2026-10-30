@@ -640,9 +640,14 @@ impl BatchManager {
     /// while `rendering` (a queued preview reads the photo).
     pub(crate) fn free_off_screen_photos(&mut self, rendering: impl Fn(u64) -> bool) {
         let selected_id = self.selected_id();
-        self.items.iter_mut()
-            .filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id))
-            .for_each(BatchItem::release_photo);
+        let mut released = 0;
+        for item in self.items.iter_mut().filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id)) {
+            item.release_photo();
+            released += 1;
+        }
+        if released > 0 {
+            tracing::info!(released, "off-screen photos let go under memory pressure");
+        }
     }
 
     /// Evict all tensor caches except the selected item (called under
