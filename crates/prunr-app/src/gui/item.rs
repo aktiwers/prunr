@@ -1175,6 +1175,12 @@ impl BatchItem {
                 .is_some_and(|on| on != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part())
     }
 
+    /// A cut-out's mask is kept to adjust it without the model; lines over
+    /// the whole photo keep none. Not a gate: an undone step may own it.
+    pub(crate) fn keeps_cut_mask(&self) -> bool {
+        self.cached_tensor.is_some()
+    }
+
     /// Drop the seg tensor and every edge cache tier together.
     pub(crate) fn drop_tensor_caches(&mut self) {
         self.set_cached_tensor(None);

@@ -59,11 +59,13 @@ pub(crate) enum ProcessButtonLabel {
 /// (`cached_edge_tensors`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
 
-/// Drop `item`'s tensor caches; the bytes they held.
-fn drop_tensors(item: &mut BatchItem) -> usize {
+/// Drop `item`'s tensor caches: the bytes they held, and whether a
+/// cut-out's mask was among them (lines over the whole photo have none).
+fn drop_tensors(item: &mut BatchItem) -> (usize, bool) {
     let bytes = item.evictable_tensor_bytes();
+    let held_cut = item.keeps_cut_mask();
     item.drop_tensor_caches();
-    bytes
+    (bytes, held_cut)
 }
 
 /// Maximum thumbnail edge length in pixels.
@@ -571,7 +573,7 @@ impl BatchManager {
 
     /// Evict tensor caches, oldest-loaded first, until under budget. Both
     /// caches go together: one without the other is useless. Returns how
-    /// many images let go of theirs.
+    /// many images let go of a cut-out's mask.
     pub(crate) fn enforce_tensor_budget(&mut self) -> usize {
         // Budget only what eviction can free — selection planes and
         // embeddings would otherwise force tensor evictions they never
@@ -585,9 +587,9 @@ impl BatchManager {
             if remaining <= TENSOR_BUDGET { break; }
             // Preserve the selected item's tensors (most likely to be reused).
             if Some(item.id) == selected_id { continue; }
-            let freed = drop_tensors(item);
+            let (freed, held_cut) = drop_tensors(item);
             remaining -= freed;
-            dropped += usize::from(freed > 0);
+            dropped += usize::from(held_cut);
         }
         dropped
     }
@@ -651,10 +653,10 @@ impl BatchManager {
     }
 
     /// Evict all tensor caches except the selected item (called under
-    /// memory pressure). Returns how many images let go of theirs.
+    /// memory pressure). Returns how many images let go of a cut-out's mask.
     pub(crate) fn evict_all_tensors(&mut self) -> usize {
         let selected_id = self.selected_id();
-        self.items.iter_mut().filter(|item| Some(item.id) != selected_id).map(drop_tensors).filter(|&freed| freed > 0).count()
+        self.items.iter_mut().filter(|item| Some(item.id) != selected_id).map(drop_tensors).filter(|&(_, held_cut)| held_cut).count()
     }
 
     /// Commit a new selection mask to the named item, registering it for
@@ -1185,8 +1187,13 @@ mod tests {
         assert!(bm.items.iter().all(|i| i.cached_tensor.is_some()));
 
         bm.items.push(item_with_cache(4, 0));
+        // Lines over the whole photo: no cut-out to tell of.
+        let mut lines_only = item_with_cache(5, 0);
+        lines_only.cached_edge_tensors = crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None);
+        bm.items.push(lines_only);
 
-        assert_eq!(bm.evict_all_tensors(), 2, "the two others that held any");
+        assert_eq!(bm.evict_all_tensors(), 2, "the two others that kept a cut-out");
+        assert!(bm.items[4].cached_edge_tensors.is_none(), "the lines go too");
 
         assert!(bm.items[0].cached_tensor.is_none(), "non-selected evicted");
         assert!(bm.items[0].edge_planes.is_empty() && bm.items[0].cached_edge_tensors.is_none(), "its edge cache too");
