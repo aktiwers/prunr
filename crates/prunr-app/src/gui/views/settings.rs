@@ -532,7 +532,7 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
                 ui.set_min_height(28.0);
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, color);
-                ui.label(RichText::new(format!("{name}: {fit}")).size(theme::FONT_SIZE_SECONDARY).color(color));
+                ui.add(egui::Label::new(RichText::new(format!("{name}: {fit}")).size(theme::FONT_SIZE_SECONDARY).color(color)).wrap());
             });
         }
         ui.add_space(4.0);
