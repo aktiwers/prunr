@@ -2931,19 +2931,11 @@ mod spare_scales_tests {
     use crate::gui::item::BatchStatus;
     use crate::gui::settings::SettingsModel;
     use crate::gui::tests::fixtures::push_test_item;
-    use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors, SpareLanding};
+    use crate::gui::worker::{CompressedEdgeTensors, SpareLanding};
     use prunr_core::EdgeScale::{self, Bold, Fine, Fused};
 
     fn made(scales: &[EdgeScale]) -> SpareLanding {
-        SpareLanding::Made(lines(scales, None).expect("compresses"))
-    }
-
-    fn lines(scales: &[EdgeScale], spare: Option<u64>) -> Option<CompressedEdgeTensors> {
-        let tensors = EdgeScale::ALL.map(|s| {
-            let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
-            if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
-        });
-        CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare })
+        SpareLanding::Made(crate::gui::tests::fixtures::edge_lines(scales, None).expect("compresses"))
     }
 
     /// The image on screen, its Sketch result in with Bold and Fused
@@ -2955,7 +2947,7 @@ mod spare_scales_tests {
         crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
         item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
         item.settings.edge_scale = Fine;
-        item.cached_edge_tensors = lines(&[Bold, Fused], Some(5));
+        item.cached_edge_tensors = crate::gui::tests::fixtures::edge_lines(&[Bold, Fused], Some(5));
         app.batch.select_item(0);
         app
     }
@@ -2986,7 +2978,7 @@ mod spare_scales_tests {
         assert!(awaits(&app), "the run's own pass is still awaited");
 
         let mut app = waiting_for_fine();
-        app.batch.items[0].cached_edge_tensors = lines(&[Bold, Fused], Some(6));
+        app.batch.items[0].cached_edge_tensors = crate::gui::tests::fixtures::edge_lines(&[Bold, Fused], Some(6));
         app.on_spare_edge_scales(1, 5, made(&[Fine]));
         assert!(!holds(&app, &[Fine]), "a newer run's lines take no older run's scales");
 

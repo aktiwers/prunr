@@ -3679,21 +3679,11 @@ mod tests {
     /// of the look alone, or lines over the whole photo, do not.
     #[test]
     fn lines_left_on_another_cut_out_are_traced_again() {
-        use crate::gui::worker::{CompressedEdgeTensors, CompressedTensor, RawEdgeTensors, RawSegTensor};
-        use prunr_core::{EdgeScale, LineMode, ModelKind::Silueta};
+        use prunr_core::{LineMode, ModelKind::Silueta};
         let traced = |line_mode: LineMode| {
             let mut item = fixture_item(1);
             item.settings.line_mode = line_mode;
-            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
-            let tensors = EdgeScale::ALL.map(|s| {
-                let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
-                vec![0.5; (h * w) as usize]
-            });
-            let edges = CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare: None });
-            let seg = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
-            let recipe = item.settings.current_recipe(Silueta);
-            item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, edges, recipe);
-            item.finish_job();
+            crate::gui::tests::fixtures::cut_with_lines(&mut item);
             item
         };
         // What a mask preview landing does: the mask reads as applied.
