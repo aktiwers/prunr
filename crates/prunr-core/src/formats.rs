@@ -654,7 +654,7 @@ impl ExportFormat {
 
     /// `img` encoded for a file the user keeps, streamed into `w`. A PNG
     /// is zlib level 4 with adaptive filters: on a 20 MP cut-out fast is
-    /// 0.2 s / 27.9 MB, level 4 1.6 s / 13.4 MB, default 4.9 s / 12.1 MB.
+    /// 0.1 s / 28.5 MB, level 4 0.54 s / 12.6 MB, default 1.4 s / 12.0 MB.
     /// Temp, drag-out and clipboard PNGs stay fast (`encode_rgba_png`).
     pub fn encode_into<W: std::io::Write>(self, img: &RgbaImage, w: W) -> Result<(), CoreError> {
         let (width, height) = img.dimensions();
