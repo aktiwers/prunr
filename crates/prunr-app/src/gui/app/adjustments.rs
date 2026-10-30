@@ -295,9 +295,9 @@ impl PrunrApp {
             dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
         // A drag shows the lines where they were; its release traces them
-        // on the new cut-out.
-        if dispatch == knob_catalog::DispatchKind::LivePreviewMask && tc.commit && item.lines_traced_on_another_cut() {
-            dispatch = knob_catalog::DispatchKind::SubprocessAddEdge;
+        // on the new cut-out. The release frame itself changes no value.
+        if tc.commit && item.lines_traced_on_another_cut() {
+            dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
         dispatch
     }
@@ -343,7 +343,8 @@ mod release_tests {
         item.settings.feather = 3.0;
         let drag = super::adjustments_toolbar::ToolbarChange { auto_dispatch: DispatchKind::LivePreviewMask, ..Default::default() };
         assert_eq!(app.resolve_auto_dispatch(0, &drag), DispatchKind::LivePreviewMask, "a drag frame");
-        let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..drag };
+        // The release frame changes no value: it only commits.
+        let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..Default::default() };
         assert_eq!(app.resolve_auto_dispatch(0, &release), DispatchKind::SubprocessAddEdge, "the release");
 
         app.batch.select_item(0);
