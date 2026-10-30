@@ -775,7 +775,7 @@ impl PrunrApp {
         let mut dropped = self.batch.enforce_tensor_budget();
         if crate::gui::memory::under_memory_pressure() {
             self.batch.move_to_disk_under_pressure();
-            self.batch.free_off_screen_photos(|id| self.processor.live_preview.works_on(id));
+            self.free_off_screen_photos();
             dropped += self.batch.evict_all_tensors();
         }
         self.tell_dropped_cutouts(dropped);

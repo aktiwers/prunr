@@ -1789,10 +1789,16 @@ impl BatchItem {
 
     /// The decoded photo, its texture and the selection's go, made again
     /// when the image is shown.
-    pub(crate) fn release_photo(&mut self) {
+    /// Whether it held a photo.
+    pub(crate) fn release_photo(&mut self) -> bool {
         self.source_texture = None;
         self.selection_texture = None;
-        super::reclaim::later(self.source_rgba.take());
+        let photo = self.source_rgba.take();
+        let held = photo.is_some();
+        if held {
+            super::reclaim::later(photo);
+        }
+        held
     }
 
     /// The result texture goes with the image off screen; one still being
