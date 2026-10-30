@@ -221,6 +221,10 @@ pub struct CompressedEdgeTensors {
     pub width: u32,
     /// The pass still to fill the scales this run left for later.
     spare: Option<u64>,
+    /// The mask (`MaskRecipe::alpha_part`) the lines were traced on, when
+    /// a run traced them on the cut-out: a preview of another mask draws
+    /// them where they were.
+    pub(crate) traced_on: Option<prunr_core::MaskRecipe>,
 }
 
 impl CompressedEdgeTensors {
@@ -237,7 +241,7 @@ impl CompressedEdgeTensors {
             return None;
         }
         let tensors = parts.try_into().ok()?;
-        Some(Self { tensors, height: raw.height, width: raw.width, spare: raw.spare })
+        Some(Self { tensors, height: raw.height, width: raw.width, spare: raw.spare, traced_on: None })
     }
 
     /// Whether both share `scale`'s stored tensor.

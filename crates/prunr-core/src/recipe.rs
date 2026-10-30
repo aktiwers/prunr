@@ -23,6 +23,13 @@ pub struct InferenceRecipe {
     pub input_transform: InputTransform,
 }
 
+impl InferenceRecipe {
+    /// Lines drawn on the cut-out: the line detector traces the subject.
+    pub fn traces_the_cut_out(&self) -> bool {
+        self.uses_segmentation && self.uses_edge_detection
+    }
+}
+
 /// Tier 2 (edge variant): settings re-applied to the cached TEED tensor.
 /// Changes here trigger an EdgeRerun, not a full pipeline — ~20-100ms vs 200ms-10s.
 ///
@@ -369,6 +376,18 @@ pub fn resolve_tier(old: &ProcessingRecipe, new: &ProcessingRecipe) -> RequiredT
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only Subject outline traces the cut-out: Sketch over the whole
+    /// photo traces the photo, and Off traces nothing.
+    #[test]
+    fn only_lines_on_the_subject_trace_the_cut_out() {
+        let inference = |uses_segmentation, uses_edge_detection| InferenceRecipe {
+            model: ModelKind::Silueta, uses_segmentation, uses_edge_detection, input_transform: InputTransform::default(),
+        };
+        assert!(inference(true, true).traces_the_cut_out());
+        assert!(!inference(false, true).traces_the_cut_out(), "the whole photo");
+        assert!(!inference(true, false).traces_the_cut_out(), "no lines");
+    }
 
     /// The look (effect, decoration) is not part of what the mask is
     /// made of; every other mask knob is.
