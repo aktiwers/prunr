@@ -60,6 +60,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Changed
 
+- Upscale, Colorize and Depth let their model go after five idle minutes, as the other models already did, giving back up to a few GB; the next use loads it again in 1 to 3 seconds.
 - The command line runs several images at once by default, as the app does: half the cores on the processor, two on a graphics card, fewer when memory is short (`-j` still sets it). On four 12 MP photos on the processor Silueta finished 27% sooner and U2Net 18%; BiRefNet runs one at a time on the processor either way.
 - When memory runs low, an upscaled image off screen moves its full-size upscale (about 0.8 GB at 4× of a 12 MP photo) compressed to disk; the first Refine change after you come back to it reads it in again. The image on screen, and every image while memory is fine, keeps it in memory so Sharpen and AI blend answer at once.
 - **Errors in plain words.** A failure the system, the graphics driver or a model reports in its own terms ("Non-zero status code returned while running Conv node", "Permission denied (os error 13)") is shown as one sentence for what happened: out of memory (the computer's or the graphics card's), the graphics card stopped, no permission, the disk is full, the file is gone, the image cannot be read, no connection, or the model failed; the details go to the log. The command line says the same.
