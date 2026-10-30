@@ -104,27 +104,36 @@ impl DepthSource {
     }
 }
 
+/// A batch save writes up to this many images at once.
+pub(crate) const SAVE_AT_ONCE: usize = 3;
+
 /// The depth one export (a save, a copy, a drag) measures: one engine
-/// for all its images, and the last map kept, so an image's backdrop,
-/// faded lines and Depth map file measure it once between them.
+/// for all its images, and the last map of each image being saved kept,
+/// so an image's backdrop, faded lines and Depth map file measure it
+/// once between them.
 #[derive(Default)]
 pub(crate) struct ExportDepth {
     measurer: prunr_core::depth::Measurer,
-    last: std::sync::Mutex<Option<(ImageSource, Arc<prunr_core::depth::DepthMap>)>>,
+    /// Newest last, about 1 MB each.
+    last: std::sync::Mutex<std::collections::VecDeque<(ImageSource, Arc<prunr_core::depth::DepthMap>)>>,
 }
 
 impl ExportDepth {
     fn measure(&self, source: &ImageSource, original: Option<&image::RgbaImage>) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
         let last = || self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((_, map)) = last().as_ref().filter(|(seen, _)| seen.same_as(source)) {
-            return Ok(Arc::clone(map));
+        if let Some(map) = last().iter().find(|(seen, _)| seen.same_as(source)).map(|(_, map)| Arc::clone(map)) {
+            return Ok(map);
         }
         let measured = match original {
             Some(photo) => self.measurer.measure(photo),
             None => self.measurer.measure_decoded(&source.decode()?),
         };
         let map = Arc::new(measured.map_err(|e| e.to_string())?);
-        *last() = Some((source.clone(), Arc::clone(&map)));
+        let mut last = last();
+        if last.len() == SAVE_AT_ONCE {
+            last.pop_front();
+        }
+        last.push_back((source.clone(), Arc::clone(&map)));
         Ok(map)
     }
 }
@@ -3454,7 +3463,7 @@ mod tests {
     fn an_export_reuses_the_map_it_measured_for_the_same_image() {
         let source = ImageSource::Bytes(Arc::new(b"not an image".to_vec()));
         let map = Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
-        let export = ExportDepth { last: std::sync::Mutex::new(Some((source.clone(), Arc::clone(&map)))), ..ExportDepth::default() };
+        let export = ExportDepth { last: std::sync::Mutex::new([(source.clone(), Arc::clone(&map))].into()), ..ExportDepth::default() };
         let same = DepthSource { depth: None, source };
         assert!(Arc::ptr_eq(&same.get(&export, None).expect("kept"), &map));
         let other = DepthSource { depth: None, source: ImageSource::Bytes(Arc::new(b"not an image".to_vec())) };

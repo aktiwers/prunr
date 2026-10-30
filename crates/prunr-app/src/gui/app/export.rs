@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::background_io::SaveDone;
-use crate::gui::item::{BatchItem, ExportDepth, SaveMark};
+use crate::gui::item::{BatchItem, ExportDepth, SaveMark, SAVE_AT_ONCE};
 use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
@@ -141,12 +141,17 @@ impl PrunrApp {
         let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
         let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
         let items: Vec<BatchSave> = found.iter().zip(names)
-            .map(|(item, filename)| BatchSave {
-                mark: item.save_mark(),
-                depth: with_depth.then(|| item.depth_export().named(&filename)),
-                filename,
-                result: item.export_image(),
-                bg: item.export_bg(),
+            .map(|(item, filename)| {
+                let result = item.export_image();
+                let (w, h) = result.pixels.decoded_dims().unwrap_or(item.dimensions);
+                BatchSave {
+                    mark: item.save_mark(),
+                    depth: with_depth.then(|| item.depth_export().named(&filename)),
+                    filename,
+                    result,
+                    bg: item.export_bg(),
+                    pixels: u64::from(w) * u64::from(h),
+                }
             })
             .collect();
         if items.is_empty() {
@@ -460,10 +465,50 @@ struct BatchSave {
     result: crate::gui::item::ExportImage,
     bg: crate::gui::item::ExportBg,
     depth: Option<crate::gui::item::DepthExport>,
+    /// The result's width × height.
+    pixels: u64,
 }
 
-/// Encode + write N images into `folder` (named by `drag_export::export_name`) on a
-/// background thread; report aggregate counts when done.
+/// What one image of a batch save holds at its peak, per pixel: its
+/// pixels unpacked, the copy with the background baked in, and JPEG's
+/// RGB copy.
+const SAVE_BYTES_PER_PX: u64 = 12;
+
+/// How many images of a batch save are written at once: one per two
+/// cores (each encoder runs on one), at most `SAVE_AT_ONCE`, and no more
+/// than `room` holds of the largest (`None`: memory unknown).
+fn saves_at_once(largest_pixels: u64, room: Option<u64>, cores: usize) -> usize {
+    let by_memory = room.map_or(usize::MAX, |room| {
+        usize::try_from(room / (largest_pixels * SAVE_BYTES_PER_PX).max(1)).unwrap_or(usize::MAX)
+    });
+    (cores / 2).min(SAVE_AT_ONCE).min(by_memory).max(1)
+}
+
+/// `save` on each of `jobs`, up to `at_once` at a time; the outcomes in
+/// the jobs' order.
+fn each_at_once<J: Send, R: Send>(jobs: Vec<J>, at_once: usize, save: impl Fn(J) -> R + Sync) -> Vec<R> {
+    use std::sync::{Mutex, PoisonError};
+    let count = jobs.len();
+    let queue = Mutex::new(jobs.into_iter().enumerate());
+    let done = Mutex::new(Vec::with_capacity(count));
+    std::thread::scope(|scope| {
+        for _ in 0..at_once.min(count) {
+            scope.spawn(|| loop {
+                let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
+                let Some((at, job)) = next else { break };
+                let outcome = save(job);
+                done.lock().unwrap_or_else(PoisonError::into_inner).push((at, outcome));
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap_or_else(PoisonError::into_inner);
+    done.sort_unstable_by_key(|&(at, _)| at);
+    done.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
+/// Encode + write N images into `folder` (named by `drag_export::export_name`)
+/// on a background thread, a few at once (`saves_at_once`); report
+/// aggregate counts when done.
 fn spawn_save_batch(
     folder: PathBuf,
     items: Vec<BatchSave>,
@@ -471,15 +516,22 @@ fn spawn_save_batch(
     tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
-        let mut tally = SaveTally::default();
-        let mut wrote = Vec::new();
+        let largest = items.iter().map(|item| item.pixels).max().unwrap_or(0);
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let at_once = saves_at_once(largest, prunr_core::sysmem::room_for_buffers_bytes(), cores);
         let measure = ExportDepth::default();
-        for BatchSave { mark, filename, result, bg, depth } in items {
-            save_depth_beside(depth.as_ref(), &folder, &measure, &mut tally);
+        let saved = each_at_once(items, at_once, |BatchSave { mark, filename, result, bg, depth, .. }| {
+            let depth = depth.map(|depth| depth.write(&folder, &measure));
             let out_path = folder.join(crate::gui::drag_export::export_name(&filename, format));
             let written = result.load()
                 .ok_or_else(|| format!("{filename} could not be read"))
                 .and_then(|rgba| write_composite(&out_path, &rgba, &bg, format, &measure).map_err(|e| format!("{filename}: {e}")));
+            (depth, written, mark)
+        });
+        let mut tally = SaveTally::default();
+        let mut wrote = Vec::new();
+        for (depth, written, mark) in saved {
+            depth.into_iter().for_each(|depth| tally.count(depth));
             if written.is_ok() {
                 wrote.push(mark);
             }
@@ -487,6 +539,41 @@ fn spawn_save_batch(
         }
         let _ = tx.send(SaveDone { outcome: tally.summary("image", "images"), wrote });
     });
+}
+
+#[cfg(test)]
+mod save_at_once_tests {
+    use super::{each_at_once, saves_at_once, SAVE_BYTES_PER_PX};
+
+    /// One image per two cores, three at most, and only as many of the
+    /// largest as memory holds; never none.
+    #[test]
+    fn a_batch_save_writes_as_many_at_once_as_cores_and_memory_allow() {
+        let twelve_mp = 12_000_000;
+        let one = twelve_mp * SAVE_BYTES_PER_PX;
+        for (room, cores, at_once) in [
+            (None, 16, 3), (None, 4, 2), (None, 2, 1), (None, 1, 1),
+            (Some(10 * one), 8, 3), (Some(2 * one), 8, 2), (Some(one), 8, 1), (Some(one / 2), 8, 1),
+        ] {
+            assert_eq!(saves_at_once(twelve_mp, room, cores), at_once, "room {room:?}, {cores} cores");
+        }
+    }
+
+    /// The outcomes come back in the jobs' order, and no more than
+    /// `at_once` run together.
+    #[test]
+    fn saves_at_once_keep_their_order_and_their_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let outcomes = each_at_once((0..12).collect(), 3, |job: u64| {
+            most.fetch_max(running.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(12 - job));
+            running.fetch_sub(1, Ordering::SeqCst);
+            job * 10
+        });
+        assert_eq!(outcomes, (0..12).map(|job| job * 10).collect::<Vec<_>>());
+        assert!((2..=3).contains(&most.load(Ordering::SeqCst)), "{}", most.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(test)]
