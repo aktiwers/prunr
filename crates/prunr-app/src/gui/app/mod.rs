@@ -1275,6 +1275,9 @@ impl eframe::App for PrunrApp {
         if let Some(wait) = self.processor.pump_seg_warm(now) {
             ctx.request_repaint_after(wait);
         }
+        if let Some(wait) = self.processor.pump_idle_engines(now) {
+            ctx.request_repaint_after(wait);
+        }
         self.note_quiet_work(now);
         // A frame at the one-second mark, so the pill appears without
         // waiting for input; once it shows, the poll below and the pill's
