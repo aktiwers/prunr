@@ -206,7 +206,12 @@ impl SelectionQueue {
                     // A panic makes nothing, so the image is not left waiting on it.
                     let (made, stroke) = crate::panics::caught("a selection edit", || made_by(&job.op, &base))
                         .unwrap_or_else(|| (base.clone(), None));
-                    let hash = made.selection.as_ref().map(|s| s.content_hash());
+                    // Hashed here, and the overlay's question answered here,
+                    // so the UI thread reads both without scanning the plane.
+                    let hash = made.selection.as_ref().map(|s| {
+                        s.has_unlayered_selection();
+                        s.content_hash()
+                    });
                     last.insert(job.item_id, made.clone());
                     let _ = done_tx.send(Done { item_id: job.item_id, op: job.op, base, made, hash, stroke });
                     if let Some(ctx) = wake.get() {

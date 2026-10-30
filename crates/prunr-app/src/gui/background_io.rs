@@ -356,6 +356,14 @@ impl SelectionStyle {
         }
     }
 
+    /// The style as `mask` is drawn in: an eraser's Expand and Feather of
+    /// now shape only a region no eraser stroke drew, so without one the
+    /// overlay does not depend on them, nor rebuild as they move.
+    pub(crate) fn for_plane(self, mask: &prunr_core::selection::MaskArtifact) -> Self {
+        let fill = self.fill.map(|f| if mask.has_unlayered_selection() { f } else { FillRegionPx { grow: 0.0, blend: 0.0 } });
+        Self { fill, ..self }
+    }
+
     /// Under an eraser, the plane the overlay draws for `mask`: what the
     /// erase will touch, each eraser stroke as it fills and any other
     /// selected region with the Expand and Feather set now. `None` shows
@@ -492,6 +500,20 @@ mod tests {
         let reach = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..style }.shown_region(&painted).expect("an eraser shows the reach");
         assert_eq!(reach.cells()[4 * 9 + 3], FULL, "the overlay shows the grown region");
         assert!(SelectionStyle::with_fill(0.5).shown_region(&painted).is_none());
+    }
+
+    /// An eraser's Expand and Feather of now shape only a region no eraser
+    /// stroke drew: an overlay of eraser strokes alone keys the same at
+    /// any of them, so it is not rebuilt as they move.
+    #[test]
+    fn an_overlay_of_eraser_strokes_alone_ignores_the_expand_and_feather_set_now() {
+        let style = |grow, blend| SelectionStyle { fill: Some(FillRegionPx { grow, blend }), ..SelectionStyle::with_fill(0.3) };
+        let mut cells = vec![0i8; 9 * 9];
+        cells[4 * 9 + 4] = FULL;
+        let picked = MaskArtifact::from_cells(9, 9, cells);
+        let stroke = prunr_core::inpaint_blend::eraser_stroke(&picked, prunr_core::selection::BrushMode::Add, 1.0, 2).into_selection();
+        assert_eq!(style(2.0, 4.0).for_plane(&stroke), style(6.0, 9.0).for_plane(&stroke), "eraser strokes alone");
+        assert_ne!(style(2.0, 4.0).for_plane(&picked), style(6.0, 9.0).for_plane(&picked), "a region no eraser stroke drew");
     }
 
     /// An eraser's overlay is drawn from the reach and a stroke patches it

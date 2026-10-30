@@ -19,18 +19,22 @@ pub(super) fn pick(ui: &mut Ui, s: &mut BrushSettings) -> bool {
     picked | specks
 }
 
-// Scattered dots on a 24-unit grid, as the strip's board draws them.
+// Scattered dots, laid out on a 24-unit grid scaled to `rect`.
 fn specks_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
     for (x, y, r) in [(6.0, 7.0, 1.8), (17.0, 6.0, 1.4), (11.0, 12.0, 2.2), (18.0, 16.0, 1.8), (7.0, 18.0, 1.4)] {
         painter.circle_filled(rect.lerp_inside(egui::vec2(x / 24.0, y / 24.0)), rect.width() * r / 24.0, color);
     }
 }
 
+/// The reading slider's names: an object pick's, a depth pick's.
+pub(super) const CONFIDENCE: &str = "Confidence";
+pub(super) const RANGE: &str = "Range";
+
 /// Confidence for an object pick, Range for a depth pick, in one place.
 pub(super) fn reading(ui: &mut Ui, s: &mut BrushSettings, name_width: f32) -> bool {
     if s.magic_depth {
-        chip::slider_cell_f32(ui, "Range", name_width, &mut s.magic_depth_range, DEPTH_RANGE, false, |v| fmt::plain(v, 2)).commit
+        chip::slider_cell_f32(ui, RANGE, name_width, &mut s.magic_depth_range, DEPTH_RANGE, false, |v| fmt::plain(v, 2)).commit
     } else {
-        chip::slider_cell_f32(ui, "Confidence", name_width, &mut s.magic_confidence_threshold, 0.0..=1.0, false, fmt::percent).commit
+        chip::slider_cell_f32(ui, CONFIDENCE, name_width, &mut s.magic_confidence_threshold, crate::gui::brush_state::UNIT_RANGE, false, fmt::percent).commit
     }
 }

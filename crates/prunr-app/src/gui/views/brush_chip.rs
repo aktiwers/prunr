@@ -54,7 +54,7 @@ const BRUSH_SHAPES: [chip::Choice<BrushShape>; 3] = [
 
 const SHAPE_ICONS: [chip::IconPaint; 3] = [circle_icon, square_icon, line_icon];
 
-// The shapes on a 24-unit grid, as the strip's board draws them.
+// The shapes, laid out on a 24-unit grid scaled to `rect`.
 fn circle_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
     painter.circle_stroke(rect.center(), rect.width() * 7.0 / 24.0, egui::Stroke::new(rect.width() / 12.0, color));
 }

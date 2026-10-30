@@ -281,12 +281,6 @@ impl BrushSettings {
         self.sd_use_taesd = source.sd_use_taesd;
     }
 
-    /// The eraser's region knobs on the brush strip: Expand region, Feather.
-    pub fn take_inpaint_tuning_from(&mut self, source: &Self) {
-        self.inpaint_feather = source.inpaint_feather;
-        self.inpaint_grow = source.inpaint_grow;
-    }
-
     /// The prompt a fill runs with: the user's, or the shipped one when
     /// the field is empty. Unconditioned SD 1.5 draws text-like glyphs on
     /// texture, so a fill never runs without one.
@@ -331,7 +325,8 @@ impl BrushSettings {
                 self.magic_remove_specks = source.magic_remove_specks;
             }
         }
-        self.take_inpaint_tuning_from(source);
+        self.inpaint_feather = source.inpaint_feather;
+        self.inpaint_grow = source.inpaint_grow;
     }
 }
 
@@ -453,6 +448,8 @@ pub(crate) struct StrokeValues {
     pub(crate) fill_feather: f32,
 }
 
+/// Hardness, Opacity and Confidence's range.
+pub(crate) const UNIT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
 /// The selection Feather's range, in pixels.
 pub(crate) const FEATHER_RANGE: std::ops::RangeInclusive<f32> = 0.0..=20.0;
 /// An eraser stroke's Expand region and Feather ranges, in whole pixels.
@@ -473,7 +470,8 @@ impl StrokeEdge {
     #[cfg(test)]
     pub(crate) const HARD: Self = Self::Selection { feather: 0.0 };
 
-    fn values(self) -> StrokeValues {
+    /// Its values, the other sliders' as `UNUSED`.
+    pub(crate) fn values(self) -> StrokeValues {
         match self {
             Self::Selection { feather } => StrokeValues { feather, ..UNUSED },
             Self::Eraser { expand, feather } => StrokeValues { expand, fill_feather: feather, ..UNUSED },
@@ -570,7 +568,7 @@ impl StrokeDrawn {
             StrokeEdge::Selection { feather } => {
                 let feather = feather.round().max(0.0) as u32;
                 match source {
-                    Some(photo) if feather > 0 => prunr_core::selection::refine::feather_edges(&drawn, photo, feather),
+                    Some(photo) if feather > 0 => prunr_core::selection::refine::feather_edges(drawn, photo, feather),
                     _ => drawn,
                 }
             }
@@ -619,10 +617,10 @@ impl StrokeValues {
         let offset = |v: f32, a: f32, b: f32, range: std::ops::RangeInclusive<f32>| (v + b - a).clamp(*range.start(), *range.end());
         Self {
             size: (self.size * to.size / from.size.max(f32::EPSILON)).clamp(*BRUSH_RADIUS_RANGE.start(), *BRUSH_RADIUS_RANGE.end()),
-            hardness: offset(self.hardness, from.hardness, to.hardness, 0.0..=1.0),
-            opacity: offset(self.opacity, from.opacity, to.opacity, 0.0..=1.0),
+            hardness: offset(self.hardness, from.hardness, to.hardness, UNIT_RANGE),
+            opacity: offset(self.opacity, from.opacity, to.opacity, UNIT_RANGE),
             reading: prunr_core::MaskReading {
-                confidence: offset(self.reading.confidence, from.reading.confidence, to.reading.confidence, 0.0..=1.0),
+                confidence: offset(self.reading.confidence, from.reading.confidence, to.reading.confidence, UNIT_RANGE),
                 remove_specks: moved_to(self.reading.remove_specks, from.reading.remove_specks, to.reading.remove_specks),
             },
             range: offset(self.range, from.range, to.range, DEPTH_RANGE),

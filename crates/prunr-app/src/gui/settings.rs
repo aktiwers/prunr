@@ -183,21 +183,14 @@ impl Settings {
 
     /// The values a stroke is drawn with, which its brush's sliders set.
     pub(crate) fn stroke_values(&self) -> super::brush_state::StrokeValues {
-        use super::brush_state::StrokeEdge;
         let b = &self.brush;
-        let (feather, expand, fill_feather) = match self.stroke_edge() {
-            StrokeEdge::Selection { feather } => (feather, 0.0, 0.0),
-            StrokeEdge::Eraser { expand, feather } => (0.0, expand, feather),
-        };
         super::brush_state::StrokeValues {
             size: b.radius,
             hardness: b.hardness,
             opacity: b.strength,
             reading: b.magic_reading(),
             range: b.magic_depth_range,
-            feather,
-            expand,
-            fill_feather,
+            ..self.stroke_edge().values()
         }
     }
 

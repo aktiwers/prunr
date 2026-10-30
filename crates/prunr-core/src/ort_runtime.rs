@@ -882,6 +882,11 @@ pub fn removal_mark(install: &Path) -> Option<PathBuf> {
     Some(install.with_file_name(format!(".{name}.remove")))
 }
 
+/// Whether `install` is marked to go at the next start.
+pub fn marked_to_go(install: &Path) -> bool {
+    removal_mark(install).is_some_and(|mark| mark.is_file())
+}
+
 /// Every runtime-store entry as `(dir name, path the dylib would have)`,
 /// sorted by name so logs reproduce.
 fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
@@ -893,7 +898,7 @@ fn store_entries_in(root: &Path) -> Vec<(String, PathBuf)> {
         .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
         // A hidden folder is an install still being extracted.
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-        .filter(|e| !removal_mark(&e.path()).is_some_and(|mark| mark.is_file()))
+        .filter(|e| !marked_to_go(&e.path()))
         .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().join(DYLIB_NAME)))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));

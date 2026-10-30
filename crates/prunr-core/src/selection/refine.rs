@@ -47,16 +47,16 @@ fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
     mask.bounds_where(MaskArtifact::is_selected)
 }
 
-/// Edge-aware feather. `feather_px == 0` or an empty selection returns a
-/// clone (one Arc bump). Otherwise the selected region is refined by
+/// Edge-aware feather. `feather_px == 0` or an empty selection returns
+/// `mask` as it is. Otherwise the selected region is refined by
 /// `guided_filter_alpha` against `source`, and the result replaces the
 /// magnitude of every cell inside the selection's bounding box plus a
-/// `3 * feather_px` margin.
+/// `3 * feather_px` margin, in place when nothing else shares the cells.
 ///
 /// Peak working set is proportional to the bbox, not the image:
 /// bbox_area × ~54 B (RGBA guide crop, two gray planes, and the guided
-/// filter's eight f32 planes plus row-sum scratch) plus one i8 copy of
-/// the full mask. Measured on a 4K source:
+/// filter's eight f32 planes plus row-sum scratch). Measured on a 4K
+/// source:
 ///
 /// | bbox      | transient |
 /// |-----------|-----------|
@@ -64,12 +64,12 @@ fn selected_bbox(mask: &MaskArtifact) -> Option<CellRect> {
 /// | 2048²     | ~220 MB   |
 /// | full 4K   | ~430 MB   |
 pub fn feather_edges(
-    mask: &MaskArtifact,
+    mut mask: MaskArtifact,
     source: &image::RgbaImage,
     feather_px: u32,
 ) -> MaskArtifact {
     if feather_px == 0 {
-        return mask.clone();
+        return mask;
     }
     let (w, h) = (mask.width, mask.height);
     if source.dimensions() != (w, h) {
@@ -77,10 +77,10 @@ pub fn feather_edges(
             mask = ?(w, h), source = ?source.dimensions(),
             "feather_edges: guide dimensions differ from mask — skipping"
         );
-        return mask.clone();
+        return mask;
     }
-    let Some(selected) = selected_bbox(mask) else {
-        return mask.clone();
+    let Some(selected) = selected_bbox(&mask) else {
+        return mask;
     };
     let work = selected.grown(3 * feather_px, w, h);
     let (bx0, by0, bw, bh) = (work.x0, work.y0, work.width(), work.height());
@@ -112,7 +112,7 @@ pub fn feather_edges(
         .map(|v| (v as f32 / 255.0 * FULL as f32).round() as i8)
         .collect();
 
-    let mut out: Vec<i8> = mask.cells().to_vec();
+    let out = mask.cells_mut();
     for y in 0..bh {
         let r = crop_row(y);
         let refined_row = &refined.as_raw()[y as usize * bw_us..][..bw_us];
@@ -124,7 +124,7 @@ pub fn feather_edges(
             *cell = sign * magnitude[rv as usize];
         }
     }
-    MaskArtifact::from_cells(w, h, out)
+    mask
 }
 
 #[cfg(test)]
@@ -211,7 +211,7 @@ mod tests {
     fn feather_with_zero_px_returns_identity_clone() {
         let mask = make_mask(4, 4, vec![64; 16]);
         let source = image::RgbaImage::from_pixel(4, 4, image::Rgba([128u8, 64, 32, 200]));
-        let result = feather_edges(&mask, &source, 0);
+        let result = feather_edges(mask.clone(), &source, 0);
         assert_eq!(result.cells(), mask.cells());
     }
 
@@ -226,7 +226,7 @@ mod tests {
         }
         let mask = make_mask(16, 16, data.clone());
         let source = image::RgbaImage::new(16, 16);
-        let result = feather_edges(&mask, &source, 2);
+        let result = feather_edges(mask.clone(), &source, 2);
         let changed = result.cells().iter().zip(data.iter()).any(|(&a, &b)| a != b);
         assert!(changed, "feather with radius > 0 must alter at least one pixel");
         assert!(
