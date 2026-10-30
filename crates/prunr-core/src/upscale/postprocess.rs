@@ -57,7 +57,7 @@ pub fn apply_ai_blend(img: &mut RgbaImage, bicubic_source: &RgbaImage, weight: f
 
 /// Reinhard Lab mean+stddev transfer of `source`'s statistics onto
 /// `target`, against the model's colour drift. Sizes may differ (image-wide
-/// statistics). Alpha unchanged. Statistics fold as rows go, so no Lab
+/// statistics over what shows). Alpha unchanged. Statistics fold as rows go, so no Lab
 /// copy is kept: no working set beyond a few numbers per thread.
 pub fn apply_color_match(target: &mut RgbaImage, source: &RgbaImage) {
     color_match_to(target, &LabStats::of(source));
@@ -109,7 +109,10 @@ impl std::ops::Deref for Reference {
 /// Pixels per partial sum in `LabStats::of`.
 const STATS_CHUNK_PIXELS: usize = 64 * 1024;
 
-/// Mean and population standard deviation of an image's L, a and b.
+/// Mean and population standard deviation of an image's L, a and b,
+/// each pixel counted by its alpha: the colour under a transparent pixel
+/// does not show, and a cut-out's holds the model's background on one
+/// side and black on the other.
 struct LabStats {
     mean: [f32; 3],
     std: [f32; 3],
@@ -124,8 +127,10 @@ impl LabStats {
         let moments = img.as_raw()
             .par_chunks(STATS_CHUNK_PIXELS * 4)
             .map(|chunk| chunk.chunks_exact(4).fold(Moments::default(), |mut m, px| {
-                let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
-                m.push([l, a, b]);
+                if px[3] > 0 {
+                    let (l, a, b) = srgb_to_lab(px[0], px[1], px[2]);
+                    m.push([l, a, b], f64::from(px[3]) / 255.0);
+                }
                 m
             }))
             .collect::<Vec<_>>()
@@ -138,9 +143,9 @@ impl LabStats {
     }
 }
 
-/// Running count, mean and sum of squared deviations per channel
-/// (Welford), mergeable across threads (Chan et al.): as exact as the
-/// two-pass mean then variance, in one pass.
+/// Running weight, mean and sum of squared deviations per channel
+/// (weighted Welford, West 1979), mergeable across threads (Chan et al.):
+/// as exact as the two-pass mean then variance, in one pass.
 #[derive(Default, Clone, Copy)]
 struct Moments {
     n: f64,
@@ -149,12 +154,12 @@ struct Moments {
 }
 
 impl Moments {
-    fn push(&mut self, v: [f32; 3]) {
-        self.n += 1.0;
+    fn push(&mut self, v: [f32; 3], weight: f64) {
+        self.n += weight;
         for ((value, mean), m2) in v.iter().zip(&mut self.mean).zip(&mut self.m2) {
             let d = f64::from(*value) - *mean;
-            *mean += d / self.n;
-            *m2 += d * (f64::from(*value) - *mean);
+            *mean += d * weight / self.n;
+            *m2 += weight * d * (f64::from(*value) - *mean);
         }
     }
 
@@ -380,22 +385,24 @@ mod tests {
         }
     }
 
-    /// The parallel transfer is the two-pass serial one it replaced, to
-    /// within one level from summation order.
+    /// The parallel transfer is the two-pass serial one, each pixel
+    /// weighted by its alpha, to within one level from summation order.
     #[test]
     fn apply_color_match_is_the_serial_two_pass_transfer() {
         fn serial(target: &mut RgbaImage, source: &RgbaImage) {
             let lab = |img: &RgbaImage| img.pixels().map(|p| srgb_to_lab(p.0[0], p.0[1], p.0[2])).collect::<Vec<_>>();
+            let alpha = |img: &RgbaImage| img.pixels().map(|p| f64::from(p.0[3]) / 255.0).collect::<Vec<_>>();
             type Channel = fn(&(f32, f32, f32)) -> f32;
-            let stats = |v: &[(f32, f32, f32)], f: Channel| {
-                let n = v.len() as f64;
-                let mean = v.iter().map(|p| f(p) as f64).sum::<f64>() / n;
-                let var = v.iter().map(|p| (f(p) as f64 - mean).powi(2)).sum::<f64>() / n;
+            let stats = |v: &[(f32, f32, f32)], a: &[f64], f: Channel| {
+                let n = a.iter().sum::<f64>();
+                let mean = v.iter().zip(a).map(|(p, w)| f(p) as f64 * w).sum::<f64>() / n;
+                let var = v.iter().zip(a).map(|(p, w)| (f(p) as f64 - mean).powi(2) * w).sum::<f64>() / n;
                 (mean as f32, var.sqrt() as f32)
             };
             let (s, t) = (lab(source), lab(target));
+            let (sa, ta) = (alpha(source), alpha(target));
             let ch: [Channel; 3] = [|p| p.0, |p| p.1, |p| p.2];
-            let (ss, ts) = (ch.map(|f| stats(&s, f)), ch.map(|f| stats(&t, f)));
+            let (ss, ts) = (ch.map(|f| stats(&s, &sa, f)), ch.map(|f| stats(&t, &ta, f)));
             for (px, l) in target.pixels_mut().zip(&t) {
                 let v = [l.0, l.1, l.2];
                 let m: [f32; 3] = std::array::from_fn(|i| (v[i] - ts[i].0) * (ss[i].1 / ts[i].1.max(1e-6)) + ss[i].0);
@@ -413,6 +420,23 @@ mod tests {
         assert!(got.pixels().zip(target.pixels()).all(|(a, b)| a.0[3] == b.0[3]), "alpha unchanged");
     }
 
+
+    /// A cut-out's colour match reads only what shows: the background
+    /// under its transparent pixels (the model's in the output, black in
+    /// the enlarged input) leaves the subject's colours as they are.
+    #[test]
+    fn colour_match_reads_only_the_pixels_that_show() {
+        let subject = |x: u32, y: u32| image::Rgba([120 + (x * 7 % 60) as u8, 90 + (y * 5 % 50) as u8, 60 + ((x + y) % 40) as u8, 255]);
+        let (w, h) = (64, 48);
+        let mut target = RgbaImage::from_fn(w, h, |x, y| if x < w / 3 { subject(x, y) } else { image::Rgba([40, 170, 60, 0]) });
+        let reference = RgbaImage::from_fn(w, h, |x, y| if x < w / 3 { subject(x, y) } else { image::Rgba([0, 0, 0, 0]) });
+        let before = target.clone();
+        apply_color_match(&mut target, &reference);
+        let worst = target.enumerate_pixels().filter(|(x, ..)| *x < w / 3)
+            .map(|(x, y, p)| (0..3).map(|c| p[c].abs_diff(before.get_pixel(x, y)[c])).max().unwrap_or(0))
+            .max();
+        assert!(worst <= Some(1), "the subject moved by {worst:?} levels");
+    }
 
     /// A kept reference colour-matches as the image itself does, its
     /// statistics worked out on the first match and kept for the next.
