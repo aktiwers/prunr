@@ -46,29 +46,25 @@ struct AlphaMadeOf {
     recipe: prunr_core::MaskRecipe,
     seg: std::sync::Weak<SegTensor>,
     photo: std::sync::Weak<RgbaImage>,
-    correction: Option<std::sync::Weak<prunr_core::selection::MaskArtifact>>,
+    /// `Weak::new()` with no correction: two of those are equal.
+    correction: std::sync::Weak<prunr_core::selection::MaskArtifact>,
 }
 
 impl AlphaMadeOf {
     fn of(inputs: &DispatchInputs, seg: &Arc<SegTensor>, settings: &prunr_core::MaskSettings) -> Self {
-        let correction = match &inputs.correction {
-            Some(crate::gui::item::Correction::Ready(plane)) => Some(Arc::downgrade(plane)),
-            _ => None,
-        };
         Self {
             recipe: prunr_core::MaskRecipe::from(settings).alpha_part(),
             seg: Arc::downgrade(seg),
             photo: Arc::downgrade(&inputs.original),
-            correction,
+            correction: inputs.ready_correction().map_or_else(std::sync::Weak::new, Arc::downgrade),
         }
     }
 
     fn same(&self, other: &Self) -> bool {
-        let same_correction = match (&self.correction, &other.correction) {
-            (Some(a), Some(b)) => a.ptr_eq(b),
-            (a, b) => a.is_none() && b.is_none(),
-        };
-        self.recipe == other.recipe && self.seg.ptr_eq(&other.seg) && self.photo.ptr_eq(&other.photo) && same_correction
+        self.recipe == other.recipe
+            && self.seg.ptr_eq(&other.seg)
+            && self.photo.ptr_eq(&other.photo)
+            && self.correction.ptr_eq(&other.correction)
     }
 }
 
@@ -780,6 +776,10 @@ impl DispatchInputs {
     /// The correction plane; a render resolves a plane still to build
     /// before it reads one.
     fn correction_plane(&self) -> Option<&prunr_core::selection::MaskArtifact> {
+        self.ready_correction().map(Arc::as_ref)
+    }
+
+    fn ready_correction(&self) -> Option<&Arc<prunr_core::selection::MaskArtifact>> {
         match self.correction.as_ref()? {
             crate::gui::item::Correction::Ready(plane) => Some(plane),
             crate::gui::item::Correction::Build(_) => None,
@@ -1198,24 +1198,24 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     // SubjectOutline's masked base: a Mask kind rebuilds it (its settings
     // just changed); an Edge kind reuses the cached one. A new one goes back
     // for caching.
-    let ((masked_base, built_masked_base), built_alpha) = if is_subject_outline {
+    let (masked_base, built_masked_base, built_alpha) = if is_subject_outline {
         let fresh_base = || {
             // invariant: is_subject_outline → seg_tensor is Some.
             let seg = inputs.seg_tensor.as_ref().unwrap();
             cut_out(&inputs, seg).map(|(img, alpha)| {
                 let arc = Arc::new(img);
-                ((Some(Arc::clone(&arc)), Some(arc)), alpha)
+                (Some(Arc::clone(&arc)), Some(arc), alpha)
             })
         };
         let base = inputs.cached_masked_base.clone()
             .filter(|_| inputs.kind == PreviewKind::Edge)
-            .map_or_else(fresh_base, |cached| Ok(((Some(cached), None), None)));
+            .map_or_else(fresh_base, |cached| Ok((Some(cached), None, None)));
         match base {
             Ok(base) => base,
             Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
         }
     } else {
-        ((None, None), None)
+        (None, None, None)
     };
 
     match inputs.kind {

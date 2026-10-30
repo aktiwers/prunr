@@ -384,7 +384,7 @@ impl PrunrApp {
                     item.cached_masked_base = Some((base, recipe, model));
                 }
                 if let Some(alpha) = r.new_alpha {
-                    item.kept_alpha = Some(alpha);
+                    crate::gui::reclaim::later(item.kept_alpha.replace(alpha));
                 }
                 if let (Some(reference), Some(run)) = (r.new_reference, item.upscale.as_mut()) {
                     run.reference = Some(reference);
