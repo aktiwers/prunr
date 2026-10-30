@@ -430,7 +430,7 @@ fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEve
 /// SHA256 matches. Transient network errors (timeout, 5xx) get up to 3
 /// tries with backoff; fatal ones (404, SHA mismatch, disk full, cancel)
 /// fail fast.
-fn download_to_file(
+pub(crate) fn download_to_file(
     url: &str,
     dest: &Path,
     expected_sha: &str,

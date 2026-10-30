@@ -126,6 +126,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 
 ### Performance
 
+- **BiRefNet-lite on an 8 GB NVIDIA card.** Its own weights take about 7.7 GB of graphics memory; on a card with less free, it now runs a half-precision copy that takes 3.9 GB, on the card instead of the processor, with the same masks (0.01 levels apart on average). A card with room keeps the full-precision weights. The copy comes with the CUDA add-on, which is 110 MB larger for it.
 - A downloaded model no longer keeps a second copy of its file in memory once it has loaded: about 170 MB less after a U2Net cut-out or a LaMa erase, up to 270 MB for DDColor. The file is read again on the next load, a fraction of a second.
 - Eraser (RORem) peaks at 15 GB of memory instead of 20.5 GB, at the same speed: its sessions run without ONNX Runtime's memory-pattern planning.
 - Edge shift runs in constant time per pixel: a 4K mask at the knob's 50 px limit went from 2.5 s to 16 ms, and 1 px from 52 ms to 16 ms.
