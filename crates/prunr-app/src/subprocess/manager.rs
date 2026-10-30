@@ -670,6 +670,11 @@ mod tests {
         while child.try_wait().unwrap().is_none() {
             std::thread::sleep(Duration::from_millis(5));
         }
+        // A test spawning beside this one holds a copy of the pipe from its
+        // fork to its exec; once a write finds the pipe closed, it stays so.
+        while std::io::Write::write(stdin.get_mut(), &[0]).is_ok() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let why = send_init(child, &mut stdin, &SubprocessCommand::Shutdown).expect_err("the pipe is closed");
         assert!(why.starts_with("Prunr was updated while it was open"), "{why}");
     }
