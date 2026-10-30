@@ -33,7 +33,7 @@ fn run(job: Job, failures: &Failures) {
         Job::Write(path, bytes) => {
             if let Err(err) = write_whole(&path, &bytes) {
                 tracing::warn!(?path, %err, "file not written");
-                failures.note(format!("A settings or preset file could not be saved ({err}). Changes made now may not be kept."));
+                failures.note(format!("A settings or preset file could not be saved, so changes made now may not be kept: {}", prunr_core::plain::reason(err)));
             }
         }
         Job::Remove(path) => match std::fs::remove_file(&path) {

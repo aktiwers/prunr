@@ -525,7 +525,7 @@ fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
             Ok(()) if !args.quiet => eprintln!("Saved {}", out.display()),
             Ok(()) => {}
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", prunr_core::plain::reason(e));
                 failed += 1;
             }
         }
@@ -861,7 +861,7 @@ fn run_each_input(
             Ok(()) if !args.quiet => eprintln!("Saved {}", out_path.display()),
             Ok(()) => {}
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {}", prunr_core::plain::reason(e));
                 failed += 1;
             }
         }
