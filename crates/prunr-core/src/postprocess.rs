@@ -559,7 +559,9 @@ const PLATE_STEP: u32 = 4;
 /// Works on the subject's box plus `PLATE_MARGIN`: the alpha at full
 /// size, the background's colour and share per `PLATE_STEP`² cell, the
 /// fill per channel at that size. Peak working set: the output
-/// (w·h·4 bytes) and the alpha (w·h); the cells are 1/16 of the box.
+/// (w·h·4 bytes) and the alpha (w·h); the cells are 1/16 of the box. A
+/// cut-out of another size adds its own alpha while it is resized (an
+/// upscale by k: w·h·k² bytes, 190 MB for 4× of 12 MP).
 fn clean_plate(source: &RgbaImage, cutout: &RgbaImage) -> Option<RgbaImage> {
     let (w, h) = source.dimensions();
     let alpha = crate::formats::alpha_plane(cutout);
