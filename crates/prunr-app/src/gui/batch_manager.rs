@@ -59,6 +59,13 @@ pub(crate) enum ProcessButtonLabel {
 /// (`cached_edge_tensors`) caches across all batch items, in bytes.
 const TENSOR_BUDGET: usize = 512 * 1024 * 1024;
 
+/// Drop `item`'s tensor caches; the bytes they held.
+fn drop_tensors(item: &mut BatchItem) -> usize {
+    let bytes = item.evictable_tensor_bytes();
+    item.drop_tensor_caches();
+    bytes
+}
+
 /// Maximum thumbnail edge length in pixels.
 const THUMB_MAX_PX: u32 = 160;
 
@@ -558,22 +565,26 @@ impl BatchManager {
     }
 
     /// Evict tensor caches, oldest-loaded first, until under budget. Both
-    /// caches go together: one without the other is useless.
-    pub(crate) fn enforce_tensor_budget(&mut self) {
+    /// caches go together: one without the other is useless. Returns how
+    /// many images let go of theirs.
+    pub(crate) fn enforce_tensor_budget(&mut self) -> usize {
         // Budget only what eviction can free — selection planes and
         // embeddings would otherwise force tensor evictions they never
         // relieve.
         let total: usize = self.items.iter().map(BatchItem::evictable_tensor_bytes).sum();
-        if total <= TENSOR_BUDGET { return; }
+        if total <= TENSOR_BUDGET { return 0; }
         let selected_id = self.selected_item().map(|b| b.id);
         let mut remaining = total;
+        let mut dropped = 0;
         for item in &mut self.items {
             if remaining <= TENSOR_BUDGET { break; }
             // Preserve the selected item's tensors (most likely to be reused).
             if Some(item.id) == selected_id { continue; }
-            remaining -= item.evictable_tensor_bytes();
-            item.drop_tensor_caches();
+            let freed = drop_tensors(item);
+            remaining -= freed;
+            dropped += usize::from(freed > 0);
         }
+        dropped
     }
 
     /// Keep the selected item's selection texture current: request a
@@ -619,14 +630,11 @@ impl BatchManager {
         }
     }
 
-    /// Evict all tensor caches except the selected item (called under memory pressure).
-    pub(crate) fn evict_all_tensors(&mut self) {
+    /// Evict all tensor caches except the selected item (called under
+    /// memory pressure). Returns how many images let go of theirs.
+    pub(crate) fn evict_all_tensors(&mut self) -> usize {
         let selected_id = self.selected_item().map(|b| b.id);
-        for item in &mut self.items {
-            if Some(item.id) != selected_id {
-                item.drop_tensor_caches();
-            }
-        }
+        self.items.iter_mut().filter(|item| Some(item.id) != selected_id).map(drop_tensors).filter(|&freed| freed > 0).count()
     }
 
     /// Commit a new selection mask to the named item, registering it for
@@ -1155,7 +1163,9 @@ mod tests {
         bm.selected_index = 1; // item id=2
         assert!(bm.items.iter().all(|i| i.cached_tensor.is_some()));
 
-        bm.evict_all_tensors();
+        bm.items.push(item_with_cache(4, 0));
+
+        assert_eq!(bm.evict_all_tensors(), 2, "the two others that held any");
 
         assert!(bm.items[0].cached_tensor.is_none(), "non-selected evicted");
         assert!(bm.items[0].edge_planes.is_empty() && bm.items[0].cached_edge_tensors.is_none(), "its edge cache too");

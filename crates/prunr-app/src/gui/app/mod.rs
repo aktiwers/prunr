@@ -135,6 +135,8 @@ pub struct PrunrApp {
     /// Each provider that could not start was named in a toast, by its
     /// stack (`GpuStack as usize`).
     told_gpu_failures: prunr_core::engine::PerStack<bool>,
+    /// Images letting go of their kept cut-out to save memory was said.
+    told_dropped_cutouts: bool,
 
     pub(crate) runtime_install: Option<RuntimeInstallProgress>,
     /// Settings › Hardware › Test this computer, while it runs: a modal
@@ -463,6 +465,7 @@ impl PrunrApp {
             pending_license_request: None,
             pending_first_toasts: Vec::new(),
             told_gpu_failures: Default::default(),
+            told_dropped_cutouts: false,
             runtime_install: None,
             machine_test: None,
             hardware_install_cache: Default::default(),
@@ -1014,6 +1017,18 @@ impl PrunrApp {
             *told = true;
             self.toasts.warning(format!("{} See Settings › Hardware.", failure.text()));
         }
+    }
+
+    /// Other images let go of what their model made, to save memory: said
+    /// once, as each needs Process again before its cut-out can change.
+    pub(crate) fn tell_dropped_cutouts(&mut self, dropped: usize) {
+        if dropped == 0 || self.told_dropped_cutouts {
+            return;
+        }
+        self.told_dropped_cutouts = true;
+        let images = super::views::fmt::count(dropped, "other image", "other images");
+        let them = if dropped == 1 { "it" } else { "them" };
+        self.toasts.info(format!("Memory ran short: to adjust the cut-out of {images}, process {them} again."));
     }
 
     /// `stack`'s start failure was said another way, so it is not said again.
@@ -1737,6 +1752,21 @@ mod field_list_tests {
         assert_eq!(app.toasts.len_for_test(), before + 2, "each once");
     }
 
+    /// Images letting go of their kept cut-out is said once a session;
+    /// nothing let go, nothing said.
+    #[test]
+    fn dropped_cut_outs_are_told_once() {
+        let mut app = super::PrunrApp::new_for_test();
+        let before = app.toasts.len_for_test();
+        app.tell_dropped_cutouts(0);
+        assert_eq!(app.toasts.len_for_test(), before, "nothing to say");
+        app.tell_dropped_cutouts(3);
+        let (kind, text) = app.toasts.last_for_test().expect("a toast");
+        assert_eq!((kind, text), ("info", "Memory ran short: to adjust the cut-out of 3 other images, process them again."));
+        app.tell_dropped_cutouts(1);
+        assert_eq!(app.toasts.len_for_test(), before + 1, "once");
+    }
+
     /// The first-launch prompt offers the recommended runtime only while
     /// the app's record of installs lacks it: a test app has every
     /// runtime, whatever the computer running the test has installed.
@@ -1787,6 +1817,7 @@ mod field_list_tests {
             pending_license_request: _,
             pending_first_toasts: _,
             told_gpu_failures: _,
+            told_dropped_cutouts: _,
             runtime_install: _,
             machine_test: _,
             hardware_install_cache: _,
