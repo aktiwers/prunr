@@ -743,6 +743,18 @@ mod busy_pill_tests {
         app
     }
 
+    /// A photo decoded for an image off screen leaves the shown image's
+    /// zoom and Compare as they are.
+    #[test]
+    fn an_off_screen_decode_leaves_the_shown_zoom() {
+        let mut app = app();
+        push_test_item(&mut app, 2);
+        app.zoom_state.zoom = 3.0;
+        app.batch.bg_io.decode_tx.send((2, Ok(std::sync::Arc::new(image::RgbaImage::new(1, 1))))).unwrap();
+        app.drain_background_channels(&egui::Context::default());
+        assert_eq!(app.zoom_state.zoom, 3.0);
+    }
+
     /// A render due for an image off screen whose photo is not decoded
     /// asks for the decode instead of waiting for good with the pill up.
     #[test]
