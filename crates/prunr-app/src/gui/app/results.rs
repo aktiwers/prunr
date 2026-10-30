@@ -1021,9 +1021,9 @@ impl PrunrApp {
 
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
-        while let Ok((item_id, key, image)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+        while let Ok((item_id, key, built)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if !item.land_backdrop(key, image, |image, landing, options| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
+            if !item.land_backdrop_built(key, built, |image, landing, options| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
                 ctx.request_repaint();
             }
         }
