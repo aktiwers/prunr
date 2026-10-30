@@ -19,7 +19,8 @@ fn resize_raw(src: &[u8], w: u32, h: u32, pixel: PixelType, dst_w: u32, dst_h: u
 
 /// Every pixel of interleaved RGBA `rgba` fully opaque.
 pub(crate) fn is_opaque(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4).all(|p| p[3] == u8::MAX)
+    use rayon::prelude::*;
+    rgba.par_chunks(1 << 20).all(|chunk| chunk.chunks_exact(4).all(|p| p[3] == u8::MAX))
 }
 
 fn resize_raw_with(src: &[u8], w: u32, h: u32, pixel: PixelType, (dst_w, dst_h): (u32, u32), filter: ResizeFilter, weigh_alpha: bool) -> Vec<u8> {
