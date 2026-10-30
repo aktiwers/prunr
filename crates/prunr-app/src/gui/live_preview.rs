@@ -395,8 +395,9 @@ impl LivePreview {
     /// gives each dispatch its inputs. A dispatch is quick when its edit
     /// hasn't settled and its image exceeds a quick frame. A render that
     /// can't be built yet waits; one that never can (`Verdict::Never`) is
-    /// dropped, so nothing waits for good.
-    pub(crate) fn tick<F>(&mut self, mut snapshot: F) -> Option<Duration>
+    /// dropped, so nothing waits for good. Images other than the `shown`
+    /// one render one at a time.
+    pub(crate) fn tick<F>(&mut self, shown: Option<u64>, mut snapshot: F) -> Option<Duration>
     where
         F: FnMut(u64, PreviewKind) -> Result<DispatchInputs, crate::gui::capability::Verdict>,
     {
@@ -427,7 +428,15 @@ impl LivePreview {
             }
         }
 
+        // A batch re-finish sent every image's render at once and held all
+        // their full-size buffers together, for little gain: each render
+        // runs in parallel itself. Off screen, the oldest image goes first.
+        ready_ids.sort_unstable();
+        let mut off_screen = self.in_flight.keys().copied().find(|&id| Some(id) != shown);
         for id in ready_ids {
+            if Some(id) != shown && off_screen.is_some_and(|busy| busy != id) {
+                continue;
+            }
             // Peek, don't remove: when the snapshot isn't ready (a decode in
             // flight after a view switch) the entry stays for the next tick.
             // Dropping it silently swallowed the tweak.
@@ -471,6 +480,9 @@ impl LivePreview {
             let generation = self.generation_counter;
             let cancel = Arc::new(AtomicBool::new(false));
             self.in_flight.insert(id, InFlight { cancel: cancel.clone(), generation });
+            if Some(id) != shown {
+                off_screen = Some(id);
+            }
 
             let tx = self.result_tx.clone();
             rayon::spawn(move || {
@@ -1499,7 +1511,7 @@ mod tests {
         // tick at the same simulated `now` — DEBOUNCE elapsed since T0,
         // so the dispatch must be ready. `wait` is None because nothing's
         // pending after dispatch.
-        let wait = lp.tick(|_, _| Err(WAIT));
+        let wait = lp.tick(None, |_, _| Err(WAIT));
         assert!(
             wait.is_none(),
             "tick at frame 1 (200ms after T0) must clear the pending entry"
@@ -1544,9 +1556,9 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
         lp.owe_for_test(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE + Duration::from_millis(1));
-        lp.tick(|_, _| Err(WAIT));
+        lp.tick(None, |_, _| Err(WAIT));
         assert!(lp.is_busy(), "a render that waits is kept");
-        lp.tick(|_, _| Err(Verdict::Never(Reason::ProcessFirst)));
+        lp.tick(None, |_, _| Err(Verdict::Never(Reason::ProcessFirst)));
         assert!(!lp.is_busy(), "nothing left: not pending, not owed");
     }
 
@@ -1563,9 +1575,35 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, true))), "a drag's in-between frame is quick");
         (clock, lp)
+    }
+
+    /// Images off screen render one at a time, the oldest first; the
+    /// shown one goes beside them, and a new render of the one under way
+    /// replaces it as before.
+    #[test]
+    fn images_off_screen_render_one_at_a_time() {
+        let clock = MockClock::new(Instant::now());
+        let mut lp = LivePreview::with_clock(clock.clone());
+        for id in [3, 1, 2, 9] {
+            lp.render_now(id, PreviewKind::Mask);
+        }
+        clock.advance(DEBOUNCE);
+        let shown = Some(9);
+        let running = |lp: &LivePreview| lp.in_flight.keys().copied().collect::<std::collections::BTreeSet<u64>>();
+        lp.tick(shown, |_, _| large());
+        assert_eq!(running(&lp), [1, 9].into(), "the oldest off screen, and the shown one");
+        let first = lp.in_flight[&1].generation;
+        lp.render_now(1, PreviewKind::Mask);
+        clock.advance(DEBOUNCE);
+        lp.tick(shown, |_, _| large());
+        assert_eq!(running(&lp), [1, 9].into());
+        assert_ne!(lp.in_flight[&1].generation, first, "its own new render replaces it");
+        lp.cancel(1);
+        lp.tick(shown, |_, _| large());
+        assert_eq!(running(&lp), [2, 9].into(), "the next when it ends");
     }
 
     /// A render that can make nothing (lines with no edge tensor) still
@@ -1576,7 +1614,7 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Edge);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| Ok(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(RgbaImage::new(8, 8)), ItemSettings::default())));
+        lp.tick(None, |_, _| Ok(DispatchInputs::new(PreviewKind::Edge, 0, Arc::new(RgbaImage::new(8, 8)), ItemSettings::default())));
         assert!(lp.works_on(1), "dispatched");
         let deadline = Instant::now() + Duration::from_secs(10);
         while lp.works_on(1) && Instant::now() < deadline {
@@ -1593,10 +1631,10 @@ mod tests {
         let (clock, mut lp) = dragging();
         let quick = dispatched(&lp);
         clock.advance(SETTLE_AFTER - DEBOUNCE - Duration::from_millis(1));
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert_eq!(dispatched(&lp), quick, "not yet");
         clock.advance(Duration::from_millis(1));
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         let settled = dispatched(&lp).expect("dispatched");
         assert!(!settled.1 && settled.0 > quick.expect("dispatched").0, "the full-size render goes out");
         assert!(lp.is_busy(), "and is under way");
@@ -1612,12 +1650,12 @@ mod tests {
         for _ in 0..3 {
             lp.mark_tweak(1, PreviewKind::Mask);
             clock.advance(DEBOUNCE);
-            lp.tick(|_, _| large());
+            lp.tick(None, |_, _| large());
             assert_eq!(dispatched(&lp).map(|d| d.0), Some(first), "the frame under way is not superseded");
         }
         let landed = land(&mut lp);
         assert_eq!(landed.iter().map(|r| r.generation).collect::<Vec<_>>(), vec![first], "it lands");
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         let next = dispatched(&lp).expect("the tweaks go out");
         assert!(next.0 > first && next.1, "as one quick frame");
     }
@@ -1630,7 +1668,7 @@ mod tests {
         for _ in 0..40 {
             lp.mark_tweak(1, PreviewKind::Mask);
             clock.advance(SETTLE_AFTER / 4);
-            lp.tick(|_, _| large());
+            lp.tick(None, |_, _| large());
             assert!(matches!(dispatched(&lp), Some((_, true))), "still quick");
         }
     }
@@ -1641,13 +1679,13 @@ mod tests {
     fn a_release_settles_the_drag_at_once() {
         let (_clock, mut lp) = dragging();
         lp.flush(1);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, false))), "nothing queued: the owed render goes out");
 
         let (_clock, mut lp) = dragging();
         lp.mark_tweak(1, PreviewKind::Mask);
         lp.flush(1);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, false))), "a queued tweak goes out settled");
     }
 
@@ -1656,12 +1694,12 @@ mod tests {
     fn a_drag_settles_once() {
         let (clock, mut lp) = dragging();
         clock.advance(SETTLE_AFTER);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         let settled = dispatched(&lp);
         assert!(matches!(settled, Some((_, false))));
         for _ in 0..5 {
             clock.advance(SETTLE_AFTER);
-            assert_eq!(lp.tick(|_, _| large()), None, "nothing to wait for");
+            assert_eq!(lp.tick(None, |_, _| large()), None, "nothing to wait for");
             assert_eq!(dispatched(&lp), settled, "no second render");
         }
     }
@@ -1685,15 +1723,15 @@ mod tests {
     fn a_tweak_after_a_settle_starts_a_new_quick_cycle() {
         let (clock, mut lp) = dragging();
         clock.advance(SETTLE_AFTER);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, false))));
         land(&mut lp);
         lp.mark_tweak(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, true))), "quick again");
         clock.advance(SETTLE_AFTER);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, false))), "and settles again");
     }
 
@@ -1702,11 +1740,11 @@ mod tests {
     #[test]
     fn the_wait_covers_the_settle_deadline() {
         let (clock, mut lp) = dragging();
-        assert_eq!(lp.tick(|_, _| large()), Some(SETTLE_AFTER - DEBOUNCE), "from the last tweak");
+        assert_eq!(lp.tick(None, |_, _| large()), Some(SETTLE_AFTER - DEBOUNCE), "from the last tweak");
         clock.advance(Duration::from_millis(100));
-        assert_eq!(lp.tick(|_, _| large()), Some(SETTLE_AFTER - DEBOUNCE - Duration::from_millis(100)));
+        assert_eq!(lp.tick(None, |_, _| large()), Some(SETTLE_AFTER - DEBOUNCE - Duration::from_millis(100)));
         lp.mark_tweak(1, PreviewKind::Mask);
-        assert_eq!(lp.tick(|_, _| large()), Some(DEBOUNCE), "a queued tweak waits for its throttle first");
+        assert_eq!(lp.tick(None, |_, _| large()), Some(DEBOUNCE), "a queued tweak waits for its throttle first");
     }
 
     /// An image no larger than a quick frame renders full size mid-drag,
@@ -1717,12 +1755,12 @@ mod tests {
         let mut lp = LivePreview::with_clock(clock.clone());
         lp.mark_tweak(1, PreviewKind::Mask);
         clock.advance(DEBOUNCE);
-        lp.tick(|_, _| Ok(photo_inputs(QUICK_FRAME_SIDE)));
+        lp.tick(None, |_, _| Ok(photo_inputs(QUICK_FRAME_SIDE)));
         let full = dispatched(&lp);
         assert!(matches!(full, Some((_, false))), "full size");
         assert!(!lp.owed.contains_key(&1));
         clock.advance(SETTLE_AFTER * 2);
-        assert_eq!(lp.tick(|_, _| Ok(photo_inputs(QUICK_FRAME_SIDE))), None);
+        assert_eq!(lp.tick(None, |_, _| Ok(photo_inputs(QUICK_FRAME_SIDE))), None);
         assert_eq!(dispatched(&lp), full, "no settle render");
     }
 
@@ -1733,7 +1771,7 @@ mod tests {
         let (_clock, mut lp) = dragging();
         lp.mark_tweak(1, PreviewKind::Mask);
         lp.hurry(1);
-        lp.tick(|_, _| large());
+        lp.tick(None, |_, _| large());
         assert!(matches!(dispatched(&lp), Some((_, true))));
         assert!(lp.works_on(1), "the drag still owes its settle");
         lp.cancel(1);
@@ -1788,12 +1826,12 @@ mod tests {
         lp.mark_tweak(1, PreviewKind::Mask);
 
         // Before DEBOUNCE — wait is Some(>0).
-        let wait = lp.tick(|_, _| Err(WAIT));
+        let wait = lp.tick(None, |_, _| Err(WAIT));
         assert!(wait.is_some(), "before DEBOUNCE tick should report a wait");
 
         // After DEBOUNCE — wait is None (entry is ready).
         clock.advance(DEBOUNCE + Duration::from_millis(1));
-        let wait = lp.tick(|_, _| Err(WAIT));
+        let wait = lp.tick(None, |_, _| Err(WAIT));
         assert!(
             wait.is_none(),
             "after DEBOUNCE tick should report no remaining wait (entry is ready)"
