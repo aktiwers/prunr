@@ -1844,9 +1844,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         version: "1.0.0",
         gpu: GpuRequirement::None,
         places: Places {
-            cuda: Place::There(Speed::on(28.35, 499.0, "RTX 3060, ORT 1.24.1 CUDA 12, 2026-10-25")),
+            cuda: Place::There(Speed::on(47.0, 1080.0, "RTX 3060, ORT 1.30, input 518 px on the short side, 2026-10-30")),
             directml: Place::There(Speed::on(65.56, 531.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
-            coreml: Place::There(Speed::on(121.7, 409.0, "MacBook Air M1 16 GB, ORT 1.30, 2026-10-25")),
+            coreml: Place::There(Speed::on(231.0, 644.0, "MacBook Air M1 16 GB, ORT 1.30, input 518 px on the short side, 2026-10-30")),
             openvino: Place::There(Speed::on(382.0, 487.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(Why::Slower("0.65x: 770 ms against the CPU's 497 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
@@ -1854,11 +1854,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured: 366 MB peak RSS on the CPU EP, session load included
         // (518×392 input); headroom for a square photo's 518×518.
         needs: Needs {
-            cpu: Cost::measured(350, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Same(Cost::measured(650, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
-            cuda: Priced::Same(Cost::measured(850, 700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
+            cpu: Cost::measured(450, 0, "i5-11600KF, input 518 px on the short side, 2026-10-30"),
+            mac_cpu: Priced::Same(Cost::measured(900, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 518 px on the short side, 2026-10-30")),
+            cuda: Priced::Same(Cost::measured(1_000, 700, "RTX 3060 12 GB, i5-11600KF, input 518 px on the short side, 2026-10-30")),
             directml: Priced::Same(Cost::measured(400, 500, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Same(Cost::measured(1_050, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
+            coreml: Priced::Same(Cost::measured(1_400, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 518 px on the short side, 2026-10-30")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
         },
