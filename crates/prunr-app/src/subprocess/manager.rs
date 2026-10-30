@@ -24,9 +24,9 @@ pub struct TensorView<'a> {
 
 /// The photo a re-run finishes: its file's bytes, or the pixels already
 /// decoded.
-pub enum Photo<'a> {
-    Encoded(&'a [u8]),
-    Decoded(&'a image::RgbaImage),
+pub enum Photo {
+    Encoded(std::sync::Arc<Vec<u8>>),
+    Decoded(std::sync::Arc<image::RgbaImage>),
 }
 
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
@@ -294,7 +294,7 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         tensor_kind: super::protocol::IpcKind,
-        photo: Photo<'_>,
+        photo: &Photo,
         image_kind: super::protocol::IpcKind,
         build_cmd: impl FnOnce(std::path::PathBuf, PhotoFile) -> SubprocessCommand,
     ) -> Result<(), String> {
@@ -303,7 +303,7 @@ impl SubprocessManager {
             .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
         let image_path = image_kind.path_for(ipc_temp_dir(), item_id);
         let original = match photo {
-            Photo::Encoded(bytes) => std::fs::write(&image_path, bytes).map(|()| PhotoFile::Encoded(image_path)),
+            Photo::Encoded(bytes) => std::fs::write(&image_path, bytes.as_slice()).map(|()| PhotoFile::Encoded(image_path)),
             Photo::Decoded(rgba) => super::ipc::write_image(&image_path, rgba).map(|()| PhotoFile::Decoded(image_path)),
         }
         .map_err(|e| format!("Failed to write image temp file: {e}"))?;
@@ -325,7 +325,7 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
-        photo: Photo<'_>,
+        photo: &Photo,
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
         self.send_with_tensor_and_image(
@@ -352,7 +352,7 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
-        photo: Photo<'_>,
+        photo: &Photo,
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
         self.send_with_tensor_and_image(

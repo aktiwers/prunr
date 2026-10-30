@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use prunr_core::{MaskSettings, EdgeSettings, EdgeScale, ModelKind, ProcessResult, EDGE_SCALE_COUNT};
 use crate::gui::settings::LineMode;
 use crate::subprocess::protocol::{EdgeCacheFile, TensorCacheFile, SpareOutcome, SubprocessEvent, CANCELLED_ERR_MSG};
-use crate::subprocess::manager::{SubprocessManager, WorkerLines};
+use crate::subprocess::manager::{Photo, SubprocessManager, WorkerLines};
 use crate::subprocess::ipc::read_and_delete;
 use crate::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
 pub(crate) use crate::subprocess::first_look::Shown;
@@ -1354,41 +1354,42 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
     sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
 }
 
-type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, crate::subprocess::manager::Photo<'_>, MaskSettings) -> Result<(), String>;
+type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &Photo, MaskSettings) -> Result<(), String>;
 
 impl CachedTensorWork {
     /// The unpacked tensor, and the photo: decoded, or the file read. A
     /// corrupt cache or an unreadable file fails the image; its failure
     /// drops the cache, so the next Process starts over.
-    fn read_inputs(&self) -> Result<(Vec<f32>, CachedPhoto), String> {
+    fn read_inputs(&self) -> Result<(Vec<f32>, Photo), String> {
         let data = self.tensor.decompress().ok_or("The kept cut-out could not be read. Process again.")?;
         let photo = match &self.photo {
-            Some(rgba) => CachedPhoto::Decoded(Arc::clone(rgba)),
-            None => CachedPhoto::Encoded(self.source.load_bytes().map_err(super::item::source_unreadable)?),
+            Some(rgba) => Photo::Decoded(Arc::clone(rgba)),
+            None => self.encoded_photo()?,
         };
         Ok((data, photo))
     }
-}
 
-/// The photo a cached re-run sends.
-enum CachedPhoto {
-    Decoded(Arc<image::RgbaImage>),
-    Encoded(Arc<Vec<u8>>),
+    fn encoded_photo(&self) -> Result<Photo, String> {
+        self.source.load_bytes().map(Photo::Encoded).map_err(super::item::source_unreadable)
+    }
 }
 
 fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendCached) -> Result<(), Refused> {
-    use crate::subprocess::manager::Photo;
     let (data, photo) = work.read_inputs().map_err(Refused::Unreadable)?;
     let tensor = crate::subprocess::manager::TensorView {
         data: &data,
         height: work.tensor.height,
         width: work.tensor.width,
     };
-    let photo = match &photo {
-        CachedPhoto::Decoded(rgba) => Photo::Decoded(rgba),
-        CachedPhoto::Encoded(bytes) => Photo::Encoded(bytes),
-    };
-    send(sub, work.item_id, &tensor, work.tensor.model, photo, work.mask).map_err(Refused::Worker)
+    let sent = send(sub, work.item_id, &tensor, work.tensor.model, &photo, work.mask);
+    // The raw pixels are several times the file: a temp folder too full
+    // for them may still take the file.
+    if let (Err(err), Photo::Decoded(_)) = (&sent, &photo) {
+        tracing::warn!(item_id = work.item_id, %err, "the decoded photo could not be handed over; sending its file");
+        let photo = work.encoded_photo().map_err(Refused::Unreadable)?;
+        return send(sub, work.item_id, &tensor, work.tensor.model, &photo, work.mask).map_err(Refused::Worker);
+    }
+    sent.map_err(Refused::Worker)
 }
 
 #[cfg(test)]
@@ -1524,7 +1525,7 @@ mod tests {
         assert_eq!(cached.read_inputs().expect("reads").0, vec![0.5; 4]);
         let photo = Some(Arc::new(image::RgbaImage::new(1, 1)));
         let decoded = CachedTensorWork { item_id: 5, tensor: tensor.clone(), source: missing.clone(), photo, mask: MaskSettings::default() };
-        assert!(matches!(decoded.read_inputs().expect("its file is not read").1, CachedPhoto::Decoded(_)), "the decoded photo goes as is");
+        assert!(matches!(decoded.read_inputs().expect("its file is not read").1, Photo::Decoded(_)), "the decoded photo goes as is");
         let cached = CachedTensorWork { item_id: 5, tensor, source: missing, photo: None, mask: MaskSettings::default() };
         assert!(cached.read_inputs().is_err_and(|e| e.contains("moved or deleted")));
     }
