@@ -371,18 +371,14 @@ impl PrunrApp {
                 for (planes, key) in r.new_edge.into_iter().chain(r.new_bold) {
                     item.edge_planes.store(planes, key);
                 }
-                if let Some(faced) = r.new_faced {
-                    item.faced_photo = Some(faced);
-                }
-                if let Some(looked) = r.new_depth_photo {
-                    item.depth_photo = Some(looked);
-                }
-                if let Some((base, recipe, model)) = r.new_masked_base {
-                    item.cached_masked_base = Some((base, recipe, model));
-                }
-                if let Some(alpha) = r.new_alpha {
-                    crate::gui::reclaim::later(item.kept_alpha.replace(alpha));
-                }
+                // The images these replace free off the UI thread.
+                let replaced = (
+                    r.new_faced.and_then(|faced| item.faced_photo.replace(faced)),
+                    r.new_depth_photo.and_then(|looked| item.depth_photo.replace(looked)),
+                    r.new_masked_base.and_then(|base| item.cached_masked_base.replace(base)),
+                    r.new_alpha.and_then(|alpha| item.kept_alpha.replace(alpha)),
+                );
+                crate::gui::reclaim::later(replaced);
                 if let (Some(reference), Some(run)) = (r.new_reference, item.upscale.as_mut()) {
                     run.reference = Some(reference);
                 }
