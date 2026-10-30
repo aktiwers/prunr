@@ -180,30 +180,38 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
 
 /// `load_image_from_bytes` decoded only as large as it shows fit inside
 /// a `side × side` square: a JPEG decodes at 1/2, 1/4 or 1/8 of its size,
-/// the reduction made in the DCT, so most of the decode and the
-/// full-size buffer are skipped. Any other image, and a JPEG this cannot
-/// read (CMYK, 16-bit), decodes whole.
+/// the reduction made in the DCT, so the full-size image is never made
+/// (a progressive JPEG still reads every coefficient, so it saves memory,
+/// not time). Any other image, and a JPEG this cannot read (CMYK,
+/// 16-bit), decodes whole.
 pub fn load_image_to_fit_from_bytes(bytes: &[u8], side: u32) -> Result<DynamicImage, CoreError> {
     scaled_jpeg(bytes, side).map_or_else(|| load_image_from_bytes(bytes), Ok)
 }
 
 fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
-    if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    use jpeg_decoder::PixelFormat;
+    if image::guess_format(bytes).ok()? != image::ImageFormat::Jpeg {
         return None;
     }
     let mut decoder = jpeg_decoder::Decoder::new(bytes);
-    if let Some(free) = crate::sysmem::room_for_buffers_bytes() {
-        decoder.set_max_decoding_buffer_size(usize::try_from(free).unwrap_or(usize::MAX));
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    if !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
+        return None;
     }
+    // A progressive JPEG holds the whole photo's coefficients while it
+    // decodes: one too big for the memory free now is left to the full
+    // decode, which refuses it with the reason.
+    let whole = u64::from(info.width) * u64::from(info.height) * 3;
+    decode_allowance(whole, false, crate::sysmem::room_for_buffers_bytes()).ok()?;
     // A square, so a quarter turn after the decode still fits.
     let side = u16::try_from(side).unwrap_or(u16::MAX);
     let (width, height) = decoder.scale(side, side).ok()?;
     let pixels = decoder.decode().ok()?;
     let (width, height) = (u32::from(width), u32::from(height));
-    let mut img = match decoder.info()?.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?),
-        jpeg_decoder::PixelFormat::L8 => DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, pixels)?),
-        jpeg_decoder::PixelFormat::L16 | jpeg_decoder::PixelFormat::CMYK32 => return None,
+    let mut img = match info.pixel_format {
+        PixelFormat::RGB24 => DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?),
+        _ => DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, pixels)?),
     };
     if let Some(turn) = decoder.exif_data().and_then(image::metadata::Orientation::from_exif_chunk) {
         img.apply_orientation(turn);
