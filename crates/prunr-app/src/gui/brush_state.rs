@@ -542,8 +542,15 @@ impl StrokeDrawn {
         match self {
             Self::Magic { reading, .. } => StrokeValues { reading: *reading, ..edge },
             Self::Depth { range, .. } => StrokeValues { range: *range, ..edge },
+            Self::Paint { size, .. } if self.fills_whole() => StrokeValues { size: *size, ..edge },
             Self::Paint { size, stamp, .. } => StrokeValues { size: *size, hardness: stamp.hardness, opacity: stamp.strength, ..edge },
         }
+    }
+
+    /// An eraser's paint stroke covers its area at full strength, whatever
+    /// the Paint Brush's Hardness and Opacity, which its strip does not show.
+    fn fills_whole(&self) -> bool {
+        matches!(self, Self::Paint { edge: StrokeEdge::Eraser { .. }, .. })
     }
 
     /// The stroke drawn at `values`, keeping what made it (its mode, its
@@ -559,7 +566,7 @@ impl StrokeDrawn {
             Self::Paint { path, stamp, .. } => Self::Paint {
                 path: Arc::clone(path),
                 size: values.size,
-                stamp: Stamp { hardness: values.hardness, strength: values.opacity, ..*stamp },
+                stamp: if self.fills_whole() { *stamp } else { Stamp { hardness: values.hardness, strength: values.opacity, ..*stamp } },
                 edge,
             },
         }
@@ -1153,6 +1160,22 @@ mod tests {
         assert!((target.strength - 0.6).abs() < f32::EPSILON);
         // mode carries user intent across reset — must not change.
         assert_eq!(target.mode, BrushMode::Add);
+    }
+
+    /// An eraser stroke fills its whole area: the Paint Brush's Hardness
+    /// and Opacity, which the eraser strip does not show, never reach it
+    /// when a Reset or a preset moves them, for the latest stroke or all.
+    #[test]
+    fn an_eraser_stroke_keeps_its_hard_full_stamp() {
+        let brush = BrushSettings::default();
+        let edge = StrokeEdge::Eraser { expand: 4.0, feather: 8.0 };
+        let drawn = crate::gui::tests::fixtures::painted_with_edge(BrushShape::Circle, 24.0, &[(8.0, 8.0, 2.0)], brush.region_stamp(false), edge);
+        let from = StrokeValues { hardness: 0.3, opacity: 0.4, ..drawn.values() };
+        let to = StrokeValues { hardness: 0.7, opacity: 0.5, ..from };
+        for redrawn in [drawn.at(drawn.values().moved(from, to)), drawn.at(drawn.values().adjusted(from, to))] {
+            let StrokeDrawn::Paint { stamp, .. } = redrawn else { panic!("a paint stroke stays one") };
+            assert_eq!((stamp.hardness, stamp.strength), (1.0, 1.0));
+        }
     }
 
     /// The Magic Brush's Reset puts back its own knobs and leaves the
