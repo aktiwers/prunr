@@ -775,6 +775,7 @@ impl PrunrApp {
         self.batch.enforce_tensor_budget();
 
         if crate::gui::memory::under_memory_pressure() {
+            self.batch.park_offscreen_upscales();
             self.batch.demote_history_to_disk();
             self.batch.evict_all_tensors();
         }

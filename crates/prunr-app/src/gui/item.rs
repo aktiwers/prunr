@@ -10,10 +10,13 @@ use super::brush_state::CutoutAction;
 
 /// An upscale run kept for Refine: the model's `raw` output, the `input`
 /// it read (after Denoise), and that input enlarged to the output size
-/// (`reference`) once AI blend or Color match needed it.
+/// (`reference`) once AI blend or Color match needed it. The raw stays
+/// in memory unless memory runs low while its image is off screen
+/// (`BatchManager::park_offscreen_upscales`); the next Refine reads it
+/// back.
 #[derive(Clone)]
 pub(crate) struct UpscaleCache {
-    pub(crate) raw: Arc<image::RgbaImage>,
+    pub(crate) raw: super::timeline::StoredImage,
     pub(crate) input: Arc<image::RgbaImage>,
     pub(crate) reference: Option<Arc<prunr_core::upscale::Reference>>,
     /// Which run this is, for the step it lands on to claim.
@@ -22,7 +25,14 @@ pub(crate) struct UpscaleCache {
 
 impl UpscaleCache {
     pub(crate) fn new(raw: Arc<image::RgbaImage>, input: Arc<image::RgbaImage>, reference: Option<Arc<prunr_core::upscale::Reference>>) -> Self {
-        Self { raw, input, reference, run: next_run() }
+        Self { raw: super::timeline::Stored::new(raw), input, reference, run: next_run() }
+    }
+
+    /// Store the raw compressed on disk and let the reference go: a
+    /// Refine reads the raw back and makes the reference again.
+    pub(crate) fn park(&mut self) -> Option<super::timeline::CompressJob> {
+        super::reclaim::later(self.reference.take());
+        self.raw.compress_job()
     }
 }
 
@@ -626,22 +636,23 @@ impl Correction {
 pub(crate) enum FacePhoto {
     Start(super::timeline::StoredImage),
     Original(Arc<image::RgbaImage>),
-    Upscaled(Arc<image::RgbaImage>),
+    Upscaled(super::timeline::StoredImage),
 }
 
 impl FacePhoto {
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Start(a), Self::Start(b)) => Arc::ptr_eq(a, b),
-            (Self::Original(a), Self::Original(b)) | (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
+            (Self::Upscaled(a), Self::Upscaled(b)) => Arc::ptr_eq(a, b),
+            (Self::Original(a), Self::Original(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
 
     pub(crate) fn load(&self) -> Option<Arc<image::RgbaImage>> {
         match self {
-            Self::Start(stored) => stored.load(),
-            Self::Original(rgba) | Self::Upscaled(rgba) => Some(Arc::clone(rgba)),
+            Self::Start(stored) | Self::Upscaled(stored) => stored.load(),
+            Self::Original(rgba) => Some(Arc::clone(rgba)),
         }
     }
 }
@@ -3516,7 +3527,8 @@ mod tests {
         item.start_job(Some(StepKind::Upscale), Engine::Upscale);
         item.result_rgba = Some(Arc::clone(&raw));
         item.land_upscale(UpscaleCache::new(Arc::clone(&raw), Arc::clone(&source), None));
-        assert!(item.face_photo(FaceStage::Upscale).is_some_and(|p| p.same(&FacePhoto::Upscaled(Arc::clone(&raw)))));
+        let kept = item.kept_upscale().map(|run| Arc::clone(&run.raw)).expect("the run landed");
+        assert!(item.face_photo(FaceStage::Upscale).is_some_and(|p| p.same(&FacePhoto::Upscaled(kept))));
         let _ = item.undo_step();
         assert!(item.face_photo(FaceStage::Upscale).is_none(), "the earlier step has no upscale of its own");
         let _ = raw;
@@ -3854,7 +3866,7 @@ mod tests {
         assert_eq!(item.faces_found_in_original(), Some(vec![place]));
         item.found_faces = Some(found(FacePhoto::Original(Arc::clone(&source)), true));
         assert_eq!(item.faces_found_in_original(), None, "a failed search");
-        item.found_faces = Some(found(FacePhoto::Upscaled(Arc::new(image::RgbaImage::new(200, 200))), false));
+        item.found_faces = Some(found(FacePhoto::Upscaled(crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::new(200, 200)))), false));
         assert_eq!(item.faces_found_in_original(), None, "another photo");
     }
 
