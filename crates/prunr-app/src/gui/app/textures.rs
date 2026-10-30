@@ -28,7 +28,7 @@ impl PrunrApp {
     /// selection texture and the Magic Brush embedding the selected item
     /// lacks. Every arm is idempotent behind its pending flag.
     pub(super) fn reconcile_selected(&mut self, ctx: &egui::Context) {
-        let selected = self.batch.selected_item().map(|i| i.id);
+        let selected = self.batch.selected_id();
         let idx = self.batch.selected_idx_clamped();
         self.magic_brush_state.note_shown(selected, std::time::Instant::now());
         if selected != self.synced_selected {
