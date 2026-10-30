@@ -463,22 +463,22 @@ pub fn apply_subject_effect(rgba: &mut RgbaImage, style: SubjectEffect) {
         SubjectEffect::Halftone { dot_spacing } => {
             let spacing = dot_spacing.clamp(*SubjectEffect::DOT_SPACING_PX.start(), *SubjectEffect::DOT_SPACING_PX.end());
             let radii_sq = halftone_radii_sq(spacing);
-            let spacing = spacing as i32;
             let (w, h) = rgba.dimensions();
-            let half = spacing / 2;
             let row_stride = (w * 4) as usize;
+            // From the pixel's centre to its cell's: the table is solved
+            // for a disc centred in the cell, so an even spacing must not
+            // round the centre to a pixel.
+            let from_centre = |v: usize| (v % spacing as usize) as f32 + 0.5 - spacing as f32 / 2.0;
 
             // Read each pixel's own luma before writing it: a cell's
             // other pixels may already be overwritten by earlier rows.
             let process_row = |(y, row): (usize, &mut [u8])| {
-                let cy = ((y as i32) / spacing) * spacing + half;
-                let dy = y as i32 - cy;
+                let dy = from_centre(y);
                 for x in 0..w as usize {
                     let p = x * 4;
                     let luma = luma_u8(row[p], row[p + 1], row[p + 2]);
-                    let cx = ((x as i32) / spacing) * spacing + half;
-                    let dx = x as i32 - cx;
-                    let dist_sq = (dx * dx + dy * dy) as f32;
+                    let dx = from_centre(x);
+                    let dist_sq = dx * dx + dy * dy;
                     let v = if dist_sq < radii_sq[luma as usize] { 0u8 } else { 255 };
                     row[p] = v; row[p + 1] = v; row[p + 2] = v;
                 }
@@ -1318,8 +1318,12 @@ mod tests {
         assert_eq!(ink(0), 1.0, "black is solid");
         assert_eq!(ink(255), 0.0, "white has no dots");
         let mid = ink(128);
-        assert!((mid - 0.5).abs() < 0.1, "mid grey inks {mid}");
+        assert!((mid - 0.5).abs() < 0.01, "mid grey inks {mid}");
         assert!(ink(64) > ink(128) && ink(128) > ink(192), "darker greys ink more");
+        // Each grey misses its share by whole pixels of an 8 × 8 cell, but
+        // not all one way.
+        let bias = (1..255u8).map(|g| ink(g) - f32::from(255 - g) / 255.0).sum::<f32>() / 254.0;
+        assert!(bias.abs() < 0.01, "greys ink {bias:+} off on average");
     }
 
     /// Halftone regression: on a uniform-luma input, pixels at the
