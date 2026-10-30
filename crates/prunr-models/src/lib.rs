@@ -2492,11 +2492,11 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
 /// What `id`'s half-precision copy needs, for a model that runs it only
 /// on a card its own weights do not fit: there the card's memory halves
 /// while the result stays the same to the eye (BiRefNet-lite on an RTX
-/// 3060: 7.2 GB against 3.6 GB, 0.2 % of mask pixels more than 8 levels
+/// 3060: 3.85 GB against 7.7 GB, 0.2 % of mask pixels more than 8 levels
 /// off). `None`: the model runs its own weights, or its copy everywhere.
 pub fn half_precision_need(id: ModelId) -> Option<Cost> {
     match id {
-        ModelId::BiRefNetLite => Some(Cost::measured(1_350, 3_600, "RTX 3060 12 GB, i5-11600KF, 2026-10-30")),
+        ModelId::BiRefNetLite => Some(Cost::measured(1_450, 3_850, "RTX 3060 12 GB, i5-11600KF, 341 ms against fp32's 397, 2026-10-30")),
         _ => None,
     }
 }
