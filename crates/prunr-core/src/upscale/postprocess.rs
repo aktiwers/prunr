@@ -12,11 +12,8 @@ use crate::color::{lab_to_srgb, srgb_to_lab};
 /// nothing, positive sharpens (`in + strength · (in − blur)`), negative
 /// blends toward the blur. `sigma` is the blur radius in output pixels;
 /// detail narrower than it is left alone. Alpha is unchanged, and so is
-/// the colour under a fully transparent pixel.
-///
-/// A see-through image is blurred weighted by alpha: the colour under a
-/// transparent pixel (black after an alpha-weighted enlargement) would
-/// otherwise draw a rim along a cut-out's edge.
+/// the colour under a fully transparent pixel. The blur is weighted by
+/// alpha, so a cut-out's hidden colour draws no rim along its edge.
 ///
 /// Peak working set: `src` plus the result, which is the blur buffer
 /// written over (2 × w·h·4 bytes).
@@ -25,28 +22,16 @@ pub fn sharpened(src: &RgbaImage, strength: f32, sigma: f32) -> RgbaImage {
         return src.clone();
     }
     use rayon::prelude::*;
-    let opaque = crate::formats::is_opaque(src.as_raw());
     // reused as the result, pixel by pixel after reading its blur value
-    let mut out = src.clone();
-    if !opaque {
-        out.as_mut().par_chunks_exact_mut(4).for_each(|px| {
-            let a = f32::from(px[3]) / 255.0;
-            for v in &mut px[..3] {
-                *v = crate::math::round_u8(f32::from(*v) * a);
-            }
-        });
-    }
-    crate::blur::blur_rgba_in_place(&mut out, sigma.max(0.3));
+    let mut out = crate::blur::blur_rgba_alpha_weighted(src, sigma.max(0.3));
     out.as_mut().par_chunks_exact_mut(4).zip(src.as_raw().par_chunks_exact(4)).for_each(|(o, p)| {
         if p[3] == 0 {
             o.copy_from_slice(p);
             return;
         }
-        let unweigh = if opaque { 1.0 } else { 255.0 / f32::from(o[3].max(1)) };
-        for c in 0..3 {
-            let (v, bv) = (f32::from(p[c]), f32::from(o[c]) * unweigh);
-            let mixed = v + strength * (v - bv);
-            o[c] = mixed.round().clamp(0.0, 255.0) as u8;
+        for (o, &v) in o[..3].iter_mut().zip(&p[..3]) {
+            let v = f32::from(v);
+            *o = crate::math::round_u8(v + strength * (v - f32::from(*o)));
         }
         o[3] = p[3];
     });
@@ -448,7 +433,7 @@ mod tests {
     fn sharpen_draws_no_rim_from_the_colour_under_transparent_pixels() {
         let cut = RgbaImage::from_fn(40, 20, |x, _| if x < 20 { image::Rgba([128, 128, 128, 255]) } else { image::Rgba([0, 0, 0, 0]) });
         let out = sharpened(&cut, 1.0, 2.0);
-        let worst = (0..20).flat_map(|x| (0..20).map(move |y| (x, y))).map(|(x, y)| out.get_pixel(x, y)[0].abs_diff(128)).max();
+        let worst = out.enumerate_pixels().filter(|(x, ..)| *x < 20).map(|(.., p)| p[0].abs_diff(128)).max();
         assert!(worst <= Some(1), "the subject's edge moved by {worst:?} levels");
         assert!(out.pixels().zip(cut.pixels()).all(|(a, b)| a[3] == b[3]), "alpha unchanged");
         assert!(out.pixels().zip(cut.pixels()).filter(|(_, b)| b[3] == 0).all(|(a, b)| a == b), "the colour under a transparent pixel unchanged");
@@ -458,7 +443,7 @@ mod tests {
         let blur = crate::blur::blur_rgba(&photo, 2.0);
         let plain = RgbaImage::from_fn(40, 20, |x, y| {
             let (p, b) = (photo.get_pixel(x, y), blur.get_pixel(x, y));
-            image::Rgba(std::array::from_fn(|c| if c == 3 { p[3] } else { (f32::from(p[c]) + f32::from(p[c]) - f32::from(b[c])).round().clamp(0.0, 255.0) as u8 }))
+            image::Rgba(std::array::from_fn(|c| if c == 3 { p[3] } else { (2.0 * f32::from(p[c]) - f32::from(b[c])).round().clamp(0.0, 255.0) as u8 }))
         });
         assert_eq!(sharpened(&photo, 1.0, 2.0), plain, "an opaque photo sharpens as a plain unsharp mask");
     }

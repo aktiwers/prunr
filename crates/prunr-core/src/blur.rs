@@ -83,28 +83,61 @@ fn box_line(line: &mut [u8], scratch: &mut [u8], width: usize, radii: &[usize; P
 }
 
 /// `src` blurred by roughly a Gaussian of `sigma` pixels; alpha too.
-///
-/// Peak working set: the returned image (w·h·4 bytes), blurred in place,
-/// plus per thread a row's scratch and a band of `TRANSPOSE_BLOCK`
-/// columns (h·64 bytes, 256 KB for a 4000 px tall photo).
 pub fn blur_rgba(src: &RgbaImage, sigma: f32) -> RgbaImage {
     let mut out = src.clone();
     blur_rgba_in_place(&mut out, sigma);
     out
 }
 
+/// `src` blurred with each pixel's colour weighted by its alpha, back in
+/// straight alpha: the colour under a transparent pixel (black after an
+/// alpha-weighted enlargement, or whatever another editor left there)
+/// does not bleed into its visible neighbours. An opaque image blurs as
+/// `blur_rgba` does; a pixel whose blurred alpha is 0 comes back black.
+///
+/// rationale: premultiplied only between the two passes here, so callers
+/// see straight sRGB like every other `RgbaImage` in core.
+///
+/// Peak working set: as `blur_rgba_in_place`, plus the returned image.
+pub fn blur_rgba_alpha_weighted(src: &RgbaImage, sigma: f32) -> RgbaImage {
+    if crate::formats::is_opaque(src.as_raw()) {
+        return blur_rgba(src, sigma);
+    }
+    let (w, h) = src.dimensions();
+    let mut out = RgbaImage::new(w, h);
+    out.as_mut().par_chunks_exact_mut(4).zip(src.as_raw().par_chunks_exact(4)).for_each(|(o, p)| {
+        let a = f32::from(p[3]) / 255.0;
+        for (o, &v) in o[..3].iter_mut().zip(&p[..3]) {
+            *o = crate::math::round_u8(f32::from(v) * a);
+        }
+        o[3] = p[3];
+    });
+    blur_rgba_in_place(&mut out, sigma);
+    out.as_mut().par_chunks_exact_mut(4).filter(|o| o[3] > 0).for_each(|o| {
+        let unweigh = 255.0 / f32::from(o[3]);
+        for v in &mut o[..3] {
+            *v = crate::math::round_u8(f32::from(*v) * unweigh);
+        }
+    });
+    out
+}
+
 /// `blur_rgba` over `img` itself.
-pub fn blur_rgba_in_place(out: &mut RgbaImage, sigma: f32) {
-    let (w, h) = out.dimensions();
+///
+/// Peak working set: `img`, blurred in place, plus per thread a row's
+/// scratch and a band of `TRANSPOSE_BLOCK` columns (h·64 bytes, 256 KB
+/// for a 4000 px tall photo).
+pub fn blur_rgba_in_place(img: &mut RgbaImage, sigma: f32) {
+    let (w, h) = img.dimensions();
     if sigma <= 0.0 || w == 0 || h == 0 {
         return;
     }
     let radii = box_radii(sigma);
     let (w, h) = (w as usize, h as usize);
-    out.as_mut().par_chunks_exact_mut(w * 4).for_each_init(|| vec![0u8; w * 4], |scratch, row| box_line(row, scratch, w, &radii));
+    img.as_mut().par_chunks_exact_mut(w * 4).for_each_init(|| vec![0u8; w * 4], |scratch, row| box_line(row, scratch, w, &radii));
     // Columns a band at a time: each band is copied out as rows of `h`
     // pixels, boxed like rows, and copied back.
-    let dp = crate::math::SendMutPtr(out.as_mut_ptr());
+    let dp = crate::math::SendMutPtr(img.as_mut_ptr());
     (0..w.div_ceil(TRANSPOSE_BLOCK)).into_par_iter().for_each_init(
         || (vec![0u8; TRANSPOSE_BLOCK * h * 4], vec![0u8; h * 4]),
         |(band, scratch), block| {
@@ -139,6 +172,20 @@ mod tests {
 
     fn pattern(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) % 256) as u8, (200 + x % 50) as u8]))
+    }
+
+    /// The colour under a transparent pixel does not bleed into what
+    /// shows, and an opaque image blurs as the plain blur does.
+    #[test]
+    fn the_alpha_weighted_blur_reads_only_what_shows() {
+        let cut = RgbaImage::from_fn(40, 20, |x, _| if x < 20 { image::Rgba([200, 60, 30, 255]) } else { image::Rgba([0, 0, 0, 0]) });
+        let out = blur_rgba_alpha_weighted(&cut, 3.0);
+        // Unweighted, the black would pull a half-shown pixel down to ~100.
+        let worst = out.pixels().filter(|p| p[3] >= 128).map(|p| p[0].abs_diff(200).max(p[1].abs_diff(60))).max();
+        assert!(worst <= Some(2), "the visible colour moved by {worst:?}");
+        let mut photo = pattern(64, 48);
+        photo.pixels_mut().for_each(|p| p[3] = 255);
+        assert_eq!(blur_rgba_alpha_weighted(&photo, 2.0), blur_rgba(&photo, 2.0));
     }
 
     #[test]
