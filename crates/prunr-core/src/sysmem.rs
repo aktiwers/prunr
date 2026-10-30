@@ -59,6 +59,32 @@ fn available_of(sys: &sysinfo::System) -> u64 {
     }
 }
 
+/// Whether the system itself says memory is short, where it says so:
+/// macOS's pressure level (Activity Monitor's yellow or red). Neither
+/// free-memory figure tells it there: under a load that left swap nearly
+/// full, sysinfo read 0 free and total less used read 27%. `None`
+/// elsewhere, and when the level cannot be read.
+pub fn system_says_pressure() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut level: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: the out-parameter is a c_int and `size` says so.
+        let read = unsafe {
+            libc::sysctlbyname(c"kern.memorystatus_vm_pressure_level".as_ptr(), (&raw mut level).cast(), &mut size, std::ptr::null_mut(), 0)
+        };
+        (read == 0).then(|| pressed(level))
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// macOS's pressure levels: 1 normal, 2 warning, 4 critical.
+#[cfg(any(target_os = "macos", test))]
+fn pressed(level: i32) -> bool {
+    level >= 2
+}
+
 /// `available` when the system reports its memory at all: a 0 is nothing
 /// free, not a figure missing.
 fn reported_available(available: u64, total: u64) -> Option<u64> {
@@ -116,6 +142,15 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// macOS names its pressure 1 (normal), 2 (warning) or 4 (critical):
+    /// the warning is when memory is short.
+    #[test]
+    fn the_systems_warning_level_is_pressure() {
+        assert!(!pressed(1));
+        assert!(pressed(2));
+        assert!(pressed(4));
+    }
 
     /// A 0 available is a figure; no total reported is unknown.
     #[test]

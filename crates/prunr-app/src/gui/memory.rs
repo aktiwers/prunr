@@ -115,8 +115,12 @@ impl AdmissionController {
     }
 }
 
-/// Available RAM below 20% of total: undo history spills to disk.
+/// Memory short: the system's own word where it gives one (macOS), else
+/// available RAM below 20% of total. Undo history then spills to disk.
 pub fn under_memory_pressure() -> bool {
+    if let Some(pressed) = prunr_core::sysmem::system_says_pressure() {
+        return pressed;
+    }
     let total = crate::hardware::total_ram_bytes();
     let available = crate::hardware::available_ram_bytes_throttled();
     if total == 0 { return false; }
