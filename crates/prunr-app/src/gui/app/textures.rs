@@ -129,10 +129,13 @@ impl PrunrApp {
                     let cutout = cutout.and_then(|c| c.load());
                     let alpha = cutout.as_deref().map(prunr_core::formats::alpha_fingerprint);
                     if alpha.is_some() && shown.map(|made| made.alpha) == alpha {
+                        tracing::debug!(item_id, "backdrop kept: the cut-out's alpha is the same");
                         return BackdropBuilt::Same;
                     }
+                    let started = std::time::Instant::now();
                     let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
                     let picture = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
+                    tracing::debug!(item_id, ms = started.elapsed().as_millis() as u64, "backdrop built");
                     BackdropBuilt::Picture(picture.map(|rgba| PreparedImage::from_rgba(&rgba)), made)
                 })
             }
