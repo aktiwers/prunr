@@ -172,9 +172,10 @@ fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -
     let mut decoder = reader.into_decoder()?;
     let orientation = orientation_of(&mut decoder, late);
     let need = decoder.total_bytes();
-    let allowance = decode_allowance(need, turns_a_quarter(orientation), crate::sysmem::available_ram_bytes()).map_err(|peak| {
+    let free = crate::sysmem::room_for_buffers_bytes();
+    let allowance = decode_allowance(need, turns_a_quarter(orientation), free).map_err(|peak| {
         let (width, height) = decoder.dimensions();
-        CoreError::TooLarge { width, height, need_mb: peak >> 20, free_mb: crate::sysmem::available_ram_bytes().unwrap_or(0) >> 20 }
+        CoreError::TooLarge { width, height, need_mb: peak >> 20, free_mb: free.unwrap_or(0) >> 20 }
     })?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(allowance);
