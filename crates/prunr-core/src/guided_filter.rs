@@ -135,83 +135,116 @@ fn colour_guided_in_bands(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsi
         return out;
     }
     let r = radius as usize;
-    let epsilon = f64::from(epsilon.max(MIN_EPSILON));
     let band_rows = band_rows.max(1);
+    let mut filter = ColourGuide::new(guide, mask, radius, epsilon, w * (band_rows + 4 * r).min(h));
     for y0 in (0..h).step_by(band_rows) {
         let y1 = (y0 + band_rows).min(h);
         // A row's coefficients average over r rows each way, and each
         // coefficient's means over r more: the band reads 2r beyond.
-        let (in0, in1) = (y0.saturating_sub(2 * r), (y1 + 2 * r).min(h));
-        let band = colour_band(guide, mask, in0..in1, radius, epsilon);
-        let from = (y0 - in0) * w;
-        out.as_mut()[y0 * w..y1 * w].copy_from_slice(&band[from..from + (y1 - y0) * w]);
+        let read = y0.saturating_sub(2 * r)..(y1 + 2 * r).min(h);
+        filter.band(read, y0..y1, &mut out.as_mut()[y0 * w..y1 * w]);
     }
     out
 }
 
-/// The colour-guided filter over `rows` alone, as if they were the whole
-/// image: exact for every row at least 2·radius inside them, and at the
-/// image's own top and bottom.
-fn colour_band(guide: &RgbaImage, mask: &GrayImage, rows: std::ops::Range<usize>, radius: u32, epsilon: f64) -> Vec<u8> {
-    let w = mask.width() as usize;
-    let (bw, bh) = (mask.width(), rows.len() as u32);
-    let n = w * rows.len();
-    let pixels = &guide.as_raw()[rows.start * w * 4..rows.end * w * 4];
-    let channel = |c: usize| -> Vec<f32> { pixels.par_chunks_exact(4).map(|p| f32::from(p[c]) * INV_255).collect() };
-    let (gr, gg, gb) = (channel(0), channel(1), channel(2));
-    let p: Vec<f32> = mask.as_raw()[rows.start * w..rows.end * w].par_iter().map(|&v| f32::from(v) * INV_255).collect();
-    let (mut product, mut row_sums) = (vec![0.0f32; n], Vec::new());
-    // The mean of x, or of x·y, into `out`.
-    let mut mean = |x: &[f32], y: Option<&[f32]>, mut out: Vec<f32>| -> Vec<f32> {
-        let src = match y {
-            None => x,
-            Some(y) => {
-                product.par_iter_mut().zip(x.par_iter().zip(y)).for_each(|(s, (a, b))| *s = a * b);
-                &product
-            }
-        };
-        box_filter_with(src, bw, bh, radius, &mut out, &mut row_sums);
-        out
-    };
-    let plane = || vec![0.0f32; n];
-    let (mr, mg, mb, mut mp) = (mean(&gr, None, plane()), mean(&gg, None, plane()), mean(&gb, None, plane()), mean(&p, None, plane()));
-    let (mut mrp, mut mgp, mut mbp) = (mean(&gr, Some(&p), plane()), mean(&gg, Some(&p), plane()), mean(&gb, Some(&p), plane()));
-    drop(p);
-    let (mrr, mrg, mrb) = (mean(&gr, Some(&gr), plane()), mean(&gr, Some(&gg), plane()), mean(&gr, Some(&gb), plane()));
-    let (mgg, mgb, mbb) = (mean(&gg, Some(&gg), plane()), mean(&gg, Some(&gb), plane()), mean(&gb, Some(&gb), plane()));
-    // a = (Σ + εI)⁻¹ · cov(I, p), b = mean(p) − a · mean(I); in f64, as the
-    // cofactors subtract near-equal products on flat regions. Each pixel's
-    // a and b replace its mean(I·p) and mean(p), read just before.
-    mrp.par_iter_mut().zip(mgp.par_iter_mut()).zip(mbp.par_iter_mut()).zip(mp.par_iter_mut()).enumerate().for_each(|(i, (((ar, ag), ab), bq))| {
-        let (r, g, b, q) = (f64::from(mr[i]), f64::from(mg[i]), f64::from(mb[i]), f64::from(*bq));
-        let cov = [f64::from(*ar) - r * q, f64::from(*ag) - g * q, f64::from(*ab) - b * q];
-        // f32 rounding on flat regions can take a variance below zero.
-        let s11 = (f64::from(mrr[i]) - r * r).max(0.0) + epsilon;
-        let s22 = (f64::from(mgg[i]) - g * g).max(0.0) + epsilon;
-        let s33 = (f64::from(mbb[i]) - b * b).max(0.0) + epsilon;
-        let (s12, s13, s23) = (f64::from(mrg[i]) - r * g, f64::from(mrb[i]) - r * b, f64::from(mgb[i]) - g * b);
-        let (c11, c12, c13) = (s22 * s33 - s23 * s23, s13 * s23 - s12 * s33, s12 * s23 - s13 * s22);
-        let (c22, c23, c33) = (s11 * s33 - s13 * s13, s13 * s12 - s11 * s23, s11 * s22 - s12 * s12);
-        let det = s11 * c11 + s12 * c12 + s13 * c13;
-        if det <= 0.0 {
-            (*ar, *ag, *ab) = (0.0, 0.0, 0.0);
-            return;
+/// The colour-guided filter a band at a time, in planes made once for the
+/// largest band and reused by every band.
+struct ColourGuide<'a> {
+    guide: &'a RgbaImage,
+    mask: &'a GrayImage,
+    radius: u32,
+    epsilon: f64,
+    /// The guide's red, green and blue, the mask, a product of two of
+    /// them, and the box filter's row sums.
+    inputs: [Vec<f32>; 6],
+    /// mean(r, g, b, p, rp, gp, bp, rr, rg, rb, gg, gb, bb).
+    means: [Vec<f32>; 13],
+}
+
+impl<'a> ColourGuide<'a> {
+    fn new(guide: &'a RgbaImage, mask: &'a GrayImage, radius: u32, epsilon: f32, plane_len: usize) -> Self {
+        let plane = || vec![0.0f32; plane_len];
+        let epsilon = f64::from(epsilon.max(MIN_EPSILON));
+        Self { guide, mask, radius, epsilon, inputs: std::array::from_fn(|_| plane()), means: std::array::from_fn(|_| plane()) }
+    }
+
+    /// The filter over `read` alone, as if those rows were the whole
+    /// image, written for the rows `keep` into `out`: exact for every row
+    /// at least 2·radius inside `read`, and at the image's own top and
+    /// bottom.
+    fn band(&mut self, read: std::ops::Range<usize>, keep: std::ops::Range<usize>, out: &mut [u8]) {
+        let (radius, epsilon) = (self.radius, self.epsilon);
+        let w = self.mask.width() as usize;
+        let (bw, bh) = (self.mask.width(), read.len() as u32);
+        let n = w * read.len();
+        let [gr, gg, gb, p, product, row_sums] = &mut self.inputs;
+        let pixels = &self.guide.as_raw()[read.start * w * 4..read.end * w * 4];
+        for (c, plane) in [&mut *gr, &mut *gg, &mut *gb].into_iter().enumerate() {
+            plane[..n].par_iter_mut().zip(pixels.par_chunks_exact(4)).for_each(|(v, px)| *v = f32::from(px[c]) * INV_255);
         }
-        let a = [
-            (c11 * cov[0] + c12 * cov[1] + c13 * cov[2]) / det,
-            (c12 * cov[0] + c22 * cov[1] + c23 * cov[2]) / det,
-            (c13 * cov[0] + c23 * cov[1] + c33 * cov[2]) / det,
-        ];
-        (*ar, *ag, *ab) = (a[0] as f32, a[1] as f32, a[2] as f32);
-        *bq = (q - a[0] * r - a[1] * g - a[2] * b) as f32;
-    });
-    drop((mrg, mrb, mgg, mgb, mbb));
-    let (ar, ag, ab, bb) = (mean(&mrp, None, mr), mean(&mgp, None, mg), mean(&mbp, None, mb), mean(&mp, None, mrr));
-    drop((mrp, mgp, mbp, mp));
-    (0..n).into_par_iter().map(|i| {
-        let q = ar[i] * gr[i] + ag[i] * gg[i] + ab[i] * gb[i] + bb[i];
-        crate::math::round_u8(q.clamp(0.0, 1.0) * 255.0)
-    }).collect()
+        p[..n].par_iter_mut().zip(&self.mask.as_raw()[read.start * w..read.end * w]).for_each(|(v, &m)| *v = f32::from(m) * INV_255);
+        let (gr, gg, gb, p) = (&gr[..n], &gg[..n], &gb[..n], &p[..n]);
+        let product = &mut product[..n];
+        // The mean of x, or of x·y, into `out`.
+        let mut mean = |x: &[f32], y: Option<&[f32]>, out: &mut [f32]| {
+            let src = match y {
+                None => x,
+                Some(y) => {
+                    product.par_iter_mut().zip(x.par_iter().zip(y)).for_each(|(s, (a, b))| *s = a * b);
+                    &*product
+                }
+            };
+            box_filter_with(src, bw, bh, radius, &mut out[..n], row_sums);
+        };
+        let [mr, mg, mb, mp, mrp, mgp, mbp, mrr, mrg, mrb, mgg, mgb, mbb] = &mut self.means;
+        for (x, y, out) in [
+            (gr, None, &mut *mr), (gg, None, &mut *mg), (gb, None, &mut *mb), (p, None, &mut *mp),
+            (gr, Some(p), &mut *mrp), (gg, Some(p), &mut *mgp), (gb, Some(p), &mut *mbp),
+            (gr, Some(gr), &mut *mrr), (gr, Some(gg), &mut *mrg), (gr, Some(gb), &mut *mrb),
+            (gg, Some(gg), &mut *mgg), (gg, Some(gb), &mut *mgb), (gb, Some(gb), &mut *mbb),
+        ] {
+            mean(x, y, out);
+        }
+        // a = (Σ + εI)⁻¹ · cov(I, p), b = mean(p) − a · mean(I); in f64, as the
+        // cofactors subtract near-equal products on flat regions. Each pixel's
+        // a and b replace its mean(I·p) and mean(p), read just before.
+        let (mr, mg, mb, mrr, mrg, mrb, mgg, mgb, mbb) = (&mr[..n], &mg[..n], &mb[..n], &mrr[..n], &mrg[..n], &mrb[..n], &mgg[..n], &mgb[..n], &mbb[..n]);
+        mrp[..n].par_iter_mut().zip(&mut mgp[..n]).zip(&mut mbp[..n]).zip(&mut mp[..n]).enumerate().for_each(|(i, (((ar, ag), ab), bq))| {
+            let (r, g, b, q) = (f64::from(mr[i]), f64::from(mg[i]), f64::from(mb[i]), f64::from(*bq));
+            let cov = [f64::from(*ar) - r * q, f64::from(*ag) - g * q, f64::from(*ab) - b * q];
+            // f32 rounding on flat regions can take a variance below zero.
+            let s11 = (f64::from(mrr[i]) - r * r).max(0.0) + epsilon;
+            let s22 = (f64::from(mgg[i]) - g * g).max(0.0) + epsilon;
+            let s33 = (f64::from(mbb[i]) - b * b).max(0.0) + epsilon;
+            let (s12, s13, s23) = (f64::from(mrg[i]) - r * g, f64::from(mrb[i]) - r * b, f64::from(mgb[i]) - g * b);
+            let (c11, c12, c13) = (s22 * s33 - s23 * s23, s13 * s23 - s12 * s33, s12 * s23 - s13 * s22);
+            let (c22, c23, c33) = (s11 * s33 - s13 * s13, s13 * s12 - s11 * s23, s11 * s22 - s12 * s12);
+            let det = s11 * c11 + s12 * c12 + s13 * c13;
+            if det <= 0.0 {
+                (*ar, *ag, *ab) = (0.0, 0.0, 0.0);
+                return;
+            }
+            let a = [
+                (c11 * cov[0] + c12 * cov[1] + c13 * cov[2]) / det,
+                (c12 * cov[0] + c22 * cov[1] + c23 * cov[2]) / det,
+                (c13 * cov[0] + c23 * cov[1] + c33 * cov[2]) / det,
+            ];
+            (*ar, *ag, *ab) = (a[0] as f32, a[1] as f32, a[2] as f32);
+            *bq = (q - a[0] * r - a[1] * g - a[2] * b) as f32;
+        });
+        // The coefficients' means go into planes already read.
+        let [mr, mg, mb, mp, mrp, mgp, mbp, mrr, ..] = &mut self.means;
+        for (x, out) in [(&*mrp, &mut *mr), (&*mgp, &mut *mg), (&*mbp, &mut *mb), (&*mp, &mut *mrr)] {
+            mean(&x[..n], None, out);
+        }
+        let from = (keep.start - read.start) * w;
+        let (ar, ag, ab, bb) = (&mr[from..], &mg[from..], &mb[from..], &mrr[from..]);
+        let (gr, gg, gb) = (&gr[from..], &gg[from..], &gb[from..]);
+        out.par_iter_mut().enumerate().for_each(|(i, o)| {
+            let q = ar[i] * gr[i] + ag[i] * gg[i] + ab[i] * gb[i] + bb[i];
+            *o = crate::math::round_u8(q.clamp(0.0, 1.0) * 255.0);
+        });
+    }
 }
 
 /// O(1)-per-pixel box mean, windows clipped at the borders and averaged
