@@ -3,7 +3,7 @@ use ort::{inputs, value::Tensor};
 
 use crate::{
     engine::OrtEngine,
-    formats::{check_large_image, load_image_from_bytes},
+    formats::load_image_from_bytes,
     postprocess::{postprocess, PostprocessOpts},
     preprocess::preprocess,
     progress::{Progress, Step},
@@ -19,7 +19,7 @@ use crate::{
 ///   Finding the subject and Refining the edges, and carries cancel.
 ///
 /// # Errors
-/// - `CoreError::LargeImage` if the image exceeds 8000px in either dimension
+/// - `CoreError::TooLarge` if the photo's full-size work does not fit the memory free now
 /// - `CoreError::ImageFormat` if the bytes cannot be decoded as a supported format
 /// - `CoreError::Inference` if ORT inference fails
 pub fn process_image(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) -> Result<ProcessResult, CoreError> {
@@ -33,29 +33,52 @@ pub fn process_image_with_mask(
     progress: &Progress,
 ) -> Result<ProcessResult, CoreError> {
     progress.step(Step::ReadingImage);
-    let img = load_image_from_bytes(img_bytes)?;
-
-    // Large image guard — return error before allocating a huge tensor
-    if let Some(err) = check_large_image(&img) {
-        return Err(err);
+    if let Some((w, h)) = crate::formats::image_dimensions_from_bytes(img_bytes) {
+        room_for_photo(w, h, false, mask.refine_edges)?;
     }
-
+    let img = load_image_from_bytes(img_bytes)?;
     process_image_from_decoded(&img, engine, mask, progress)
 }
 
-/// Process a single image without the large-image size guard.
+/// A run's working memory at the photo's own size, per pixel, beyond the
+/// model: the decoded photo, its RGBA copy, the mask scaled up to it and
+/// the result. Measured on Silueta from 12 to 75 MP (RTX 3060 box): a
+/// cut-out 7.7 bytes, with lines 11.5, with Refine edges 42 (its guided
+/// filter holds float planes of the whole photo; lines then add nothing
+/// to the peak). Rounded up for peaks the 20 ms samples missed.
+const CUTOUT_BYTES_PER_PX: u64 = 10;
+const LINES_BYTES_PER_PX: u64 = 14;
+const REFINED_BYTES_PER_PX: u64 = 48;
+
+/// What a run on a `w` × `h` photo holds at full size beyond the model,
+/// with lines and with Refine edges:
 ///
-/// Use only when the caller has already handled the size check
-/// (e.g., `--large-image=process` CLI flag). Skips the 8000px dimension guard
-/// and proceeds directly to inference on the original image.
-///
-/// # Errors
-/// - `CoreError::ImageFormat` if the bytes cannot be decoded as a supported format
-/// - `CoreError::Inference` if ORT inference fails
-pub fn process_image_unchecked(img_bytes: &[u8], engine: &OrtEngine, progress: &Progress) -> Result<ProcessResult, CoreError> {
-    progress.step(Step::ReadingImage);
-    let img = load_image_from_bytes(img_bytes)?;
-    process_image_from_decoded(&img, engine, &MaskSettings::default(), progress)
+/// | Photo | Cut-out | Lines | Refine edges |
+/// |-------|---------|-------|--------------|
+/// | 12 MP | 0.1 GB  | 0.2 GB | 0.6 GB      |
+/// | 75 MP | 0.7 GB  | 1.0 GB | 3.4 GB      |
+pub fn full_size_bytes(w: u32, h: u32, lines: bool, refine: bool) -> u64 {
+    let per_px = if refine {
+        REFINED_BYTES_PER_PX
+    } else if lines {
+        LINES_BYTES_PER_PX
+    } else {
+        CUTOUT_BYTES_PER_PX
+    };
+    u64::from(w) * u64::from(h) * per_px
+}
+
+/// Refuses a `w` × `h` photo whose full-size work does not fit the memory
+/// free now; with no reading of free memory it runs.
+pub fn room_for_photo(w: u32, h: u32, lines: bool, refine: bool) -> Result<(), CoreError> {
+    crate::sysmem::available_ram_bytes().map_or(Ok(()), |free| fits_in(w, h, full_size_bytes(w, h, lines, refine), free))
+}
+
+fn fits_in(width: u32, height: u32, need: u64, free: u64) -> Result<(), CoreError> {
+    if need <= free {
+        return Ok(());
+    }
+    Err(CoreError::TooLarge { width, height, need_mb: need >> 20, free_mb: free >> 20 })
 }
 
 /// Run the full pipeline on an already-decoded image.
@@ -210,6 +233,27 @@ pub fn infer_only(img: &DynamicImage, engine: &OrtEngine, progress: &Progress) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_photo_runs_when_its_full_size_work_fits_the_free_memory() {
+        let gb = 1 << 30;
+        assert!(fits_in(12000, 8000, 5 * gb, 6 * gb).is_ok());
+        assert!(fits_in(12000, 8000, 6 * gb, 6 * gb).is_ok(), "exactly what is free");
+        match fits_in(12000, 8000, 7 * gb, 6 * gb) {
+            Err(CoreError::TooLarge { width: 12000, height: 8000, need_mb: 7168, free_mb: 6144 }) => {}
+            other => panic!("expected a refusal naming the photo and both sizes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_size_work_grows_with_the_pixels_and_most_with_refine_edges() {
+        for (lines, refine) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(full_size_bytes(2000, 1000, lines, refine) * 4, full_size_bytes(4000, 2000, lines, refine));
+        }
+        let (cut_out, lines, refined) = (full_size_bytes(4000, 2000, false, false), full_size_bytes(4000, 2000, true, false), full_size_bytes(4000, 2000, false, true));
+        assert!(cut_out < lines && lines < refined);
+        assert_eq!(full_size_bytes(4000, 2000, true, true), refined, "lines add nothing to a refined run's peak");
+    }
     use image::{DynamicImage, Rgb, RgbImage};
     use std::io::Cursor;
 

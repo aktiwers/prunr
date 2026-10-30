@@ -10,8 +10,11 @@ pub enum CoreError {
     Inference(String),
     #[error("Image format error: {0}")]
     ImageFormat(String),
-    #[error("Image too large: {width}x{height} exceeds {limit}px limit")]
-    LargeImage { width: u32, height: u32, limit: u32 },
+    #[error(
+        "This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps and try again.",
+        *.need_mb as f64 / 1024.0, *.free_mb as f64 / 1024.0,
+    )]
+    TooLarge { width: u32, height: u32, need_mb: u64, free_mb: u64 },
     #[error("Processing cancelled")]
     Cancelled,
 }
@@ -876,8 +879,8 @@ mod tests {
         assert_eq!(CoreError::Model("test error".to_string()).to_string(), "Model error: test error");
         assert_eq!(CoreError::Inference("ort failed".into()).to_string(), "Inference error: ort failed");
         assert_eq!(CoreError::ImageFormat("bad format".into()).to_string(), "Image format error: bad format");
-        let msg = CoreError::LargeImage { width: 9000, height: 5000, limit: 8000 }.to_string();
-        assert!(msg.contains("9000") && msg.contains("8000"), "{msg}");
+        let msg = CoreError::TooLarge { width: 9000, height: 5000, need_mb: 5632, free_mb: 3072 }.to_string();
+        assert!(msg.contains("9000\u{00d7}5000") && msg.contains("5.5 GB") && msg.contains("3.0 GB"), "{msg}");
     }
 
     #[test]

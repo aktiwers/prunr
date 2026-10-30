@@ -262,8 +262,8 @@ fn spare_skipped(cancel: &DispatchCancel, stopping: &AtomicBool, on_screen: &Sho
 }
 
 /// Calculate pixel weight for an image (1 unit = 1M pixels, minimum 1).
-fn pixel_weight(image_bytes: &[u8]) -> usize {
-    match prunr_core::image_dimensions_from_bytes(image_bytes) {
+fn pixel_weight(dims: Option<(u32, u32)>) -> usize {
+    match dims {
         Some((w, h)) => ((w as usize * h as usize) / 1_000_000).max(1),
         None => 4, // conservative fallback (~4MP)
     }
@@ -472,8 +472,13 @@ pub fn run_worker() -> ! {
                     };
 
                     // Released on drop, panics included.
-                    let weight = pixel_weight(&img_bytes);
-                    let sem_guard = sem.acquire(weight);
+                    let dims = prunr_core::image_dimensions_from_bytes(&img_bytes);
+                    let sem_guard = sem.acquire(pixel_weight(dims));
+                    // Checked once the runs ahead hold their memory.
+                    if let Some(Err(err)) = dims.map(|(w, h)| prunr_core::room_for_photo(w, h, line_mode != LineMode::Off, mask.refine_edges)) {
+                        fail(err.message());
+                        return;
+                    }
                     let (progress, pulse) = ipc_progress(item_id, evt_tx.clone());
                     let progress = progress.with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
@@ -543,34 +548,30 @@ pub fn run_worker() -> ! {
                                     }
                                 };
                                 let original = &decoded;
-                                if let Some(err) = prunr_core::check_large_image(original) {
-                                    Err(err)
-                                } else {
-                                    let look = look.as_ref().and_then(Look::engine);
-                                    prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
-                                        progress.step(prunr_core::Step::RefiningEdges);
-                                        let th = ir.tensor_height;
-                                        let tw = ir.tensor_width;
-                                        let active_provider = ir.active_provider.clone();
-                                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..mask };
-                                        let subject = prunr_core::postprocess_from_flat(
-                                            &ir.tensor_data, th, tw, original,
-                                            &prunr_core::PostprocessOpts::new(&plain, model),
-                                        )?;
-                                        // Seg tensor captured → Tier 2 mask reruns work in
-                                        // SubjectOutline; Off ↔ SubjectOutline can reuse it.
-                                        tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
-                                        progress.step(prunr_core::Step::DrawingLines);
-                                        // invariant: ensure_edge_engine ran above for every line mode but Off.
-                                        let eng_ref = edge_eng.as_ref().unwrap();
-                                        let measured = line_depth.as_ref().and_then(|d| d.measure(original));
-                                        let (rgba_image, edge_res) = prunr_core::outline_subject(
-                                            subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
-                                        )?;
-                                        edge_tensor_for_cache = Some(edge_res);
-                                        Ok(ProcessResult { rgba_image, active_provider })
-                                    })
-                                }
+                                let look = look.as_ref().and_then(Look::engine);
+                                prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
+                                    progress.step(prunr_core::Step::RefiningEdges);
+                                    let th = ir.tensor_height;
+                                    let tw = ir.tensor_width;
+                                    let active_provider = ir.active_provider.clone();
+                                    let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..mask };
+                                    let subject = prunr_core::postprocess_from_flat(
+                                        &ir.tensor_data, th, tw, original,
+                                        &prunr_core::PostprocessOpts::new(&plain, model),
+                                    )?;
+                                    // Seg tensor captured → Tier 2 mask reruns work in
+                                    // SubjectOutline; Off ↔ SubjectOutline can reuse it.
+                                    tensor_for_cache = Some((ir.tensor_data, th as u32, tw as u32));
+                                    progress.step(prunr_core::Step::DrawingLines);
+                                    // invariant: ensure_edge_engine ran above for every line mode but Off.
+                                    let eng_ref = edge_eng.as_ref().unwrap();
+                                    let measured = line_depth.as_ref().and_then(|d| d.measure(original));
+                                    let (rgba_image, edge_res) = prunr_core::outline_subject(
+                                        subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
+                                    )?;
+                                    edge_tensor_for_cache = Some(edge_res);
+                                    Ok(ProcessResult { rgba_image, active_provider })
+                                })
                             }
                         }
                         LineMode::Off => {
@@ -592,32 +593,28 @@ pub fn run_worker() -> ! {
                                 }
                             };
 
-                            if let Some(err) = prunr_core::check_large_image(original) {
-                                Err(err)
-                            } else {
-                                let look = look.as_ref().and_then(Look::engine);
-                                prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
-                                    progress.step(prunr_core::Step::RefiningEdges);
+                            let look = look.as_ref().and_then(Look::engine);
+                            prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
+                                progress.step(prunr_core::Step::RefiningEdges);
 
-                                    let th = ir.tensor_height;
-                                    let tw = ir.tensor_width;
-                                    let rgba_image = prunr_core::postprocess_from_flat(
-                                        &ir.tensor_data, th, tw, original,
-                                        &prunr_core::PostprocessOpts::new(&mask, model),
-                                    )?;
+                                let th = ir.tensor_height;
+                                let tw = ir.tensor_width;
+                                let rgba_image = prunr_core::postprocess_from_flat(
+                                    &ir.tensor_data, th, tw, original,
+                                    &prunr_core::PostprocessOpts::new(&mask, model),
+                                )?;
 
-                                    tensor_for_cache = Some((
-                                        ir.tensor_data,
-                                        th as u32,
-                                        tw as u32,
-                                    ));
+                                tensor_for_cache = Some((
+                                    ir.tensor_data,
+                                    th as u32,
+                                    tw as u32,
+                                ));
 
-                                    Ok(ProcessResult {
-                                        rgba_image,
-                                        active_provider: ir.active_provider,
-                                    })
+                                Ok(ProcessResult {
+                                    rgba_image,
+                                    active_provider: ir.active_provider,
                                 })
-                            }
+                            })
                         }
                     };
 

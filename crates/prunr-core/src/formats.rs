@@ -340,16 +340,6 @@ pub fn exceeds_large_image_limit(w: u32, h: u32) -> bool {
     w > LARGE_IMAGE_LIMIT || h > LARGE_IMAGE_LIMIT
 }
 
-/// `Some(CoreError::LargeImage)` when either side exceeds `LARGE_IMAGE_LIMIT`.
-pub fn check_large_image(img: &DynamicImage) -> Option<CoreError> {
-    let (w, h) = (img.width(), img.height());
-    if exceeds_large_image_limit(w, h) {
-        Some(CoreError::LargeImage { width: w, height: h, limit: LARGE_IMAGE_LIMIT })
-    } else {
-        None
-    }
-}
-
 /// `(w, h)` scaled so the long side is `max_side`, the aspect kept and
 /// neither side zero.
 pub fn fit_long_side(w: u32, h: u32, max_side: u32) -> (u32, u32) {
@@ -990,20 +980,6 @@ mod tests {
         let mut opaque = vec![100, 200, 50, 255];
         unmultiply_alpha(&mut opaque);
         assert_eq!(opaque, vec![100, 200, 50, 255]);
-    }
-
-    #[test]
-    fn test_check_large_image_over_limit() {
-        // A thin but wide image past 8000 px.
-        let img = DynamicImage::ImageRgb8(image::RgbImage::new(9000, 100));
-        match check_large_image(&img) {
-            Some(CoreError::LargeImage { width, height: _, limit }) => {
-                assert_eq!(width, 9000);
-                assert_eq!(limit, LARGE_IMAGE_LIMIT);
-            }
-            other => panic!("Expected LargeImage, got {:?}", other),
-        }
-        assert!(check_large_image(&DynamicImage::ImageRgb8(image::RgbImage::new(800, 600))).is_none());
     }
 
     #[test]

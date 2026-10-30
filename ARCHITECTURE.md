@@ -315,7 +315,7 @@ One exception, by design: Process with another cut-out model (or No model) than 
 
 ```
 load_image_from_bytes  → DynamicImage (SVG sniffed, rasterized via resvg)
-check_large_image      → error above 8000 px per side (CLI --large-image overrides)
+room_for_photo         → refuses a photo whose full-size work does not fit free RAM
 preprocess             → NCHW f32: Silueta/U2Net 320², ÷ max pixel; BiRefNet 1024², ÷ 255; ImageNet norm
 infer                  → raw [1,1,S,S]                                ← Tier 1
 postprocess            → RGBA                                         ← Tier 2 starts here

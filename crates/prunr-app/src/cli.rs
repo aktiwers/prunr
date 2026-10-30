@@ -31,8 +31,9 @@ pub struct Cli {
     #[arg(short = 'j', long, default_value_t = 1, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     pub jobs: usize,
 
-    /// How to handle images exceeding 8000px in either dimension.
-    #[arg(long, default_value = "downscale")]
+    /// Images over 8000 px on either side: keep their size, or shrink
+    /// them to 4096 px first.
+    #[arg(long, default_value = "process")]
     pub large_image: LargeImagePolicy,
 
     /// Overwrite existing output files.
@@ -389,9 +390,9 @@ impl From<CliModel> for prunr_core::ModelKind {
 /// How to handle images exceeding LARGE_IMAGE_LIMIT
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LargeImagePolicy {
-    /// Downscale to DOWNSCALE_TARGET (4096px) before inference — safe default
+    /// Shrink to DOWNSCALE_TARGET (4096 px) before the model runs
     Downscale,
-    /// Process at original size — may be slow or OOM on limited hardware
+    /// Keep the original size; a photo too large for the free memory is refused
     Process,
 }
 
@@ -971,14 +972,38 @@ fn report_failure(spinner: Option<&ProgressBar>, input: &std::path::Path, what: 
     }
 }
 
-/// What a batch sends to the worker: each input's index and the file the
-/// worker reads (a downscaled copy for an oversized one).
+/// What a batch sends to the worker: each input's index and what the
+/// worker reads.
 struct Sendable {
     indices: Vec<usize>,
-    paths: Vec<PathBuf>,
+    paths: Vec<ToSend>,
     /// Inputs reported and left out: unreadable, or their output is there
     /// already without `--force`.
     refused: usize,
+}
+
+/// A batch input as the worker reads it: the file itself, or a copy shrunk
+/// to `DOWNSCALE_TARGET` (`--large-image downscale`), made when its turn
+/// comes and sent again after a worker crash.
+#[derive(Debug, Clone, PartialEq)]
+enum ToSend {
+    File(PathBuf),
+    Shrunk { from: PathBuf, to: PathBuf },
+}
+
+impl ToSend {
+    /// The file to send, shrinking it first when that is still to do.
+    fn path(&mut self, quiet: bool) -> Result<PathBuf, CoreError> {
+        let shrunk = match self {
+            ToSend::File(path) => return Ok(path.clone()),
+            ToSend::Shrunk { from, to } => {
+                std::fs::write(&*to, downscale_to_png(from, quiet)?)?;
+                to.clone()
+            }
+        };
+        *self = ToSend::File(shrunk.clone());
+        Ok(shrunk)
+    }
 }
 
 /// The inputs worth a run, checked by their header only: the subprocess
@@ -994,29 +1019,16 @@ fn sendable_inputs(args: &Cli, spinners: &[Option<ProgressBar>]) -> Sendable {
             continue;
         }
         match prunr_core::image_dimensions_from_path(input) {
-            Some((w, h)) if args.large_image == LargeImagePolicy::Downscale
-                && prunr_core::exceeds_large_image_limit(w, h) =>
-            {
-                match downscale_to_png(input, args.quiet) {
-                    Ok(bytes) => {
-                        let temp = prunr_app::subprocess::protocol::IpcKind::CliDs
-                            .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
-                        if std::fs::write(&temp, &bytes).is_ok() {
-                            sendable.indices.push(idx);
-                            sendable.paths.push(temp);
-                        } else {
-                            sendable.refused += 1;
-                        }
-                    }
-                    Err(e) => {
-                        sendable.refused += 1;
-                        report_failure(spinner, input, "downscale", e);
-                    }
-                }
-            }
-            Some(_) => {
+            Some((w, h)) => {
+                let shrink = args.large_image == LargeImagePolicy::Downscale && prunr_core::exceeds_large_image_limit(w, h);
                 sendable.indices.push(idx);
-                sendable.paths.push(input.clone());
+                sendable.paths.push(if shrink {
+                    let to = prunr_app::subprocess::protocol::IpcKind::CliDs
+                        .path_for(prunr_app::subprocess::protocol::ipc_temp_dir(), idx as u64);
+                    ToSend::Shrunk { from: input.clone(), to }
+                } else {
+                    ToSend::File(input.clone())
+                });
             }
             None => {
                 sendable.refused += 1;
@@ -1051,7 +1063,7 @@ fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, Core
     let img = load_image_from_path(path)?;
     if !quiet {
         eprintln!(
-            "warning: '{}' exceeds {}px. Downscaling to {}px (use --large-image=process to skip).",
+            "note: '{}' is over {} px: shrinking it to {} px (--large-image downscale).",
             path.display(), prunr_core::LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET
         );
     }
@@ -1109,7 +1121,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     }).collect();
 
     let start_times: Vec<Instant> = args.inputs.iter().map(|_| Instant::now()).collect();
-    let Sendable { indices: valid_indices, paths: valid_paths, refused: load_fail_count } = sendable_inputs(args, &spinners);
+    let Sendable { indices: valid_indices, paths: mut to_send, refused: load_fail_count } = sendable_inputs(args, &spinners);
 
     let model: ModelKind = args.model.into();
     let spinners_arc = std::sync::Arc::new(spinners);
@@ -1200,7 +1212,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         }
     };
     run_batch_subprocess(
-        &valid_paths, &valid_indices, model, args.jobs, mask, args.cpu,
+        &mut to_send, &valid_indices, model, args.jobs, mask, args.cpu,
         lines, &backdrop,
         &spinners_arc, &inputs_arc, quiet, &mut land,
     );
@@ -1228,7 +1240,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
 // and a struct would be a builder no other site reuses.
 #[allow(clippy::too_many_arguments)]
 fn run_batch_subprocess(
-    valid_paths: &[std::path::PathBuf],
+    to_send: &mut [ToSend],
     valid_indices: &[usize],
     model: ModelKind,
     initial_jobs: usize,
@@ -1245,12 +1257,12 @@ fn run_batch_subprocess(
     use prunr_app::subprocess::manager::{Crash, SubprocessManager};
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
-    let mut landed = vec![false; valid_paths.len()];
+    let mut landed = vec![false; to_send.len()];
     let mut give = |idx: usize, result| {
         landed[idx] = true;
         land(idx, result);
     };
-    let mut pending: std::collections::VecDeque<usize> = (0..valid_paths.len()).collect();
+    let mut pending: std::collections::VecDeque<usize> = (0..to_send.len()).collect();
     let mut max_jobs = initial_jobs;
 
     // Inverse index: orig_idx (item_id cast to usize) → batch_results slot,
@@ -1282,7 +1294,14 @@ fn run_batch_subprocess(
         let crash = loop {
             while room_to_send(in_flight.len(), max_jobs, sub.should_pause_admission()) > 0 {
                 let Some(idx) = pending.pop_front() else { break };
-                match sub.send_image_path(valid_indices[idx] as u64, valid_paths[idx].clone()) {
+                let path = match to_send[idx].path(quiet) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        give(idx, Err(e));
+                        continue;
+                    }
+                };
+                match sub.send_image_path(valid_indices[idx] as u64, path) {
                     Ok(()) => {
                         // Each ticking spinner is a thread of its own: only
                         // the images being worked on tick, through the
@@ -1719,9 +1738,32 @@ mod tests {
         let cli = |force: &[&str]| super::Cli::parse_from(["prunr".as_ref(), kept.as_os_str(), fresh.as_os_str(), "-o".as_ref(), out.as_os_str(), "-q".as_ref()].into_iter().chain(force.iter().map(std::ffi::OsStr::new)));
         std::fs::write(cli(&[]).result_path(&kept), b"an earlier result").unwrap();
         let sendable = super::sendable_inputs(&cli(&[]), &[]);
-        assert_eq!((sendable.paths, sendable.indices, sendable.refused), (vec![fresh.clone()], vec![1], 1));
+        assert_eq!((sendable.paths, sendable.indices, sendable.refused), (vec![super::ToSend::File(fresh.clone())], vec![1], 1));
         let forced = super::sendable_inputs(&cli(&["-f"]), &[]);
-        assert_eq!((forced.paths, forced.refused), (vec![kept.clone(), fresh.clone()], 0));
+        assert_eq!((forced.paths, forced.refused), (vec![super::ToSend::File(kept.clone()), super::ToSend::File(fresh.clone())], 0));
+    }
+
+    /// A photo over the limit is kept at its size unless `--large-image
+    /// downscale` asks; then it is shrunk when its turn comes, not before
+    /// the first one starts, and a resend after a crash reuses the copy.
+    #[test]
+    fn a_large_photo_is_shrunk_when_it_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        image::RgbaImage::new(prunr_core::LARGE_IMAGE_LIMIT + 1, 8).save(&big).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let cli = |policy: &[&str]| super::Cli::parse_from(["prunr".as_ref(), big.as_os_str(), "-o".as_ref(), out.as_os_str(), "-q".as_ref()].into_iter().chain(policy.iter().map(std::ffi::OsStr::new)));
+        assert_eq!(super::sendable_inputs(&cli(&[]), &[]).paths, vec![super::ToSend::File(big.clone())], "kept at its size by default");
+
+        let mut sent = super::sendable_inputs(&cli(&["--large-image", "downscale"]), &[]).paths;
+        let super::ToSend::Shrunk { to, .. } = sent[0].clone() else { panic!("marked to shrink: {sent:?}") };
+        assert!(!to.exists(), "nothing is shrunk before its turn");
+        let first = sent[0].path(true).unwrap();
+        assert_eq!(first, to);
+        assert_eq!(prunr_core::image_dimensions_from_path(&first).map(|(w, _)| w), Some(super::DOWNSCALE_TARGET));
+        assert_eq!(sent[0], super::ToSend::File(to.clone()), "a resend reuses the copy");
+        std::fs::remove_file(&to).unwrap();
     }
 
     /// No job slots means nothing is ever sent, and the batch waits forever.
