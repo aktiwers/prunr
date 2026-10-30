@@ -1238,7 +1238,11 @@ impl Processor {
             let (freed, wait) = release_if_idle(slot, now);
             if let Some(engine) = freed {
                 tracing::info!(model = name, "an idle model was let go");
-                super::reclaim::later(engine);
+                // Freed off the UI thread, then handed back to the system.
+                std::thread::spawn(move || {
+                    drop(engine);
+                    prunr_core::sysmem::return_freed_memory();
+                });
             }
             wait
         }).min()
