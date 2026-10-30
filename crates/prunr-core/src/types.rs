@@ -10,13 +10,22 @@ pub enum CoreError {
     Inference(String),
     #[error("Image format error: {0}")]
     ImageFormat(String),
-    #[error(
-        "This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps and try again.",
-        *.need_mb as f64 / 1024.0, *.free_mb as f64 / 1024.0,
-    )]
+    #[error("{}", too_large_text(*.width, *.height, *.need_mb, *.free_mb))]
     TooLarge { width: u32, height: u32, need_mb: u64, free_mb: u64 },
     #[error("Processing cancelled")]
     Cancelled,
+}
+
+/// A photo too large for its work: on macOS the room is the machine's
+/// memory (`sysmem::room_for_buffers_bytes`), which closing apps does not
+/// change; elsewhere what is free now.
+fn too_large_text(width: u32, height: u32, need_mb: u64, room_mb: u64) -> String {
+    let gb = |mb: u64| mb as f64 / 1024.0;
+    if cfg!(target_os = "macos") {
+        format!("This photo is too large for this computer: {width}\u{00d7}{height} needs about {:.1} GB, more than its {:.1} GB of memory.", gb(need_mb), gb(room_mb))
+    } else {
+        format!("This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps and try again.", gb(need_mb), gb(room_mb))
+    }
 }
 
 impl CoreError {
