@@ -100,6 +100,9 @@ impl PrunrApp {
         if !results.is_empty() {
             self.apply_completed_previews(ctx, results);
         }
+        for why in self.processor.live_preview.take_refusals() {
+            self.toasts.warning(prunr_core::plain::reason(why));
+        }
         // Ticked after the landing: a landed frame frees its image for the
         // next, which builds on the caches it left. The closure borrows
         // `batch.items` mutably so `build_preview_inputs` can hold the
