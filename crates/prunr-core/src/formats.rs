@@ -162,20 +162,49 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
 }
 
 /// Decode a raster turned the way its EXIF says, as a viewer shows it:
-/// phones store a portrait sideways with a note to turn it. Under the
-/// same allocation limit `ImageReader::decode` keeps.
+/// phones store a portrait sideways with a note to turn it. A photo whose
+/// decode does not fit the memory free now is refused before anything is
+/// allocated, so a header claiming a vast size cannot exhaust memory.
 ///
 /// Peak: twice the decoded image while a quarter turn copies it.
 fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Result<DynamicImage, CoreError> {
     let (reader, late) = late_png_orientation(reader);
     let mut decoder = reader.into_decoder()?;
     let orientation = orientation_of(&mut decoder, late);
+    let need = decoder.total_bytes();
+    let allowance = decode_allowance(need, turns_a_quarter(orientation), crate::sysmem::available_ram_bytes()).map_err(|peak| {
+        let (width, height) = decoder.dimensions();
+        CoreError::TooLarge { width, height, need_mb: peak >> 20, free_mb: crate::sysmem::available_ram_bytes().unwrap_or(0) >> 20 }
+    })?;
     let mut limits = image::Limits::default();
-    limits.reserve(decoder.total_bytes())?;
+    limits.max_alloc = Some(allowance);
+    limits.reserve(need)?;
     decoder.set_limits(limits)?;
     let mut img = DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
     Ok(img)
+}
+
+/// The image library's own allocation cap, kept when free memory cannot
+/// be read.
+const DECODE_CAP_UNREAD: u64 = 512 * 1024 * 1024;
+
+/// What a decode of `need` bytes may allocate: the memory `free` now, at
+/// least the library's own cap; `Err` with its peak (twice the image when
+/// a quarter turn copies it) when that is more than is free.
+fn decode_allowance(need: u64, quarter_turn: bool, free: Option<u64>) -> Result<u64, u64> {
+    let Some(free) = free else { return Ok(DECODE_CAP_UNREAD) };
+    let peak = if quarter_turn { need.saturating_mul(2) } else { need };
+    if peak > free {
+        return Err(peak);
+    }
+    Ok(free.max(DECODE_CAP_UNREAD))
+}
+
+/// An orientation whose turn copies the image instead of working in place.
+fn turns_a_quarter(orientation: image::metadata::Orientation) -> bool {
+    use image::metadata::Orientation::*;
+    matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
 }
 
 /// A raster's size as `decode_upright` turns it, from its header.
@@ -980,6 +1009,42 @@ mod tests {
         let mut opaque = vec![100, 200, 50, 255];
         unmultiply_alpha(&mut opaque);
         assert_eq!(opaque, vec![100, 200, 50, 255]);
+    }
+
+    #[test]
+    fn a_decode_may_take_what_is_free_and_refuses_more() {
+        let (mb, cap) = (1u64 << 20, DECODE_CAP_UNREAD);
+        assert_eq!(decode_allowance(600 * mb, false, Some(8000 * mb)), Ok(8000 * mb), "past the old 512 MB cap when it fits");
+        assert_eq!(decode_allowance(10 * mb, false, Some(100 * mb)), Ok(cap), "never below the library's own cap");
+        assert_eq!(decode_allowance(600 * mb, false, Some(500 * mb)), Err(600 * mb));
+        assert_eq!(decode_allowance(300 * mb, true, Some(500 * mb)), Err(600 * mb), "a quarter turn holds two copies");
+        assert_eq!(decode_allowance(600 * mb, false, None), Ok(cap), "no reading: the library's cap");
+    }
+
+    /// A header claiming a size no computer has free is refused in plain
+    /// words before anything is allocated.
+    #[test]
+    fn a_header_claiming_a_vast_size_is_refused_before_decoding() {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &b in bytes {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut png = encode_rgba_png(&RgbaImage::new(5, 3)).unwrap();
+        // The IHDR chunk: width and height at 16..24, its CRC over 12..29 at 29..33.
+        png[16..20].copy_from_slice(&1_000_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&1_000_000u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        match load_image_from_bytes(&png) {
+            Err(CoreError::TooLarge { width: 1_000_000, height: 1_000_000, need_mb, .. }) => assert!(need_mb > 1_000_000),
+            other => panic!("expected a refusal naming the size, got {other:?}"),
+        }
     }
 
     #[test]
