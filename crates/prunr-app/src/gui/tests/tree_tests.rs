@@ -449,7 +449,8 @@ fn the_depth_chip_s_controls_act() {
     click(&mut h, "Depth");
     assert!(!tree(&h).iter().any(|n| n.name.as_deref() == Some("Set focus")), "no focus to set while the blur is off");
     click(&mut h, "Point");
-    assert_eq!(h.state().batch.items[0].settings.depth.blur, prunr_core::depth::LensBlurMode::Point);
+    let picked = { let d = &h.state().batch.items[0].settings.depth; (d.blur, d.blur_pct) };
+    assert_eq!(picked, (prunr_core::depth::LensBlurMode::Point, 50), "a blur picked at Amount 0 starts at half");
     click(&mut h, "Set focus");
     assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
 }
