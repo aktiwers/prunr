@@ -640,11 +640,11 @@ impl BatchManager {
     /// while `rendering` (a queued preview reads the photo).
     pub(crate) fn free_off_screen_photos(&mut self, rendering: impl Fn(u64) -> bool) {
         let selected_id = self.selected_id();
-        let mut released = 0;
-        for item in self.items.iter_mut().filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id)) {
-            item.release_photo();
-            released += 1;
-        }
+        let released = self.items.iter_mut()
+            .filter(|item| Some(item.id) != selected_id && !item.is_busy() && !rendering(item.id))
+            .map(BatchItem::release_photo)
+            .filter(|&held| held)
+            .count();
         if released > 0 {
             tracing::info!(released, "off-screen photos let go under memory pressure");
         }

@@ -84,8 +84,14 @@ impl PrunrApp {
             }
         }
         if crate::gui::memory::under_memory_pressure() {
-            self.batch.free_off_screen_photos(|id| self.processor.live_preview.works_on(id));
+            self.free_off_screen_photos();
         }
+    }
+
+    /// Images off screen let go of their photos, but not one a queued
+    /// preview reads.
+    pub(super) fn free_off_screen_photos(&mut self) {
+        self.batch.free_off_screen_photos(|id| self.processor.live_preview.works_on(id));
     }
 
     /// Build the picture behind the result off the UI thread: the
