@@ -22,6 +22,13 @@ pub struct TensorView<'a> {
     pub width: u32,
 }
 
+/// The photo a re-run finishes: its file's bytes, or the pixels already
+/// decoded.
+pub enum Photo<'a> {
+    Encoded(&'a [u8]),
+    Decoded(&'a image::RgbaImage),
+}
+
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
 pub struct SubprocessManager {
     child: Child,
@@ -287,18 +294,21 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         tensor_kind: super::protocol::IpcKind,
-        image_bytes: &[u8],
+        photo: Photo<'_>,
         image_kind: super::protocol::IpcKind,
-        build_cmd: impl FnOnce(std::path::PathBuf, std::path::PathBuf) -> SubprocessCommand,
+        build_cmd: impl FnOnce(std::path::PathBuf, PhotoFile) -> SubprocessCommand,
     ) -> Result<(), String> {
         let tensor_path = tensor_kind.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor.data))
             .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
         let image_path = image_kind.path_for(ipc_temp_dir(), item_id);
-        std::fs::write(&image_path, image_bytes)
-            .map_err(|e| format!("Failed to write image temp file: {e}"))?;
+        let original = match photo {
+            Photo::Encoded(bytes) => std::fs::write(&image_path, bytes).map(|()| PhotoFile::Encoded(image_path)),
+            Photo::Decoded(rgba) => super::ipc::write_image(&image_path, rgba).map(|()| PhotoFile::Decoded(image_path)),
+        }
+        .map_err(|e| format!("Failed to write image temp file: {e}"))?;
 
-        self.send_cmd(&build_cmd(tensor_path, image_path))
+        self.send_cmd(&build_cmd(tensor_path, original))
             .map_err(|e| format!("Failed to send command: {e}"))?;
 
         self.in_flight.insert(item_id);
@@ -315,18 +325,18 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
-        original_image_bytes: &[u8],
+        photo: Photo<'_>,
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
             super::protocol::IpcKind::Seg,
-            original_image_bytes,
+            photo,
             super::protocol::IpcKind::Input,
-            |seg_tensor_path, image_path| SubprocessCommand::AddEdgeInference {
+            |seg_tensor_path, original| SubprocessCommand::AddEdgeInference {
                 item_id,
-                image_path,
+                original,
                 seg_tensor_path,
                 seg_tensor_height: tensor.height,
                 seg_tensor_width: tensor.width,
@@ -342,22 +352,22 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         model: prunr_core::ModelKind,
-        original_image_bytes: &[u8],
+        photo: Photo<'_>,
         mask: prunr_core::MaskSettings,
     ) -> Result<(), String> {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
             super::protocol::IpcKind::Tensor,
-            original_image_bytes,
+            photo,
             super::protocol::IpcKind::Orig,
-            |tensor_path, original_image_path| SubprocessCommand::RePostProcess {
+            |tensor_path, original| SubprocessCommand::RePostProcess {
                 item_id,
                 tensor_path,
                 tensor_height: tensor.height,
                 tensor_width: tensor.width,
                 model,
-                original_image_path,
+                original,
                 mask,
             },
         )

@@ -684,7 +684,7 @@ pub fn run_worker() -> ! {
 
             SubprocessCommand::RePostProcess {
                 item_id, tensor_path, tensor_height, tensor_width,
-                model: cmd_model, original_image_path, mask: cmd_mask,
+                model: cmd_model, original: photo, mask: cmd_mask,
             } => {
                 let evt_tx = evt_tx.clone();
                 let in_flight = in_flight.clone();
@@ -698,7 +698,7 @@ pub fn run_worker() -> ! {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
-                        cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
+                        cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -711,10 +711,7 @@ pub fn run_worker() -> ! {
                         let raw_bytes = std::fs::read(&tensor_path)
                             .map_err(|e| format!("Failed to read tensor: {e}"))?;
                         let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
-                        let img_bytes = std::fs::read(&original_image_path)
-                            .map_err(|e| format!("Failed to read original: {e}"))?;
-                        let original = prunr_core::load_image_from_bytes(&img_bytes)
-                            .map_err(|e| format!("Failed to decode original: {e}"))?;
+                        let original = prunr_app::subprocess::ipc::read_photo(&photo)?;
                         progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat(
                             &floats, tensor_height as usize, tensor_width as usize,
@@ -747,7 +744,7 @@ pub fn run_worker() -> ! {
                         }
                     }
 
-                    cleanup_ipc_temps(&ipc, &[&tensor_path, &original_image_path]);
+                    cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
 
                     send_rss(&evt_tx);
 
@@ -756,13 +753,13 @@ pub fn run_worker() -> ! {
             }
 
             SubprocessCommand::AddEdgeInference {
-                item_id, image_path, seg_tensor_path,
+                item_id, original: photo, seg_tensor_path,
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
                 mask: cmd_mask,
             } => {
                 if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
-                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, &image_path]);
+                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, photo.path()]);
                     continue;
                 }
                 let evt_tx = evt_tx.clone();
@@ -781,7 +778,7 @@ pub fn run_worker() -> ! {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
-                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path, &image_path]);
+                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path, photo.path()]);
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -797,10 +794,7 @@ pub fn run_worker() -> ! {
                             .map_err(|e| format!("Failed to read seg tensor: {e}"))?;
                         let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
 
-                        let img_bytes = std::fs::read(&image_path)
-                            .map_err(|e| format!("Failed to read image: {e}"))?;
-                        let original = prunr_core::load_image_from_bytes(&img_bytes)
-                            .map_err(|e| format!("Failed to decode image: {e}"))?;
+                        let original = prunr_app::subprocess::ipc::read_photo(&photo)?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
                         let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..cmd_mask };
@@ -855,7 +849,7 @@ pub fn run_worker() -> ! {
                         }
                     };
                     prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
-                    cleanup_ipc_temps(&ipc, &[&image_path]);
+                    cleanup_ipc_temps(&ipc, &[photo.path()]);
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
                         drop(sem_guard);
