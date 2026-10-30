@@ -63,7 +63,7 @@ const SD_LATENT_SIDE: u32 = SD_TILE / VAE_FACTOR;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
-/// Photo a crop keeps around its region: 32 px on each side.
+/// Photo a crop keeps around its region, both sides together (32 px a side).
 const CROP_CONTEXT: u32 = 64;
 
 /// The longest crop side, with or without the tall crop.
@@ -3626,10 +3626,10 @@ mod tests {
         let tuning = SdTuning { tall_crop: true, ..SdTuning::default() };
         let req = SdInpaintRequest { tuning, use_taesd: true, ..Default::default() };
         assert!(!req.tall_crop());
-        assert_eq!(fit(&req).long, SD_TILE - 64);
+        assert_eq!(fit(&req).long, SD_TILE - CROP_CONTEXT);
         let req = SdInpaintRequest { use_taesd: false, ..req };
         assert!(req.tall_crop());
-        assert_eq!(fit(&req).long, SD_CROP_MAX - 64);
+        assert_eq!(fit(&req).long, SD_CROP_MAX - CROP_CONTEXT);
     }
 
     /// Slats a few pixels apart are one region; a mark across the image
