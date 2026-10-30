@@ -531,10 +531,13 @@ pub enum Uninstalled {
 /// Remove an installed runtime or add-on. Refuses when this is the only
 /// ORT source (uninstalling would brick startup) and when the subdir name
 /// could escape `<data>/runtimes/`.
-/// The small-card copies it brought go with it.
+/// The small-card copies it brought go with it, at the next start when
+/// it does (`finish_uninstalls`): until then it may run them.
 pub fn uninstall(runtime: RuntimeId) -> Result<Uninstalled, String> {
     let uninstalled = remove_install(runtime)?;
-    remove_small_card_copies(runtime);
+    if uninstalled == Uninstalled::Now {
+        remove_small_card_copies(runtime);
+    }
     Ok(uninstalled)
 }
 
@@ -575,8 +578,18 @@ pub fn finish_uninstalls() {
     let Some(store) = prunr_models::runtime_store_dir() else { return };
     let marked = marked_installs(&store);
     if !marked.is_empty() {
-        std::thread::spawn(move || remove_marked(marked));
+        let leaving = uninstalls_finishing(&store, &marked);
+        std::thread::spawn(move || {
+            remove_marked(marked);
+            leaving.into_iter().for_each(remove_small_card_copies);
+        });
     }
+}
+
+/// The runtimes whose own install is among `marked`: an uninstall of
+/// theirs finishing, not an update's sweep of an install it replaced.
+fn uninstalls_finishing(store: &Path, marked: &[PathBuf]) -> Vec<RuntimeId> {
+    RuntimeId::ALL.into_iter().filter(|rt| marked.contains(&store.join(rt.install_subdir()))).collect()
 }
 
 /// The installs of any runtime Prunr installs (offered on this platform
@@ -619,6 +632,8 @@ fn run_install(
     // Uninstalled while loaded and still here: installing keeps it.
     if let Some(mark) = rt.removal_mark().filter(|mark| mark.is_file()) {
         std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
+        let copies = small_card_copies_missing(rt);
+        fetch_small_card_copies(&copies, tx, &cancel, (0, copies.iter().map(|(_, copy)| copy.size_bytes()).sum()));
         let install_dir = rt.checked_install_dir()?;
         let _ = tx.send(InstallEvent::Done { install_dir, started: rt.addon_kind().map(start_addon) });
         return Ok(());
@@ -650,7 +665,7 @@ fn run_install(
         let target = rt.checked_install_dir()?.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
         fetch_nvidia_libraries(&nvidia, &target, tx, &cancel, (wheel.size_bytes, total))?;
     }
-    fetch_small_card_copies(&copies, tx, &cancel, (wheel.size_bytes + nvidia_bytes, total))?;
+    fetch_small_card_copies(&copies, tx, &cancel, (wheel.size_bytes + nvidia_bytes, total));
     // The runtime just installed is the one the user wants next start;
     // an add-on starts now, in the runtime already loaded, when that is
     // as new as the add-on (Prunr's own), else at the next start, in it.
@@ -705,15 +720,16 @@ fn small_card_copies_missing(rt: RuntimeId) -> Vec<(PathBuf, prunr_models::OnDem
     rt.small_card_copies().map(|copy| (dir.join(copy.filename), copy)).filter(|(path, _)| !path.is_file()).collect()
 }
 
-/// Each copy into place. One that does not download leaves its model on
-/// its own weights, so it is logged and the install goes on; a cancel
-/// stops the install.
+/// Each copy into place, after the install it comes with is. One that
+/// does not download leaves its model on its own weights, so it is logged
+/// and the install goes on; a cancel stops the copies, not the install
+/// already in place.
 fn fetch_small_card_copies(
     copies: &[(PathBuf, prunr_models::OnDemandVariant)],
     tx: &mpsc::Sender<InstallEvent>,
     cancel: &Arc<AtomicBool>,
     (done_before, total): (u64, u64),
-) -> Result<(), String> {
+) {
     let mut done = done_before;
     for (path, copy) in copies {
         let on_progress = |so_far: u64, _: u64| {
@@ -723,14 +739,13 @@ fn fetch_small_card_copies(
             crate::gui::download_manager::download_to_file(copy.url, path, copy.sha256, Arc::clone(cancel), &on_progress, &|| ()).map_err(|e| e.message)
         });
         if let Err(e) = placed {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(e);
-            }
             tracing::warn!(file = %path.display(), %e, "a small-card copy did not download; its model keeps its own weights");
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
         }
         done += copy.size_bytes();
     }
-    Ok(())
 }
 
 fn remove_small_card_copies(rt: RuntimeId) {
@@ -1069,6 +1084,18 @@ mod tests {
         assert!(!store.path().join(".cuda-addon-0.2.0-windows-x64.remove").exists(), "its mark too");
         assert!(store.path().join("cuda-1.24.1-windows-x64").exists(), "not marked: kept");
         assert!(store.path().join("other").exists() && store.path().join(".other.remove").exists(), "not an add-on: kept");
+    }
+
+    /// CUDA's small-card copies go at the next start with CUDA's own
+    /// install, when its uninstall finishes; an update's sweep of an
+    /// install it replaced keeps them, as CUDA stays.
+    #[test]
+    fn copies_go_only_with_the_runtime_s_own_install() {
+        let store = Path::new("store");
+        let own = |rt: RuntimeId| store.join(rt.install_subdir());
+        assert_eq!(uninstalls_finishing(store, &[own(RuntimeId::Cuda), own(RuntimeId::OpenVino)]), [RuntimeId::OpenVino, RuntimeId::Cuda]);
+        assert!(uninstalls_finishing(store, &[store.join("cuda-1.24.1-linux-x64"), store.join("cuda-addon-0.0.1-linux-x64")]).is_empty(), "replaced installs");
+        assert!(RuntimeId::Cuda.small_card_copies().count() > 0 && RuntimeId::OpenVino.small_card_copies().count() == 0);
     }
 
     /// An earlier Prunr's installs of a runtime (the whole runtime an
