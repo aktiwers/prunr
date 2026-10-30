@@ -1200,7 +1200,8 @@ impl BatchItem {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
         self.adjusting = None;
-        super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take(), self.kept_alpha.take()));
+        super::reclaim::later((std::mem::take(&mut self.edge_planes), self.start_photo.take()));
+        self.drop_kept_cut();
         self.drop_correction_cache();
     }
 
@@ -2567,7 +2568,14 @@ impl BatchItem {
     /// The found faces or how they blend changed: the faced photo and the
     /// cut-out built over it are out of date.
     pub(crate) fn faces_changed(&mut self) {
-        self.faced_photo = None;
+        super::reclaim::later(self.faced_photo.take());
+        self.drop_kept_cut();
+    }
+
+    /// The cut-out the live preview keeps (the outline's base, the mask),
+    /// freed off the UI thread: made of the result, the photo and the
+    /// segmentation, so stale when any of them changes.
+    fn drop_kept_cut(&mut self) {
         super::reclaim::later((self.cached_masked_base.take(), self.kept_alpha.take()));
     }
 
@@ -2738,7 +2746,7 @@ impl BatchItem {
                     new.traced_on = traced_on;
                     self.cached_edge_tensors = Some(new);
                 }
-                super::reclaim::later((self.cached_masked_base.take(), self.kept_alpha.take()));
+                self.drop_kept_cut();
                 // source_rgba stays on every item: live preview re-cuts from it.
                 // Tier 2 reruns report empty active_provider (no inference ran).
                 (!pr.active_provider.is_empty()).then_some(pr.active_provider)
