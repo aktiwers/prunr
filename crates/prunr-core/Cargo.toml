@@ -29,6 +29,9 @@ image = { workspace = true }
 # this one's 1/8 DCT scaling. No rayon: its threads would share the pool
 # the previews render on.
 jpeg-decoder = { version = "0.3.2", default-features = false }
+# image's PNG encoder compresses through zlib-rs: a saved 20 MP cut-out
+# at level 4 takes 0.54 s instead of miniz_oxide's 0.86 s, 5% smaller.
+png = { version = "0.18", features = ["zlib-rs"] }
 resvg = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
