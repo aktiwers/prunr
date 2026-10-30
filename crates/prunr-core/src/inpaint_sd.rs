@@ -63,14 +63,15 @@ const SD_LATENT_SIDE: u32 = SD_TILE / VAE_FACTOR;
 /// Longest crop side with `SdTuning::tall_crop`: a region up to this
 /// long runs as one 512×768 / 768×512 / 768² crop instead of tiles.
 pub const SD_CROP_MAX: u32 = 768;
-/// The largest region SD fills at full size in one crop with 32 px of
-/// photo around it: up to 768 on its long side with the tall crop.
+/// The longest region side one crop fills at full size, with 32 px of
+/// photo around it: 704 with the tall crop, else 448.
+pub const fn one_crop_side(tall_crop: bool) -> u32 {
+    (if tall_crop { SD_CROP_MAX } else { SD_TILE }) - 64
+}
+
+/// The largest region SD fills at full size in one crop.
 pub fn fit(req: &SdInpaintRequest) -> crate::inpaint::Fit {
-    let side = |crop: u32| crop - 64;
-    crate::inpaint::Fit {
-        long: side(if req.tall_crop() { SD_CROP_MAX } else { SD_TILE }),
-        short: side(SD_TILE),
-    }
+    crate::inpaint::Fit { long: one_crop_side(req.tall_crop()), short: one_crop_side(false) }
 }
 
 /// The UNet downsamples three times, so a crop side is a multiple of 64.
@@ -259,8 +260,10 @@ fn bundle_charge(id: prunr_models::ModelId, cpu_only: bool) -> Option<(&'static 
 pub enum SdRamFit {
     /// Tall regions run as one crop.
     Full,
-    /// It runs, but tall regions fall back to 512 px tiles.
-    TilesOnly,
+    /// It runs without the tall crop: a region longer than
+    /// `one_crop_side(false)` is filled smaller at Auto fill scale, in
+    /// tiles at Full.
+    NoTallCrop,
     /// The gate refuses the erase: system RAM is short.
     Refused,
     /// The gate refuses the erase: the graphics card's memory is short.
@@ -271,7 +274,7 @@ pub fn sd_ram_fit(id: prunr_models::ModelId, room: Room, margin_mb: u64, bundle:
     let mut tuning = plan_tuning(false, margin_mb);
     match fit_ram(id, &mut tuning, room, false, bundle) {
         Ok(()) if tuning.tall_crop => SdRamFit::Full,
-        Ok(()) => SdRamFit::TilesOnly,
+        Ok(()) => SdRamFit::NoTallCrop,
         Err(Short::Ram { .. }) => SdRamFit::Refused,
         Err(Short::Card { .. }) => SdRamFit::CardFull,
     }
@@ -3732,6 +3735,23 @@ mod tests {
         assert_eq!(padded_dims(700, 300), (704, 512));
     }
 
+    /// What the Settings note says: an area up to `one_crop_side` long
+    /// fills whole in one crop with 32 px of photo around it; Auto
+    /// shrinks a longer one.
+    #[test]
+    fn one_crop_holds_an_area_of_its_side_with_photo_around_it() {
+        use crate::inpaint::{FillScale, Fit};
+        for (tall, max_side) in [(false, SD_TILE), (true, SD_CROP_MAX)] {
+            let side = one_crop_side(tall);
+            let fit = Fit { long: side, short: one_crop_side(false) };
+            assert_eq!(FillScale::Auto.factor((side, 100), fit), 1.0, "tall {tall}");
+            assert!(FillScale::Auto.factor((side + 1, 100), fit) < 1.0, "tall {tall}");
+            let area = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1000 + side - 1, y_max: 1099 };
+            let (_, _, w, _) = compute_sd_crop(&area, 4096, 4096, max_side).expect("one crop");
+            assert_eq!(w, side + 64, "tall {tall}");
+        }
+    }
+
     /// A "now" far enough from the clock's origin to subtract minutes from.
     /// On Windows `Instant` counts from boot, and a fresh CI runner can be
     /// seconds old — `Instant::now() - 600 s` then panics with an overflow.
@@ -3740,8 +3760,8 @@ mod tests {
     }
 
     /// The Settings memory note and the run-time gate agree: refused
-    /// exactly where `fit_ram` refuses, tiles exactly where it drops the
-    /// tall crop.
+    /// exactly where `fit_ram` refuses, short of the tall crop exactly
+    /// where it drops it.
     #[test]
     fn sd_ram_fit_matches_the_run_time_gate() {
         use prunr_models::ModelId;
@@ -3758,7 +3778,7 @@ mod tests {
                             Err(Short::Card { .. }) => SdRamFit::CardFull,
                             Err(Short::Ram { .. }) => SdRamFit::Refused,
                             Ok(()) if t.tall_crop => SdRamFit::Full,
-                            Ok(()) => SdRamFit::TilesOnly,
+                            Ok(()) => SdRamFit::NoTallCrop,
                         };
                         assert_eq!(sd_ram_fit(id, room, margin, bundle), expected, "{id:?} {bundle:?} {room:?}");
                     }
