@@ -24,6 +24,7 @@ pub mod face;
 pub mod inpaint_sd;
 pub mod inpaint_blend;
 pub mod ep_compat;
+pub mod plain;
 mod ep_coverage;
 pub mod sysmem;
 pub mod card_memory;

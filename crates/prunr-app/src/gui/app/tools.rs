@@ -427,7 +427,7 @@ impl PrunrApp {
     /// Admission or encoder failure: tell the user and turn the tool off,
     /// which also stops the per-frame encoder check from retrying.
     fn magic_brush_unavailable(&mut self, err: &str) {
-        self.toasts.error(format!("Magic Brush unavailable: {err}"));
+        self.toasts.error(format!("Magic Brush unavailable: {}", prunr_core::plain::error(err)));
         // The sessions stay warm and the selected image keeps its
         // embedding, so turning it back on is instant; background images
         // drop theirs on the next eviction pass.
@@ -545,7 +545,7 @@ impl PrunrApp {
                 }
                 Err(err) => {
                     tracing::error!(item_id = result.item_id, %err, "SAM decoder failed");
-                    self.toasts.error(format!("Magic Brush could not run: {err}"));
+                    self.toasts.error(format!("Magic Brush could not run: {}", prunr_core::plain::error(&err.to_string())));
                 }
             }
         }

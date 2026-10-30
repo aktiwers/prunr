@@ -194,6 +194,21 @@ fn a_failure_never_hides_a_result() {
     assert_eq!(app.batch.items[0].error(), Some("boom"), "with nothing to show, the failure is what the image is");
 }
 
+/// A run or decode that failed with a system or model message is shown
+/// as the plain sentence for its kind; Prunr's own words stay.
+#[test]
+fn an_images_failure_reads_in_plain_words() {
+    use prunr_core::plain::Kind;
+    let mut app = app_in(State::Unprocessed, SettingsModel::Silueta);
+    let item = &mut app.batch.items[0];
+    item.fail("Non-zero status code returned while running Conv node".into());
+    assert_eq!(item.error(), Some(Kind::ModelFailed.sentence()));
+    item.land_decode(Err("Permission denied (os error 13)".into()));
+    assert_eq!(item.error(), Some(Kind::NoPermission.sentence()));
+    item.fail("Eraser (Big-LaMa) is not installed".into());
+    assert_eq!(item.error(), Some("Eraser (Big-LaMa) is not installed"));
+}
+
 /// A cut waiting for a worker slot shows the result it has, and Cancel
 /// All ends it like one under way: nothing is left awaited.
 #[test]

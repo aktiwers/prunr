@@ -77,9 +77,7 @@ impl PrunrApp {
         }
         for (item_id, msg) in &errors {
             tracing::warn!(item_id, %msg, "erase failed");
-            // The worker's message is user-facing already (the SD RAM
-            // gate names the free and needed memory).
-            self.toasts.error(msg.clone());
+            self.toasts.error(prunr_core::plain::error(msg).to_string());
         }
         for crate::gui::processor::LandedFill { item_id, run, rgba, fill_scale } in ended.fills {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
@@ -276,7 +274,7 @@ impl PrunrApp {
             self.toasts.info(format!("{run} cancelled"));
         } else {
             tracing::error!(item_id, run, %err, "run failed");
-            self.toasts.error(format!("{run} did not finish: {}", err.message()));
+            self.toasts.error(format!("{run} did not finish: {}", prunr_core::plain::error(&err.message())));
         }
     }
 
@@ -346,7 +344,7 @@ impl PrunrApp {
                 }
                 DownloadEvent::Failed { id, error } => {
                     let name = prunr_models::display_name(id);
-                    self.toasts.error(format!("Could not download {name}: {error}"));
+                    self.toasts.error(format!("Could not download {name}: {}", prunr_core::plain::error(&error.to_string())));
                     self.refresh_install_cache();
                 }
                 DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } | DownloadEvent::Cancelled { .. } => {}
@@ -374,7 +372,7 @@ impl PrunrApp {
             }
             Some(Err(err)) => {
                 tracing::warn!(item_id, %err, "face restore failed");
-                self.toasts.error(format!("Could not redraw the faces: {err}"));
+                self.toasts.error(format!("Could not redraw the faces: {}", prunr_core::plain::error(&err.to_string())));
             }
         }
         self.redo_faces_blend(idx);
@@ -505,7 +503,7 @@ impl PrunrApp {
                 self.on_depth_landed(idx);
                 ctx.request_repaint();
             } else if let Some(err) = error {
-                self.toasts.error(format!("Could not measure the depth: {err}"));
+                self.toasts.error(format!("Could not measure the depth: {}", prunr_core::plain::error(&err.to_string())));
             }
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
@@ -751,7 +749,7 @@ impl PrunrApp {
         if let Some(err) = failure.filter(|_| item.has_result()) {
             let name = item.filename.clone();
             tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
-            self.toasts.warning(format!("{name} could not be processed again ({err}). It shows its last result."));
+            self.toasts.warning(format!("{name} could not be processed again: {} It shows its last result.", prunr_core::plain::error(&err.to_string())));
             self.processor.note_failed_rerun();
         }
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };

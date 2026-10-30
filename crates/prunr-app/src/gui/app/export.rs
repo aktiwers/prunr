@@ -247,7 +247,7 @@ impl PrunrApp {
             );
             if let Err(e) = result {
                 DragExportState::reset(&self.drag_export.active, &self.drag_export.items);
-                self.toasts.error(format!("Could not drag out: {e}"));
+                self.toasts.error(format!("Could not drag out: {}", prunr_core::plain::error(&e.to_string())));
             }
         }
     }

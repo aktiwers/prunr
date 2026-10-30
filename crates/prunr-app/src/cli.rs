@@ -498,7 +498,7 @@ impl CliDepth {
         if let Some(kept) = self.kept.as_ref().and_then(|kept| kept.borrow_mut().remove(input)) {
             return Ok(kept);
         }
-        let photo = prunr_core::load_image_from_path(input).map_err(|e| could_not(input, "read", e))?;
+        let photo = prunr_core::load_image_from_path(input).map_err(|e| could_not(input, "read", e.message()))?;
         let map = self.measurer.measure_decoded(&photo).map_err(|e| format!("depth failed: {e}"))?;
         Ok((std::sync::Arc::new(map), (photo.width(), photo.height())))
     }
@@ -853,7 +853,7 @@ fn run_each_input(
             eprintln!("{doing} {}...", input.display());
         }
         let result = load_image_from_path(input)
-            .map_err(|e| could_not(input, "read", e))
+            .map_err(|e| could_not(input, "read", e.message()))
             .and_then(|img| run(img.into_rgba8()))
             .and_then(|out| prunr_app::fs_util::save_image_replacing(&out_path, &out).map_err(|e| could_not(&out_path, "save", e)));
         match result {
@@ -890,14 +890,14 @@ fn run_inpaint(args: &Cli) -> i32 {
     let img = match load_image_from_path(input) {
         Ok(i) => i.into_rgba8(),
         Err(e) => {
-            eprintln!("error: {}", could_not(input, "read", e));
+            eprintln!("error: {}", could_not(input, "read", e.message()));
             return 1;
         }
     };
     let mask = match load_image_from_path(mask_path) {
         Ok(i) => i.into_luma8(),
         Err(e) => {
-            eprintln!("error: {}", could_not(mask_path, "read the mask", e));
+            eprintln!("error: {}", could_not(mask_path, "read the mask", e.message()));
             return 1;
         }
     };
@@ -916,7 +916,7 @@ fn run_inpaint(args: &Cli) -> i32 {
     let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {
         Ok(r) => r.rgba,
         Err(e) => {
-            eprintln!("error: {}", could_not(input, "erase", e));
+            eprintln!("error: {}", could_not(input, "erase", e.message()));
             return 1;
         }
     };
@@ -959,15 +959,16 @@ fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool
 }
 
 /// The CLI's one error shape: "<path>: could not <what>: <reason>".
+/// `path` could not have `what` done to it, for `reason` in plain words.
 fn could_not(path: &std::path::Path, what: &str, reason: impl std::fmt::Display) -> String {
-    format!("{}: could not {what}: {reason}", path.display())
+    format!("{}: could not {what}: {}", path.display(), prunr_core::plain::error(&reason.to_string()))
 }
 
 /// An image failed: its spinner says why, or stderr when none shows (the
 /// output is not a terminal).
 fn report_failure(spinner: Option<&ProgressBar>, input: &std::path::Path, what: &str, why: impl std::fmt::Display) {
     match spinner {
-        Some(pb) => pb.finish_with_message(format!("X {} — {why}", input.display())),
+        Some(pb) => pb.finish_with_message(format!("X {} — {}", input.display(), prunr_core::plain::error(&why.to_string()))),
         None => eprintln!("error: {}", could_not(input, what, why)),
     }
 }
@@ -1207,7 +1208,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
             }
             Err(e) => {
                 fail_count += 1;
-                report_failure(spinner_opt, input, "process", e);
+                report_failure(spinner_opt, input, "process", e.message());
             }
         }
     };
