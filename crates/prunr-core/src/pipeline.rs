@@ -75,6 +75,22 @@ pub fn room_for_photo(w: u32, h: u32, lines: bool, refine: bool) -> Result<(), C
     crate::sysmem::room_for_buffers_bytes().map_or(Ok(()), |free| fits_in(w, h, full_size_bytes(w, h, lines, refine), free))
 }
 
+/// The decoded photo a run holds before its work after the model: at
+/// least its RGB bytes.
+const DECODED_BYTES_PER_PX: u64 = 3;
+
+/// What the work after the model adds on a `w` × `h` photo already
+/// decoded and in memory: `full_size_bytes` less the decoded photo.
+fn postprocess_bytes(w: u32, h: u32, refine: bool) -> u64 {
+    full_size_bytes(w, h, false, refine).saturating_sub(u64::from(w) * u64::from(h) * DECODED_BYTES_PER_PX)
+}
+
+/// `room_for_photo` for the work after the model (a re-run, a live
+/// preview), the photo already decoded: what it holds is not counted again.
+pub fn room_for_postprocess(w: u32, h: u32, refine: bool) -> Result<(), CoreError> {
+    crate::sysmem::room_for_buffers_bytes().map_or(Ok(()), |free| fits_in(w, h, postprocess_bytes(w, h, refine), free))
+}
+
 fn fits_in(width: u32, height: u32, need: u64, free: u64) -> Result<(), CoreError> {
     if need <= free {
         return Ok(());
@@ -243,6 +259,14 @@ mod tests {
         match fits_in(12000, 8000, 7 * gb, 6 * gb) {
             Err(CoreError::TooLarge { width: 12000, height: 8000, need_mb: 7168, free_mb: 6144 }) => {}
             other => panic!("expected a refusal naming the photo and both sizes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_work_after_the_model_leaves_out_the_photo_it_holds() {
+        for refine in [false, true] {
+            let (whole, after) = (full_size_bytes(4000, 3000, false, refine), postprocess_bytes(4000, 3000, refine));
+            assert_eq!(whole - after, 4000 * 3000 * DECODED_BYTES_PER_PX, "refine {refine}");
         }
     }
 
