@@ -1011,10 +1011,6 @@ pub(crate) struct BatchItem {
     pub(crate) cached_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
     /// The cut-out's mask a render made, for a change of its look alone.
     pub(crate) kept_alpha: Option<super::live_preview::KeptAlpha>,
-    /// The mask (`MaskRecipe::alpha_part`) the kept lines were traced on,
-    /// when a run traced them on the cut-out: a preview of another mask
-    /// draws them where they were.
-    lines_traced_on: Option<prunr_core::MaskRecipe>,
     /// The preset last applied (dropdown or Reset All); the preset button
     /// compares `settings` against it, and it stays across later tweaks.
     pub(crate) applied_preset: String,
@@ -1155,15 +1151,14 @@ impl BatchItem {
         self.cached_edge_tensors = None;
         self.volatile_edge_tensor = None;
         self.edge_planes = Default::default();
-        self.lines_traced_on = None;
     }
 
     /// The lines drawn on the cut-out were traced on another mask than
     /// the settings make now: a preview moved the cut-out under them.
     pub(crate) fn lines_traced_on_another_cut(&self) -> bool {
         self.settings.line_mode == prunr_core::LineMode::SubjectOutline
-            && self.cached_edge_tensors.is_some()
-            && self.lines_traced_on.is_some_and(|on| on != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part())
+            && self.cached_edge_tensors.as_ref().and_then(|lines| lines.traced_on)
+                .is_some_and(|on| on != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part())
     }
 
     /// Drop the seg tensor and every edge cache tier together.
@@ -2669,8 +2664,7 @@ impl BatchItem {
         self.apply_cache_impact(impact);
         let has_tensor = self.cached_tensor.is_some();
         // Lines a preview left on another cut-out are traced on this one.
-        let lines_on_cut = current.inference.uses_segmentation && current.inference.uses_edge_detection;
-        if has_tensor && lines_on_cut && self.lines_traced_on_another_cut() && !matches!(tier, RequiredTier::FullPipeline) {
+        if has_tensor && self.lines_traced_on_another_cut() && tier != RequiredTier::FullPipeline {
             return RunTier::AddEdge;
         }
         match tier {
@@ -2694,7 +2688,7 @@ impl BatchItem {
             RequiredTier::AddEdgeInference if has_tensor => RunTier::AddEdge,
             // Lines on the subject trace the cut-out the cached tensor
             // makes again; over the whole photo there is no cut-out.
-            RequiredTier::EdgeRerun if has_tensor && current.inference.uses_segmentation && current.inference.uses_edge_detection => RunTier::AddEdge,
+            RequiredTier::EdgeRerun if has_tensor && current.inference.traces_the_cut_out() => RunTier::AddEdge,
             RequiredTier::MaskRerun
             | RequiredTier::AddEdgeInference
             | RequiredTier::EdgeRerun
@@ -2732,18 +2726,17 @@ impl BatchItem {
                 self.reset_result_caches();
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.failure = None;
-                let on_cut = recipe_snapshot.inference.uses_segmentation && recipe_snapshot.inference.uses_edge_detection;
-                let traced_on = on_cut.then(|| recipe_snapshot.mask.alpha_part());
+                let traced_on = recipe_snapshot.inference.traces_the_cut_out().then(|| recipe_snapshot.mask.alpha_part());
                 self.applied_recipe = Some(recipe_snapshot);
                 // Keep the cache when the worker returned no fresh tensor (a
                 // rerun): clobbering it killed live preview after any rerun.
                 if let Some(new) = seg {
                     self.set_cached_tensor(Some(new));
                 }
-                if let Some(new) = edges {
+                if let Some(mut new) = edges {
                     self.invalidate_edge_cache();
+                    new.traced_on = traced_on;
                     self.cached_edge_tensors = Some(new);
-                    self.lines_traced_on = traced_on;
                 }
                 super::reclaim::later((self.cached_masked_base.take(), self.kept_alpha.take()));
                 // source_rgba stays on every item: live preview re-cuts from it.
@@ -2981,7 +2974,6 @@ impl BatchItem {
             edge_planes: Default::default(),
             cached_masked_base: None,
             kept_alpha: None,
-            lines_traced_on: None,
             applied_preset,
             bg_image: None,
             backdrop_texture: None,
