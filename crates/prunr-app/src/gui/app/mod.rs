@@ -97,10 +97,10 @@ pub struct PrunrApp {
 
     title_state: TitleState,
 
-    /// Last `(item_id, MaskSettings)` `recipe_drift_tripwire` proved
-    /// drift-free, so an idle frame skips `MaskRecipe::from`. Cleared on
-    /// drift or item switch.
-    last_drift_check: Option<(u64, prunr_core::MaskSettings)>,
+    /// Last `(item_id, timeline version, MaskSettings)` `recipe_drift_tripwire`
+    /// is done with: found drift-free, or asked a render for. A new step or
+    /// new settings check again.
+    last_drift_check: Option<(u64, u64, prunr_core::MaskSettings)>,
 
     pub(crate) batch: super::batch_manager::BatchManager,
     /// User explicitly hid the sidebar via Tab / configured hotkey.
