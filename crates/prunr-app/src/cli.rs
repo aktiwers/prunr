@@ -1293,7 +1293,7 @@ fn run_batch_subprocess(
                 break;
             }
         };
-        if jobs.is_none() && !prunr_core::engine::runs_on_host_cpu(&provider) {
+        if jobs.is_none() && !prunr_core::engine::model_on_host_cpu(model.model_id(), &provider) {
             max_jobs = max_jobs.min(default_on(false));
         }
 
