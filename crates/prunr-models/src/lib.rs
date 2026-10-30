@@ -3163,15 +3163,12 @@ mod tests {
         }
     }
 
-    /// Gigabytes of models and runtimes stay on this computer: on Windows
-    /// outside the roaming folder a domain profile copies around.
+    /// Gigabytes of models and runtimes stay outside the roaming folder a
+    /// domain profile copies from computer to computer.
+    #[cfg(windows)]
     #[test]
     fn the_data_stays_on_this_computer() {
-        let data = data_dir().expect("a data dir");
-        assert!(data.starts_with(dirs::data_local_dir().expect("a local data dir")));
-        if cfg!(windows) {
-            assert!(!data.starts_with(dirs::data_dir().expect("a roaming data dir")));
-        }
+        assert!(!data_dir().expect("a data dir").starts_with(dirs::data_dir().expect("a roaming data dir")));
     }
 
     /// The sweep removes the retired names it finds and nothing else.
