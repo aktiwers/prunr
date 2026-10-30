@@ -178,6 +178,39 @@ pub fn load_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage, CoreError> {
     decode_upright(ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(CoreError::Io)?)
 }
 
+/// `load_image_from_bytes` decoded only as large as it shows fit inside
+/// a `side × side` square: a JPEG decodes at 1/2, 1/4 or 1/8 of its size,
+/// the reduction made in the DCT, so most of the decode and the
+/// full-size buffer are skipped. Any other image, and a JPEG this cannot
+/// read (CMYK, 16-bit), decodes whole.
+pub fn load_image_to_fit_from_bytes(bytes: &[u8], side: u32) -> Result<DynamicImage, CoreError> {
+    scaled_jpeg(bytes, side).map_or_else(|| load_image_from_bytes(bytes), Ok)
+}
+
+fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
+    if !bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return None;
+    }
+    let mut decoder = jpeg_decoder::Decoder::new(bytes);
+    if let Some(free) = crate::sysmem::room_for_buffers_bytes() {
+        decoder.set_max_decoding_buffer_size(usize::try_from(free).unwrap_or(usize::MAX));
+    }
+    // A square, so a quarter turn after the decode still fits.
+    let side = u16::try_from(side).unwrap_or(u16::MAX);
+    let (width, height) = decoder.scale(side, side).ok()?;
+    let pixels = decoder.decode().ok()?;
+    let (width, height) = (u32::from(width), u32::from(height));
+    let mut img = match decoder.info()?.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, pixels)?),
+        jpeg_decoder::PixelFormat::L8 => DynamicImage::ImageLuma8(GrayImage::from_raw(width, height, pixels)?),
+        jpeg_decoder::PixelFormat::L16 | jpeg_decoder::PixelFormat::CMYK32 => return None,
+    };
+    if let Some(turn) = decoder.exif_data().and_then(image::metadata::Orientation::from_exif_chunk) {
+        img.apply_orientation(turn);
+    }
+    Some(img)
+}
+
 /// Decode a raster turned the way its EXIF says, as a viewer shows it:
 /// phones store a portrait sideways with a note to turn it. A photo whose
 /// decode does not fit the memory free now is refused before anything is
@@ -753,6 +786,32 @@ mod tests {
             assert_eq!(image_dimensions_from_bytes(bytes), Some((8, 16)), "{name}'s size from bytes");
             assert_eq!(image_dimensions_from_path(&path), Some((8, 16)), "{name}'s size from a file");
         }
+    }
+
+    /// A JPEG fit to a small square decodes smaller in the DCT, still
+    /// covering the square and turned by its EXIF; a PNG decodes whole.
+    #[test]
+    fn a_jpeg_decodes_only_as_large_as_it_shows() {
+        use image::{GenericImageView, ImageEncoder, Rgb, RgbImage};
+        let stored = RgbImage::from_fn(400, 200, |x, _| if x < 200 { Rgb([250, 20, 20]) } else { Rgb([20, 20, 250]) });
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
+        encoder.set_exif_metadata(turn_right_exif()).unwrap();
+        encoder.write_image(stored.as_raw(), 400, 200, image::ExtendedColorType::Rgb8).unwrap();
+
+        let small = load_image_to_fit_from_bytes(&jpeg, 40).unwrap();
+        assert_eq!(small.dimensions(), (25, 50), "1/8 of 400 × 200, turned upright");
+        let small = small.to_rgb8();
+        let (top, bottom) = (small.get_pixel(12, 2), small.get_pixel(12, 47));
+        assert!(top[0] > 200 && top[2] < 60, "the stored left half turns to the top: {top:?}");
+        assert!(bottom[2] > 200 && bottom[0] < 60, "the stored right half turns to the bottom: {bottom:?}");
+        assert_eq!(load_image_to_fit_from_bytes(&jpeg, 90).unwrap().dimensions(), (50, 100), "1/4 covers 90");
+        assert_eq!(load_image_to_fit_from_bytes(&jpeg, 120).unwrap().dimensions(), (100, 200), "1/4 does not cover 120, 1/2 does");
+        assert_eq!(load_image_to_fit_from_bytes(&jpeg, 1000).unwrap().dimensions(), (200, 400), "smaller than the square: whole");
+
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(stored.as_raw(), 400, 200, image::ExtendedColorType::Rgb8).unwrap();
+        assert_eq!(load_image_to_fit_from_bytes(&png, 40).unwrap().dimensions(), (400, 200));
     }
 
     /// A PNG may put its EXIF after the image data (the PNG rules allow

@@ -25,6 +25,10 @@ ort = { workspace = true }
 libloading = "0.9"
 ndarray = { workspace = true }
 image = { workspace = true }
+# image's JPEG decoder cannot decode at a reduced size; thumbnails use
+# this one's 1/8 DCT scaling. No rayon: its threads would share the pool
+# the previews render on.
+jpeg-decoder = { version = "0.3.2", default-features = false }
 resvg = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
