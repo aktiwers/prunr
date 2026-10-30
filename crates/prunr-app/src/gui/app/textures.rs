@@ -140,9 +140,11 @@ impl PrunrApp {
                     }
                     let started = std::time::Instant::now();
                     let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
-                    let picture = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
-                    tracing::debug!(item_id, ms = started.elapsed().as_millis() as u64, "backdrop built");
-                    BackdropBuilt::Picture(picture.map(|rgba| PreparedImage::from_rgba(&rgba)), made)
+                    let picture = photo.load()
+                        .and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
+                        .map(|rgba| PreparedImage::from_rgba(&rgba));
+                    tracing::debug!(item_id, elapsed_ms = started.elapsed().as_millis() as u64, "backdrop built");
+                    BackdropBuilt::Picture(picture, made)
                 })
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,

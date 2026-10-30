@@ -98,7 +98,7 @@ pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Opt
 }
 
 /// A re-run's photo, upright; a decoded one's file is removed as read.
-pub fn read_photo(photo: &super::protocol::PhotoFile) -> Result<image::DynamicImage, String> {
+pub fn read_photo(photo: &super::protocol::PhotoFile, item_id: u64) -> Result<image::DynamicImage, String> {
     use super::protocol::PhotoFile;
     let started = std::time::Instant::now();
     let read = match photo {
@@ -110,7 +110,7 @@ pub fn read_photo(photo: &super::protocol::PhotoFile) -> Result<image::DynamicIm
             .map(image::DynamicImage::ImageRgba8)
             .ok_or_else(|| "The photo could not be read".to_string()),
     };
-    tracing::debug!(decoded = matches!(photo, PhotoFile::Decoded(_)), ms = started.elapsed().as_millis() as u64, "re-run photo read");
+    tracing::debug!(item_id, decoded = matches!(photo, PhotoFile::Decoded(_)), elapsed_ms = started.elapsed().as_millis() as u64, "re-run photo read");
     read
 }
 
@@ -207,10 +207,10 @@ mod tests {
         let decoded = dir.path().join("photo.raw");
         write_image(&decoded, &photo).unwrap();
         for file in [PhotoFile::Encoded(encoded), PhotoFile::Decoded(decoded.clone())] {
-            assert_eq!(read_photo(&file).expect("reads").to_rgba8(), photo, "{file:?}");
+            assert_eq!(read_photo(&file, 1).expect("reads").to_rgba8(), photo, "{file:?}");
         }
         assert!(!decoded.exists());
-        assert!(read_photo(&PhotoFile::Decoded(decoded)).is_err(), "gone");
+        assert!(read_photo(&PhotoFile::Decoded(decoded), 1).is_err(), "gone");
     }
 
     #[test]
