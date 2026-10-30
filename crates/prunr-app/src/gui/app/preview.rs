@@ -89,6 +89,9 @@ impl PrunrApp {
         } else if !live.works_on(id) {
             tracing::debug!(item_id = id, "recipe-drift tripwire fired — dispatching Tier-2");
             live.render_now(id, PreviewKind::Mask);
+            // Once for these settings: a render refused for memory never
+            // lands, and would be asked for every frame.
+            self.last_drift_check = Some((id, current_settings));
         }
     }
 
@@ -718,6 +721,20 @@ mod drift_tests {
         let mut app = drifted();
         app.recipe_drift_tripwire();
         assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
+    }
+
+    /// A render for the drift that ends without landing (refused for
+    /// memory) is not asked for again every frame; new settings ask again.
+    #[test]
+    fn a_drift_render_that_never_lands_is_asked_for_once() {
+        let mut app = drifted();
+        app.recipe_drift_tripwire();
+        app.processor.live_preview.cancel(1);
+        app.recipe_drift_tripwire();
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), None, "once for these settings");
+        app.batch.items[0].settings.gamma = 1.8;
+        app.recipe_drift_tripwire();
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true), "again for new ones");
     }
 }
 
