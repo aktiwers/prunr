@@ -25,31 +25,67 @@ use std::time::{Duration, Instant};
 use image::{GrayImage, RgbaImage};
 
 use prunr_core::depth::LineFade;
-use prunr_core::{LineMode, ModelKind, postprocess_from_flat, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
+use prunr_core::{LineMode, ModelKind, tensor_to_edge_mask, thickened_edges, compose_edges_styled, compose_edges_dual_styled};
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::worker::CompressedTensor;
 
-/// Run Tier 2 mask from the cached seg tensor, so SubjectOutline edges
-/// composite onto the masked subject instead of the raw photo. `None` on
-/// failure; the caller falls back to the raw original.
-fn build_masked_base(
-    seg: &SegTensor,
-    original: &RgbaImage,
-    settings: &ItemSettings,
-    correction: Option<&prunr_core::selection::MaskArtifact>,
-) -> Result<RgbaImage, String> {
-    let mask_settings = settings.mask_settings();
-    let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
-        .with_correction(correction);
-    postprocess_from_flat(
-        &seg.data,
-        seg.height as usize,
-        seg.width as usize,
-        original,
-        &opts,
-    )
-    .map_err(|e| e.message())
+/// The mask of the last full-size cut-out a render made, kept so a
+/// change of the look alone (effect, decoration) finishes from it instead
+/// of making it again: w·h bytes held.
+#[derive(Clone)]
+pub(crate) struct KeptAlpha {
+    mask: Arc<GrayImage>,
+    made_of: AlphaMadeOf,
+}
+
+/// What a mask is made of. The weak references hold the allocations, so
+/// an equal address is the same value, never a new one at a freed address.
+#[derive(Clone)]
+struct AlphaMadeOf {
+    recipe: prunr_core::MaskRecipe,
+    seg: std::sync::Weak<SegTensor>,
+    photo: std::sync::Weak<RgbaImage>,
+    correction: Option<std::sync::Weak<prunr_core::selection::MaskArtifact>>,
+}
+
+impl AlphaMadeOf {
+    fn of(inputs: &DispatchInputs, seg: &Arc<SegTensor>, settings: &prunr_core::MaskSettings) -> Self {
+        let correction = match &inputs.correction {
+            Some(crate::gui::item::Correction::Ready(plane)) => Some(Arc::downgrade(plane)),
+            _ => None,
+        };
+        Self {
+            recipe: prunr_core::MaskRecipe::from(settings).alpha_part(),
+            seg: Arc::downgrade(seg),
+            photo: Arc::downgrade(&inputs.original),
+            correction,
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        let same_correction = match (&self.correction, &other.correction) {
+            (Some(a), Some(b)) => a.ptr_eq(b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        self.recipe == other.recipe && self.seg.ptr_eq(&other.seg) && self.photo.ptr_eq(&other.photo) && same_correction
+    }
+}
+
+/// The cut-out of `inputs.original` by `seg`: finished from the kept mask
+/// when only the look changed since it was made, else from a new mask,
+/// which comes back to keep (not a quick frame's, made small).
+fn cut_out(inputs: &DispatchInputs, seg: &Arc<SegTensor>) -> Result<(RgbaImage, Option<KeptAlpha>), String> {
+    let settings = inputs.settings.mask_settings();
+    let made_of = AlphaMadeOf::of(inputs, seg, &settings);
+    if let Some(kept) = inputs.kept_alpha.as_ref().filter(|kept| kept.made_of.same(&made_of)) {
+        return Ok((prunr_core::finish_with_mask(&inputs.original, &kept.mask, &settings), None));
+    }
+    let opts = prunr_core::PostprocessOpts::new(&settings, seg.model).with_correction(inputs.correction_plane());
+    let mask = prunr_core::mask_from_flat(&seg.data, seg.height as usize, seg.width as usize, &inputs.original, &opts)
+        .map_err(|e| e.message())?;
+    let rgba = prunr_core::finish_with_mask(&inputs.original, &mask, &settings);
+    Ok((rgba, (!inputs.quick).then(|| KeptAlpha { mask: Arc::new(mask), made_of })))
 }
 
 /// Throttle cadence during a continuous drag, and the shortest wait
@@ -142,6 +178,8 @@ pub struct PreviewResult {
     /// Masked subject base built here (SubjectOutline only), for the parent
     /// to cache keyed by (MaskRecipe, model).
     pub new_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
+    /// The cut-out's mask made here, for the item to keep.
+    pub(crate) new_alpha: Option<KeptAlpha>,
     /// The upscale reference an UpscaleTier2 dispatch built, for the kept
     /// upscale run.
     pub new_reference: Option<Arc<prunr_core::upscale::Reference>>,
@@ -527,6 +565,7 @@ impl LivePreview {
                     item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                     cutter: seg_model.map(crate::gui::item::Cutter::Model),
                     new_edge, new_bold, new_masked_base,
+                    new_alpha: output.built_alpha,
                     new_reference: output.built_reference,
                     new_faced: output.built_faced.zip(faced_key),
                     new_depth_photo: output.built_depth_photo,
@@ -669,6 +708,8 @@ pub struct DispatchInputs {
     /// SubjectOutline masked base from a dispatch with the same mask recipe,
     /// so Edge tweaks skip Lanczos + guided filter.
     pub cached_masked_base: Option<Arc<image::RgbaImage>>,
+    /// The item's kept mask, used when it was made of what this render's is.
+    pub(crate) kept_alpha: Option<KeptAlpha>,
     /// The item's selection, applied to the segmentation mask before the
     /// resize / refine / feather chain (resampled to tensor resolution
     /// inline). `None` when nothing is selected. Built on the render's
@@ -756,6 +797,7 @@ impl DispatchInputs {
             cached_edge: EdgePlanes::default(),
             cached_bold: EdgePlanes::default(),
             cached_masked_base: None,
+            kept_alpha: None,
             correction: None,
             upscale: None,
             colorize: None,
@@ -945,6 +987,7 @@ struct RunOutput {
     built_edge: EdgePlanes,
     built_bold: EdgePlanes,
     built_masked_base: Option<Arc<image::RgbaImage>>,
+    built_alpha: Option<KeptAlpha>,
     built_reference: Option<Arc<prunr_core::upscale::Reference>>,
     built_faced: Option<Arc<RgbaImage>>,
     built_depth_photo: Option<(Arc<RgbaImage>, crate::gui::item::DepthPhotoKey)>,
@@ -1148,24 +1191,24 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
     // SubjectOutline's masked base: a Mask kind rebuilds it (its settings
     // just changed); an Edge kind reuses the cached one. A new one goes back
     // for caching.
-    let (masked_base, built_masked_base) = if is_subject_outline {
+    let ((masked_base, built_masked_base), built_alpha) = if is_subject_outline {
         let fresh_base = || {
             // invariant: is_subject_outline → seg_tensor is Some.
             let seg = inputs.seg_tensor.as_ref().unwrap();
-            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane()).map(|img| {
+            cut_out(&inputs, seg).map(|(img, alpha)| {
                 let arc = Arc::new(img);
-                (Some(Arc::clone(&arc)), Some(arc))
+                ((Some(Arc::clone(&arc)), Some(arc)), alpha)
             })
         };
         let base = inputs.cached_masked_base.clone()
             .filter(|_| inputs.kind == PreviewKind::Edge)
-            .map_or_else(fresh_base, |cached| Ok((Some(cached), None)));
+            .map_or_else(fresh_base, |cached| Ok(((Some(cached), None), None)));
         match base {
             Ok(base) => base,
             Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
         }
     } else {
-        (None, None)
+        ((None, None), None)
     };
 
     match inputs.kind {
@@ -1179,11 +1222,10 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
-                let masked = match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane()) {
-                    Ok(masked) => masked,
-                    Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
+                return match cut_out(&inputs, seg) {
+                    Ok((masked, built_alpha)) => RunOutput { rgba: Some(Arc::new(masked)), built_alpha, ..RunOutput::default() },
+                    Err(why) => RunOutput { refused: Some(why), ..RunOutput::default() },
                 };
-                return RunOutput { rgba: Some(Arc::new(masked)), ..RunOutput::default() };
             }
             // SubjectOutline: compose subject + edges; no model run.
             let Some(base_arc) = masked_base else { return RunOutput::default(); };
@@ -1198,7 +1240,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold,
                 out_dims, fade,
             );
-            RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, ..RunOutput::default() }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_masked_base, built_alpha, ..RunOutput::default() }
         }
         PreviewKind::Edge => {
             let Some(edge) = inputs.edge_tensor.as_ref() else { return RunOutput::default(); };
@@ -1225,7 +1267,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 &mask, &base, &compose_settings,
                 inputs.secondary_edge_tensor.as_ref(), &inputs.cached_bold, out_dims, fade,
             );
-            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, ..RunOutput::default() }
+            RunOutput { rgba: Some(Arc::new(rgba)), built_edge, built_bold, built_masked_base, built_alpha, ..RunOutput::default() }
         }
         PreviewKind::UpscaleTier2 | PreviewKind::ColorizeTier2 | PreviewKind::Photo => unreachable!("run_preview finishes these kinds itself"),
     }
@@ -1341,7 +1383,7 @@ impl PreviewResult {
     pub(crate) fn mask_for_test(item_id: u64, rgba: Arc<RgbaImage>) -> Self {
         Self {
             item_id, rgba, kind: PreviewKind::Mask, generation: 0, version: 0, start: None, cutter: None,
-            new_edge: None, new_bold: None, new_masked_base: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_start: None, new_correction: None, unpacked: Unpacked::default(),
+            new_edge: None, new_bold: None, new_masked_base: None, new_alpha: None, new_reference: None, new_faced: None, new_depth_photo: None, new_quick_photo: None, new_start: None, new_correction: None, unpacked: Unpacked::default(),
             applied_depth: Default::default(),
             applied_mask: prunr_core::MaskRecipe::from(&prunr_core::MaskSettings::default()),
             applied_tier2_knobs: None, applied_color_strength: None, is_final: true, quick: false,
@@ -2140,6 +2182,43 @@ mod tests {
                 *kept = out.built_quick_photo.or(kept.take());
             }
         }
+    }
+
+    /// A change of the look alone finishes from the kept mask, to the
+    /// same cut-out; a mask knob, another photo or another segmentation
+    /// makes the mask again, and a quick frame's is not kept.
+    #[test]
+    fn a_look_change_finishes_from_the_kept_mask() {
+        use crate::gui::item_settings::ItemSettings;
+        let photo = Arc::new(RgbaImage::from_fn(16, 12, |x, y| image::Rgba([(x * 9) as u8, (y * 13) as u8, 70, 255])));
+        let seg = Arc::new(SegTensor { data: (0..64).map(|i| (i % 8) as f32 / 8.0).collect(), height: 8, width: 8, model: ModelKind::Silueta });
+        let base = ItemSettings { gamma: 1.4, feather: 1.0, refine_edges: true, ..ItemSettings::default() };
+        let inputs = |settings: ItemSettings, photo: &Arc<RgbaImage>, seg: &Arc<SegTensor>, kept: Option<KeptAlpha>| DispatchInputs {
+            seg_tensor: Some(Arc::clone(seg)),
+            kept_alpha: kept,
+            ..DispatchInputs::new(PreviewKind::Mask, 0, Arc::clone(photo), settings)
+        };
+        let (_, kept) = cut_out(&inputs(base, &photo, &seg, None), &seg).expect("cut");
+        let kept = kept.expect("a full-size mask is kept");
+
+        let sepia = ItemSettings { effect: prunr_core::SubjectEffect::Sepia, ..base };
+        let (reused, again) = cut_out(&inputs(sepia, &photo, &seg, Some(kept.clone())), &seg).expect("cut");
+        assert!(again.is_none(), "the look alone: the kept mask");
+        let (whole, _) = cut_out(&inputs(sepia, &photo, &seg, None), &seg).expect("cut");
+        assert_eq!(reused, whole, "the same cut-out as made whole");
+
+        let other_photo = Arc::new((*photo).clone());
+        let other_seg = Arc::new(SegTensor { data: seg.data.clone(), ..*seg });
+        for (settings, photo, seg, what) in [
+            (ItemSettings { gamma: 2.0, ..sepia }, &photo, &seg, "a mask knob"),
+            (sepia, &other_photo, &seg, "another photo"),
+            (sepia, &photo, &other_seg, "another segmentation"),
+        ] {
+            let (_, made) = cut_out(&inputs(settings, photo, seg, Some(kept.clone())), seg).expect("cut");
+            assert!(made.is_some(), "{what}: made again");
+        }
+        let quick = DispatchInputs { quick: true, ..inputs(base, &photo, &seg, None) };
+        assert!(cut_out(&quick, &seg).expect("cut").1.is_none(), "a quick frame's mask is not kept");
     }
 
     /// What a 24 MP cut-out costs per drag frame, quick and settled.

@@ -1004,6 +1004,8 @@ pub(crate) struct BatchItem {
     /// edges draw onto, keyed by mask recipe and model: an Edge-only tick
     /// reuses it and skips ~50-100 ms of Lanczos + guided filter.
     pub(crate) cached_masked_base: Option<(Arc<image::RgbaImage>, prunr_core::MaskRecipe, prunr_core::ModelKind)>,
+    /// The cut-out's mask a render made, for a change of its look alone.
+    pub(crate) kept_alpha: Option<super::live_preview::KeptAlpha>,
     /// The preset last applied (dropdown or Reset All); the preset button
     /// compares `settings` against it, and it stays across later tweaks.
     pub(crate) applied_preset: String,
@@ -1185,7 +1187,7 @@ impl BatchItem {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
         self.adjusting = None;
-        super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take()));
+        super::reclaim::later((std::mem::take(&mut self.edge_planes), self.cached_masked_base.take(), self.start_photo.take(), self.kept_alpha.take()));
         self.drop_correction_cache();
     }
 
@@ -2546,6 +2548,7 @@ impl BatchItem {
     pub(crate) fn faces_changed(&mut self) {
         self.faced_photo = None;
         self.cached_masked_base = None;
+        self.kept_alpha = None;
     }
 
     /// The face search `photo` needs, if any: Restore faces is on and
@@ -2710,6 +2713,7 @@ impl BatchItem {
                     self.cached_edge_tensors = Some(new);
                 }
                 self.cached_masked_base = None;
+                self.kept_alpha = None;
                 // source_rgba stays on every item: live preview re-cuts from it.
                 // Tier 2 reruns report empty active_provider (no inference ran).
                 (!pr.active_provider.is_empty()).then_some(pr.active_provider)
@@ -2944,6 +2948,7 @@ impl BatchItem {
             volatile_seg_tensor: None,
             edge_planes: Default::default(),
             cached_masked_base: None,
+            kept_alpha: None,
             applied_preset,
             bg_image: None,
             backdrop_texture: None,

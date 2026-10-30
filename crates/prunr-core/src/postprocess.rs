@@ -36,9 +36,38 @@ impl<'a> PostprocessOpts<'a> {
 pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba, opts: &PostprocessOpts<'_>) -> RgbaImage {
     let mut rgba = original.as_rgba().into_owned();
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
-    apply_mask_inplace(&mut rgba, &mask);
-    apply_subject_effect(&mut rgba, opts.mask_settings.effect);
-    crate::decorate::apply_decoration(&mut rgba, &opts.mask_settings.decoration);
+    finish_into(&mut rgba, &mask, opts.mask_settings);
+    rgba
+}
+
+/// The cut-out's look on a photo already cut: `mask` as its alpha, then
+/// the subject effect and the decoration.
+fn finish_into(rgba: &mut RgbaImage, mask: &GrayImage, settings: &MaskSettings) {
+    apply_mask_inplace(rgba, mask);
+    apply_subject_effect(rgba, settings.effect);
+    crate::decorate::apply_decoration(rgba, &settings.decoration);
+}
+
+/// `postprocess_from_flat` up to its mask, for a caller that keeps it:
+/// a change of the look alone (`MaskRecipe::alpha_part` unchanged) then
+/// finishes from it with `finish_with_mask`. Refused as that is.
+pub fn mask_from_flat(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: &RgbaImage,
+    opts: &PostprocessOpts<'_>,
+) -> Result<GrayImage, crate::types::CoreError> {
+    crate::pipeline::room_for_postprocess(original.width(), original.height(), opts.mask_settings.refine_edges)?;
+    Ok(tensor_to_mask_with_rgba(flat_view(tensor, tensor_h, tensor_w)?, original, opts))
+}
+
+/// The cut-out of `original` from a mask `mask_from_flat` made, with
+/// `settings`' look. Peak working set: the output (w·h·4 bytes) and what
+/// the decoration takes.
+pub fn finish_with_mask(original: &RgbaImage, mask: &GrayImage, settings: &MaskSettings) -> RgbaImage {
+    let mut rgba = original.clone();
+    finish_into(&mut rgba, mask, settings);
     rgba
 }
 
@@ -1026,6 +1055,28 @@ mod tests {
         let flat_mask = tensor_to_mask_from_flat(&flat, 320, 320, &original, &opts)
             .expect("flat path succeeds");
         assert_eq!(view_mask.as_raw(), flat_mask.as_raw());
+    }
+
+    /// Finishing from the kept mask makes the same cut-out as the whole
+    /// pass, whatever the look.
+    #[test]
+    fn a_cut_out_finished_from_its_mask_is_the_whole_pass() {
+        let flat: Vec<f32> = (0..64 * 64).map(|i| (i % 64) as f32 / 64.0).collect();
+        let original = RgbaImage::from_fn(96, 80, |x, y| image::Rgba([(x * 2) as u8, (y * 3) as u8, 90, 255]));
+        let looks = [
+            MaskSettings { refine_edges: true, feather: 1.5, ..MaskSettings::default() },
+            MaskSettings { effect: crate::types::SubjectEffect::Sepia, ..MaskSettings::default() },
+            MaskSettings {
+                decoration: crate::types::Decoration { outline_width: 2.0, shadow: crate::types::ShadowKind::Drop, ..Default::default() },
+                ..MaskSettings::default()
+            },
+        ];
+        for settings in looks {
+            let opts = PostprocessOpts::new(&settings, ModelKind::Silueta);
+            let whole = postprocess_from_flat(&flat, 64, 64, &original, &opts).expect("fits");
+            let mask = mask_from_flat(&flat, 64, 64, &original, &opts).expect("fits");
+            assert_eq!(finish_with_mask(&original, &mask, &settings), whole, "{settings:?}");
+        }
     }
 
     #[test]
