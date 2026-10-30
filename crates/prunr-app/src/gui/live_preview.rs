@@ -38,7 +38,7 @@ fn build_masked_base(
     original: &RgbaImage,
     settings: &ItemSettings,
     correction: Option<&prunr_core::selection::MaskArtifact>,
-) -> Option<RgbaImage> {
+) -> Result<RgbaImage, String> {
     let mask_settings = settings.mask_settings();
     let opts = prunr_core::PostprocessOpts::new(&mask_settings, seg.model)
         .with_correction(correction);
@@ -49,7 +49,7 @@ fn build_masked_base(
         original,
         &opts,
     )
-    .ok()
+    .map_err(|e| e.message())
 }
 
 /// Throttle cadence during a continuous drag, and the shortest wait
@@ -288,6 +288,10 @@ pub struct LivePreview {
     result_tx: mpsc::Sender<Finished>,
     result_rx: mpsc::Receiver<Finished>,
     clock: Arc<dyn Clock>,
+    /// Why each image's latest render was refused, until one lands.
+    refused: HashMap<u64, String>,
+    /// Refusals not yet told.
+    untold: Vec<String>,
 }
 
 /// A dispatch that ran to its end: its result, or `None` when it could
@@ -297,6 +301,9 @@ pub(crate) struct Finished {
     item_id: u64,
     generation: u64,
     result: Option<PreviewResult>,
+    /// Why it made none, when that is for the person to know (a photo too
+    /// large for the memory free).
+    refused: Option<String>,
 }
 
 impl Default for LivePreview {
@@ -317,6 +324,8 @@ impl LivePreview {
             result_tx: tx,
             result_rx: rx,
             clock,
+            refused: HashMap::new(),
+            untold: Vec::new(),
         }
     }
 
@@ -488,8 +497,12 @@ impl LivePreview {
                 if cancel.load(Ordering::Acquire) {
                     return;
                 }
-                let Some((rgba, output)) = output.and_then(|mut output| Some((output.rgba.take()?, output))) else {
-                    let _ = tx.send(Finished { item_id: id, generation, result: None });
+                let Some(mut output) = output else {
+                    let _ = tx.send(Finished { item_id: id, generation, result: None, refused: None });
+                    return;
+                };
+                let Some(rgba) = output.rgba.take() else {
+                    let _ = tx.send(Finished { item_id: id, generation, result: None, refused: output.refused.take() });
                     return;
                 };
                 let new_edge = is_edge.then_some((output.built_edge, primary_key));
@@ -498,7 +511,7 @@ impl LivePreview {
                     .zip(seg_model)
                     .map(|(base, model)| (base, mask_recipe, model));
                 // `is_final` is set in `drain_results`, which can read `self.pending`.
-                let _ = tx.send(Finished { item_id: id, generation, result: Some(PreviewResult {
+                let _ = tx.send(Finished { item_id: id, generation, refused: None, result: Some(PreviewResult {
                     item_id: id, rgba, kind: dispatch_kind, generation, version, start,
                     cutter: seg_model.map(crate::gui::item::Cutter::Model),
                     new_edge, new_bold, new_masked_base,
@@ -538,12 +551,25 @@ impl LivePreview {
                 continue;
             }
             self.in_flight.remove(&done.item_id);
+            if let Some(why) = done.refused {
+                if self.refused.get(&done.item_id) != Some(&why) {
+                    self.untold.push(why.clone());
+                    self.refused.insert(done.item_id, why);
+                }
+            }
             if let Some(mut r) = done.result {
+                self.refused.remove(&r.item_id);
                 r.is_final = !self.pending.contains_key(&r.item_id) && !self.owed.contains_key(&r.item_id);
                 out.push(r);
             }
         }
         out
+    }
+
+    /// Why renders were refused since last asked: once per image until
+    /// one of its renders lands, so a drag does not repeat it every frame.
+    pub(crate) fn take_refusals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.untold)
     }
 
     /// The images with a render queued that reads the photo (not a Refine
@@ -914,6 +940,7 @@ struct RunOutput {
     built_start: Option<Arc<RgbaImage>>,
     built_correction: Option<crate::gui::item::BuiltCorrection>,
     unpacked: Unpacked,
+    refused: Option<String>,
 }
 
 /// Tensors a render unpacks on its thread: the segmentation, and of the
@@ -1113,15 +1140,18 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
         let fresh_base = || {
             // invariant: is_subject_outline → seg_tensor is Some.
             let seg = inputs.seg_tensor.as_ref().unwrap();
-            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
-                .map_or((None, None), |img| {
-                    let arc = Arc::new(img);
-                    (Some(Arc::clone(&arc)), Some(arc))
-                })
+            build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane()).map(|img| {
+                let arc = Arc::new(img);
+                (Some(Arc::clone(&arc)), Some(arc))
+            })
         };
-        inputs.cached_masked_base.clone()
+        let base = inputs.cached_masked_base.clone()
             .filter(|_| inputs.kind == PreviewKind::Edge)
-            .map_or_else(fresh_base, |cached| (Some(cached), None))
+            .map_or_else(fresh_base, |cached| Ok((Some(cached), None)));
+        match base {
+            Ok(base) => base,
+            Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
+        }
     } else {
         (None, None)
     };
@@ -1137,8 +1167,10 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
                 // Off mode with seg tensor: rebuild masked RGBA (no edge compose).
-                let Some(masked) = build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane())
-                else { return RunOutput::default(); };
+                let masked = match build_masked_base(seg, &inputs.original, &inputs.settings, inputs.correction_plane()) {
+                    Ok(masked) => masked,
+                    Err(why) => return RunOutput { refused: Some(why), ..RunOutput::default() },
+                };
                 return RunOutput { rgba: Some(Arc::new(masked)), ..RunOutput::default() };
             }
             // SubjectOutline: compose subject + edges; no model run.
@@ -1368,10 +1400,30 @@ mod tests {
         cancel
     }
 
+    /// A render refused for memory is told once per image, also when the
+    /// drag refuses it again, until one of its renders lands.
+    #[test]
+    fn a_refused_render_is_told_once_until_one_lands() {
+        let mut lp = LivePreview::default();
+        let refuse = |lp: &mut LivePreview, generation: u64| {
+            in_flight(lp, 7, generation);
+            lp.result_tx.send(Finished { item_id: 7, generation, result: None, refused: Some("too large".into()) }).unwrap();
+            lp.drain_results();
+        };
+        refuse(&mut lp, 1);
+        refuse(&mut lp, 2);
+        assert_eq!(lp.take_refusals(), vec!["too large".to_string()]);
+        in_flight(&mut lp, 7, 3);
+        send_result(&lp, 7, 3);
+        assert_eq!(lp.drain_results().len(), 1);
+        refuse(&mut lp, 4);
+        assert_eq!(lp.take_refusals(), vec!["too large".to_string()], "after a render landed, told again");
+    }
+
     /// A worker's non-final Mask result for item `id` under `generation`.
     fn send_result(lp: &LivePreview, id: u64, generation: u64) {
         let result = PreviewResult { generation, is_final: false, ..PreviewResult::mask_for_test(id, Arc::new(RgbaImage::new(1, 1))) };
-        lp.result_tx.send(Finished { item_id: id, generation, result: Some(result) }).unwrap();
+        lp.result_tx.send(Finished { item_id: id, generation, result: Some(result), refused: None }).unwrap();
     }
 
     #[test]
