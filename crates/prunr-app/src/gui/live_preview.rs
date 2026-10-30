@@ -736,7 +736,7 @@ impl DispatchInputs {
             PreviewKind::Mask | PreviewKind::Edge => self.original_from.as_ref()
                 .map_or(self.original.dimensions(), |from| from.dims()),
             PreviewKind::UpscaleTier2 if self.faces.is_some() => return false,
-            PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dimensions()),
+            PreviewKind::UpscaleTier2 => self.upscale.as_ref().map_or((0, 0), |u| u.raw.dims()),
             PreviewKind::ColorizeTier2 => self.colorize.as_ref().map_or((0, 0), |c| c.input.dimensions()),
             PreviewKind::Photo => return false,
         };
@@ -952,18 +952,23 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             tracing::debug!(event = "upscale_tier2_run_abort", reason = "no upscale run kept");
             return RunOutput::default();
         };
+        // Read back here when memory ran low while the image was off screen.
+        let Some(full) = upscale.raw.load() else {
+            tracing::warn!(event = "upscale_tier2_run_abort", reason = "the kept upscale could not be read back");
+            return RunOutput::default();
+        };
         let knobs = inputs.settings.upscale_refine();
         if inputs.quick {
             // Sharpen's radius is in output pixels; the plain enlargement
             // is made at the frame's size and not kept.
-            let (raw, built_quick_photo) = QuickPhoto::shrink(&upscale.raw, inputs.quick_photo.as_ref());
-            let knobs = prunr_core::upscale::Refine { sharpen_sigma: knobs.sharpen_sigma * raw.width() as f32 / upscale.raw.width() as f32, ..knobs };
+            let (raw, built_quick_photo) = QuickPhoto::shrink(&full, inputs.quick_photo.as_ref());
+            let knobs = prunr_core::upscale::Refine { sharpen_sigma: knobs.sharpen_sigma * raw.width() as f32 / full.width() as f32, ..knobs };
             let (shown, _) = prunr_core::upscale::refine(&raw, &upscale.input, None, &knobs);
             return RunOutput { rgba: Some(shown), built_quick_photo, ..RunOutput::default() };
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
-        let (shown, reference) = finish_upscale(&upscale.raw, &upscale.input, upscale.reference, &knobs, faces);
+        let (shown, reference) = finish_upscale(&full, &upscale.input, upscale.reference, &knobs, faces);
         let built_reference = reference.filter(|_| !had_reference);
         return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::default() };
     }
@@ -1854,6 +1859,27 @@ mod tests {
         assert!(output.rgba.is_some(), "UpscaleTier2 dispatch must produce an RGBA result");
         assert!(output.built_edge.dilated.is_none(), "UpscaleTier2 must not build an edge mask");
         assert!(output.built_masked_base.is_none(), "UpscaleTier2 must not build a masked base");
+    }
+
+    /// A Refine render of a run parked on disk (memory ran low while its
+    /// image was off screen) reads it back and draws what the resident
+    /// run draws.
+    #[test]
+    fn a_refine_render_reads_a_parked_upscale_back() {
+        use crate::gui::item_settings::ItemSettings;
+        let raw = Arc::new(RgbaImage::from_fn(6, 6, |x, y| image::Rgba([(x * 40) as u8, (y * 40) as u8, 90, 255])));
+        let input = Arc::new(RgbaImage::from_pixel(3, 3, image::Rgba([60, 60, 60, 255])));
+        let settings = ItemSettings { sharpen: 0.4, ai_blend: 0.5, color_match: false, ..ItemSettings::default() };
+        let render_of = |run: crate::gui::item::UpscaleCache| {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            run_preview(DispatchInputs { upscale: Some(run), ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&raw), settings) }, &cancel).rgba
+        };
+        let resident = render_of(crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None));
+        let mut parked = crate::gui::item::UpscaleCache::new(Arc::new((*raw).clone()), Arc::clone(&input), None);
+        parked.park().expect("nothing else holds the run")();
+        assert!(parked.raw.demote_to_disk());
+        assert_eq!(render_of(parked), resident);
+        assert!(resident.is_some());
     }
 
     /// A render from packed tensors unpacks them on its thread and draws
