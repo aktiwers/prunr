@@ -574,16 +574,6 @@ fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
 }
 
 impl Cli {
-    /// `-j`, or what the app runs at once with this model where it runs.
-    pub fn jobs(&self) -> usize {
-        self.jobs.unwrap_or_else(|| {
-            let model: ModelKind = self.model.into();
-            let id = model.model_id();
-            let on_cpu = self.cpu || prunr_core::engine::model_on_host_cpu(id, prunr_core::memory::provider_for(id, self.cpu));
-            prunr_app::gui::memory::default_jobs(Some(model), on_cpu, self.cpu)
-        })
-    }
-
     /// Whether this run writes to the terminal it was started from. A
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
@@ -1224,7 +1214,7 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
         }
     };
     run_batch_subprocess(
-        &mut to_send, &valid_indices, model, args.jobs(), mask, args.cpu,
+        &mut to_send, &valid_indices, model, args.jobs, mask, args.cpu,
         lines, &backdrop,
         &spinners_arc, &inputs_arc, quiet, &mut land,
     );
@@ -1255,7 +1245,7 @@ fn run_batch_subprocess(
     to_send: &mut [ToSend],
     valid_indices: &[usize],
     model: ModelKind,
-    initial_jobs: usize,
+    jobs: Option<usize>,
     mask: MaskSettings,
     cpu_only: bool,
     lines: prunr_app::subprocess::manager::WorkerLines,
@@ -1275,7 +1265,10 @@ fn run_batch_subprocess(
         land(idx, result);
     };
     let mut pending: std::collections::VecDeque<usize> = (0..to_send.len()).collect();
-    let mut max_jobs = initial_jobs;
+    // Without -j, the app's default: the processor's until the worker
+    // names a graphics card, so this process never probes for one.
+    let default_on = |on_host_cpu| prunr_app::gui::memory::default_jobs(Some(model), on_host_cpu, cpu_only);
+    let mut max_jobs = jobs.unwrap_or_else(|| default_on(true));
 
     // Inverse index: orig_idx (item_id cast to usize) → batch_results slot,
     // so each event finds its slot without scanning valid_indices.
@@ -1289,7 +1282,7 @@ fn run_batch_subprocess(
         if pending.is_empty() { break; }
 
         let effective_jobs = max_jobs.min(pending.len());
-        let (mut sub, _provider) = match SubprocessManager::spawn(
+        let (mut sub, provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, cpu_only, lines,
         ) {
             Ok(s) => s,
@@ -1300,6 +1293,9 @@ fn run_batch_subprocess(
                 break;
             }
         };
+        if jobs.is_none() && !prunr_core::engine::runs_on_host_cpu(&provider) {
+            max_jobs = max_jobs.min(default_on(false));
+        }
 
         let mut in_flight: Vec<usize> = Vec::new();
         let mut last_event_at = Instant::now();
@@ -1782,7 +1778,7 @@ mod tests {
     #[test]
     fn zero_jobs_is_refused() {
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "-j", "0"]).is_err());
-        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "-j", "3"]).jobs(), 3);
+        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "-j", "3"]).jobs, Some(3));
         assert_eq!(super::Cli::parse_from(["prunr", "a.png", "--cpu"]).jobs, None, "no -j: the app's default");
     }
 
