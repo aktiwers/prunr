@@ -241,6 +241,16 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
 }
 
 /// The page list, and Reset to defaults at its foot.
+/// The note for an SD eraser that runs without the tall crop.
+fn no_tall_crop_text() -> &'static str {
+    use prunr_core::inpaint_sd::one_crop_side;
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| format!(
+        "runs, but at Auto fill scale an area over {} px is filled smaller. Close other apps to fill up to {} px at full size",
+        one_crop_side(false), one_crop_side(true),
+    ))
+}
+
 fn render_sidebar(ui: &mut egui::Ui, app: &mut PrunrApp, height: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
     let painter = ui.painter();
@@ -503,28 +513,21 @@ pub(crate) fn render_page_hardware(ui: &mut egui::Ui, ctx: &HardwareSectionConte
         kv(ui, "RAM", &format!("{:.1} / {:.1} GB free", avail_ram as f64 / 1e9, total_ram as f64 / 1e9));
 
         // The same rule as the gate an erase passes, with the user's margin.
-        use prunr_core::inpaint_sd::{one_crop_side, sd_ram_fit, SdRamFit};
+        use prunr_core::inpaint_sd::{sd_ram_fit, SdRamFit};
         for (name, id) in ctx.installs.sd_erasers() {
             let Some((bundle, room)) = hardware::charge_and_room(id, ctx.cpu_only) else { continue };
             let (color, fit) = match sd_ram_fit(id, room, ctx.sd_margin_mb, bundle) {
-                SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free".into()),
-                SdRamFit::NoTallCrop => (
-                    theme::ADVISORY_TEXT,
-                    format!(
-                        "runs, but at Auto fill scale an area over {} px is filled smaller. Close other apps to fill up to {} px at full size",
-                        one_crop_side(false), one_crop_side(true),
-                    ).into(),
-                ),
+                SdRamFit::Full => (Color32::from_rgb(0x6c, 0xd1, 0x6c), "enough memory free"),
+                SdRamFit::NoTallCrop => (theme::ADVISORY_TEXT, no_tall_crop_text()),
                 SdRamFit::Refused => (
                     Color32::from_rgb(0xd8, 0x6e, 0x6e),
-                    "not enough memory free. Close other apps or use Big-LaMa".into(),
+                    "not enough memory free. Close other apps or use Big-LaMa",
                 ),
                 SdRamFit::CardFull => (
                     Color32::from_rgb(0xd8, 0x6e, 0x6e),
-                    "not enough free memory on the graphics card. Close apps that use it or use Big-LaMa".into(),
+                    "not enough free memory on the graphics card. Close apps that use it or use Big-LaMa",
                 ),
             };
-            let fit: std::borrow::Cow<'static, str> = fit;
             ui.horizontal(|ui| {
                 ui.set_min_height(28.0);
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
