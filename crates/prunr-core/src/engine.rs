@@ -1247,24 +1247,28 @@ pub fn gpu_providers_now() -> Option<Vec<&'static str>> {
     OrtEngine::probed().then(|| available_gpu_eps().iter().map(|ep| ep.as_str()).collect())
 }
 
-/// The lighter copy of `id`'s weights a session tries before its own,
-/// when one is on disk: FP16 on a GPU in `eps` that gains from it (for a
-/// model that keeps it for small cards, only when its own weights do not
-/// fit the card), INT8 on the CPU. Never on macOS, where CoreML converts
-/// to FP16 itself.
-fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) -> Option<Weights> {
+/// The lighter copy of `id`'s weights on disk a session may try before
+/// its own: FP16 on a GPU in `eps` that gains from it, INT8 on the CPU.
+/// Never on macOS, where CoreML converts to FP16 itself.
+fn lighter_copy(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) -> Option<Weights> {
     if cfg!(target_os = "macos") {
-        return None;
+        None
+    } else if cpu_only {
+        prunr_models::has_int8_variant(id).then_some(Weights::Int8)
+    } else {
+        (prunr_models::has_fp16_variant(id) && !fp16_eps(id, eps).is_empty()).then_some(Weights::Fp16)
     }
-    if cpu_only {
-        return prunr_models::has_int8_variant(id).then_some(Weights::Int8);
-    }
-    let gains = fp16_eps(id, eps);
-    let half = match prunr_models::half_precision_copy(id) {
-        Some(_) => gains.first().is_some_and(|ep| crate::memory::runs_half_precision(id, ep.as_str(), crate::memory::card_free_mb(ep.as_str()))),
-        None => prunr_models::has_fp16_variant(id) && !gains.is_empty(),
-    };
-    half.then_some(Weights::Fp16)
+}
+
+/// `lighter_copy` as a session built now takes it: a copy kept for small
+/// cards only where the card cannot hold the model's own weights. Reads
+/// the card, so only a session build asks.
+fn lighter_weights(id: prunr_models::ModelId, cpu_only: bool, eps: &[EpKind]) -> Option<Weights> {
+    lighter_copy(id, cpu_only, eps).filter(|&weights| {
+        weights != Weights::Fp16
+            || prunr_models::half_precision_copy(id).is_none()
+            || fp16_eps(id, eps).first().is_some_and(|ep| crate::memory::copy_in_use(id, ep.as_str(), || crate::memory::card_free_mb(ep.as_str())).is_some())
+    })
 }
 
 /// The providers in `eps` where `id` gains from its FP16 copy. One on the
@@ -1282,7 +1286,7 @@ fn gpu_skip(model: prunr_models::ModelId, ep: EpKind, remeasuring: bool) -> Opti
         return Some(Skip::KeptOff(why));
     }
     let intel_gpu = asks_intel_gpu_as(ep, model, remeasuring);
-    [lighter_weights(model, false, &[ep]), Some(Weights::Fp32)].into_iter().flatten()
+    [lighter_copy(model, false, &[ep]), Some(Weights::Fp32)].into_iter().flatten()
         .all(|weights| crate::ep_compat::is_known_failure(ep, model, weights, intel_gpu))
         .then_some(Skip::FailedBefore)
 }

@@ -17,13 +17,25 @@ impl Charge {
     /// `needs` on `provider`.
     pub fn of(needs: &Needs, provider: &str) -> Self {
         match needs.on(provider) {
-            Priced::Same(cost) => Self { ram_mb: cost.host_mb.into(), card_mb: cost.card_mb.into() },
+            Priced::Same(cost) => cost.into(),
             Priced::Unmeasured => Self { ram_mb: needs.host_cpu().host_mb.into(), card_mb: 0 },
         }
     }
 
     pub fn on_card(self) -> bool {
         self.card_mb > 0
+    }
+
+    /// What must be free on the card for it: its own memory and the
+    /// desktop's reserve.
+    fn card_need_mb(self) -> u64 {
+        self.card_mb + CARD_RESERVE_MB
+    }
+}
+
+impl From<prunr_models::Cost> for Charge {
+    fn from(cost: prunr_models::Cost) -> Self {
+        Self { ram_mb: cost.host_mb.into(), card_mb: cost.card_mb.into() }
     }
 }
 
@@ -59,7 +71,7 @@ pub const CARD_RESERVE_MB: u64 = if cfg!(windows) { 600 } else { 400 };
 /// system RAM.
 pub fn fit(charge: Charge, room: Room) -> Result<(), Short> {
     if let Some(free_mb) = room.card_mb.filter(|_| charge.on_card()) {
-        let need_mb = charge.card_mb + CARD_RESERVE_MB;
+        let need_mb = charge.card_need_mb();
         if free_mb < need_mb {
             return Err(Short::Card { need_mb, free_mb });
         }
@@ -88,27 +100,19 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
     prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, provider))
 }
 
-/// Whether `id` runs its half-precision copy on `provider`: a model that
-/// keeps one for cards its own weights do not fit, with the copy on disk,
-/// and `card_free_mb` short of its own weights. No reading: its own.
-pub fn runs_half_precision(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> bool {
-    too_big_for_card(charge_on(id, provider), card_free_mb)
-        && prunr_models::half_precision_copy(id).is_some()
-        && prunr_models::has_fp16_variant(id)
-}
-
-/// Whether `own` goes to a card and does not fit `card_free_mb` there.
-fn too_big_for_card(own: Option<Charge>, card_free_mb: Option<u64>) -> bool {
-    own.zip(card_free_mb).is_some_and(|(own, free)| own.on_card() && free < own.card_mb + CARD_RESERVE_MB)
+/// The half-precision copy `id` runs on `provider`: one kept for cards
+/// its own weights do not fit, on disk, where the card's free memory (read
+/// by `card_free_mb`, last) is short of them. No reading: its own weights.
+pub fn copy_in_use(id: ModelId, provider: &str, card_free_mb: impl FnOnce() -> Option<u64>) -> Option<prunr_models::HalfPrecisionCopy> {
+    let copy = prunr_models::half_precision_copy(id).filter(|_| prunr_models::has_fp16_variant(id))?;
+    let own = charge_on(id, provider).filter(|own| own.on_card())?;
+    card_free_mb().is_some_and(|free| free < own.card_need_mb()).then_some(copy)
 }
 
 /// `charge_on` for the weights `id` runs on `provider` with `card_free_mb`
-/// free there: its half-precision copy's where `runs_half_precision`.
+/// free there: its half-precision copy's where `copy_in_use`.
 pub fn charge_with(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> Option<Charge> {
-    match prunr_models::half_precision_copy(id).filter(|_| runs_half_precision(id, provider, card_free_mb)) {
-        Some(copy) => Some(Charge { ram_mb: copy.need.host_mb.into(), card_mb: copy.need.card_mb.into() }),
-        None => charge_on(id, provider),
-    }
+    copy_in_use(id, provider, || card_free_mb).map(|copy| copy.need.into()).or_else(|| charge_on(id, provider))
 }
 
 /// How many of `wanted` engines of `id` fit the card `provider` runs it
@@ -136,8 +140,10 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
 /// Whether `id` on `provider` fits the memory free now. No figure for
 /// it, or no reading, lets it through.
 pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
-    let Some(charge) = charge_with(id, provider, card_free_mb(provider)) else { return Ok(()) };
-    room_now(charge, provider).map_or(Ok(()), |room| fit(charge, room))
+    let card_mb = card_free_mb(provider);
+    let Some(charge) = charge_with(id, provider, card_mb) else { return Ok(()) };
+    let Some(ram) = crate::sysmem::available_ram_bytes() else { return Ok(()) };
+    fit(charge, Room { ram_mb: ram / (1024 * 1024), card_mb: card_mb.filter(|_| charge.on_card()) })
 }
 
 /// `provider_for` without waiting for the GPU probe, for the UI thread:
@@ -226,20 +232,23 @@ pub fn card_free_mb(provider: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// A model takes its half-precision copy only where its own weights
-    /// do not fit what the card has free; with no reading, or off a card,
-    /// it keeps its own.
+    /// do not fit what the card has free; with no reading, off a card, or
+    /// without a copy, it keeps its own, and the card is not read then.
     #[test]
     fn half_precision_only_where_the_own_weights_do_not_fit() {
-        let own = Some(Charge { ram_mb: 1_350, card_mb: 7_700 });
-        assert!(!too_big_for_card(own, Some(12_000)), "a 12 GB card holds it");
-        assert!(too_big_for_card(own, Some(7_000)), "an 8 GB card with the desktop on it does not");
-        assert!(!too_big_for_card(own, None), "no reading: its own weights");
-        assert!(!too_big_for_card(Some(Charge { ram_mb: 7_100, card_mb: 0 }), Some(100)), "off a card");
-        assert_eq!(charge_with(ModelId::Silueta, "CUDA", Some(10)), charge_on(ModelId::Silueta, "CUDA"), "a model without a copy for small cards keeps its own figure");
+        let never_read = || -> Option<u64> { panic!("no copy for this model: the card is not read") };
+        assert!(copy_in_use(ModelId::Silueta, "CUDA", never_read).is_none());
+        assert!(copy_in_use(ModelId::BiRefNetLite, "CPU", never_read).is_none(), "off a card");
+        assert_eq!(charge_with(ModelId::Silueta, "CUDA", Some(10)), charge_on(ModelId::Silueta, "CUDA"));
+        if prunr_models::has_fp16_variant(ModelId::BiRefNetLite) {
+            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || Some(12_000)).is_none(), "a 12 GB card holds its own");
+            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || Some(7_000)).is_some(), "an 8 GB card with the desktop on it does not");
+            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || None).is_none(), "no reading: its own weights");
+        }
     }
-    use super::*;
 
     /// A run short of a card's memory is noted with what that card had
     /// free, replacing an older note; without a reading nothing is noted,

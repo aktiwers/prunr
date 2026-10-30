@@ -139,7 +139,8 @@ fn per_engine_cost(model: ModelKind, cpu_only: bool) -> usize {
 
 fn engine_cost_on(model: ModelKind, provider: &str) -> usize {
     let id: prunr_models::ModelId = model.into();
-    let mb = prunr_core::memory::charge_on(id, provider).map_or_else(|| u64::from(cpu_need_mb(model)), |c| c.ram_mb);
+    let card_free = crate::hardware::card_free_mb_throttled(provider);
+    let mb = prunr_core::memory::charge_with(id, provider, card_free).map_or_else(|| u64::from(cpu_need_mb(model)), |c| c.ram_mb);
     mb as usize * 1024 * 1024
 }
 
