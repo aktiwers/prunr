@@ -1,13 +1,10 @@
-use image::{GrayImage, Luma, RgbaImage};
+use image::{GrayImage, RgbaImage};
 use crate::formats::resize_gray_lanczos3;
 
 /// Sized to the tiler's RGB output, so (R, G, B, A) recombine without
 /// further resampling.
 pub fn upscale_alpha_lanczos3(rgba: &RgbaImage, out_w: u32, out_h: u32) -> GrayImage {
-    let alpha = GrayImage::from_fn(rgba.width(), rgba.height(), |x, y| {
-        Luma([rgba.get_pixel(x, y).0[3]])
-    });
-    resize_gray_lanczos3(&alpha, out_w, out_h)
+    resize_gray_lanczos3(&crate::formats::alpha_plane(rgba), out_w, out_h)
 }
 
 /// Give `out` the alpha of `input`, the image it was upscaled from,

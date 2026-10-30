@@ -172,10 +172,9 @@ fn decode_upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -
     let mut decoder = reader.into_decoder()?;
     let orientation = orientation_of(&mut decoder, late);
     let need = decoder.total_bytes();
-    let free = crate::sysmem::room_for_buffers_bytes();
-    let allowance = decode_allowance(need, turns_a_quarter(orientation), free).map_err(|peak| {
+    let allowance = decode_allowance(need, turns_a_quarter(orientation), crate::sysmem::room_for_buffers_bytes()).map_err(|(peak, free)| {
         let (width, height) = decoder.dimensions();
-        CoreError::TooLarge { width, height, need_mb: peak >> 20, free_mb: free.unwrap_or(0) >> 20 }
+        CoreError::too_large(width, height, peak, free)
     })?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(allowance);
@@ -192,12 +191,12 @@ const DECODE_CAP_UNREAD: u64 = 512 * 1024 * 1024;
 
 /// What a decode of `need` bytes may allocate: the memory `free` now, at
 /// least the library's own cap; `Err` with its peak (twice the image when
-/// a quarter turn copies it) when that is more than is free.
-fn decode_allowance(need: u64, quarter_turn: bool, free: Option<u64>) -> Result<u64, u64> {
+/// a quarter turn copies it) and what is free, when the peak is more.
+fn decode_allowance(need: u64, quarter_turn: bool, free: Option<u64>) -> Result<u64, (u64, u64)> {
     let Some(free) = free else { return Ok(DECODE_CAP_UNREAD) };
     let peak = if quarter_turn { need.saturating_mul(2) } else { need };
     if peak > free {
-        return Err(peak);
+        return Err((peak, free));
     }
     Ok(free.max(DECODE_CAP_UNREAD))
 }
@@ -210,15 +209,10 @@ fn turns_a_quarter(orientation: image::metadata::Orientation) -> bool {
 
 /// A raster's size as `decode_upright` turns it, from its header.
 fn upright_dimensions<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Option<(u32, u32)> {
-    use image::metadata::Orientation;
     let (reader, late) = late_png_orientation(reader);
     let mut decoder = reader.into_decoder().ok()?;
     let (w, h) = decoder.dimensions();
-    let quarter_turn = matches!(
-        orientation_of(&mut decoder, late),
-        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH
-    );
-    Some(if quarter_turn { (h, w) } else { (w, h) })
+    Some(if turns_a_quarter(orientation_of(&mut decoder, late)) { (h, w) } else { (w, h) })
 }
 
 /// The turn the header names, else one read after the pixels (`late`).
@@ -362,6 +356,13 @@ fn unmultiply_alpha(buf: &mut [u8]) {
         px[1] = inv(px[1]);
         px[2] = inv(px[2]);
     }
+}
+
+/// The alpha channel of `rgba` as a grey plane.
+pub fn alpha_plane(rgba: &RgbaImage) -> GrayImage {
+    let alpha = rgba.as_raw().chunks_exact(4).map(|px| px[3]).collect();
+    // one byte per pixel of the same size
+    GrayImage::from_raw(rgba.width(), rgba.height(), alpha).expect("a plane the image's size")
 }
 
 /// Either side past `LARGE_IMAGE_LIMIT`, for callers that only have the
@@ -723,16 +724,6 @@ mod tests {
     #[test]
     fn a_png_with_its_exif_after_the_pixels_loads_upright() {
         use image::{GenericImageView, ImageEncoder, Rgb, RgbImage};
-        fn crc32(bytes: &[u8]) -> u32 {
-            let mut crc = !0u32;
-            for &b in bytes {
-                crc ^= b as u32;
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-                }
-            }
-            !crc
-        }
         let mut stored = RgbImage::new(16, 8);
         stored.put_pixel(0, 0, Rgb([255, 0, 0]));
         let mut png = Vec::new();
@@ -875,6 +866,18 @@ mod tests {
 
 
     use super::*;
+
+    /// A PNG chunk's CRC.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
     use crate::types::DOWNSCALE_TARGET;
     use image::{DynamicImage, RgbaImage, Rgba};
 
@@ -1017,8 +1020,8 @@ mod tests {
         let (mb, cap) = (1u64 << 20, DECODE_CAP_UNREAD);
         assert_eq!(decode_allowance(600 * mb, false, Some(8000 * mb)), Ok(8000 * mb), "past the old 512 MB cap when it fits");
         assert_eq!(decode_allowance(10 * mb, false, Some(100 * mb)), Ok(cap), "never below the library's own cap");
-        assert_eq!(decode_allowance(600 * mb, false, Some(500 * mb)), Err(600 * mb));
-        assert_eq!(decode_allowance(300 * mb, true, Some(500 * mb)), Err(600 * mb), "a quarter turn holds two copies");
+        assert_eq!(decode_allowance(600 * mb, false, Some(500 * mb)), Err((600 * mb, 500 * mb)));
+        assert_eq!(decode_allowance(300 * mb, true, Some(500 * mb)), Err((600 * mb, 500 * mb)), "a quarter turn holds two copies");
         assert_eq!(decode_allowance(600 * mb, false, None), Ok(cap), "no reading: the library's cap");
     }
 
@@ -1026,16 +1029,6 @@ mod tests {
     /// words before anything is allocated.
     #[test]
     fn a_header_claiming_a_vast_size_is_refused_before_decoding() {
-        fn crc32(bytes: &[u8]) -> u32 {
-            let mut crc = !0u32;
-            for &b in bytes {
-                crc ^= u32::from(b);
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 { 0xEDB8_8320 ^ (crc >> 1) } else { crc >> 1 };
-                }
-            }
-            !crc
-        }
         let mut png = encode_rgba_png(&RgbaImage::new(5, 3)).unwrap();
         // The IHDR chunk: width and height at 16..24, its CRC over 12..29 at 29..33.
         png[16..20].copy_from_slice(&1_000_000u32.to_be_bytes());

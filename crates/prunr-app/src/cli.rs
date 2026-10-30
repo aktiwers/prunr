@@ -969,17 +969,17 @@ fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool
     output_path_with_suffix(input, output, is_batch, &prunr_core::ExportFormat::Png.result_suffix())
 }
 
-/// The CLI's one error shape: "<path>: could not <what>: <reason>".
-/// `path` could not have `what` done to it, for `reason` in plain words.
+/// The CLI's one error shape: "<path>: could not <what>: <reason>", the
+/// reason in plain words.
 fn could_not(path: &std::path::Path, what: &str, reason: impl std::fmt::Display) -> String {
-    format!("{}: could not {what}: {}", path.display(), prunr_core::plain::error(&reason.to_string()))
+    format!("{}: could not {what}: {}", path.display(), prunr_core::plain::reason(reason))
 }
 
 /// An image failed: its spinner says why, or stderr when none shows (the
 /// output is not a terminal).
 fn report_failure(spinner: Option<&ProgressBar>, input: &std::path::Path, what: &str, why: impl std::fmt::Display) {
     match spinner {
-        Some(pb) => pb.finish_with_message(format!("X {} — {}", input.display(), prunr_core::plain::error(&why.to_string()))),
+        Some(pb) => pb.finish_with_message(format!("X {} — {}", input.display(), prunr_core::plain::reason(why))),
         None => eprintln!("error: {}", could_not(input, what, why)),
     }
 }

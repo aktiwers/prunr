@@ -569,10 +569,10 @@ impl PrunrApp {
                 self.settings.save();
             }
             BgLanded::Failed { picked: true, error } => {
-                self.toasts.error(format!("Couldn't load background image: {}", prunr_core::plain::error(&error.to_string())));
+                self.toasts.error(format!("Couldn't load background image: {}", prunr_core::plain::reason(error)));
             }
             BgLanded::Failed { picked: false, error } => {
-                self.toasts.error(format!("Couldn't load preset background: {}", prunr_core::plain::error(&error.to_string())));
+                self.toasts.error(format!("Couldn't load preset background: {}", prunr_core::plain::reason(error)));
             }
             BgLanded::Filled | BgLanded::Gone => {}
         }

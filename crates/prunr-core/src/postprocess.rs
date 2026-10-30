@@ -513,7 +513,7 @@ pub fn effect_backdrop(
     cutout: Option<&RgbaImage>,
 ) -> Option<RgbaImage> {
     use crate::types::BgEffect;
-    let plate = || cutout.filter(|_| effect.takes_cutout()).and_then(|cutout| clean_plate(source, cutout));
+    let plate = || cutout.and_then(|cutout| clean_plate(source, cutout));
     let mut img = match effect {
         BgEffect::None => return None,
         BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(plate().as_ref().unwrap_or(source), radius.clamp(1, 64) as f32),
@@ -557,26 +557,35 @@ const PLATE_STEP: u32 = 4;
 /// (w·h·4 bytes) and the alpha (w·h); the cells are 1/16 of the box.
 fn clean_plate(source: &RgbaImage, cutout: &RgbaImage) -> Option<RgbaImage> {
     let (w, h) = source.dimensions();
-    let alpha = GrayImage::from_fn(cutout.width(), cutout.height(), |x, y| image::Luma([cutout.get_pixel(x, y).0[3]]));
+    let alpha = crate::formats::alpha_plane(cutout);
     let alpha = if alpha.dimensions() == (w, h) { alpha } else { resize_gray_lanczos3(&alpha, w, h) };
     let b = crate::inpaint::mask_bbox(&alpha, PLATE_BACKGROUND_MAX + 1, PLATE_MARGIN)?;
     let (cw, ch) = (b.w.div_ceil(PLATE_STEP) as usize, b.h.div_ceil(PLATE_STEP) as usize);
-    let cell_of = |x: u32, y: u32| (y / PLATE_STEP) as usize * cw + (x / PLATE_STEP) as usize;
-    let background = |x: u32, y: u32| alpha.get_pixel(b.x + x, b.y + y).0[0] <= PLATE_BACKGROUND_MAX;
+    let step = PLATE_STEP as usize;
+    // The box's rows: the alpha's and the RGBA bytes', start to end.
+    let (cols, width) = (b.x as usize..(b.x + b.w) as usize, w as usize);
+    let rows = || (b.y as usize..(b.y + b.h) as usize).enumerate();
+    let alpha_row = |y: usize| &alpha.as_raw()[y * width + cols.start..y * width + cols.end];
+    let byte_span = |y: usize| (y * width + cols.start) * 4..(y * width + cols.end) * 4;
     let mut count = vec![0u32; cw * ch];
     let mut sum = vec![[0.0f32; 3]; cw * ch];
-    for (x, y) in (0..b.h).flat_map(|y| (0..b.w).map(move |x| (x, y))).filter(|&(x, y)| background(x, y)) {
-        let cell = cell_of(x, y);
-        count[cell] += 1;
-        let p = source.get_pixel(b.x + x, b.y + y).0;
-        for c in 0..3 {
-            sum[cell][c] += f32::from(p[c]);
+    for (by, y) in rows() {
+        let cells = (by / step) * cw;
+        for (bx, (&a, px)) in alpha_row(y).iter().zip(source.as_raw()[byte_span(y)].chunks_exact(4)).enumerate() {
+            if a > PLATE_BACKGROUND_MAX {
+                continue;
+            }
+            let cell = cells + bx / step;
+            count[cell] += 1;
+            for c in 0..3 {
+                sum[cell][c] += f32::from(px[c]);
+            }
         }
     }
     if count.iter().all(|&n| n == 0) {
         return None;
     }
-    let per_cell = (PLATE_STEP * PLATE_STEP) as f32;
+    let per_cell = (step * step) as f32;
     let weight: Vec<f32> = count.iter().map(|&n| n as f32 / per_cell).collect();
     let fills: Vec<Vec<f32>> = (0..3)
         .map(|c| {
@@ -585,21 +594,17 @@ fn clean_plate(source: &RgbaImage, cutout: &RgbaImage) -> Option<RgbaImage> {
         })
         .collect();
     drop((count, sum, weight));
-    let sample = |plane: &[f32], x: u32, y: u32| {
-        let at = |v: u32| (v as f32 + 0.5) / PLATE_STEP as f32 - 0.5;
-        let (fx, fy) = (at(x).clamp(0.0, (cw - 1) as f32), at(y).clamp(0.0, (ch - 1) as f32));
-        let (x0, y0) = (fx as usize, fy as usize);
-        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
-        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-        let top = plane[y0 * cw + x0] * (1.0 - tx) + plane[y0 * cw + x1] * tx;
-        let bottom = plane[y1 * cw + x0] * (1.0 - tx) + plane[y1 * cw + x1] * tx;
-        top * (1.0 - ty) + bottom * ty
-    };
+    let (xs, ys) = (crate::math::bilinear_taps(cw as u32, b.w), crate::math::bilinear_taps(ch as u32, b.h));
     let mut out = source.clone();
-    for (x, y) in (0..b.h).flat_map(|y| (0..b.w).map(move |x| (x, y))).filter(|&(x, y)| !background(x, y)) {
-        let px = out.get_pixel_mut(b.x + x, b.y + y);
-        for (c, plane) in fills.iter().enumerate() {
-            px.0[c] = crate::math::round_u8(sample(plane, x, y));
+    let bytes: &mut [u8] = &mut out;
+    for (by, y) in rows() {
+        for (bx, (&a, px)) in alpha_row(y).iter().zip(bytes[byte_span(y)].chunks_exact_mut(4)).enumerate() {
+            if a <= PLATE_BACKGROUND_MAX {
+                continue;
+            }
+            for (c, plane) in fills.iter().enumerate() {
+                px[c] = crate::math::round_u8(crate::math::bilinear_sample(plane, cw, &xs[bx], &ys[by]));
+            }
         }
     }
     Some(out)

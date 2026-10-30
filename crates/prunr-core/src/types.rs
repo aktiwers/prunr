@@ -20,6 +20,12 @@ pub enum CoreError {
 }
 
 impl CoreError {
+    /// A `width` × `height` photo whose work needs `need` bytes with only
+    /// `free` free.
+    pub fn too_large(width: u32, height: u32, need: u64, free: u64) -> Self {
+        CoreError::TooLarge { width, height, need_mb: need >> 20, free_mb: free >> 20 }
+    }
+
     /// The error for a person to read: the message alone, without the
     /// kind of failure in front of it ("Inference error: …").
     pub fn message(&self) -> String {

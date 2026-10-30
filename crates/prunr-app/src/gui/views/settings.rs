@@ -181,7 +181,7 @@ fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, c
                 }
                 Ok(()) => {}
                 Err(e) => {
-                    app.toasts.error(format!("Could not choose {}: {}", choice.name(), prunr_core::plain::error(&e.to_string())));
+                    app.toasts.error(format!("Could not choose {}: {}", choice.name(), prunr_core::plain::reason(e)));
                 }
             }
             app.refresh_install_cache();

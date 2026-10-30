@@ -119,45 +119,35 @@ impl BatchManager {
         }
     }
 
-    /// Under memory pressure: the kept upscale runs of images not on
-    /// screen go compressed to disk, on a worker, and let their reference
-    /// go. The image on screen keeps its run, so Refine answers at once.
-    pub(crate) fn park_offscreen_upscales(&mut self) {
-        let shown = self.selected_idx_clamped();
-        let jobs: Vec<(super::timeline::StoredImage, super::timeline::CompressJob)> = self.items.iter_mut().enumerate()
-            .filter(|&(idx, _)| Some(idx) != shown)
-            .filter_map(|(_, item)| item.upscale.as_mut())
-            .filter_map(|run| run.park().map(|job| (Arc::clone(&run.raw), job)))
-            .collect();
-        if jobs.is_empty() {
-            return;
-        }
-        let slots = Arc::clone(&self.bg_io.decode_slots);
-        std::thread::spawn(move || {
-            let moved = jobs.into_iter().map(|(cell, job)| {
-                let _slot = slots.acquire();
-                job();
-                cell.demote_to_disk()
-            }).filter(|&moved| moved).count();
-            tracing::info!(moved, "kept upscales moved to disk");
-        });
-    }
-
-    /// Under memory pressure: move compressed undo states to disk, on a
-    /// worker. One move runs at a time; while it does, another ask is
-    /// skipped, and the next landing under pressure asks again.
-    pub(crate) fn demote_history_to_disk(&self) {
+    /// Under memory pressure, on a worker: the kept upscale runs of images
+    /// not on screen go compressed to disk and let their reference go (the
+    /// image on screen keeps its run, so Refine answers at once), then the
+    /// compressed undo states follow. One move runs at a time; while it
+    /// does, another ask is skipped, and the next landing under pressure
+    /// asks again.
+    pub(crate) fn move_to_disk_under_pressure(&mut self) {
         use std::sync::atomic::Ordering;
         if self.demoting.swap(true, Ordering::AcqRel) {
             return;
         }
-        let cells: Vec<super::timeline::StoredImage> = self.items.iter()
+        let shown = self.selected_idx_clamped();
+        let upscales: Vec<(super::timeline::StoredImage, super::timeline::CompressJob)> = self.items.iter_mut().enumerate()
+            .filter(|&(idx, _)| Some(idx) != shown)
+            .filter_map(|(_, item)| item.upscale.as_mut())
+            .filter_map(|run| run.park().map(|job| (Arc::clone(&run.raw), job)))
+            .collect();
+        let history: Vec<super::timeline::StoredImage> = self.items.iter()
             .flat_map(|item| item.timeline.stored_images().cloned())
             .collect();
-        let demoting = Arc::clone(&self.demoting);
+        let (slots, demoting) = (Arc::clone(&self.bg_io.decode_slots), Arc::clone(&self.demoting));
         std::thread::spawn(move || {
-            let moved = cells.iter().filter(|cell| cell.demote_to_disk()).count();
-            tracing::info!(moved, "undo states moved to disk");
+            let upscales = upscales.into_iter().map(|(cell, job)| {
+                let _slot = slots.acquire();
+                job();
+                cell.demote_to_disk()
+            }).filter(|&moved| moved).count();
+            let undo_states = history.iter().filter(|cell| cell.demote_to_disk()).count();
+            tracing::info!(upscales, undo_states, "moved to disk under memory pressure");
             demoting.store(false, Ordering::Release);
         });
     }
@@ -959,7 +949,7 @@ mod tests {
             batch.compress_history_off_thread();
             std::thread::sleep(Duration::from_millis(5));
         }
-        batch.demote_history_to_disk();
+        batch.move_to_disk_under_pressure();
         while !first(&batch).is_on_disk() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -982,7 +972,7 @@ mod tests {
             batch.items.push(item);
         }
         batch.select_item(1);
-        batch.park_offscreen_upscales();
+        batch.move_to_disk_under_pressure();
         let run = |b: &BatchManager, idx: usize| b.items[idx].upscale.clone().expect("a kept run");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !(run(&batch, 0).raw.is_on_disk() && run(&batch, 2).raw.is_on_disk()) && std::time::Instant::now() < deadline {

@@ -348,7 +348,7 @@ impl Default for SdInpaintRequest {
             seed: None,
             use_taesd: false,
             scheduler: SchedulerKind::Lcm,
-            strength: full_strength(),
+            strength: FULL_STRENGTH,
             tuning: SdTuning::default(),
             fill_scale: Default::default(),
             soft_edge_px: 0.0,

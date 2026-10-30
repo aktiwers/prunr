@@ -15,25 +15,26 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
 /// The memory free to take: what the system reports available, else its
 /// total; `None` when it reports neither.
 pub fn available_ram_bytes() -> Option<u64> {
-    let (available, total) = with_system(|sys| {
-        sys.refresh_memory();
-        (sys.available_memory(), sys.total_memory())
-    });
-    first_reported(available, total)
+    memory_now().0
 }
 
 /// What a photo's buffers may use: the memory available now plus free
 /// swap; `None` when free memory cannot be read. Buffers touched once or
 /// twice sit in swap at little cost, so the system pushing idle memory
-/// there serves them (a 75 MP Refine needing 3.4 GB with 1.7 GB available
-/// ran in 5.5 s against 5 s, 2 GB of it in swap); a model's weights, read
-/// every step, are held to RAM by the model checks instead.
+/// there serves them; a model's weights, read every step, are held to RAM
+/// by the model checks instead.
 pub fn room_for_buffers_bytes() -> Option<u64> {
-    let free_swap = with_system(|sys| {
+    let (available, free_swap) = memory_now();
+    available.map(|available| available + free_swap)
+}
+
+/// `available_ram_bytes` and the free swap, from one reading.
+fn memory_now() -> (Option<u64>, u64) {
+    let (available, total, free_swap) = with_system(|sys| {
         sys.refresh_memory();
-        sys.free_swap()
+        (sys.available_memory(), sys.total_memory(), sys.free_swap())
     });
-    available_ram_bytes().map(|available| available + free_swap)
+    (first_reported(available, total), free_swap)
 }
 
 /// The first figure the system reported (0 is none).

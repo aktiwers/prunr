@@ -275,7 +275,7 @@ fn test_format_support_png_jpeg_webp_bmp() {
 // ============================================================
 
 /// A photo past 8,000 px on a side runs at its own size when it fits the
-/// free memory; it used to be refused for its size alone.
+/// free memory.
 #[test]
 fn a_photo_past_8000_px_is_cut_out_at_its_size() {
     use std::io::Cursor;
