@@ -326,6 +326,11 @@ const FILTER_COUNT: usize = prunr_core::InputTransform::ALL.len();
 const STYLE_COUNT: usize = prunr_core::LineStyle::ALL.len();
 const COMPOSE_COUNT: usize = prunr_core::ComposeMode::ALL.len();
 
+const REFINE_GUIDES: [chip::Choice<prunr_core::RefineGuide>; 2] = [
+    chip::Choice { value: prunr_core::RefineGuide::Brightness, name: "Brightness", description: "Follows the photo's light and dark", enabled: true },
+    chip::Choice { value: prunr_core::RefineGuide::Colour, name: "Color", description: "Follows its colors too, slower", enabled: true },
+];
+
 /// Every mask knob, in processing order.
 const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::Gamma), differs: |s, d| differs(s.gamma, d.gamma), reset: |s, d| s.gamma = d.gamma },
@@ -333,6 +338,7 @@ const MASK_FIELDS: &[chip::Field<ItemSettings>] = &[
     chip::Field { knob: Some(StaticKnob::RefineEdges), differs: |s, d| s.refine_edges != d.refine_edges, reset: |s, d| s.refine_edges = d.refine_edges },
     chip::Field { knob: Some(StaticKnob::GuidedRadius), differs: |s, d| s.refine_edges && s.guided_radius != d.guided_radius, reset: |s, d| s.guided_radius = d.guided_radius },
     chip::Field { knob: Some(StaticKnob::GuidedEpsilon), differs: |s, d| s.refine_edges && differs(s.guided_epsilon, d.guided_epsilon), reset: |s, d| s.guided_epsilon = d.guided_epsilon },
+    chip::Field { knob: Some(StaticKnob::RefineGuide), differs: |s, d| s.refine_edges && s.refine_guide != d.refine_guide, reset: |s, d| s.refine_guide = d.refine_guide },
     chip::Field { knob: Some(StaticKnob::Feather), differs: |s, d| differs(s.feather, d.feather), reset: |s, d| s.feather = d.feather },
     chip::Field { knob: Some(StaticKnob::Contrast), differs: |s, d| differs(s.contrast, d.contrast), reset: |s, d| s.contrast = d.contrast },
 ];
@@ -437,6 +443,9 @@ fn render_mask_group(
                     }
                     aggregate_knob(dt, StaticKnob::GuidedEpsilon, change);
                     hint(ui, "Edge width: how far from the edge refinement looks. Detail: higher follows finer color edges.");
+                    let followed = chip::choice_row(ui, "Follow", &REFINE_GUIDES, &mut s.refine_guide);
+                    aggregate_bool(followed, StaticKnob::RefineGuide, change);
+                    hint(ui, "Brightness suits most photos. Color also finds an edge between two colors of the same brightness, and takes several times as long.");
                 });
             });
             chip::step(ui, 4, s.feather > 0.0, |ui| {

@@ -197,6 +197,9 @@ pub struct MaskSettings {
     pub guided_radius: u32,
     /// Guided filter regularization. Smaller = preserve edges from guide, larger = smoother. Only used when refine_edges.
     pub guided_epsilon: f32,
+    /// What Refine edges follows in the photo. Only used when refine_edges.
+    #[serde(default)]
+    pub refine_guide: RefineGuide,
     /// Gaussian blur sigma (pixels). Color-agnostic edge softening.
     pub feather: f32,
     /// How the subject RGB is transformed after masking and before compose.
@@ -294,6 +297,38 @@ impl std::str::FromStr for ShadowKind {
     }
 }
 
+/// What Refine edges follows in the photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineGuide {
+    /// Its brightness: the faster, and the edge most photos have.
+    #[default]
+    Brightness,
+    /// Its colour too: also the edge between two colours of the same
+    /// brightness, at several times the time.
+    Colour,
+}
+
+impl std::fmt::Display for RefineGuide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Brightness => "brightness",
+            Self::Colour => "color",
+        })
+    }
+}
+
+impl std::str::FromStr for RefineGuide {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "brightness" => Ok(Self::Brightness),
+            "colour" | "color" => Ok(Self::Colour),
+            _ => Err(format!("unknown refine guide '{s}' (expected: brightness, color)")),
+        }
+    }
+}
+
 /// The kind of shadow under a cut-out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -324,6 +359,7 @@ impl Default for MaskSettings {
             refine_edges: false,
             guided_radius: 8,
             guided_epsilon: 1e-4,
+            refine_guide: RefineGuide::default(),
             feather: 0.0,
             effect: SubjectEffect::default(),
             decoration: Decoration::default(),

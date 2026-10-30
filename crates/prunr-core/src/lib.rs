@@ -53,7 +53,7 @@ pub use postprocess::{tensor_to_mask, tensor_to_mask_from_flat, apply_mask, post
 pub use batch::{batch_process, batch_process_with_mask, create_engine_pool};
 pub use formats::{ExportFormat, load_image_from_path, load_image_from_bytes, load_image_to_fit_from_bytes, image_dimensions_from_bytes, image_dimensions_from_path, exceeds_large_image_limit, downscale_image, encode_rgba_png, encode_rgba_png_into, rgba_view, encode_gray_png_into, encode_gray_png_kept_into, apply_background_color, apply_background_image};
 pub use edge::{EdgeEngine, EdgeInferenceResult, EdgeInput, scales_from_same_runs, EDGE_SCALE_COUNT, edge_scale_dims, tensor_to_edge_mask, edge_plane, thickened_edges, compose_edges_styled, compose_edges_dual_styled, compose_subject_outline, compose_whole_photo, outline_subject};
-pub use types::{ComposeMode, LineStyle, SubjectEffect, BgEffect, BgImageFit, InputTransform, Decoration, ShadowKind};
+pub use types::{ComposeMode, LineStyle, SubjectEffect, BgEffect, BgImageFit, InputTransform, Decoration, ShadowKind, RefineGuide};
 pub use edge::apply_input_transform;
 pub use postprocess::{apply_bg_effect, apply_subject_effect, effect_backdrop};
 pub use selection::{MaskArtifact, SelectionError};
