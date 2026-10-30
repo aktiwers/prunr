@@ -1027,8 +1027,7 @@ impl PrunrApp {
         }
         self.told_dropped_cutouts = true;
         let images = super::views::fmt::count(dropped, "other image", "other images");
-        let them = if dropped == 1 { "it" } else { "them" };
-        self.toasts.info(format!("Memory ran short: to adjust the cut-out of {images}, process {them} again."));
+        self.toasts.info(format!("To save memory, adjusting the cut-out of {images} now needs Process again."));
     }
 
     /// `stack`'s start failure was said another way, so it is not said again.
@@ -1762,7 +1761,7 @@ mod field_list_tests {
         assert_eq!(app.toasts.len_for_test(), before, "nothing to say");
         app.tell_dropped_cutouts(3);
         let (kind, text) = app.toasts.last_for_test().expect("a toast");
-        assert_eq!((kind, text), ("info", "Memory ran short: to adjust the cut-out of 3 other images, process them again."));
+        assert_eq!((kind, text), ("info", "To save memory, adjusting the cut-out of 3 other images now needs Process again."));
         app.tell_dropped_cutouts(1);
         assert_eq!(app.toasts.len_for_test(), before + 1, "once");
     }
