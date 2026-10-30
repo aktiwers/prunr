@@ -520,11 +520,11 @@ A drag is one PNG matching the canvas, background baked in like Save and Copy. W
 | What | Location |
 |------|----------|
 | `settings.json`, `presets/*.json` | `{config_dir}/prunr/` |
-| On-demand models | `{data_dir}/prunr/models/` |
-| Runtime Store, compiled-model cache, EP compatibility | `{data_dir}/prunr/runtimes/`, `ep_cache/`, `ep_compat.json` |
+| On-demand models | `{data_local_dir}/prunr/models/` |
+| Runtime Store, compiled-model cache, EP compatibility | `{data_local_dir}/prunr/runtimes/`, `ep_cache/`, `ep_compat.json` |
 | Compiled-model cache on macOS | `~/Library/Caches/prunr/ep_cache/`: CoreML can fail to open a compiled model under a path with a space |
 
-Directories come from `dirs` (`~/.config` and `~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows). Settings hold user choices only, hotkey overrides and accepted model licenses included; CPU forcing and the active backend reset every launch. Old files load through serde defaults and a v1 migration.
+Directories come from `dirs` (`~/.config` and `~/.local/share` on Linux, `~/Library/Application Support` on macOS; on Windows settings in `%APPDATA%`, models and runtimes in `%LOCALAPPDATA%`, since a roaming profile copies its folder between computers and these run to gigabytes). Settings hold user choices only, hotkey overrides and accepted model licenses included; CPU forcing and the active backend reset every launch. Old files load through serde defaults and a v1 migration.
 
 ## Model Registry & Distribution
 

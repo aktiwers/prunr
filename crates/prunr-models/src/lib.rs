@@ -2299,10 +2299,12 @@ impl SdLatent {
 }
 
 /// Per-app data root. Linux: `$XDG_DATA_HOME/prunr/`, macOS:
-/// `~/Library/Application Support/prunr/`, Windows: `%APPDATA%\prunr\`.
+/// `~/Library/Application Support/prunr/`, Windows: `%LOCALAPPDATA%\prunr\`,
+/// not the roaming folder: models and runtimes run to gigabytes, which a
+/// roaming profile copies from computer to computer.
 /// Does NOT create the dir.
 pub fn data_dir() -> Option<std::path::PathBuf> {
-    dirs::data_dir().map(|d| d.join("prunr"))
+    dirs::data_local_dir().map(|d| d.join("prunr"))
 }
 
 pub fn on_demand_dir() -> Option<std::path::PathBuf> {
@@ -3158,6 +3160,17 @@ mod tests {
                 (input, fp16, scale, window, multiple, overlap, tile),
                 "{id:?}",
             );
+        }
+    }
+
+    /// Gigabytes of models and runtimes stay on this computer: on Windows
+    /// outside the roaming folder a domain profile copies around.
+    #[test]
+    fn the_data_stays_on_this_computer() {
+        let data = data_dir().expect("a data dir");
+        assert!(data.starts_with(dirs::data_local_dir().expect("a local data dir")));
+        if cfg!(windows) {
+            assert!(!data.starts_with(dirs::data_dir().expect("a roaming data dir")));
         }
     }
 
