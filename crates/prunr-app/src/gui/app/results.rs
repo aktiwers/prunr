@@ -749,7 +749,7 @@ impl PrunrApp {
         if let Some(err) = failure.filter(|_| item.has_result()) {
             let name = item.filename.clone();
             tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
-            self.toasts.warning(format!("{name} could not be processed again: {} It shows its last result.", prunr_core::plain::reason(err)));
+            self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
             self.processor.note_failed_rerun();
         }
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
