@@ -870,10 +870,10 @@ fn run_one_tile(
                 let np = np.clone();
                 s.spawn(move || text_embedding_f16(bundle, &np))
             });
-            let vae_h = s.spawn(|| vae_encode(vae, image_to_minus1_plus1_masked(&padded_image, &padded_mask)));
+            let vae_h = s.spawn(|| vae_encode(bundle, image_to_minus1_plus1_masked(&padded_image, &padded_mask)));
             // The soft edge holds its band to the photo itself, unmasked,
             // and a fill below full strength starts from it.
-            let photo_h = (soft.is_some() || from_photo).then(|| s.spawn(|| vae_encode(vae, image_to_minus1_plus1_inner(&padded_image, None))));
+            let photo_h = (soft.is_some() || from_photo).then(|| s.spawn(|| vae_encode(bundle, image_to_minus1_plus1_inner(&padded_image, None))));
             let mask_lat = mask_to_latent(&padded_mask);
             let cond = cond_h.map(|h| h.join()
                 .map_err(|_| CoreError::Inference("text encoder (cond) thread panicked".into()))?)
@@ -1224,9 +1224,7 @@ fn batch_refused_for_good(error: &str) -> bool {
 /// Tiny distilled VAE pair (~1M params each). Never idle-released: it
 /// costs ~10 MB.
 pub(crate) struct TaesdSession {
-    encoder: Mutex<Session>,
     decoder: Mutex<Session>,
-    encoder_input: String,
     decoder_input: String,
 }
 
@@ -1245,43 +1243,18 @@ impl TaesdSession {
                 prunr_models::not_installed_error(prunr_models::ModelId::TaesdFp16)
             ))?;
         let by_key: HashMap<&str, PathBuf> = parts.into_iter().collect();
-        let encoder_path = by_key.get("encoder")
-            .ok_or_else(|| CoreError::Inference("TAESD bundle missing encoder part".into()))?;
         let decoder_path = by_key.get("decoder")
             .ok_or_else(|| CoreError::Inference("TAESD bundle missing decoder part".into()))?;
-
-        // In parallel: saves ~1-2 s of cold start; each session is ~5 MB.
-        let build = |path: &PathBuf, label: &'static str| -> Result<Session, CoreError> {
-            crate::ort_runtime::session_builder()?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
-                .commit_from_file(path)
-                .map_err(|e| CoreError::Inference(format!("TAESD {label}: load: {e}")))
-        };
-        let (enc_res, dec_res) = rayon::join(
-            || build(encoder_path, "encoder"),
-            || build(decoder_path, "decoder"),
-        );
-        let encoder = enc_res?;
-        let decoder = dec_res?;
-
-        let encoder_input = encoder.inputs().first()
-            .ok_or_else(|| CoreError::Inference("TAESD encoder: no inputs".into()))?
-            .name().to_string();
+        let decoder = crate::ort_runtime::session_builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| CoreError::Inference(format!("TAESD: opt level: {e}")))?
+            .commit_from_file(decoder_path)
+            .map_err(|e| CoreError::Inference(format!("TAESD decoder: load: {e}")))?;
         let decoder_input = decoder.inputs().first()
             .ok_or_else(|| CoreError::Inference("TAESD decoder: no inputs".into()))?
             .name().to_string();
-
-        tracing::info!(
-            encoder_input = %encoder_input, decoder_input = %decoder_input,
-            "TAESD session loaded",
-        );
-        Ok(TaesdSession {
-            encoder: Mutex::new(encoder),
-            decoder: Mutex::new(decoder),
-            encoder_input,
-            decoder_input,
-        })
+        tracing::info!(decoder_input = %decoder_input, "TAESD decoder loaded");
+        Ok(TaesdSession { decoder: Mutex::new(decoder), decoder_input })
     }
 }
 
@@ -2006,36 +1979,27 @@ fn encode_text(bundle: &SdSession, prompt: &str) -> Result<Array3<f32>, CoreErro
 
 // ── VAE encode / decode ────────────────────────────────────────────────
 
-/// `Standard` is the bundle's own VAE (~80M params a leg); `Taesd` a
-/// distilled pair (~1M params, ~3× faster decode) with the latent scale
-/// baked into the model, so only `Standard` scales.
+/// How latents become pixels: `Standard` is the bundle's own VAE decoder
+/// (~80M params); `Taesd` a distilled one (~1M params, ~3× faster) with
+/// the latent scale baked in, so only `Standard` scales. Encoding always
+/// runs the bundle's own encoder: TAESD's fed the model latents further
+/// from those it was trained on, and saved no measurable time (8.3-9.2 s
+/// an erase either way on an RTX 3060, the encoder loaded regardless).
 pub(crate) enum VaeBackend<'a> {
     Standard(&'a SdSession),
     Taesd(&'a TaesdSession),
 }
 
-fn vae_encode(backend: &VaeBackend, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
-    let f32_input = matches!(backend, VaeBackend::Standard(b) if b.vae_f32);
-    let t = tensor_in(input, f32_input)
+fn vae_encode(bundle: &SdSession, input: Array4<f32>) -> Result<Array4<f32>, CoreError> {
+    let t = tensor_in(input, bundle.vae_f32)
         .map_err(|e| CoreError::Inference(format!("vae encoder: input tensor: {e}")))?;
-    match backend {
-        VaeBackend::Standard(bundle) => {
-            let mut session = bundle.vae_encoder.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
-                .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
-            let mut latent = extract::<ndarray::Ix4>(&outputs[0], "vae encoder")?;
-            latent *= bundle.latent.vae_scale();
-            Ok(latent)
-        }
-        VaeBackend::Taesd(taesd) => {
-            let mut session = taesd.encoder.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let outputs = session.run(inputs![taesd.encoder_input.as_str() => &t])
-                .map_err(|e| CoreError::Inference(format!("TAESD encoder: run: {e}")))?;
-            extract::<ndarray::Ix4>(&outputs[0], "TAESD encoder")
-        }
-    }
+    let mut session = bundle.vae_encoder.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let outputs = session.run(inputs![bundle.vae_encoder_input.as_str() => &t])
+        .map_err(|e| CoreError::Inference(format!("SD vae encoder: run: {e}")))?;
+    let mut latent = extract::<ndarray::Ix4>(&outputs[0], "vae encoder")?;
+    latent *= bundle.latent.vae_scale();
+    Ok(latent)
 }
 
 fn vae_decode(backend: &VaeBackend, latent: &Array4<f32>) -> Result<RgbaImage, CoreError> {
