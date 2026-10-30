@@ -12,11 +12,11 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
     f(&mut sys)
 }
 
-/// The memory free to take: what the system reports available, else its
-/// total; `None` when it reports neither.
+/// The memory free to take, as the system reports it available; `None`
+/// when it reports no memory at all.
 pub fn available_ram_bytes() -> Option<u64> {
     let (available, total, _) = memory_now();
-    first_reported(available, total)
+    reported_available(available, total)
 }
 
 /// What a photo's buffers may use: the memory available now plus free
@@ -34,7 +34,7 @@ pub fn room_for_buffers_bytes() -> Option<u64> {
     if cfg!(target_os = "macos") {
         return (total > 0).then_some(total);
     }
-    first_reported(available, total).map(|available| available + free_swap)
+    reported_available(available, total).map(|available| available + free_swap)
 }
 
 /// Available memory, total memory and free swap, from one reading.
@@ -45,9 +45,11 @@ fn memory_now() -> (u64, u64, u64) {
     })
 }
 
-/// The first figure the system reported (0 is none).
-fn first_reported(available: u64, total: u64) -> Option<u64> {
-    [available, total].into_iter().find(|&bytes| bytes > 0)
+/// `available` when the system reports its memory at all. A 0 is nothing
+/// free, not a figure missing: macOS reports 0 while its compressor holds
+/// more than is free, its worst pressure.
+fn reported_available(available: u64, total: u64) -> Option<u64> {
+    (total > 0).then_some(available)
 }
 
 /// The system's memory; `None` when it doesn't report it.
@@ -102,12 +104,13 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// Available memory counts; the total stands in when it isn't
-    /// reported; neither reported is unknown.
+    /// Available memory counts, also when it is none: macOS reports 0
+    /// while its compressor holds more than is free. No total reported is
+    /// unknown.
     #[test]
-    fn available_memory_falls_back_to_the_total() {
-        assert_eq!(first_reported(4, 16), Some(4));
-        assert_eq!(first_reported(0, 16), Some(16));
-        assert_eq!(first_reported(0, 0), None);
+    fn available_memory_counts_also_when_it_is_none() {
+        assert_eq!(reported_available(4, 16), Some(4));
+        assert_eq!(reported_available(0, 16), Some(0));
+        assert_eq!(reported_available(0, 0), None);
     }
 }
