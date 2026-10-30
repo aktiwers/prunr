@@ -417,6 +417,9 @@ pub const BAND_HALF_HEIGHT: f32 = 0.12;
 /// `DepthLook::focus` units per photo side.
 const FOCUS_SCALE: f32 = 10_000.0;
 
+/// A lens blur's Amount as it is picked: half, so it shows at once.
+pub const LENS_BLUR_START_PCT: u8 = 50;
+
 /// The longest side of the grid `subject_nearness` samples.
 const SUBJECT_SAMPLES: u32 = 512;
 
@@ -458,6 +461,14 @@ impl DepthLook {
 
     pub fn blurs(&self) -> bool {
         self.blur != LensBlurMode::Off && self.blur_pct > 0
+    }
+
+    /// After a blur is picked: one at Amount 0 starts at
+    /// `LENS_BLUR_START_PCT`; an Amount already set stays.
+    pub fn start_blur(&mut self) {
+        if self.blur != LensBlurMode::Off && self.blur_pct == 0 {
+            self.blur_pct = LENS_BLUR_START_PCT;
+        }
     }
 
     pub fn focus_point(&self) -> Option<(f32, f32)> {
@@ -691,6 +702,20 @@ mod tests {
 
         let tiny = depth.clone().with_faces(&[face(0.01, [0.31, 0.505, 0.32, 0.506])]);
         assert_eq!(tiny.face_nearness(), Some(depth.at(0.315, 0.5055)), "a face within one cell reads that cell");
+    }
+
+    #[test]
+    fn a_blur_picked_at_amount_0_starts_at_half() {
+        let mut look = DepthLook { blur: LensBlurMode::Point, ..DepthLook::default() };
+        look.start_blur();
+        assert_eq!(look.blur_pct, LENS_BLUR_START_PCT);
+        look.blur_pct = 20;
+        look.blur = LensBlurMode::TiltShift;
+        look.start_blur();
+        assert_eq!(look.blur_pct, 20, "an Amount already set stays");
+        let mut off = DepthLook::default();
+        off.start_blur();
+        assert_eq!(off.blur_pct, 0, "Off starts nothing");
     }
 
     #[test]

@@ -177,8 +177,8 @@ impl PrunrApp {
         }
         if toolbar_change.pick_depth_focus {
             self.begin_focus_pick();
-            // The Depth panel covers the middle of the image; the click
-            // must land on the image, wherever the user wants the focus.
+            // The Depth flyout covers part of the image; the click must
+            // land on the image, wherever the user wants the focus.
             crate::gui::theme::close_flyouts(ctx);
         }
 

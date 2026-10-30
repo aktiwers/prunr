@@ -1126,7 +1126,7 @@ fn apply_bg_kind(
         }
         BgKind::LensBlur => {
             *bg = None;
-            *bg_effect = BgEffect::LensBlur { amount_pct: 50 };
+            *bg_effect = BgEffect::LensBlur { amount_pct: prunr_core::depth::LENS_BLUR_START_PCT };
         }
         // Image bg lives on BatchItem, not on these two ItemSettings fields —
         // the chip emits `change.pick_bg_image` and skips this fn for Image.
