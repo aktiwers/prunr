@@ -16,8 +16,13 @@ use crate::{CoreError, ModelKind, OrtEngine};
 /// The one model every depth feature reads.
 pub const MODEL: ModelKind = ModelKind::DepthAnythingV2Small;
 
-/// The model's long side; a multiple of its 14-pixel patch.
-pub const DEPTH_LONG_SIDE: u32 = 518;
+/// The model's short side, as its reference runs it; a multiple of its
+/// 14-pixel patch. At 518 on the long side instead, a 3:2 photo's map
+/// ran a third faster but blurred bench slats, faces and people together.
+pub const DEPTH_SHORT_SIDE: u32 = 518;
+/// The most the long side grows to: the model's attention grows with the
+/// square of its input, so a panorama is held to twice the short side.
+const DEPTH_MAX_LONG_SIDE: u32 = 2 * DEPTH_SHORT_SIDE;
 const PATCH: u32 = 14;
 
 /// A relative depth map: 1 = the nearest point in the photo, 0 = the
@@ -110,10 +115,11 @@ impl DepthMap {
     }
 }
 
-/// The model's input size for a `w × h` photo: the long side at
-/// `DEPTH_LONG_SIDE`, both sides multiples of the patch.
+/// The model's input size for a `w × h` photo: the short side at
+/// `DEPTH_SHORT_SIDE` unless the long side would pass
+/// `DEPTH_MAX_LONG_SIDE`, both sides multiples of the patch.
 fn input_size(w: u32, h: u32) -> (u32, u32) {
-    let scale = DEPTH_LONG_SIDE as f32 / w.max(h).max(1) as f32;
+    let scale = (DEPTH_SHORT_SIDE as f32 / w.min(h).max(1) as f32).min(DEPTH_MAX_LONG_SIDE as f32 / w.max(h).max(1) as f32);
     let snap = |v: u32| (((v as f32 * scale) / PATCH as f32).round() as u32).max(1) * PATCH;
     (snap(w), snap(h))
 }
@@ -188,7 +194,7 @@ pub fn map_file_name(stem: &str) -> String {
 /// Estimate the depth of `src`.
 ///
 /// Peak working set: the resized copy and its NCHW tensor at
-/// `DEPTH_LONG_SIDE` (~4 MB), the model's own scratch
+/// `DEPTH_SHORT_SIDE` (~8 MB), the model's own scratch
 /// (`ModelDescriptor.needs`), and the returned map (~1 MB).
 pub fn estimate_depth(engine: &OrtEngine, src: &RgbaImage, progress: &Progress) -> Result<DepthMap, CoreError> {
     progress.step(Step::EstimatingDepth);
@@ -569,9 +575,10 @@ mod tests {
     }
 
     #[test]
-    fn input_sides_are_patch_multiples_with_the_long_side_at_518() {
-        assert_eq!(input_size(6000, 4000), (518, 350));
-        assert_eq!(input_size(800, 1200), (350, 518));
+    fn input_sides_are_patch_multiples_with_the_short_side_at_518() {
+        assert_eq!(input_size(6000, 4000), (784, 518));
+        assert_eq!(input_size(800, 1200), (518, 784));
+        assert_eq!(input_size(10_000, 1_000), (1036, 98), "a panorama's long side is held to twice the short");
         let (w, h) = input_size(37, 3);
         assert_eq!((w % PATCH, h % PATCH), (0, 0));
     }

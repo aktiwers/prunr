@@ -1484,7 +1484,7 @@ fn first_input(model: prunr_models::ModelId, provider: &str) -> Option<[usize; 4
     let descriptor = prunr_models::descriptor(model).filter(|d| !d.free_dims.is_empty())?;
     let side = match descriptor.category {
         prunr_models::ModelCategory::Upscale => crate::upscale::tile_for_provider(descriptor.recommended_tile?, provider),
-        prunr_models::ModelCategory::Depth => crate::depth::DEPTH_LONG_SIDE,
+        prunr_models::ModelCategory::Depth => crate::depth::DEPTH_SHORT_SIDE,
         _ => return None,
     };
     Some([1, 3, side as usize, side as usize])
