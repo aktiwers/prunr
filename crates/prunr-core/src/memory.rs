@@ -88,12 +88,35 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
     prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, provider))
 }
 
+/// Whether `id` runs its half-precision copy on `provider`: a model that
+/// keeps one for cards its own weights do not fit, with the copy on disk,
+/// and `card_free_mb` short of its own weights. No reading: its own.
+pub fn runs_half_precision(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> bool {
+    too_big_for_card(charge_on(id, provider), card_free_mb)
+        && prunr_models::half_precision_need(id).is_some()
+        && prunr_models::has_fp16_variant(id)
+}
+
+/// Whether `own` goes to a card and does not fit `card_free_mb` there.
+fn too_big_for_card(own: Option<Charge>, card_free_mb: Option<u64>) -> bool {
+    own.zip(card_free_mb).is_some_and(|(own, free)| own.on_card() && free < own.card_mb + CARD_RESERVE_MB)
+}
+
+/// `charge_on` for the weights `id` runs on `provider` with `card_free_mb`
+/// free there: its half-precision copy's where `runs_half_precision`.
+pub fn charge_with(id: ModelId, provider: &str, card_free_mb: Option<u64>) -> Option<Charge> {
+    match prunr_models::half_precision_need(id).filter(|_| runs_half_precision(id, provider, card_free_mb)) {
+        Some(half) => Some(Charge { ram_mb: half.host_mb.into(), card_mb: half.card_mb.into() }),
+        None => charge_on(id, provider),
+    }
+}
+
 /// How many of `wanted` engines of `id` fit the card `provider` runs it
 /// on, at least one, given `free_card_mb` there: each engine holds its own
 /// pool there (BiRefNet takes 7.7 GB of an RTX 3060, so a second would
 /// run out). Off a card, or with no reading of it, `wanted`.
 pub fn engines_that_fit(id: ModelId, provider: &str, wanted: usize, free_card_mb: Option<u64>) -> usize {
-    charge_on(id, provider)
+    charge_with(id, provider, free_card_mb)
         .filter(|charge| charge.on_card())
         .zip(free_card_mb)
         .map_or(wanted, |(charge, free_mb)| fitting(charge.card_mb, free_mb, wanted))
@@ -113,7 +136,7 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
 /// Whether `id` on `provider` fits the memory free now. No figure for
 /// it, or no reading, lets it through.
 pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
-    let Some(charge) = charge_on(id, provider) else { return Ok(()) };
+    let Some(charge) = charge_with(id, provider, card_free_mb(provider)) else { return Ok(()) };
     room_now(charge, provider).map_or(Ok(()), |room| fit(charge, room))
 }
 
@@ -203,6 +226,19 @@ pub fn card_free_mb(provider: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A model takes its half-precision copy only where its own weights
+    /// do not fit what the card has free; with no reading, or off a card,
+    /// it keeps its own.
+    #[test]
+    fn half_precision_only_where_the_own_weights_do_not_fit() {
+        let own = Some(Charge { ram_mb: 1_350, card_mb: 7_700 });
+        assert!(!too_big_for_card(own, Some(12_000)), "a 12 GB card holds it");
+        assert!(too_big_for_card(own, Some(7_000)), "an 8 GB card with the desktop on it does not");
+        assert!(!too_big_for_card(own, None), "no reading: its own weights");
+        assert!(!too_big_for_card(Some(Charge { ram_mb: 7_100, card_mb: 0 }), Some(100)), "off a card");
+        assert_eq!(charge_with(ModelId::Silueta, "CUDA", Some(10)), charge_on(ModelId::Silueta, "CUDA"), "a model without a copy for small cards keeps its own figure");
+    }
     use super::*;
 
     /// A run short of a card's memory is noted with what that card had

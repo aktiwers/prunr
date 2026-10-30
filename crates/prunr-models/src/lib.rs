@@ -2489,6 +2489,18 @@ pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
     load_variant(id, "int8")
 }
 
+/// What `id`'s half-precision copy needs, for a model that runs it only
+/// on a card its own weights do not fit: there the card's memory halves
+/// while the result stays the same to the eye (BiRefNet-lite on an RTX
+/// 3060: 7.2 GB against 3.6 GB, 0.2 % of mask pixels more than 8 levels
+/// off). `None`: the model runs its own weights, or its copy everywhere.
+pub fn half_precision_need(id: ModelId) -> Option<Cost> {
+    match id {
+        ModelId::BiRefNetLite => Some(Cost::measured(1_350, 3_600, "RTX 3060 12 GB, i5-11600KF, 2026-10-30")),
+        _ => None,
+    }
+}
+
 /// Whether the half-precision copy of `id` is on disk, without reading it.
 pub fn has_fp16_variant(id: ModelId) -> bool {
     variant_path(id, "fp16").is_some()

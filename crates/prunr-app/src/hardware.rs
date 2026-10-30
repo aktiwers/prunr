@@ -236,8 +236,9 @@ pub fn card_free_mb_throttled(provider: &str) -> Option<u64> {
 /// CPU's charge.
 pub fn charge_and_room(id: prunr_models::ModelId, cpu_only: bool) -> Option<(prunr_core::memory::Charge, prunr_core::memory::Room)> {
     let provider = prunr_core::memory::provider_now(id, cpu_only);
-    let charge = prunr_core::memory::charge_on(id, provider)?;
-    let card_mb = charge.on_card().then(|| card_free_mb_throttled(provider)).flatten();
+    let card_free = card_free_mb_throttled(provider);
+    let charge = prunr_core::memory::charge_with(id, provider, card_free)?;
+    let card_mb = card_free.filter(|_| charge.on_card());
     Some((charge, prunr_core::memory::Room { ram_mb: available_ram_mb_throttled().into(), card_mb }))
 }
 
