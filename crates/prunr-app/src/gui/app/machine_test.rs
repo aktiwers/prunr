@@ -57,7 +57,7 @@ impl PrunrApp {
             Ok(test) => self.machine_test = Some(test),
             Err(e) => {
                 tracing::warn!(model = ?only, %e, "the test did not start");
-                self.toasts.error(e);
+                self.toasts.error(prunr_core::plain::error(&e.to_string()).to_string());
             }
         }
     }

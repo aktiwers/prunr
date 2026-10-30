@@ -108,6 +108,25 @@ fn only_the_cli_and_main_write_to_stderr() {
     report(found, "stderr written outside the CLI");
 }
 
+/// A failure's own text put into a toast goes through
+/// `prunr_core::plain::error`, which turns a system, driver or model
+/// message ("os error 13", "Non-zero status code returned") into a plain
+/// sentence and logs the text.
+#[test]
+fn toasts_show_failures_in_plain_words() {
+    const RAW: [&str; 6] = ["{e}", "{err}", "{error}", "{why}", "{msg}", "{reason}"];
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources().filter(|(rel, _)| rel.starts_with("prunr-app/src/gui/")) {
+        for (n, line) in production_lines(text) {
+            let code = code_part(line);
+            if (code.contains("toasts.error(") || code.contains("toasts.warning(")) && RAW.iter().any(|raw| code.contains(raw)) {
+                found.push(format!("{rel}:{n}: show the failure through prunr_core::plain::error"));
+            }
+        }
+    }
+    report(found, "raw failures in toasts");
+}
+
 /// A float colour becomes a byte by rounding: `as u8` truncates, and
 /// every channel comes out half a step dark.
 #[test]

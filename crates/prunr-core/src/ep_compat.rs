@@ -130,13 +130,17 @@ fn addons_changed(old: &str, new: &str) -> bool {
 /// already saved by another session building at the same time. The next
 /// session may well succeed.
 pub fn is_transient(error: &str) -> bool {
+    is_out_of_memory(error) || is_device_lost(error) || error.to_ascii_lowercase().contains("error copying compiled model to cache path")
+}
+
+/// Error text of a GPU that was removed, hung or reset.
+pub(crate) fn is_device_lost(error: &str) -> bool {
     const MARKS: &[&str] = &[
         "887a0005", "887a0006", "887a0007", "device removed", "device_removed", "device hung", "device_hung",
         "has been suspended", "will not respond to more commands",
-        "error copying compiled model to cache path",
     ];
     let lower = error.to_ascii_lowercase();
-    is_out_of_memory(error) || MARKS.iter().any(|m| lower.contains(m))
+    MARKS.iter().any(|m| lower.contains(m))
 }
 
 /// Error text of a run or session that ran out of memory, the card's or

@@ -330,7 +330,7 @@ pub fn process_lama(
     let short = !cpu_only && crate::memory::ran_short(id, crate::memory::provider_for(id, false));
     if short {
         if let Err(room) = crate::memory::fits_now(id, crate::engine::CPU_NAME) {
-            return Err(CoreError::Inference(format!("out of memory: the graphics card had no room for it, and the processor {room}")));
+            return Err(CoreError::Inference(format!("The graphics card has no room for this eraser, and on the processor it {room}. Close other apps and try again.")));
         }
         progress.step(Step::OnTheProcessor);
     }

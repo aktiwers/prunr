@@ -154,7 +154,7 @@ impl PrunrApp {
         // A refused run leaves no job: the image would wait on nothing.
         if let Err(why) = self.processor.dispatch_upscale(item_id, run, input, run_model, self.settings.cpu_only(), recipe) {
             self.batch.find_by_id_mut(item_id).map(BatchItem::abandon_job);
-            self.toasts.error(format!("Upscale not started: {why}"));
+            self.toasts.error(format!("Upscale not started: {}", prunr_core::plain::error(&why)));
             return false;
         }
         tracing::info!(item_id, ?model_id, ?run_model, ?output_scale, "upscale dispatched");
@@ -173,7 +173,7 @@ impl PrunrApp {
         // A refused run leaves no job: the image would wait on nothing.
         if let Err(why) = self.processor.dispatch_colorize(item_id, run, input, self.settings.cpu_only(), recipe) {
             self.batch.find_by_id_mut(item_id).map(BatchItem::abandon_job);
-            self.toasts.error(format!("Colorize not started: {why}"));
+            self.toasts.error(format!("Colorize not started: {}", prunr_core::plain::error(&why)));
             return false;
         }
         tracing::info!(item_id, "colorize dispatched");

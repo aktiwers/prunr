@@ -1334,7 +1334,7 @@ impl BatchItem {
     /// The run or read failed with `why`: nothing is awaited any more.
     pub(crate) fn fail(&mut self, why: String) {
         self.job = None;
-        self.failure = Some(why);
+        self.failure = Some(prunr_core::plain::error(&why).to_string());
     }
 
     /// True while a model works on this image: a cut-out the worker has
@@ -1816,7 +1816,7 @@ impl BatchItem {
             }
             Err(msg) => {
                 self.decode_failed = true;
-                self.failure = Some(msg);
+                self.failure = Some(prunr_core::plain::error(&msg).to_string());
                 false
             }
         }
