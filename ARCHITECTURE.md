@@ -384,7 +384,7 @@ Colorize is its own role (`ModelRole::Colorize`), not a filter: the picker shows
 
 ## Depth
 
-Depth Anything V2 Small measures a photo once (518 px long side, ~0.5 s) into a `DepthMap` kept on the item; every depth feature reads that map, and a photo with no map asks the depth queue on `Processor` for one (epoch-tagged, so a late map for an earlier source is dropped). Readers:
+Depth Anything V2 Small measures a photo once (518 px on its short side, as its reference runs it) into a `DepthMap` kept on the item; every depth feature reads that map, and a photo with no map asks the depth queue on `Processor` for one (epoch-tagged, so a late map for an earlier source is dropped). Readers:
 
 | Feature | Where | How |
 |---|---|---|
