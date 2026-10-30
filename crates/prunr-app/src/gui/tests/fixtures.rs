@@ -36,6 +36,29 @@ pub(crate) fn cut_out(item: &mut BatchItem, model: prunr_core::ModelKind) {
     item.record_origin(crate::gui::item::Engine::Segment, None, Some(crate::gui::item::Cutter::Model(model)));
 }
 
+/// Line planes at 2×2 for `scales` (the others not made), as a run
+/// sends them; `spare` is the pass still to make the rest.
+pub(crate) fn edge_lines(scales: &[prunr_core::EdgeScale], spare: Option<u64>) -> Option<crate::gui::worker::CompressedEdgeTensors> {
+    let tensors = prunr_core::EdgeScale::ALL.map(|s| {
+        let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
+        if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
+    });
+    crate::gui::worker::CompressedEdgeTensors::from_raw(crate::gui::worker::RawEdgeTensors { tensors, height: 2, width: 2, spare })
+}
+
+/// Land a cut by Silueta on `item` with every line scale, as a run under
+/// its settings leaves it (lines traced on the cut-out under Subject
+/// outline).
+pub(crate) fn cut_with_lines(item: &mut BatchItem) {
+    use prunr_core::ModelKind::Silueta;
+    item.start_cut(Some(crate::gui::timeline::StepKind::Process), crate::gui::item::Cutter::Model(Silueta));
+    let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+    let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: "CPU".into() };
+    let recipe = item.settings.current_recipe(Silueta);
+    item.apply_tier_result(Ok(result), seg, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
+    item.finish_job();
+}
+
 /// Put `item` in `status` through the transitions the app makes: Done
 /// lands the run under way on the result it holds, or makes a cut-out
 /// (`cut_out`); Processing is a cut the worker has taken; Error a failed

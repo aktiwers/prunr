@@ -336,22 +336,10 @@ mod release_tests {
     #[test]
     fn a_mask_drags_release_traces_the_lines_again() {
         use crate::gui::knob_catalog::DispatchKind;
-        use crate::gui::worker::{CompressedEdgeTensors, CompressedTensor, RawEdgeTensors, RawSegTensor};
-        use prunr_core::{EdgeScale, LineMode, ModelKind::Silueta};
         let mut app = PrunrApp::new_for_test();
         let item = push_test_item(&mut app, 1);
-        item.settings.line_mode = LineMode::SubjectOutline;
-        item.start_cut(Some(crate::gui::timeline::StepKind::Process), crate::gui::item::Cutter::Model(Silueta));
-        let tensors = EdgeScale::ALL.map(|s| {
-            let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
-            vec![0.5; (h * w) as usize]
-        });
-        let edges = CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare: None });
-        let seg = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
-        let result = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: "CPU".into() };
-        let recipe = item.settings.current_recipe(Silueta);
-        item.apply_tier_result(Ok(result), seg, edges, recipe);
-        item.finish_job();
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
         item.settings.feather = 3.0;
         let drag = super::adjustments_toolbar::ToolbarChange { auto_dispatch: DispatchKind::LivePreviewMask, ..Default::default() };
         assert_eq!(app.resolve_auto_dispatch(0, &drag), DispatchKind::LivePreviewMask, "a drag frame");
@@ -372,15 +360,7 @@ mod release_tests {
     #[test]
     fn a_scale_the_kept_lines_lack_runs_the_lines_again() {
         use crate::gui::knob_catalog::DispatchKind;
-        use crate::gui::worker::{CompressedEdgeTensors, RawEdgeTensors};
         use prunr_core::{EdgeScale, LineMode};
-        let kept = |scales: &[EdgeScale], spare: Option<u64>| {
-            let tensors = EdgeScale::ALL.map(|s| {
-                let (h, w) = prunr_core::edge_scale_dims(s, 2, 2);
-                if scales.contains(&s) { vec![0.5; (h * w) as usize] } else { Vec::new() }
-            });
-            CompressedEdgeTensors::from_raw(RawEdgeTensors { tensors, height: 2, width: 2, spare })
-        };
         let switch = DispatchKind::LivePreviewEdge;
         let change = super::adjustments_toolbar::ToolbarChange { auto_dispatch: switch, ..Default::default() };
         let drawn = &[EdgeScale::Bold, EdgeScale::Fused][..];
@@ -396,7 +376,7 @@ mod release_tests {
             let item = &mut app.batch.items[0];
             item.settings.line_mode = line_mode;
             item.settings.edge_scale = EdgeScale::Fine;
-            item.cached_edge_tensors = kept(held, spare);
+            item.cached_edge_tensors = crate::gui::tests::fixtures::edge_lines(held, spare);
             assert_eq!(app.resolve_auto_dispatch(0, &change), want, "{line_mode:?} holding {held:?}, spare {spare:?}");
         }
     }
