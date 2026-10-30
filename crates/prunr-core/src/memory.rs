@@ -105,8 +105,12 @@ pub fn charge_on(id: ModelId, provider: &str) -> Option<Charge> {
 /// by `card_free_mb`, last) is short of them. No reading: its own weights.
 pub fn copy_in_use(id: ModelId, provider: &str, card_free_mb: impl FnOnce() -> Option<u64>) -> Option<prunr_models::HalfPrecisionCopy> {
     let copy = prunr_models::half_precision_copy(id).filter(|_| prunr_models::has_fp16_variant(id))?;
-    let own = charge_on(id, provider).filter(|own| own.on_card())?;
-    card_free_mb().is_some_and(|free| free < own.card_need_mb()).then_some(copy)
+    own_short_of_card(charge_on(id, provider), card_free_mb).then_some(copy)
+}
+
+/// Whether `own` goes to a card that has less free than it needs.
+fn own_short_of_card(own: Option<Charge>, card_free_mb: impl FnOnce() -> Option<u64>) -> bool {
+    own.filter(|own| own.on_card()).is_some_and(|own| card_free_mb().is_some_and(|free| free < own.card_need_mb()))
 }
 
 /// `charge_on` for the weights `id` runs on `provider` with `card_free_mb`
@@ -140,10 +144,12 @@ pub fn provider_for(id: ModelId, cpu_only: bool) -> &'static str {
 /// Whether `id` on `provider` fits the memory free now. No figure for
 /// it, or no reading, lets it through.
 pub fn fits_now(id: ModelId, provider: &str) -> Result<(), Short> {
-    let card_mb = card_free_mb(provider);
-    let Some(charge) = charge_with(id, provider, card_mb) else { return Ok(()) };
-    let Some(ram) = crate::sysmem::available_ram_bytes() else { return Ok(()) };
-    fit(charge, Room { ram_mb: ram / (1024 * 1024), card_mb: card_mb.filter(|_| charge.on_card()) })
+    // Read once, and only when the copy rule or a card charge asks.
+    let card = std::cell::OnceCell::new();
+    let card_mb = || *card.get_or_init(|| card_free_mb(provider));
+    let charge = copy_in_use(id, provider, card_mb).map(|copy| copy.need.into()).or_else(|| charge_on(id, provider));
+    let Some(charge) = charge else { return Ok(()) };
+    room_with(charge, card_mb).map_or(Ok(()), |room| fit(charge, room))
 }
 
 /// `provider_for` without waiting for the GPU probe, for the UI thread:
@@ -156,9 +162,12 @@ pub fn provider_now(id: ModelId, cpu_only: bool) -> &'static str {
 /// when the run goes to one and it is CUDA's. `None` when free RAM
 /// cannot be read.
 pub fn room_now(charge: Charge, provider: &str) -> Option<Room> {
+    room_with(charge, || card_free_mb(provider))
+}
+
+fn room_with(charge: Charge, card_free_mb: impl FnOnce() -> Option<u64>) -> Option<Room> {
     let ram_mb = crate::sysmem::available_ram_bytes()? / (1024 * 1024);
-    let card_mb = charge.on_card().then(|| card_free_mb(provider)).flatten();
-    Some(Room { ram_mb, card_mb })
+    Some(Room { ram_mb, card_mb: charge.on_card().then(card_free_mb).flatten() })
 }
 
 /// How much more of the card must be free than when a run ran short on
@@ -243,11 +252,11 @@ mod tests {
         assert!(copy_in_use(ModelId::Silueta, "CUDA", never_read).is_none());
         assert!(copy_in_use(ModelId::BiRefNetLite, "CPU", never_read).is_none(), "off a card");
         assert_eq!(charge_with(ModelId::Silueta, "CUDA", Some(10)), charge_on(ModelId::Silueta, "CUDA"));
-        if prunr_models::has_fp16_variant(ModelId::BiRefNetLite) {
-            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || Some(12_000)).is_none(), "a 12 GB card holds its own");
-            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || Some(7_000)).is_some(), "an 8 GB card with the desktop on it does not");
-            assert!(copy_in_use(ModelId::BiRefNetLite, "CUDA", || None).is_none(), "no reading: its own weights");
-        }
+        let own = charge_on(ModelId::BiRefNetLite, "CUDA");
+        assert!(!own_short_of_card(own, || Some(12_000)), "a 12 GB card holds its own");
+        assert!(own_short_of_card(own, || Some(7_000)), "an 8 GB card with the desktop on it does not");
+        assert!(!own_short_of_card(own, || None), "no reading: its own weights");
+        assert!(!own_short_of_card(charge_on(ModelId::BiRefNetLite, "CPU"), never_read), "off a card");
     }
 
     /// A run short of a card's memory is noted with what that card had
