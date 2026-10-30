@@ -64,7 +64,8 @@ impl PrunrApp {
         let Some(applied) = item.applied_recipe.as_ref() else { return };
         let id = item.id;
         let current_settings = item.settings.mask_settings();
-        if self.last_drift_check == Some((id, current_settings)) {
+        let checked_as = (id, item.timeline.version(), current_settings);
+        if self.last_drift_check == Some(checked_as) {
             return;
         }
         // The mask as the run applies it: pinned to the defaults where the
@@ -87,7 +88,7 @@ impl PrunrApp {
             live.render_now(id, PreviewKind::Mask);
             checked = true;
         }
-        self.last_drift_check = checked.then_some((id, current_settings));
+        self.last_drift_check = checked.then_some(checked_as);
     }
 
     /// Live-preview pump: dispatch debounced Tier 2 reruns + apply completed ones.
@@ -728,6 +729,18 @@ mod drift_tests {
         app.batch.items[0].settings.gamma = 1.8;
         app.recipe_drift_tripwire();
         assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true), "again for new ones");
+    }
+
+    /// A drift render dropped because the image moved on (a stroke made a
+    /// new step under it) is asked for again on the new step.
+    #[test]
+    fn a_drift_render_dropped_for_a_new_step_is_asked_again() {
+        let mut app = drifted();
+        app.recipe_drift_tripwire();
+        app.processor.live_preview.cancel(1);
+        app.batch.items[0].commit(crate::gui::timeline::StepKind::Selection);
+        app.recipe_drift_tripwire();
+        assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
     }
 }
 
