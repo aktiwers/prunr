@@ -85,7 +85,7 @@ fn main() {
     }
 
     std::thread::spawn(|| {
-        prunr_core::cache::remove_retired_root();
+        prunr_core::cache::remove_retired_roots();
         let bytes = prunr_models::remove_retired_files();
         if bytes > 0 {
             tracing::info!(bytes, "removed model files an earlier version downloaded");
