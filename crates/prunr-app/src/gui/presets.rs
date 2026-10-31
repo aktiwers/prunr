@@ -293,22 +293,14 @@ pub(crate) fn draft(started: &Preset, shown: &Shown) -> Vec<(String, Entry)> {
 pub(crate) fn take_untouched_brush(preset: &Preset, model: SettingsModel, brush: BrushSettings, changes: &Changes<BrushSettings>) -> BrushSettings {
     let tuning = super::preset_fields::fill_tuning_of(model);
     let own = changes.on(&preset_key(model));
-    let own_value = |name: &str| own.and_then(|own| own.get(name));
-    let scheduler = own_value("sd_scheduler").and_then(|quality| SdScheduler::deserialize(quality).ok());
+    let scheduler = own.and_then(|own| own.get("sd_scheduler")).and_then(|quality| SdScheduler::deserialize(quality).ok());
     let target = serde_json::to_value(preset.brush(model, scheduler)).unwrap_or_default();
     let names: Vec<&str> = brush_entries_of(model).iter().flat_map(|(_, fields)| BrushSettings::fields(fields)).collect();
-    let values: Map<String, Value> = pick(&target, &names)
-        .into_iter()
-        .filter_map(|(name, value)| {
-            if tuning.contains(&name.as_str()) {
-                let value = own_value(&name).cloned().unwrap_or(value);
-                Some((name, value))
-            } else {
-                (!changes.touched(&name)).then_some((name, value))
-            }
-        })
-        .collect();
-    let mut brush = overlay(brush, &values);
+    let mut values = pick(&target, &names);
+    values.retain(|name, _| tuning.contains(&name.as_str()) || !changes.touched(name));
+    let own_tuning: Map<String, Value> = own.into_iter().flatten().filter(|(name, _)| tuning.contains(&name.as_str())).map(|(name, value)| (name.clone(), value.clone())).collect();
+    // The preset's first: an own value that no longer reads leaves it.
+    let mut brush = overlay(overlay(brush, &values), &own_tuning);
     brush.fit_sd_to_quality();
     brush
 }

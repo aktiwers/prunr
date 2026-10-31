@@ -1192,6 +1192,23 @@ mod tests {
         assert_eq!(s.brush.inpaint_sharpen, 0.0, "a generated fill keeps its own Sharpen 0");
     }
 
+    /// An eraser's own tuning that no longer reads (a value an older
+    /// Prunr wrote) gives way to the preset's, not to the eraser's left.
+    #[test]
+    fn an_erasers_unreadable_tuning_takes_the_presets() {
+        use super::super::presets::prunr_view;
+        let mut s = Settings::default();
+        s.model = SettingsModel::BigInpaint;
+        s.brush.inpaint_fill_scale = prunr_core::inpaint::FillScale::Full;
+        let from = serde_json::to_value(&s.brush).unwrap();
+        s.brush_changes = serde_json::from_value(serde_json::json!({ "from": from, "on": { "LaMaFp32": { "inpaint_fill_scale": "Retired" } } })).unwrap();
+        s.model = SettingsModel::Inpaint;
+        s.switch_brush_model(SettingsModel::BigInpaint, "Prunr");
+        let lama = prunr_view(SettingsModel::Inpaint, None).brush.inpaint_fill_scale;
+        assert_ne!(lama, prunr_core::inpaint::FillScale::Full, "the test needs LaMa's own to differ");
+        assert_eq!(s.brush.inpaint_fill_scale, lama);
+    }
+
     /// Without the Fast download, Fast's few steps would run on the full
     /// model and leave a half-made fill; the eraser runs Quality instead.
     #[test]
