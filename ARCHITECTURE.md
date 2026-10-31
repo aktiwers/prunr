@@ -254,7 +254,7 @@ Mask, edge and post-upscale knob changes on the selected item, and brush re-cuts
 
 **One off screen at a time.** Renders of images other than the shown one go one at a time: each is parallel itself, so running them together only stacks their full-size buffers.
 
-**Lines on a moved cut-out.** Under Subject outline a mask drag draws the kept lines where they were traced; releasing it traces them on the new cut-out (an AddEdge run). A Restore or Erase stroke does the same at once, and its run fills in the stroke's step, so one Undo takes back both. The kept lines remember the mask and strokes they were traced on, and the worker cuts the subject with the strokes (sent beside the run, a Process's too), so they follow them.
+**Lines on a moved cut-out.** Under Subject outline a mask drag draws the kept lines where they were traced; releasing it traces them on the new cut-out (an AddEdge run). A Restore or Erase stroke does the same once the brush is put down (a run would hold the next stroke back), and the run fills in the shown step, so one Undo takes back both. The kept lines remember the mask and strokes they were traced on, and the worker cuts the subject with the strokes (sent beside the run, a Process's too), so they follow them.
 
 ## Presets
 
