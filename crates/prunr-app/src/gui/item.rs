@@ -475,6 +475,9 @@ pub(crate) struct Job {
     /// The strokes a cut cuts the subject with, sent with it; none unless
     /// it carries them.
     pub(crate) strokes: StrokesMark,
+    /// Started for the lines to follow strokes, not asked for: a later
+    /// edit drops it without a word, and picking up a brush stops it.
+    pub(crate) quiet: bool,
 }
 
 /// A stroke landed while an erase fills, cropped to where it painted, and
@@ -690,6 +693,10 @@ impl StrokesMark {
             (a, b) => a.is_none() && b.is_none(),
         };
         edits && selection
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.edits.is_none() && self.selection.is_none()
     }
 }
 
@@ -1205,12 +1212,28 @@ impl BatchItem {
     /// the settings and the strokes `action` applies make now: a preview
     /// or a stroke moved the cut-out under them.
     pub(crate) fn lines_traced_on_another_cut(&self, action: CutoutAction) -> bool {
-        self.settings.line_mode == prunr_core::LineMode::SubjectOutline
-            && self.cached_edge_tensors.as_ref().and_then(|lines| lines.traced_on.as_ref())
-                .is_some_and(|on| {
-                    on.mask != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part()
-                        || !on.strokes.same(&self.strokes_mark(action))
-                })
+        self.lines_traced_on_another_mask() || self.traced_lines().is_some_and(|on| !on.strokes.same(&self.strokes_mark(action)))
+    }
+
+    /// `lines_traced_on_another_cut` by the mask settings alone: a drag
+    /// moved the cut-out under the lines. Strokes wait for the brush to
+    /// be put down.
+    pub(crate) fn lines_traced_on_another_mask(&self) -> bool {
+        self.traced_lines().is_some_and(|on| on.mask != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part())
+    }
+
+    /// The cut the kept lines on the subject were traced on.
+    fn traced_lines(&self) -> Option<&TracedCut> {
+        (self.settings.line_mode == prunr_core::LineMode::SubjectOutline)
+            .then(|| self.cached_edge_tensors.as_ref().and_then(|lines| lines.traced_on.as_ref()))
+            .flatten()
+    }
+
+    /// The shown cut-out came from a run that cut the subject with the
+    /// strokes shown, its lines traced on them: no render redoes it.
+    pub(crate) fn cut_has_its_strokes(&self, action: CutoutAction) -> bool {
+        let shown = self.strokes_mark(action);
+        !shown.is_empty() && self.traced_lines().is_some_and(|on| on.mask == prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part() && on.strokes.same(&shown))
     }
 
     /// Lines a preview or a stroke left on another cut-out, which a lines
@@ -2334,7 +2357,7 @@ impl BatchItem {
         // Only a cut queues for a worker slot; other runs start at once.
         let running = engine != Engine::Segment;
         let since = self.timeline.current().at;
-        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running, since, painted: Vec::new(), strokes: StrokesMark::default() });
+        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running, since, painted: Vec::new(), strokes: StrokesMark::default(), quiet: false });
         self.failure = None;
         self.tile_preview = None;
         self.subject = None;
