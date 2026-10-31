@@ -183,7 +183,8 @@ impl PresetFile {
             // Over Prunr's settings for the face restorer the entry picks,
             // so an untouched restorer setting reads as Prunr's.
             let face = overlay(prunr.item_settings, &entry.item_settings).faces.model;
-            let item = overlay(view_of(model, &HashMap::new(), Some(face)).item_settings, &entry.item_settings);
+            let base = ItemSettings { faces: Preset::prunr().faces(model, face), ..prunr.item_settings };
+            let item = overlay(base, &entry.item_settings);
             let brush = overlay(prunr.brush.clone(), &entry.brush);
             let sd = prunr.sd.clone().map(|sd| overlay(sd, &entry.sd));
             kept.set(preset_key(model), own_differences(model, &item, &brush, sd.as_ref()));
@@ -236,14 +237,11 @@ fn entry_of(key: &str, entries: &HashMap<String, Entry>, item: ItemSettings, bru
     }
 }
 
-/// `key`'s settings as `entries` set them over Prunr's.
-fn values_of(key: &str, entries: &HashMap<String, Entry>) -> (ItemSettings, BrushSettings) {
+/// `key`'s settings as `preset` sets them.
+fn values_of(key: &str, preset: &Preset) -> (ItemSettings, BrushSettings) {
     match owner(key) {
-        Owner::Picked(model) => {
-            let view = view_of(model, entries, None);
-            (view.item_settings, view.brush(None).clone())
-        }
-        Owner::Helper(helper) => helper_values(helper, entries.get(key)),
+        Owner::Picked(model) => (preset.item_settings(model), preset.brush(model, None).clone()),
+        Owner::Helper(helper) => helper_values(helper, preset.file.models.get(key)),
         Owner::Unknown => Default::default(),
     }
 }
@@ -281,7 +279,7 @@ pub(crate) fn draft(started: &Preset, shown: &Shown) -> Vec<(String, Entry)> {
     });
     let unchanged = Map::new();
     let rest = others.into_iter().map(|key| {
-        let (item, brush) = values_of(key, entries);
+        let (item, brush) = values_of(key, started);
         let item = overlay(item, item_changes.on(key).unwrap_or(&unchanged));
         let brush = overlay(brush, brush_changes.on(key).unwrap_or(&unchanged));
         (key.to_string(), entry_of(key, entries, item, brush))
@@ -295,14 +293,21 @@ pub(crate) fn draft(started: &Preset, shown: &Shown) -> Vec<(String, Entry)> {
 pub(crate) fn take_untouched_brush(preset: &Preset, model: SettingsModel, brush: BrushSettings, changes: &Changes<BrushSettings>) -> BrushSettings {
     let tuning = super::preset_fields::fill_tuning_of(model);
     let own = changes.on(&preset_key(model));
-    let scheduler = own.and_then(|own| own.get("sd_scheduler")).and_then(|quality| serde_json::from_value(quality.clone()).ok());
+    let own_value = |name: &str| own.and_then(|own| own.get(name));
+    let scheduler = own_value("sd_scheduler").and_then(|quality| SdScheduler::deserialize(quality).ok());
     let target = serde_json::to_value(preset.brush(model, scheduler)).unwrap_or_default();
     let names: Vec<&str> = brush_entries_of(model).iter().flat_map(|(_, fields)| BrushSettings::fields(fields)).collect();
-    let mut values = pick(&target, &names);
-    values.retain(|name, _| tuning.contains(&name.as_str()) || !changes.touched(name));
-    for (name, value) in own.into_iter().flatten().filter(|(name, _)| tuning.contains(&name.as_str())) {
-        values.insert(name.clone(), value.clone());
-    }
+    let values: Map<String, Value> = pick(&target, &names)
+        .into_iter()
+        .filter_map(|(name, value)| {
+            if tuning.contains(&name.as_str()) {
+                let value = own_value(&name).cloned().unwrap_or(value);
+                Some((name, value))
+            } else {
+                (!changes.touched(&name)).then_some((name, value))
+            }
+        })
+        .collect();
     let mut brush = overlay(brush, &values);
     brush.fit_sd_to_quality();
     brush
@@ -374,27 +379,36 @@ fn tidy(value: Value) -> Value {
 /// `base` with `over`'s settings laid on it, by name. A setting that does
 /// not read (a newer Prunr's value, a typo) is left out, not the others.
 fn overlay<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> T {
-    if over.is_empty() {
-        return base;
+    let (laid, left_out) = lay_readable(base, over);
+    if !left_out.is_empty() {
+        tracing::warn!(?left_out, "preset settings that do not read were left out");
     }
-    let start = serde_json::to_value(&base).unwrap_or_default();
-    let mut value = start.clone();
+    laid
+}
+
+/// `base` with each of `over`'s settings that reads laid on it, by name,
+/// and the names of those that did not.
+pub(crate) fn lay_readable<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> (T, Vec<String>) {
+    if over.is_empty() {
+        return (base, Vec::new());
+    }
+    let mut value = serde_json::to_value(&base).unwrap_or_default();
     for (name, to) in over {
         set_field(&mut value, name, to.clone());
     }
-    if let Ok(laid) = serde_json::from_value(value) {
-        return laid;
+    if let Ok(laid) = T::deserialize(&value) {
+        return (laid, Vec::new());
     }
-    let mut value = start;
-    for (name, to) in over {
-        let mut tried = value.clone();
+    let mut left_out = Vec::new();
+    let laid = over.iter().fold(base, |kept, (name, to)| {
+        let mut tried = serde_json::to_value(&kept).unwrap_or_default();
         set_field(&mut tried, name, to.clone());
-        match serde_json::from_value::<T>(tried.clone()) {
-            Ok(_) => value = tried,
-            Err(err) => tracing::warn!(setting = %name, %err, "a preset setting that does not read was left out"),
-        }
-    }
-    serde_json::from_value(value).unwrap_or(base)
+        T::deserialize(&tried).unwrap_or_else(|_| {
+            left_out.push(name.clone());
+            kept
+        })
+    });
+    (laid, left_out)
 }
 
 /// One model's settings, resolved.

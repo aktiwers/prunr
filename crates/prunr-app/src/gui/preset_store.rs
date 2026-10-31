@@ -79,8 +79,8 @@ impl PresetStore {
     pub(crate) fn drain(&self, settings: &mut Settings, ctx: &egui::Context) -> Vec<Imported> {
         let mut imported = Vec::new();
         let mut last = None;
-        for scan in self.rx.try_iter() {
-            imported.extend(scan.imported.iter().cloned());
+        for mut scan in self.rx.try_iter() {
+            imported.append(&mut scan.imported);
             last = Some(scan);
         }
         let Some(scan) = last else { return imported };
