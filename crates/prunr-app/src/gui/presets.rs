@@ -18,6 +18,7 @@ use prunr_models::ModelId;
 
 use super::brush_state::{BrushSettings, SdScheduler};
 use super::item_settings::ItemSettings;
+use super::preset_fields::{helpers_of, HELPERS};
 use super::settings::SettingsModel;
 
 pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
@@ -39,6 +40,11 @@ pub(crate) fn preset_key(model: SettingsModel) -> String {
 /// The model filed under `key`; `None` for one this Prunr does not know.
 fn model_of_key(key: &str) -> Option<SettingsModel> {
     SettingsModel::ALL.into_iter().find(|&m| preset_key(m) == key)
+}
+
+/// The helper model filed under `key`.
+fn helper_of_key(key: &str) -> Option<ModelId> {
+    HELPERS.into_iter().find(|&h| model_id_key(h) == key)
 }
 
 /// The settings of the `sd` part, by name.
@@ -82,57 +88,110 @@ impl PresetFile {
     /// v1 file, which predates models in presets.
     pub(crate) fn of_item_settings(item_settings: ItemSettings) -> Self {
         let model = super::settings::DEFAULT_MODEL;
-        Self::default().with_settings(model, &item_settings, &prunr_model(model).brush)
+        Self::default().with_settings(model, &item_settings, &prunr_view(model, None).brush)
     }
 
-    /// The file with `model`'s entry set from the current settings, `item`
-    /// and `brush`: those of its settings that differ from Prunr's. The SD
-    /// part keeps the bundles of the qualities not in use. A model with
-    /// nothing apart from Prunr's has no entry.
+    /// The file with `model`'s entry, and those of the helper models that
+    /// run inside it, set from the current settings, `item` and `brush`:
+    /// those of their settings that differ from Prunr's. The SD part keeps
+    /// the bundles of the qualities not in use. A model with nothing apart
+    /// from Prunr's has no entry.
     pub(crate) fn with_settings(mut self, model: SettingsModel, item: &ItemSettings, brush: &BrushSettings) -> Self {
         let key = preset_key(model);
-        let mut sd = prunr_model(model).sd.as_ref().map(|prunr| {
+        let mut sd = prunr_view_of(model).sd.as_ref().map(|prunr| {
             let kept = self.models.get(&key).map_or(Map::new(), |entry| entry.sd.clone());
             overlay(prunr.clone(), &kept)
         });
         if let Some(sd) = &mut sd {
             take_sd_from_brush(sd, brush);
         }
-        let entry = differences(model, item, brush, sd.as_ref());
-        if entry.is_empty() {
-            self.models.remove(&key);
-        } else {
-            self.models.insert(key, entry);
+        self.set(key, own_differences(model, item, brush, sd.as_ref()));
+        for helper in helpers_of(model, item.faces.model) {
+            self.set(model_id_key(helper), helper_differences(helper, item, brush));
         }
         self.format_version = PRESET_FORMAT_VERSION;
         self
     }
 
+    fn set(&mut self, key: String, entry: Entry) {
+        if entry.is_empty() {
+            self.models.remove(&key);
+        } else {
+            self.models.insert(key, entry);
+        }
+    }
+
     /// The file as it is kept: each model's entry trimmed to its settings
     /// that differ from Prunr's (a file an earlier Prunr saved whole, or
-    /// one written by hand); a model this Prunr does not know is kept as it
-    /// is, for the Prunr that does.
-    pub(crate) fn trimmed(mut self) -> Self {
-        self.models.retain(|key, entry| match model_of_key(key) {
-            Some(model) => {
-                let view = ModelView::of(model, entry);
-                *entry = differences(model, &view.item_settings, &view.brush, view.sd.as_ref());
-                !entry.is_empty()
+    /// one written by hand). A picked model's entry from before helper
+    /// models had their own hands its line, face, depth and Magic Brush
+    /// settings to them, unless they have an entry already. A model this
+    /// Prunr does not know is kept as it is, for the Prunr that does.
+    pub(crate) fn trimmed(self) -> Self {
+        let mut kept = Self { format_version: self.format_version, models: HashMap::new() };
+        for (key, entry) in &self.models {
+            if let Some(helper) = helper_of_key(key) {
+                let (item, brush) = helper_values(helper, entry);
+                kept.set(key.clone(), helper_differences(helper, &item, &brush));
+            } else if model_of_key(key).is_none() {
+                kept.models.insert(key.clone(), entry.clone());
             }
-            None => true,
-        });
-        self
+        }
+        for model in SettingsModel::ALL {
+            let Some(entry) = self.models.get(&preset_key(model)) else { continue };
+            let prunr = prunr_view_of(model);
+            let item = overlay(prunr.item_settings, &entry.item_settings);
+            let brush = overlay(prunr.brush.clone(), &entry.brush);
+            let sd = prunr.sd.clone().map(|sd| overlay(sd, &entry.sd));
+            kept.set(preset_key(model), own_differences(model, &item, &brush, sd.as_ref()));
+            for helper in helpers_of(model, item.faces.model) {
+                let key = model_id_key(helper);
+                if !kept.models.contains_key(&key) {
+                    kept.set(key, helper_differences(helper, &item, &brush));
+                }
+            }
+        }
+        kept
     }
 }
 
-/// The settings of `model`'s that differ from Prunr's, by name.
-fn differences(model: SettingsModel, item: &ItemSettings, brush: &BrushSettings, sd: Option<&SdPreset>) -> Entry {
+/// The picked model's own settings that differ from Prunr's, by name.
+fn own_differences(model: SettingsModel, item: &ItemSettings, brush: &BrushSettings, sd: Option<&SdPreset>) -> Entry {
     let fields = super::preset_fields::of(model);
-    let prunr = prunr_model(model);
+    let prunr = prunr_view_of(model);
     Entry {
         item_settings: differing(item, &prunr.item_settings, &fields.item),
         brush: differing(brush, &prunr.brush, &fields.brush),
         sd: sd.zip(prunr.sd.as_ref()).map_or(Map::new(), |(sd, base)| differing(sd, base, SD_FIELDS)),
+    }
+}
+
+/// A helper model's own settings that differ from Prunr's, by name.
+fn helper_differences(helper: ModelId, item: &ItemSettings, brush: &BrushSettings) -> Entry {
+    let fields = super::preset_fields::of_helper(helper);
+    let (prunr_item, prunr_brush) = prunr_helper(helper);
+    Entry {
+        item_settings: differing(item, &prunr_item, &fields.item),
+        brush: differing(brush, &prunr_brush, &fields.brush),
+        sd: Map::new(),
+    }
+}
+
+/// A setting by its name in a file: `faces.hair` inside `faces`.
+fn field<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+    name.split('.').try_fold(value, |value, part| value.get(part))
+}
+
+fn set_field(value: &mut Value, name: &str, to: Value) {
+    let mut at = value;
+    let mut parts = name.split('.').peekable();
+    while let Some(part) = parts.next() {
+        let Some(group) = at.as_object_mut() else { return };
+        if parts.peek().is_none() {
+            group.insert(part.to_string(), to);
+            return;
+        }
+        at = group.entry(part).or_insert_with(|| Value::Object(Map::new()));
     }
 }
 
@@ -142,11 +201,27 @@ fn differing<T: Serialize>(value: &T, base: &T, fields: &[&str]) -> Map<String, 
     let (value, base) = (serde_json::to_value(value).unwrap_or_default(), serde_json::to_value(base).unwrap_or_default());
     fields
         .iter()
-        .filter_map(|&field| {
-            let own = value.get(field).cloned().unwrap_or(Value::Null);
-            (own != base.get(field).cloned().unwrap_or(Value::Null)).then(|| (field.to_string(), own))
+        .filter_map(|&name| {
+            let own = field(&value, name).cloned().unwrap_or(Value::Null);
+            (own != field(&base, name).cloned().unwrap_or(Value::Null)).then(|| (name.to_string(), tidy(own)))
         })
         .collect()
+}
+
+/// `value` with each number written as people type it: settings are
+/// `f32`, which JSON widens (0.8 becomes 0.800000011920929); the shortest
+/// form that reads back as the same `f32` goes in the file instead.
+fn tidy(value: Value) -> Value {
+    match value {
+        Value::Number(n) if n.is_f64() => n
+            .as_f64()
+            .and_then(|x| (x as f32).to_string().parse::<f64>().ok())
+            .and_then(serde_json::Number::from_f64)
+            .map_or(Value::Number(n), Value::Number),
+        Value::Array(items) => Value::Array(items.into_iter().map(tidy).collect()),
+        Value::Object(fields) => Value::Object(fields.into_iter().map(|(k, v)| (k, tidy(v))).collect()),
+        other => other,
+    }
 }
 
 /// `base` with `over`'s settings laid on it, by name. A preset whose
@@ -156,8 +231,8 @@ fn overlay<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<Strin
         return base;
     }
     let mut value = serde_json::to_value(&base).unwrap_or_default();
-    if let Some(fields) = value.as_object_mut() {
-        fields.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for (name, to) in over {
+        set_field(&mut value, name, to.clone());
     }
     serde_json::from_value(value).unwrap_or_else(|err| {
         tracing::warn!(%err, "preset settings that do not read were left out");
@@ -175,16 +250,6 @@ struct ModelView {
 }
 
 impl ModelView {
-    /// `entry`'s settings over Prunr's for `model`.
-    fn of(model: SettingsModel, entry: &Entry) -> Self {
-        let prunr = prunr_model(model);
-        Self {
-            item_settings: overlay(prunr.item_settings, &entry.item_settings),
-            brush: overlay(prunr.brush.clone(), &entry.brush),
-            sd: prunr.sd.clone().map(|sd| overlay(sd, &entry.sd)),
-        }
-    }
-
     /// `scheduler`: `None` uses the SD part's own quality; `Some`
     /// overrides it, so a quality picked in the session doesn't rewrite
     /// the preset.
@@ -197,30 +262,42 @@ impl ModelView {
     }
 }
 
+/// `model`'s settings with `entries` (a preset's) laid over Prunr's: its
+/// own entry, then that of each helper model that runs inside it, by the
+/// face restorer it has chosen.
+fn view_of(model: SettingsModel, entries: &HashMap<String, Entry>) -> ModelView {
+    let prunr = prunr_entries();
+    let layers = |key: &str| [prunr.get(key), entries.get(key)].into_iter().flatten().collect::<Vec<_>>();
+    let own = layers(&preset_key(model));
+    let mut item = own.iter().fold(ItemSettings::default(), |item, entry| overlay(item, &entry.item_settings));
+    let mut brush = own.iter().fold(BrushSettings::default(), |brush, entry| overlay(brush, &entry.brush));
+    let sd = own.first().is_some_and(|entry| !entry.sd.is_empty()).then(|| own.iter().fold(SdPreset::default(), |sd, entry| overlay(sd, &entry.sd)));
+    for helper in helpers_of(model, item.faces.model) {
+        for entry in layers(&model_id_key(helper)) {
+            item = overlay(item, &entry.item_settings);
+            brush = overlay(brush, &entry.brush);
+        }
+    }
+    ModelView { item_settings: item, brush, sd }
+}
+
 #[derive(Debug, Deserialize)]
 struct PrunrFile {
     models: HashMap<String, Entry>,
 }
 
-/// Prunr's settings for every model, in `SettingsModel::ALL` order: its
-/// built-in file over the code's own defaults, read once.
+/// Prunr's own preset as its built-in file lists it.
+fn prunr_entries() -> &'static HashMap<String, Entry> {
+    static FILE: std::sync::OnceLock<HashMap<String, Entry>> = std::sync::OnceLock::new();
+    // A test reads the file and resolves every model from it.
+    FILE.get_or_init(|| serde_json::from_str::<PrunrFile>(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads").models)
+}
+
+/// Prunr's settings for every picked model, in `SettingsModel::ALL`
+/// order, resolved once.
 fn prunr_models() -> &'static [ModelView] {
     static MODELS: std::sync::OnceLock<Vec<ModelView>> = std::sync::OnceLock::new();
-    MODELS.get_or_init(|| {
-        // A test reads the file and resolves every model from it.
-        let file: PrunrFile = serde_json::from_str(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads");
-        SettingsModel::ALL
-            .into_iter()
-            .map(|model| {
-                let entry = file.models.get(&preset_key(model)).cloned().unwrap_or_default();
-                ModelView {
-                    item_settings: overlay(ItemSettings::default(), &entry.item_settings),
-                    brush: overlay(BrushSettings::default(), &entry.brush),
-                    sd: (!entry.sd.is_empty()).then(|| overlay(SdPreset::default(), &entry.sd)),
-                }
-            })
-            .collect()
-    })
+    MODELS.get_or_init(|| SettingsModel::ALL.into_iter().map(|model| view_of(model, &HashMap::new())).collect())
 }
 
 fn model_index(model: SettingsModel) -> usize {
@@ -228,37 +305,48 @@ fn model_index(model: SettingsModel) -> usize {
     SettingsModel::ALL.iter().position(|&m| m == model).unwrap_or(0)
 }
 
-fn prunr_model(model: SettingsModel) -> &'static ModelView {
+fn prunr_view_of(model: SettingsModel) -> &'static ModelView {
     &prunr_models()[model_index(model)]
+}
+
+/// Prunr's settings for a helper model, over the code's defaults.
+fn prunr_helper(helper: ModelId) -> (ItemSettings, BrushSettings) {
+    helper_values(helper, &Entry::default())
+}
+
+/// A helper model's settings from `entry` over Prunr's.
+fn helper_values(helper: ModelId, entry: &Entry) -> (ItemSettings, BrushSettings) {
+    let empty = Entry::default();
+    let prunr = prunr_entries().get(&model_id_key(helper)).unwrap_or(&empty);
+    let item = overlay(overlay(ItemSettings::default(), &prunr.item_settings), &entry.item_settings);
+    let brush = overlay(overlay(BrushSettings::default(), &prunr.brush), &entry.brush);
+    (item, brush)
 }
 
 /// Prunr's settings for `model`, resolved for `scheduler` (`None`: its
 /// own quality).
 pub(crate) fn prunr_view(model: SettingsModel, scheduler: Option<SdScheduler>) -> ResolvedView {
-    prunr_model(model).resolve(scheduler)
+    prunr_view_of(model).resolve(scheduler)
 }
 
 /// Prunr's image settings for `model`, without cloning its brush.
 pub(crate) fn prunr_item_settings(model: SettingsModel) -> ItemSettings {
-    prunr_model(model).item_settings
+    prunr_view_of(model).item_settings
 }
 
-/// A preset as the app holds it: its file, and each model's settings
-/// resolved once, as the toolbar reads them every frame.
+/// A preset as the app holds it: its file, and each picked model's
+/// settings resolved once, as the toolbar reads them every frame.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "PresetFile")]
 pub(crate) struct Preset {
     file: PresetFile,
-    /// Per model in `SettingsModel::ALL` order; `None` without an entry.
-    views: Vec<Option<ModelView>>,
+    /// Per model in `SettingsModel::ALL` order.
+    views: Vec<ModelView>,
 }
 
 impl From<PresetFile> for Preset {
     fn from(file: PresetFile) -> Self {
-        let views = SettingsModel::ALL
-            .into_iter()
-            .map(|model| file.models.get(&preset_key(model)).map(|entry| ModelView::of(model, entry)))
-            .collect();
+        let views = SettingsModel::ALL.into_iter().map(|model| view_of(model, &file.models)).collect();
         Self { file, views }
     }
 }
@@ -270,12 +358,12 @@ impl Preset {
 
     /// The preset's settings for `model`, Prunr's where it has none.
     pub(crate) fn resolve(&self, model: SettingsModel, scheduler: Option<SdScheduler>) -> ResolvedView {
-        self.views[model_index(model)].as_ref().map_or_else(|| prunr_view(model, scheduler), |view| view.resolve(scheduler))
+        self.views[model_index(model)].resolve(scheduler)
     }
 
     /// `resolve`'s image settings, without cloning a brush.
     pub(crate) fn item_settings(&self, model: SettingsModel) -> ItemSettings {
-        self.views[model_index(model)].as_ref().map_or_else(|| prunr_item_settings(model), |view| view.item_settings)
+        self.views[model_index(model)].item_settings
     }
 }
 
@@ -364,9 +452,10 @@ fn take_sd_from_brush(sd: &mut SdPreset, brush: &BrushSettings) {
 mod tests {
     use super::*;
 
-    /// Prunr's file has an entry for every model, listing exactly the
-    /// settings that model shows, each one readable: a new model or a new
-    /// setting has to be given its default there.
+    /// Prunr's file has an entry for every picked model and every helper
+    /// model, listing exactly the settings that model keeps, each one
+    /// readable: a new model or a new setting has to be given its default
+    /// there.
     #[test]
     fn prunr_holds_every_models_settings() {
         fn keys(map: &Map<String, Value>) -> Vec<&str> {
@@ -380,21 +469,24 @@ mod tests {
         }
         fn reads<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> Result<T, serde_json::Error> {
             let mut value = serde_json::to_value(base)?;
-            value.as_object_mut().expect("a struct").extend(over.clone());
+            for (name, to) in over {
+                set_field(&mut value, name, to.clone());
+            }
             serde_json::from_value(value)
         }
         let file: PrunrFile = serde_json::from_str(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads");
-        for model in SettingsModel::ALL {
-            let entry = file.models.get(&preset_key(model)).unwrap_or_else(|| panic!("{model:?} has no entry in Prunr.json"));
-            let fields = super::super::preset_fields::of(model);
-            assert_eq!(keys(&entry.item_settings), sorted(fields.item), "{model:?} image settings");
-            assert_eq!(keys(&entry.brush), sorted(fields.brush), "{model:?} brush settings");
-            assert_eq!(!entry.sd.is_empty(), fields.sd, "{model:?} SD part");
-            reads(ItemSettings::default(), &entry.item_settings).unwrap_or_else(|e| panic!("{model:?} image settings: {e}"));
-            reads(BrushSettings::default(), &entry.brush).unwrap_or_else(|e| panic!("{model:?} brush settings: {e}"));
-            reads(SdPreset::default(), &entry.sd).unwrap_or_else(|e| panic!("{model:?} SD part: {e}"));
+        let picked = SettingsModel::ALL.into_iter().map(|m| (preset_key(m), super::super::preset_fields::of(m)));
+        let helpers = HELPERS.into_iter().map(|h| (model_id_key(h), super::super::preset_fields::of_helper(h)));
+        for (key, fields) in picked.chain(helpers) {
+            let entry = file.models.get(&key).unwrap_or_else(|| panic!("{key} has no entry in Prunr.json"));
+            assert_eq!(keys(&entry.item_settings), sorted(fields.item), "{key} image settings");
+            assert_eq!(keys(&entry.brush), sorted(fields.brush), "{key} brush settings");
+            assert_eq!(!entry.sd.is_empty(), fields.sd, "{key} SD part");
+            reads(ItemSettings::default(), &entry.item_settings).unwrap_or_else(|e| panic!("{key} image settings: {e}"));
+            reads(BrushSettings::default(), &entry.brush).unwrap_or_else(|e| panic!("{key} brush settings: {e}"));
+            reads(SdPreset::default(), &entry.sd).unwrap_or_else(|e| panic!("{key} SD part: {e}"));
         }
-        assert_eq!(file.models.len(), SettingsModel::ALL.len(), "an entry for a model the app does not offer");
+        assert_eq!(file.models.len(), SettingsModel::ALL.len() + HELPERS.len(), "an entry for a model the app does not run");
     }
 
     /// Moving the defaults into Prunr's file changed nothing: every model
@@ -452,6 +544,39 @@ mod tests {
         for other in [SettingsModel::U2net, SettingsModel::Silueta, SettingsModel::None, SettingsModel::Nomos2Upscale] {
             assert_eq!(preset.resolve(other, None), prunr_view(other, None), "{other:?}");
         }
+    }
+
+    /// A helper model keeps its settings in its own entry, and they apply
+    /// wherever it runs; each face restorer has its own.
+    #[test]
+    fn a_helper_keeps_its_settings_wherever_it_runs() {
+        use super::super::item_settings::FaceModel;
+        let birefnet = SettingsModel::BiRefNetLite;
+        let mut item = prunr_item_settings(birefnet);
+        item.line_strength = 0.75;
+        item.faces.strength_pct = 70;
+        let saved = PresetFile::default().with_settings(birefnet, &item, &prunr_view(birefnet, None).brush);
+        assert!(!saved.models.contains_key("BiRefNetLite"), "nothing of BiRefNet's own changed");
+        assert_eq!(saved.models["Teed"].item_settings["line_strength"], 0.75);
+        assert_eq!(saved.models["FaceGfpgan"].item_settings["faces.strength_pct"], 70);
+        let preset = Preset::from(saved);
+        assert_eq!(preset.item_settings(SettingsModel::None).line_strength, 0.75, "the line model runs on No model too");
+        assert_eq!(preset.item_settings(SettingsModel::Nomos2Upscale).faces.strength_pct, 70, "GFPGAN after an upscaler");
+        let restoreformer = Preset::from(file(r#"{ "format_version": 2, "models": { "Nomos8kSchatL": { "item_settings": { "faces.model": "RestoreFormerPp" } } } }"#));
+        let faces = restoreformer.item_settings(SettingsModel::Nomos8kUpscale).faces;
+        assert_eq!((faces.model, faces.strength_pct), (FaceModel::RestoreFormerPp, 50), "RestoreFormer++'s own strength, not GFPGAN's");
+    }
+
+    /// A file from before helper models had entries keeps its line and face
+    /// settings: they move from the picked model's entry to the helpers'.
+    #[test]
+    fn an_old_entry_hands_its_helper_settings_over() {
+        let old = file(r#"{ "format_version": 2, "models": { "Silueta": { "item_settings": {
+            "gamma": 1.5, "line_strength": 0.8, "faces": { "on": true, "model": "Gfpgan", "strength_pct": 70, "largest_only": false, "hair": false }
+        } } } }"#).trimmed();
+        assert_eq!(old.models["Silueta"].item_settings, serde_json::from_str::<Map<String, Value>>(r#"{ "gamma": 1.5, "faces.on": true }"#).unwrap());
+        assert_eq!(old.models["Teed"].item_settings["line_strength"], 0.8);
+        assert_eq!(old.models["FaceGfpgan"].item_settings["faces.strength_pct"], 70);
     }
 
     /// No model files under its own key.
@@ -571,6 +696,17 @@ mod tests {
     fn an_old_preset_without_upscale_keys_loads_prunrs() {
         let old = Preset::from(file(r#"{ "format_version": 2, "models": { "Nomos8kSchatL": { "item_settings": { "gamma": 1.5 } } } }"#).trimmed());
         assert_eq!(old.item_settings(SettingsModel::Nomos8kUpscale), prunr_item_settings(SettingsModel::Nomos8kUpscale), "gamma is not an upscaler setting");
+    }
+
+    /// A saved number is written as typed, not as JSON widens an `f32`.
+    #[test]
+    fn a_saved_number_is_written_as_typed() {
+        let model = SettingsModel::Silueta;
+        let item = ItemSettings { gamma: 0.8, feather: 2.3, ..prunr_item_settings(model) };
+        let saved = PresetFile::default().with_settings(model, &item, &prunr_view(model, None).brush);
+        let json = serde_json::to_string(&saved.models["Silueta"]).unwrap();
+        assert!(json.contains("\"gamma\":0.8") && json.contains("\"feather\":2.3"), "{json}");
+        assert_eq!(Preset::from(saved).item_settings(model).gamma, 0.8, "reads back as the same value");
     }
 
     /// A saved preset round-trips through its file: key by model name, the

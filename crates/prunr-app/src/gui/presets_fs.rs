@@ -469,9 +469,10 @@ mod tests {
         let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 2.0, "edge_thickness": 5, "definitely_not_a_real_field": 42 })).expect("migrates");
         assert_eq!(migrated.format_version, 2);
         let entry = default_entry(&migrated).expect("default model entry");
-        assert_eq!((entry.item_settings["gamma"].as_f64(), entry.item_settings["edge_thickness"].as_u64()), (Some(2.0), Some(5)));
-        assert_eq!(entry.item_settings.len(), 2, "only what differs");
+        assert_eq!(entry.item_settings["gamma"].as_f64(), Some(2.0));
+        assert_eq!(entry.item_settings.len(), 1, "only what differs");
         assert!(entry.brush.is_empty() && entry.sd.is_empty());
+        assert_eq!(migrated.models["Teed"].item_settings["edge_thickness"].as_u64(), Some(5), "the line width is the line model's");
         let empty = migrate_v1_to_v2(&serde_json::json!({})).expect("an empty v1 file migrates");
         assert!(empty.models.is_empty(), "nothing apart from Prunr's");
     }
