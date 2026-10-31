@@ -283,13 +283,13 @@ impl Settings {
         value.as_object().map_or_else(|| (Self::default(), Vec::new()), |saved| super::presets::lay_readable(Self::default(), saved))
     }
 
-    /// Best-effort, off the UI thread, after every earlier save.
     /// Nothing changed on the brush from here: a preset was applied, or
     /// the brush was read without changes kept over it.
     pub(crate) fn restart_brush_changes(&mut self) {
         self.brush_changes = super::preset_changes::Changes::new(self.brush.clone());
     }
 
+    /// Best-effort, off the UI thread, after every earlier save.
     pub fn save(&self) {
         let Some(path) = Self::config_path() else { return };
         match serde_json::to_string_pretty(self) {
