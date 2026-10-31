@@ -241,20 +241,22 @@ impl Settings {
         super::item_settings::migrate_old_item_settings(&mut value);
         migrate_sd_margin(&mut value);
 
-        let (mut settings, note) = match serde_json::from_value(value.clone()) {
-            Ok(s) => (s, None),
+        let (mut settings, reset, note) = match serde_json::from_value(value.clone()) {
+            Ok(s) => (s, Vec::new(), None),
             Err(e) => {
                 let (s, reset) = Self::merge_readable(&value);
                 tracing::warn!(%e, ?reset, "settings.json has settings this version cannot read; they start from defaults");
                 keep_unreadable(path);
-                (s, Some(SOME_SETTINGS_RESET))
+                (s, reset, Some(SOME_SETTINGS_RESET))
             }
         };
         settings.brush.fit_sd_to_quality();
-        // A file from before the brush's changes were kept: the brush as
-        // saved is where they start, or every setting apart from the
-        // code's default would count as one.
-        if value.get("brush_changes").is_none() {
+        // Without changes kept over the brush as read (a file from before
+        // they were kept, or a brush or changes that did not read), they
+        // start from it, or every setting apart from the code's default
+        // would count as one.
+        let changes_kept = value.get("brush_changes").is_some() && !reset.iter().any(|key| key == "brush" || key == "brush_changes");
+        if !changes_kept {
             settings.restart_brush_changes();
         }
 
@@ -1021,6 +1023,23 @@ mod tests {
         v.as_object_mut().unwrap().remove("brush_changes");
         std::fs::write(&path, v.to_string()).unwrap();
         let (s, _) = Settings::read(&path);
+        assert_eq!(s.brush_changes, super::super::preset_changes::Changes::new(s.brush.clone()));
+    }
+
+    /// A brush that does not read starts from the defaults, and its changes
+    /// start from them too, not from the brush the file kept them over.
+    #[test]
+    fn a_brush_that_does_not_read_starts_its_changes_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut kept = Settings::default();
+        kept.brush.inpaint_sharpen = 0.0;
+        kept.restart_brush_changes();
+        let mut v = serde_json::to_value(&kept).unwrap();
+        v["brush"]["radius"] = serde_json::json!("wide");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let (s, _) = Settings::read(&path);
+        assert_eq!(s.brush, BrushSettings::default());
         assert_eq!(s.brush_changes, super::super::preset_changes::Changes::new(s.brush.clone()));
     }
 
