@@ -70,7 +70,10 @@ impl PrunrApp {
         if !self.batch.items[idx].shows_cutout() {
             return;
         }
-        if !self.retrace_lines(idx) {
+        // A brush in hand keeps painting: a lines run would hold its next
+        // stroke back. Its strokes render at once, and the lines follow
+        // when it is put down (`set_tool`).
+        if self.active_tool().is_some() || !self.retrace_lines(idx) {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -81,7 +84,7 @@ impl PrunrApp {
     /// in the shown step (a stroke's own, so one Undo takes back both).
     /// False when none starts now; an edit still being made asks again as
     /// it lands.
-    fn retrace_lines(&mut self, idx: usize) -> bool {
+    pub(super) fn retrace_lines(&mut self, idx: usize) -> bool {
         let Some(model) = self.settings.model.to_model_kind() else { return false };
         let item = &self.batch.items[idx];
         // A run takes the shown image's settings, which are not this one's.
@@ -485,6 +488,10 @@ impl PrunrApp {
             None => {
                 self.brush_state.disable();
                 self.magic_brush_state.deactivate();
+                // Put down: the lines follow the strokes it made.
+                if let Some(idx) = self.batch.selected_idx_clamped().filter(|&idx| self.batch.items[idx].shows_cutout()) {
+                    self.retrace_lines(idx);
+                }
             }
             Some(Tool::Paint) => {
                 self.picking_depth_focus = false;
@@ -1016,6 +1023,26 @@ mod stroke_lines_tests {
         app.apply_brush_change(crate::gui::views::brush_chip::BrushChipOutcome { action_changed: true, ..Default::default() });
         assert_eq!(lines_runs(&rx), vec![true], "traced on the erased cut-out");
         assert!(!app.processor.live_preview.works_on(1), "no render draws the restored one's lines");
+    }
+
+    /// With a brush in hand a stroke renders at once and starts no lines
+    /// run, which would hold the next stroke back; putting the brush down
+    /// starts the one run, cut with every stroke it made.
+    #[test]
+    fn a_brush_in_hand_leaves_the_lines_until_it_is_put_down() {
+        use crate::gui::brush_state::Tool;
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        app.set_tool(Some(Tool::Paint));
+        stroke(&mut app, FULL);
+        assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "painting: no lines run");
+        assert!(app.processor.live_preview.works_on(1), "the stroke renders at once");
+        assert!(app.batch.items[0].is_idle(), "the next stroke is not held back");
+        app.set_tool(None);
+        assert_eq!(lines_runs(&rx), vec![true], "put down: one run, with the strokes");
+        land_lines(&mut app);
+        app.set_tool(Some(Tool::Paint));
+        app.set_tool(None);
+        assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "picked up and put down without a stroke: nothing to trace");
     }
 
     /// A stroke that lands while the lines run is under way starts no
