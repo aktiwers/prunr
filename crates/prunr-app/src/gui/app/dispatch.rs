@@ -377,7 +377,9 @@ impl PrunrApp {
         jobs: usize,
     ) {
         let first_look = self.processor.first_look.get().is_some_and(|id| tier1_ids.contains(&id));
-        let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs, self.settings.cpu_only(), first_look);
+        let line_mode = self.run_settings().line_mode;
+        let engines = crate::gui::memory::CutoutEngines { model, jobs, cpu_only: self.settings.cpu_only(), first_look, line_mode };
+        let mut ctrl = crate::gui::memory::AdmissionController::new(engines);
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let (batch, action) = (&mut self.batch, self.settings.brush.cutout_action);
         let (initial_items, additional_items_rx) =

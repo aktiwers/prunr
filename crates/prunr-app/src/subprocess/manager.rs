@@ -123,8 +123,7 @@ impl WorkerLines {
 pub enum Crash {
     /// The system killed it (SIGKILL), which on a desktop means memory.
     OutOfMemory,
-    /// Prunr stopped it: free memory fell below the line while it ran
-    /// (`batch_rules::stops_for_memory`).
+    /// Prunr stopped it: free memory fell below the line while it ran.
     MemoryLow,
     /// It is alive but can no longer be heard: it sent nothing for too
     /// long, or what it sent could not be read.
@@ -599,9 +598,10 @@ impl SubprocessManager {
         let _ = self.child.wait(); // reap zombie
     }
 
-    /// The memory the worker holds now, in MB; 0 when it cannot be read.
-    pub fn resident_mb(&self) -> u64 {
-        prunr_core::sysmem::rss_mb_of(self.child.id()).unwrap_or(0)
+    /// The memory the worker holds now, in MB; `None` when it cannot be
+    /// read.
+    pub fn resident_mb(&self) -> Option<u64> {
+        prunr_core::sysmem::rss_mb_of(self.child.id())
     }
 }
 

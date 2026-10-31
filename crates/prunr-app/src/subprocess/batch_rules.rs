@@ -17,19 +17,15 @@ pub fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
     max_jobs.saturating_sub(working)
 }
 
-/// Free system RAM below which a worker's run is stopped. 1 GB sits
-/// below Linux's aggressive-reclaim band and above macOS's
-/// memory-pressure warning, so the worker goes before the desktop
-/// thrashes. Runs start with `memory::RAM_RESERVE_MB` free beside their
-/// need, so only a figure that was low, or another app growing, gets
-/// here.
-pub const STOP_BELOW_FREE_BYTES: u64 = 1024 * 1024 * 1024;
-
-/// Whether a worker with work in flight stops for memory, by the free
-/// RAM `read_free` reads now, only while work is in flight. No reading:
+/// The free RAM that stops a worker with work in flight, as `read_free`
+/// reads it (only then): below `memory::STOP_BELOW_FREE_MB`. No reading:
 /// it runs on.
-pub fn stops_for_memory(in_flight_count: usize, read_free: impl FnOnce() -> Option<u64>) -> bool {
-    in_flight_count > 0 && read_free().is_some_and(|free| free < STOP_BELOW_FREE_BYTES)
+pub fn low_free_memory(in_flight_count: usize, read_free: impl FnOnce() -> Option<u64>) -> Option<u64> {
+    const LINE: u64 = prunr_core::memory::STOP_BELOW_FREE_MB * 1024 * 1024;
+    if in_flight_count == 0 {
+        return None;
+    }
+    read_free().filter(|&free| free < LINE)
 }
 
 /// Alive but silent too long; the event loop treats it as a crash.
@@ -82,13 +78,13 @@ mod tests {
     /// an idle worker, or no reading, is left alone.
     #[test]
     fn a_run_stops_only_when_memory_runs_low_under_it() {
-        let gb = 1024 * 1024 * 1024;
-        assert!(stops_for_memory(1, || Some(700 * 1024 * 1024)), "the desktop that froze had 0.7 GB free");
-        assert!(stops_for_memory(1, || Some(STOP_BELOW_FREE_BYTES - 1)));
-        assert!(!stops_for_memory(1, || Some(STOP_BELOW_FREE_BYTES)));
-        assert!(!stops_for_memory(0, || panic!("read only while work runs")), "nothing running");
-        assert!(!stops_for_memory(1, || None), "no reading");
-        assert!(!stops_for_memory(2, || Some(8 * gb)));
+        let line = prunr_core::memory::STOP_BELOW_FREE_MB * 1024 * 1024;
+        assert_eq!(low_free_memory(1, || Some(700 << 20)), Some(700 << 20));
+        assert_eq!(low_free_memory(1, || Some(line - 1)), Some(line - 1));
+        assert_eq!(low_free_memory(1, || Some(line)), None);
+        assert_eq!(low_free_memory(0, || panic!("read only while work runs")), None);
+        assert_eq!(low_free_memory(1, || None), None, "no reading");
+        assert_eq!(low_free_memory(2, || Some(8 << 30)), None);
     }
 
     /// A worker is hung only when it sits on work past the timeout: an
