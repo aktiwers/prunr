@@ -193,6 +193,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - A background image applies to every image in a run, not only the one on screen; it loads off the UI thread, and cancelling the file dialog keeps the background you had.
 - Tile backgrounds tile by image pixels, so the screen matches the export at any zoom; a see-through background image keeps its color instead of darkening.
 - With an effect on Sketch Subject, the lines are traced from the plain subject, so Pixelate or Halftone no longer turns them into steps after Process.
+- With Sketch on Subject, the outline follows Restore and Erase strokes: after a stroke, a switch of Restore · Erase · Select, an Undo onto a selection or a Process, the lines are traced on the cut-out as painted, instead of staying where the cut-out was before. One Undo takes back a stroke and its lines.
 - The exported Lines layer of a split drag-out matches the canvas, Dual scale included.
 - Separate layers keep your brush corrections and start from the image the cut-out ran on; an image whose cut-out data is gone saves as one file, and a toast says so.
 - Model Store: Retry works after any failed download, a cancelled one returns to Download, a queued one says so, and disk usage counts the Stable Diffusion files.
