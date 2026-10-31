@@ -252,19 +252,16 @@ impl CutoutEngines {
     }
 }
 
-/// The most jobs up to `max_jobs` that `fits`, fewer jobs before the
-/// first look is dropped; when none fits either way, the shortfall of one
-/// job without it, the smallest run tried.
+/// The most jobs up to `max_jobs` that `fits` without the first look,
+/// with it beside them where it fits too: it goes before a job does. When
+/// one job alone does not fit, its shortfall.
 fn plan_with(
     max_jobs: usize,
     first_look: bool,
     fits: impl Fn(usize, bool) -> Result<(), prunr_core::memory::Short>,
 ) -> Result<CutoutPlan, prunr_core::memory::Short> {
-    let with = |look| most_jobs(max_jobs, |jobs| fits(jobs, look)).map(|jobs| CutoutPlan { jobs, first_look: look });
-    match with(first_look) {
-        Err(_) if first_look => with(false),
-        planned => planned,
-    }
+    let jobs = most_jobs(max_jobs, |jobs| fits(jobs, false))?;
+    Ok(CutoutPlan { jobs, first_look: first_look && fits(jobs, true).is_ok() })
 }
 
 /// The most of up to `max_jobs` that `fits`; one's shortfall when none.
@@ -364,18 +361,29 @@ mod tests {
         assert!(fits_beside_held(need(birefnet), (need_mb + kept - 1_000) * MB, 1_000).is_ok(), "a warm worker's own memory");
     }
 
-    /// A batch that does not fit runs with fewer jobs, then without the
-    /// first look, and is refused only when one job alone does not fit.
+    /// A batch that does not fit runs with fewer jobs, without the first
+    /// look where it does not fit beside them, and is refused only when
+    /// one job alone does not fit.
     #[test]
     fn a_batch_runs_smaller_before_it_is_refused() {
         let short = prunr_core::memory::Short::Ram { need_mb: 2_000, kept_mb: 1_024, free_mb: 3_000 };
         let plan = |jobs, first_look| CutoutPlan { jobs, first_look };
         let room = |most: usize, look_fits: bool| move |jobs: usize, look: bool| if jobs <= most && (look_fits || !look) { Ok(()) } else { Err(short) };
         assert_eq!(plan_with(4, true, room(4, true)), Ok(plan(4, true)));
-        assert_eq!(plan_with(4, true, room(2, true)), Ok(plan(2, true)), "fewer jobs first");
-        assert_eq!(plan_with(4, true, room(2, false)), Ok(plan(2, false)), "then no first look");
+        assert_eq!(plan_with(4, true, room(2, true)), Ok(plan(2, true)), "as many jobs as fit");
+        assert_eq!(plan_with(4, true, room(2, false)), Ok(plan(2, false)), "no first look where it does not fit beside them");
         assert_eq!(plan_with(4, false, room(1, true)), Ok(plan(1, false)));
         assert_eq!(plan_with(4, true, room(0, true)), Err(short));
+    }
+
+    /// The first look goes before a job does: four jobs fit without it,
+    /// three with it, and the batch runs four.
+    #[test]
+    fn the_first_look_goes_before_a_job() {
+        let short = prunr_core::memory::Short::Ram { need_mb: 4_500, kept_mb: 1_024, free_mb: 4_200 };
+        let room = |jobs: usize, look: bool| if jobs * 1_000 + usize::from(look) * 500 <= 4_200 { Ok(()) } else { Err(short) };
+        assert_eq!(plan_with(4, true, room), Ok(CutoutPlan { jobs: 4, first_look: false }));
+        assert_eq!(plan_with(3, true, room), Ok(CutoutPlan { jobs: 3, first_look: true }), "it stays where it costs no job");
     }
 
     /// One job may run in swap, slower but not stopped; a second runs only

@@ -882,20 +882,12 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
         return Ok(super::memory::CutoutPlan { jobs, first_look: true });
     }
     let EngineSpec { model, cpu_only, .. } = state.config.engines;
-    let shown = state.config.first_look.get();
-    let first_look = state.pending.iter().any(|item| Some(item.id) == shown);
     let line_mode = state.config.run.line_mode;
-    let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode, line_fade: false };
+    // Any image the batch runs may be the one on screen by its turn: the
+    // plan says whether a first look has room beside the jobs.
+    let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look: true, line_mode, line_fade: false };
     let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
-    let planned = engines.plan(held_mb);
-    if let (Ok(plan), false) = (&planned, first_look) {
-        // An image shown later in the batch may take a first look: where
-        // there is room for one beside the jobs planned, it stays open.
-        let looked = super::memory::CutoutEngines { jobs: plan.jobs, first_look: true, ..engines }.plan(held_mb);
-        let room = looked == Ok(super::memory::CutoutPlan { jobs: plan.jobs, first_look: true });
-        return Ok(super::memory::CutoutPlan { first_look: room, ..*plan });
-    }
-    planned.map_err(|short| {
+    engines.plan(held_mb).map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
         // Lines alone run no cut-out model: the line model is what is short.
         let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
