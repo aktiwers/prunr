@@ -601,10 +601,10 @@ fn missing_depth_model(args: &Cli, s: &ItemSettings) -> Option<String> {
     (wants_depth(args, s) && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
 }
 
-/// Whether the run reads a depth map: a depth-map file, faded lines (only
-/// when lines are drawn), or a lens-blur backdrop.
+/// Whether the run reads a depth map: a depth-map file, or what the app
+/// reads one for (faded lines, a lens-blur backdrop).
 fn wants_depth(args: &Cli, s: &ItemSettings) -> bool {
-    args.depth_map || (s.line_mode != LineMode::Off && s.line_fade_pct > 0) || s.bg_effect.needs_depth()
+    args.depth_map || s.wants_depth(args.settings_model().role())
 }
 
 fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {

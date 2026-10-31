@@ -37,11 +37,28 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Whether `name` is Prunr's own preset, in any case.
+pub(crate) fn is_prunr(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(PRUNR_PRESET)
+}
+
+/// The file preset `name` is kept in.
+pub(crate) fn file_name(name: &str) -> String {
+    format!("{name}.{PRESET_EXT}")
+}
+
 /// `None` for the reserved "Prunr" or without a config dir.
 pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
-    if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
+    if is_prunr(name) { return None; }
     let dir = presets_dir()?;
-    Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
+    Some(dir.join(file_name(&sanitize_filename(name))))
+}
+
+/// Preset names in the order the list shows them, case ignored.
+pub(crate) fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names
 }
 
 /// A name Windows keeps for a device, whatever follows a dot: CON, PRN,
@@ -89,9 +106,9 @@ pub fn sanitize_filename(name: &str) -> String {
 /// model; its brush and SD values are Prunr's. The file on disk stays v1
 /// until the user re-saves it.
 fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
-    // `#[serde(default)]` would read an array or unrelated value as a
-    // fully-default ItemSettings, masking a corrupt file.
-    if !value.is_object() {
+    // `#[serde(default)]` would read any JSON as a fully-default
+    // ItemSettings, masking a corrupt or unrelated file.
+    if !names_a_setting(value) {
         return None;
     }
     let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
@@ -113,19 +130,19 @@ pub(crate) fn load_all() -> (HashMap<String, Preset>, HashSet<String>) {
         })
         .collect();
 
-    let read: Vec<(String, Result<PresetFile, Skipped>)> = paths
+    let read: Vec<(String, Result<Preset, Skipped>)> = paths
         .par_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
-            (!name.eq_ignore_ascii_case(PRUNR_PRESET)).then(|| (name, read_preset(path)))
+            (!is_prunr(&name)).then(|| (name, read_preset(path).map(Preset::from)))
         })
         .collect();
     let mut presets = HashMap::new();
     let mut newer = HashSet::new();
-    for (name, file) in read {
-        match file {
-            Ok(file) => {
-                presets.insert(name, Preset::from(file));
+    for (name, preset) in read {
+        match preset {
+            Ok(preset) => {
+                presets.insert(name, preset);
             }
             Err(Skipped::Newer) => {
                 newer.insert(name.to_lowercase());
@@ -154,9 +171,7 @@ pub(crate) fn find_preset(name: &str) -> Result<Preset, String> {
     if newer.contains(&name.to_lowercase()) {
         return Err(format!("the preset \"{name}\" was saved by a newer Prunr"));
     }
-    let mut names: Vec<String> = presets.into_keys().collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.insert(0, PRUNR_PRESET.to_string());
+    let names: Vec<String> = std::iter::once(PRUNR_PRESET.to_string()).chain(sorted_names(presets.into_keys())).collect();
     Err(format!("no preset named \"{name}\" (presets: {})", names.join(", ")))
 }
 
@@ -171,11 +186,10 @@ enum Skipped {
 /// Why a preset cannot be saved under `name`, when it cannot: "Prunr" is
 /// reserved, and a name in `newer` (a newer Prunr's preset) is kept for it.
 pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>) -> Option<&'static str> {
-    let name = name.trim();
-    if name.eq_ignore_ascii_case(PRUNR_PRESET) {
+    if is_prunr(name) {
         return Some(RESERVED_NAME);
     }
-    newer.contains(&name.to_lowercase()).then_some("A newer version of Prunr saved a preset with this name — pick another.")
+    newer.contains(&name.trim().to_lowercase()).then_some("A newer version of Prunr saved a preset with this name — pick another.")
 }
 
 const RESERVED_NAME: &str = "\"Prunr\" is reserved — pick another name.";
@@ -193,6 +207,11 @@ fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skippe
     }
 }
 
+/// A preset file's bytes as a preset, or why not.
+fn parse_preset_bytes(data: &[u8]) -> Result<PresetFile, Skipped> {
+    serde_json::from_slice(data).map_err(|_| Skipped::Unreadable).and_then(parse_preset_value)
+}
+
 /// The preset, or why it was left out: unreadable, malformed, matching
 /// neither format, or a newer Prunr's.
 fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
@@ -200,13 +219,9 @@ fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
         tracing::warn!(?path, %e, "skipping unreadable preset");
         Skipped::Unreadable
     })?;
-    let value: serde_json::Value = serde_json::from_slice(&data).map_err(|e| {
-        tracing::warn!(?path, %e, "skipping malformed-JSON preset");
-        Skipped::Unreadable
-    })?;
-    parse_preset_value(value).inspect_err(|skipped| match skipped {
+    parse_preset_bytes(&data).inspect_err(|skipped| match skipped {
         Skipped::Newer => tracing::warn!(?path, "skipping a preset a newer Prunr saved; it is kept as it is"),
-        Skipped::Unreadable => tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)"),
+        Skipped::Unreadable => tracing::warn!(?path, "skipping a file that is no preset"),
     })
 }
 
@@ -248,17 +263,15 @@ fn import_one(dir: &Path, source: ImportSource) -> Imported {
         ImportSource::Path(path) => (path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(), std::fs::read(&path).ok()),
         ImportSource::Bytes { name, bytes } => (name, Some(bytes.to_vec())),
     };
-    let Some((bytes, value)) = bytes.and_then(|b| serde_json::from_slice(&b).ok().map(|value| (b, value))).filter(|(_, v)| names_a_setting(v)) else {
-        return Imported::NotAPreset(file);
-    };
-    let newer = match parse_preset_value(value) {
+    let Some(bytes) = bytes else { return Imported::NotAPreset(file) };
+    let newer = match parse_preset_bytes(&bytes) {
         Ok(_) => false,
         Err(Skipped::Newer) => true,
         Err(Skipped::Unreadable) => return Imported::NotAPreset(file),
     };
     let stem = Path::new(&file).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     let name = free_name(dir, stem);
-    match crate::fs_util::write_bytes_replacing(&dir.join(format!("{name}.{PRESET_EXT}")), &bytes) {
+    match crate::fs_util::write_bytes_replacing(&dir.join(file_name(&name)), &bytes) {
         Ok(()) if newer => Imported::Newer(name),
         Ok(()) => Imported::As(name),
         Err(err) => {
@@ -269,8 +282,7 @@ fn import_one(dir: &Path, source: ImportSource) -> Imported {
 }
 
 /// Whether `value` reads as a preset rather than any JSON: it has a
-/// format version, or names an image setting. Loading takes any object as
-/// an old preset; an import would add one from any JSON file.
+/// format version, or names an image setting.
 fn names_a_setting(value: &serde_json::Value) -> bool {
     let Some(map) = value.as_object() else { return false };
     let settings = serde_json::to_value(ItemSettings::default()).unwrap_or_default();
@@ -280,7 +292,7 @@ fn names_a_setting(value: &serde_json::Value) -> bool {
 /// `stem` as a preset name no file in `dir` has yet, and not "Prunr".
 fn free_name(dir: &Path, stem: &str) -> String {
     let base = preset_name(stem).unwrap_or_else(|| "Imported".to_string());
-    let taken = |name: &str| name.eq_ignore_ascii_case(PRUNR_PRESET) || dir.join(format!("{name}.{PRESET_EXT}")).exists();
+    let taken = |name: &str| is_prunr(name) || dir.join(file_name(name)).exists();
     let mut name = base.clone();
     let mut n = 1;
     while taken(&name) {
@@ -297,7 +309,7 @@ pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
 
 /// `preset_path` for any name but the reserved "Prunr".
 fn writable_path(name: &str) -> std::io::Result<PathBuf> {
-    if name.trim().eq_ignore_ascii_case(PRUNR_PRESET) {
+    if is_prunr(name) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, RESERVED_NAME));
     }
     preset_path(name).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable"))
@@ -312,10 +324,17 @@ fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()
 /// Write a preset off the UI thread, after every config write asked for
 /// before it. "Prunr" is never written.
 pub(crate) fn queue_save(name: &str, file: &PresetFile) {
-    let Ok(path) = writable_path(name) else { return };
+    if let Ok(path) = writable_path(name) {
+        queue_write(path, file);
+    }
+}
+
+/// Write `file` at `path` off the UI thread, in order with the other
+/// config writes.
+pub(crate) fn queue_write(path: PathBuf, file: &PresetFile) {
     match serde_json::to_string_pretty(file) {
         Ok(json) => super::disk_queue::write(path, json.into_bytes()),
-        Err(err) => tracing::error!(preset = %name, %err, "preset not saved"),
+        Err(err) => tracing::error!(?path, %err, "preset not written"),
     }
 }
 
@@ -578,16 +597,18 @@ mod tests {
         assert_eq!(entry.item_settings.len(), 1, "only what differs");
         assert!(entry.brush.is_empty() && entry.sd.is_empty());
         assert_eq!(migrated.models["Teed"].item_settings["edge_thickness"].as_u64(), Some(5), "the line width is the line model's");
-        let empty = migrate_v1_to_v2(&serde_json::json!({})).expect("an empty v1 file migrates");
-        assert!(empty.models.is_empty(), "nothing apart from Prunr's");
+        let prunrs = migrate_v1_to_v2(&serde_json::json!({ "gamma": 1.0 })).expect("migrates");
+        assert!(prunrs.models.is_empty(), "nothing apart from Prunr's");
     }
 
     #[test]
     fn migrate_v1_with_garbage_json_returns_none() {
-        // Strings, arrays and scalars at top level can't be ItemSettings:
-        // load_all skips them.
+        // JSON that names no image setting is no preset: load_all skips it,
+        // and an import refuses it.
         assert!(migrate_v1_to_v2(&serde_json::json!("not an object")).is_none());
         assert!(migrate_v1_to_v2(&serde_json::json!([1, 2, 3])).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!({})).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!({ "name": "web", "version": "1.0" })).is_none());
     }
 
     /// Once saved as v2, a migrated file loads back as it was.

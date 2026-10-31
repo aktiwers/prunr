@@ -1051,7 +1051,7 @@ pub(super) fn group_chip<R>(
         // otherwise stretch a flyout to the popup's default width.
         ui.set_width(g.width);
         ui.spacing_mut().slider_width = g.width - PANEL_VALUE_WIDTH;
-        let reset = popover_header(ui, g.label, Some(("Back to your default preset", g.at_default)));
+        let reset = popover_header(ui, g.label, Some((BACK_TO_PRESET, g.at_default)));
         out = Some(body(ui, reset));
     };
     if g.live {
@@ -1142,9 +1142,23 @@ pub(super) struct PanelHeader<'a> {
     pub reset: &'a str,
 }
 
-impl PanelHeader<'_> {
+impl<'a> PanelHeader<'a> {
     pub const RESET: PanelHeader<'static> = PanelHeader { note: "", reset: "Reset" };
+
+    /// A header whose Reset names what it goes back to while that is the
+    /// shipped look (`shipped`), and is plain "Reset" otherwise.
+    pub(super) fn back_to(note: &'a str, shipped: bool, back_to: &'a str) -> Self {
+        Self { note, reset: if shipped { back_to } else { Self::RESET.reset } }
+    }
 }
+
+/// A popover Reset's tooltip: what it goes back to while that is the
+/// shipped look, the default preset otherwise.
+pub(super) fn reset_tip(shipped: bool, back_to: &'static str) -> &'static str {
+    if shipped { back_to } else { BACK_TO_PRESET }
+}
+
+const BACK_TO_PRESET: &str = "Back to your default preset";
 
 /// A full panel's title row: the title, the note, and the reset at the
 /// end, greyed while the group sits at its default. True on the frame

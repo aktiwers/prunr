@@ -716,10 +716,19 @@ impl BatchManager {
     /// A switch from model `from` to the one in `settings`: every image
     /// keeps the settings it changed and takes the rest from its preset.
     pub fn switch_model(&mut self, from: super::settings::SettingsModel, settings: &super::settings::Settings) {
+        let to = settings.model;
+        // What the switch gives depends on the preset and face restorer
+        // alone, so a batch on one preset works it out once.
+        let mut values: Vec<(&super::presets::Preset, super::item_settings::FaceModel, serde_json::Map<String, serde_json::Value>)> = Vec::new();
         for item in &mut self.items {
-            let face = item.settings.faces.model;
+            item.leave_model(from, item.settings.faces.model);
             let preset = settings.preset(&item.applied_preset);
-            item.take_preset_for(from, face, settings.model, preset);
+            let face = preset.face_after(to, &item.settings, &item.preset_changes);
+            let at = values.iter().position(|(p, f, _)| std::ptr::eq(*p, preset) && *f == face).unwrap_or_else(|| {
+                values.push((preset, face, preset.switch_values(to, face)));
+                values.len() - 1
+            });
+            item.take_untouched(&values[at].2, to);
         }
     }
 }

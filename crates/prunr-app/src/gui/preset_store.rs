@@ -5,7 +5,7 @@
 //! saved or finds one just deleted.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use super::presets::{Preset, PresetFile};
 use super::presets_fs::{self, ImportSource, Imported};
@@ -14,7 +14,7 @@ use super::settings::Settings;
 /// The folder as read, and what an import before it did.
 struct Scan {
     /// The presets the app held when the read was asked for.
-    held: HashMap<String, PresetFile>,
+    held: HashMap<String, Arc<PresetFile>>,
     presets: HashMap<String, Preset>,
     newer: HashSet<String>,
     imported: Vec<Imported>,
@@ -24,18 +24,34 @@ pub(crate) struct PresetStore {
     tx: mpsc::Sender<Scan>,
     rx: mpsc::Receiver<Scan>,
     /// Off in a test window, whose presets are made in memory.
+    #[cfg(test)]
     reads_folder: bool,
 }
 
 impl PresetStore {
     pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, reads_folder: true }
+        Self {
+            tx,
+            rx,
+            #[cfg(test)]
+            reads_folder: true,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self { reads_folder: false, ..Self::new() }
+    }
+
+    #[cfg(test)]
+    fn reads_folder(&self) -> bool {
+        self.reads_folder
+    }
+
+    #[cfg(not(test))]
+    fn reads_folder(&self) -> bool {
+        true
     }
 
     /// Read the folder again.
@@ -45,7 +61,7 @@ impl PresetStore {
 
     /// Copy `sources` into the folder, then read it again.
     pub(crate) fn import(&self, sources: Vec<ImportSource>, settings: &Settings, ctx: &egui::Context) {
-        if !self.reads_folder {
+        if !self.reads_folder() {
             return;
         }
         let (tx, ctx, held) = (self.tx.clone(), ctx.clone(), held(settings));
@@ -62,7 +78,9 @@ impl PresetStore {
     /// overtook is read again.
     pub(crate) fn drain(&self, settings: &mut Settings, ctx: &egui::Context) -> Vec<Imported> {
         let Some(scan) = self.rx.try_iter().last() else { return Vec::new() };
-        if held(settings) == scan.held {
+        let unchanged = settings.presets.len() == scan.held.len()
+            && settings.presets.iter().all(|(name, preset)| scan.held.get(name).is_some_and(|file| Arc::ptr_eq(file, &preset.shared_file())));
+        if unchanged {
             settings.presets = scan.presets;
             settings.newer_presets = scan.newer;
         } else {
@@ -72,8 +90,8 @@ impl PresetStore {
     }
 }
 
-fn held(settings: &Settings) -> HashMap<String, PresetFile> {
-    settings.presets.iter().map(|(name, preset)| (name.clone(), preset.file().clone())).collect()
+fn held(settings: &Settings) -> HashMap<String, Arc<PresetFile>> {
+    settings.presets.iter().map(|(name, preset)| (name.clone(), preset.shared_file())).collect()
 }
 
 #[cfg(test)]

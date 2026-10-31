@@ -73,8 +73,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, default: &FaceSettings, 
         width: PANEL_WIDTH,
         live: true,
     };
-    let header = chip::PanelHeader { note: "", reset: "Reset" };
-    chip::strip_chip(ui, group, "More face settings", header, |ui, part| match part {
+    chip::strip_chip(ui, group, "More face settings", chip::PanelHeader::RESET, |ui, part| match part {
         chip::Part::Quick => {
             if !any_installed {
                 ui.label(egui::RichText::new(needs_text()).color(crate::gui::theme::TEXT_SECONDARY));

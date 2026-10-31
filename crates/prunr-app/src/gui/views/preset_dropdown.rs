@@ -18,7 +18,7 @@ use crate::gui::views::chip::{button, ButtonKind};
 /// diverge, so "Portrait ✎" keeps naming the base while you tweak.
 fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &str) -> String {
     // If applied_preset was deleted out from under us, fall back gracefully.
-    let exists = applied_preset == PRUNR_PRESET
+    let exists = crate::gui::presets_fs::is_prunr(applied_preset)
         || settings.presets.contains_key(applied_preset);
     if !exists {
         return format!("Custom  {}", ICON_EDIT.codepoint);
@@ -35,9 +35,7 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
 /// is NOT included — callers prepend it manually since it always appears
 /// first in the dropdown regardless of alphabetical order.
 pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
-    let mut names: Vec<String> = settings.presets.keys().cloned().collect();
-    names.sort_by_key(|a| a.to_lowercase());
-    names
+    crate::gui::presets_fs::sorted_names(settings.presets.keys().cloned())
 }
 
 /// All preset names in display order: Prunr first, then user presets
@@ -86,6 +84,8 @@ pub(crate) struct SaveDialog {
 #[derive(Debug, Clone)]
 pub(crate) struct ModelRow {
     pub key: String,
+    /// How the row names the model.
+    pub name: String,
     pub entry: Entry,
     pub ticked: bool,
 }
@@ -95,7 +95,10 @@ impl SaveDialog {
     /// would save, ticked.
     fn of(settings: &Settings, item: &ItemSettings, applied: &str, changes: &Changes<ItemSettings>) -> Self {
         let shown = Shown { model: settings.model, item, brush: &settings.brush, item_changes: changes, brush_changes: &settings.brush_changes };
-        let models = draft(settings.preset(applied), &shown).into_iter().map(|(key, entry)| ModelRow { key, entry, ticked: true }).collect();
+        let models = draft(settings.preset(applied), &shown)
+            .into_iter()
+            .map(|(key, entry)| ModelRow { name: entry_name(&key).to_string(), key, entry, ticked: true })
+            .collect();
         Self { name: String::new(), models }
     }
 
@@ -153,7 +156,7 @@ pub(crate) fn render(
 
             // Prunr's is built in: it cannot be deleted or overwritten.
             for name in all_preset_names(settings) {
-                let is_prunr = name == PRUNR_PRESET;
+                let is_prunr = crate::gui::presets_fs::is_prunr(&name);
                 let is_default = settings.default_preset == name;
                 ui.horizontal(|ui| {
                     let label_text = RichText::new(&name)
@@ -296,7 +299,7 @@ pub(crate) fn render(
                     ui.label(RichText::new("Saves the settings of:").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_SECONDARY));
                     egui::ScrollArea::vertical().id_salt("save_models").max_height(MODEL_LIST_HEIGHT).show(ui, |ui| {
                         for row in models.iter_mut() {
-                            ui.checkbox(&mut row.ticked, entry_name(&row.key));
+                            ui.checkbox(&mut row.ticked, row.name.as_str());
                         }
                     });
                 }
