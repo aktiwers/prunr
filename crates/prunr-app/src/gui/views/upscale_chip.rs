@@ -39,7 +39,7 @@ pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, def
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        let tip = if default == OutputScale::X4 { "Back to 4\u{00d7}, the model's native size" } else { "Back to your default preset" };
+        let tip = chip::reset_tip(default == OutputScale::X4, "Back to 4\u{00d7}, the model's native size");
         if chip::popover_header(ui, "Scale", Some((tip, *value == default))) {
             *value = default;
             changed = true;

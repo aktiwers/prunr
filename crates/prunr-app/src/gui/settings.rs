@@ -354,42 +354,29 @@ impl Settings {
         super::memory::cap_jobs(self.model.to_model_kind(), base, self.cpu_only())
     }
 
-    /// A preset's image settings for the active model; Prunr's for
-    /// "Prunr", a missing preset or a missing entry. Cheap: no brush clone.
+    /// A preset's image settings for the active model. Missing presets
+    /// and models fall back to Prunr's, here and below.
     pub fn preset_values(&self, name: &str) -> ItemSettings {
-        self.preset(name).map_or_else(|| super::presets::prunr_item_settings(self.model), |p| p.item_settings(self.model))
+        self.preset(name).item_settings(self.model)
     }
 
     /// A preset's image and brush settings for the active model: what
-    /// applying it, or Reset to it, sets. Falls back to factory values at
-    /// every level.
+    /// applying it, or Reset to it, sets. `scheduler`: `None` uses the
+    /// preset's own quality.
     pub(crate) fn resolve_preset(
         &self,
         name: &str,
         scheduler: Option<super::brush_state::SdScheduler>,
     ) -> super::presets::ResolvedView {
-        match self.preset(name) {
-            Some(preset) => preset.resolve(self.model, scheduler),
-            None => super::presets::prunr_view(self.model, scheduler),
-        }
+        self.preset(name).resolve(self.model, scheduler)
     }
 
-    /// The Faces settings preset `name` gives the active model with face
-    /// restorer `face`: whether faces are on from the model's entry, the
-    /// rest from the restorer's.
-    pub(crate) fn preset_faces(&self, name: &str, face: super::item_settings::FaceModel) -> super::item_settings::FaceSettings {
-        let on = self.preset_values(name).faces.on;
-        let restorer = super::presets::helper_item_settings(self.preset(name), face.id()).faces;
-        super::item_settings::FaceSettings { on, model: face, ..restorer }
+    /// The named preset; Prunr's for "Prunr" and a missing one.
+    pub(crate) fn preset(&self, name: &str) -> &super::presets::Preset {
+        super::presets::named(&self.presets, name)
     }
 
-    /// The named preset; `None` for "Prunr" and a missing one.
-    pub(crate) fn preset(&self, name: &str) -> Option<&super::presets::Preset> {
-        (name != PRUNR_PRESET).then(|| self.presets.get(name)).flatten()
-    }
-
-    /// `scheduler`: as `resolve_preset_for_model`. Falls back to factory
-    /// defaults at every level.
+    /// `resolve_preset` for the default preset.
     pub(crate) fn resolve_active_preset(
         &self,
         scheduler: Option<super::brush_state::SdScheduler>,
@@ -408,8 +395,7 @@ impl Settings {
     /// preset set them stay, the rest take the new model's from preset
     /// `name`.
     pub(crate) fn switch_brush_model(&mut self, from: SettingsModel, name: &str) {
-        // A face restorer has no brush settings: which one runs does not matter.
-        self.brush_changes.note(&self.brush, &super::preset_fields::entries_of(from, Default::default()));
+        self.brush_changes.note(&self.brush, &super::preset_fields::brush_entries_of(from));
         let brush = super::presets::take_untouched_brush(self.preset(name), self.model, self.brush.clone(), &self.brush_changes);
         self.brush_changes.rebase(&brush);
         self.brush = brush;

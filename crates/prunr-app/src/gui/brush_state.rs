@@ -260,24 +260,6 @@ impl BrushSettings {
         prunr_core::MaskReading { confidence: self.magic_confidence_threshold, remove_specks: self.magic_remove_specks }
     }
 
-    /// The settings that belong to a model rather than to the brush: the
-    /// fill's Sharpen and scale, and the Stable Diffusion quality, prompt
-    /// and seed. Expand region and Feather sit on the brush strips and
-    /// mean the same in every eraser, so they stay as the user set them.
-    pub fn take_model_tuning_from(&mut self, source: &Self) {
-        self.inpaint_sharpen = source.inpaint_sharpen;
-        self.inpaint_fill_scale = source.inpaint_fill_scale;
-        self.inpaint_edge_colour = source.inpaint_edge_colour;
-        self.sd_soft_edge = source.sd_soft_edge;
-        self.sd_sampler = source.sd_sampler;
-        self.sd_strength = source.sd_strength;
-        self.take_sd_quality_from(source);
-        self.sd_prompt = source.sd_prompt.clone();
-        self.sd_negative_prompt = source.sd_negative_prompt.clone();
-        self.sd_seed = source.sd_seed;
-        self.sd_use_taesd = source.sd_use_taesd;
-    }
-
     /// The prompt a fill runs with: the user's, or the shipped one when
     /// the field is empty. Unconditioned SD 1.5 draws text-like glyphs on
     /// texture, so a fill never runs without one.

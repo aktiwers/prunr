@@ -161,7 +161,6 @@ impl PrunrApp {
             return;
         }
 
-        // A preset file dropped on the window is added to the presets.
         let is_preset = |name: &std::ffi::OsStr| name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(crate::gui::presets_fs::PRESET_EXT));
         let (preset_paths, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| p.extension().is_some_and(is_preset));
         let (preset_bytes, inline_items): (Vec<_>, Vec<_>) = inline_items.into_iter()

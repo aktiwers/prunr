@@ -182,7 +182,10 @@ impl PrunrApp {
         if item.settings.faces.model != face {
             // Another face restorer: its own settings, unless changed.
             let model = self.settings.model;
-            item.take_preset_for(model, face, model, self.settings.preset(&item.applied_preset));
+            item.leave_model(model, face);
+            let preset = self.settings.preset(&item.applied_preset);
+            let values = preset.switch_values(model, preset.face_after(model, &item.settings, &item.preset_changes));
+            item.take_untouched(&values, model);
         }
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
         if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {

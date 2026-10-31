@@ -57,9 +57,9 @@ pub(crate) fn render(
 ) -> bool {
     let mut committed = render_quality_chip(ui, app_settings, installed.lcm_bundle);
     // The default preset's, for the quality in use.
-    let defaults = app_settings.resolve_active_preset(Some(app_settings.brush.sd_scheduler)).brush;
-    committed |= render_prompt_chip(ui, &mut app_settings.brush, &defaults);
-    committed |= render_advanced_group(ui, &mut app_settings.brush, &defaults, installed.taesd, shown_seed);
+    let defaults = crate::gui::presets::named(&app_settings.presets, &app_settings.default_preset).brush(app_settings.model, Some(app_settings.brush.sd_scheduler));
+    committed |= render_prompt_chip(ui, &mut app_settings.brush, defaults);
+    committed |= render_advanced_group(ui, &mut app_settings.brush, defaults, installed.taesd, shown_seed);
     committed
 }
 
@@ -297,7 +297,7 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &B
         ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
         let already_default = brush.sd_prompt == defaults.sd_prompt && brush.sd_negative_prompt == defaults.sd_negative_prompt;
         let shipped = defaults.sd_prompt.is_empty() && defaults.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT;
-        let tip = if shipped { "Clear the prompt and restore the shipped negative prompt" } else { "Back to your default preset's prompts" };
+        let tip = chip::reset_tip(shipped, "Clear the prompt and restore the shipped negative prompt");
         if chip::popover_header(ui, "Prompt", Some((tip, already_default))) {
             brush.sd_prompt.clone_from(&defaults.sd_prompt);
             brush.sd_negative_prompt.clone_from(&defaults.sd_negative_prompt);

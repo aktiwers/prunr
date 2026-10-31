@@ -31,8 +31,7 @@ pub(super) fn render(ui: &mut Ui, style: &mut SubjectEffect, default: SubjectEff
         width: PANEL_WIDTH,
         live: true,
     };
-    let back = if default == SubjectEffect::None { "Back to own colors" } else { "Reset" };
-    let header = chip::PanelHeader { note: style.name(), reset: back };
+    let header = chip::PanelHeader::back_to(style.name(), default == SubjectEffect::None, "Back to own colors");
     let mut changed = false;
     chip::strip_chip(ui, group, "All effects", header, |ui, part| match part {
         chip::Part::Quick => {

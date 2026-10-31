@@ -196,17 +196,12 @@ pub(crate) fn render(
         if shows(model, Surface::SdChips) && row.chip(ui, "sd", |ui| super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed)) {
             change.brush_settings_committed = true;
         }
-        if shows(model, Surface::RoremChips) {
-            let defaults = app_settings.resolve_active_preset(None).brush;
-            if row.chip(ui, "rorem", |ui| super::eraser_chip::render_rorem(ui, &mut app_settings.brush, &defaults, state.shown_seed)) {
-                change.brush_settings_committed = true;
-            }
+        let default_brush = crate::gui::presets::named(&app_settings.presets, &app_settings.default_preset).brush(model, None);
+        if shows(model, Surface::RoremChips) && row.chip(ui, "rorem", |ui| super::eraser_chip::render_rorem(ui, &mut app_settings.brush, default_brush, state.shown_seed)) {
+            change.brush_settings_committed = true;
         }
-        if shows(model, Surface::FillChips) {
-            let defaults = app_settings.resolve_active_preset(None).brush;
-            if row.chip(ui, "fill", |ui| super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush, &defaults)) {
-                change.brush_settings_committed = true;
-            }
+        if shows(model, Surface::FillChips) && row.chip(ui, "fill", |ui| super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush, default_brush)) {
+            change.brush_settings_committed = true;
         }
         if shows(model, Surface::Mask) {
             row.chip(ui, "mask", |ui| chip::gated(ui, gate(Surface::Mask), |ui| {
@@ -226,7 +221,7 @@ pub(crate) fn render(
         }
         if shows(model, Surface::Faces) {
             row.chip(ui, "faces", |ui| chip::gated(ui, gate(Surface::Faces), |ui| {
-                let default = app_settings.preset_faces(&app_settings.default_preset, item_settings.faces.model);
+                let default = crate::gui::presets::named(&app_settings.presets, &app_settings.default_preset).faces(model, item_settings.faces.model);
                 render_faces_chip(ui, item_settings, &default, &mut app_settings.face_outlines, &state, &mut change);
             }));
         }
@@ -822,8 +817,7 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration, default: 
         live: true,
     };
     let mut changed = false;
-    let back = if default.has_outline() || default.has_shadow() { "Reset" } else { "Back to none" };
-    let header = chip::PanelHeader { note: "", reset: back };
+    let header = chip::PanelHeader::back_to("", !default.has_outline() && !default.has_shadow(), "Back to none");
     chip::strip_chip_faced(ui, group, value, "All outline and shadow settings", header, |ui, part| match part {
         chip::Part::Quick => {
             changed |= outline_width(ui, "Outline", d);
@@ -954,8 +948,7 @@ fn render_background_chip(
         width: BACKGROUND_PANEL_WIDTH,
         live: true,
     };
-    let back = if BgKind::of(default.backdrop()) == BgKind::Transparent { "Back to transparent" } else { "Reset" };
-    let header = chip::PanelHeader { note: "", reset: back };
+    let header = chip::PanelHeader::back_to("", BgKind::of(default.backdrop()) == BgKind::Transparent, "Back to transparent");
     let pick = |kind: BgKind, bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
         // The picture lives on the item and loads off the UI thread; it
         // replaces the background when it lands.

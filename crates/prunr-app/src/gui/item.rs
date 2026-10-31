@@ -3150,8 +3150,6 @@ impl BatchItem {
         self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
     }
 
-    /// Take another image's settings and its background picture together,
-    /// keeping the picture in step with the settings' reference to it.
     /// Without a background-removal model there is no subject to
     /// outline, so Subject lines draw over the whole photo, the nearest
     /// mode that still has lines.
@@ -3161,23 +3159,22 @@ impl BatchItem {
         }
     }
 
-    /// Leave model `from`, which ran face restorer `face`, for `to` and the
-    /// restorer chosen now: what was changed since the preset was applied
-    /// stays, the rest takes `to`'s settings from `preset` (Prunr's for
-    /// `None`).
-    pub(crate) fn take_preset_for(
-        &mut self,
-        from: super::settings::SettingsModel,
-        face: super::item_settings::FaceModel,
-        to: super::settings::SettingsModel,
-        preset: Option<&super::presets::Preset>,
-    ) {
+    /// Note what was changed on model `from`, which ran face restorer
+    /// `face`, before it is left.
+    pub(crate) fn leave_model(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel) {
         self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
-        self.settings = super::presets::take_untouched_item(preset, to, self.settings, &self.preset_changes);
+    }
+
+    /// Arrive on model `to`: each setting not changed since the preset was
+    /// applied takes its value from `values` (`Preset::switch_values`).
+    pub(crate) fn take_untouched(&mut self, values: &serde_json::Map<String, serde_json::Value>, to: super::settings::SettingsModel) {
+        self.settings = super::presets::take(self.settings, values, &self.preset_changes);
         self.fit_line_mode_to(to);
         self.preset_changes.rebase(&self.settings);
     }
 
+    /// Take another image's settings and its background picture together,
+    /// keeping the picture in step with the settings' reference to it.
     pub(crate) fn adopt_settings(&mut self, settings: super::item_settings::ItemSettings, bg_image: Option<Arc<BgImage>>) {
         self.settings = settings;
         self.bg_image = bg_image;

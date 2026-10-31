@@ -273,7 +273,7 @@ fn look(request: &DialogRequest) -> Look {
             pick: Pick::SaveFile,
             title: "Export preset",
             filters: presets(),
-            file_name: Some(format!("{name}.{}", super::presets_fs::PRESET_EXT)),
+            file_name: Some(super::presets_fs::file_name(name)),
         },
     }
 }

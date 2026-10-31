@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 
 use crate::gui::presets_fs::{self, ImportSource, Imported};
-use crate::gui::settings::PRUNR_PRESET;
 use crate::gui::system_bridge::DialogRequest;
 use crate::gui::views::preset_dropdown::PresetRequest;
 use super::PrunrApp;
@@ -16,10 +15,8 @@ impl PrunrApp {
             PresetRequest::Import => self.ask_dialog(DialogRequest::ImportPresets),
             PresetRequest::Export(name) => self.ask_dialog(DialogRequest::ExportPreset { name }),
             PresetRequest::ShowFolder => {
-                let shown = presets_fs::presets_dir()
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no settings folder"))
-                    .and_then(|dir| crate::gui::system_bridge::show_folder(&dir));
-                if let Err(err) = shown {
+                let Some(dir) = presets_fs::presets_dir() else { return };
+                if let Err(err) = crate::gui::system_bridge::show_folder(&dir) {
                     self.toasts.error(format!("Couldn't open the presets folder: {}", prunr_core::plain::reason(err)));
                 }
             }
@@ -35,22 +32,14 @@ impl PrunrApp {
 
     /// Write preset `name` to the file picked for it.
     pub(super) fn on_preset_export_picked(&mut self, name: &str, path: PathBuf) {
-        let json = if name == PRUNR_PRESET {
-            Ok(crate::gui::presets::prunr_file_json().to_string())
+        if presets_fs::is_prunr(name) {
+            crate::gui::disk_queue::write(path, crate::gui::presets::prunr_file_json().as_bytes().to_vec());
         } else if let Some(preset) = self.settings.presets.get(name) {
-            serde_json::to_string_pretty(preset.file())
+            presets_fs::queue_write(path, preset.file());
         } else {
             return;
-        };
-        match json {
-            Ok(json) => {
-                crate::gui::disk_queue::write(path, json.into_bytes());
-                self.toasts.info(format!("Exported \"{name}\"."));
-            }
-            Err(err) => {
-                tracing::error!(preset = %name, %err, "preset not exported");
-            }
         }
+        self.toasts.info(format!("Exported \"{name}\"."));
     }
 
     /// Lay the last read of the presets folder over the list, and say what

@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use super::brush_state::BrushSettings;
 use super::item_settings::ItemSettings;
 use super::preset_fields::Fields;
-use super::presets::differing;
+use super::presets::differing_values;
 
 /// The image settings or the brush: the part of an entry it fills.
 pub(crate) trait Part: Serialize + DeserializeOwned + Clone {
@@ -51,8 +51,9 @@ impl<T: Part> Changes<T> {
     /// Note what `now` changed under `entries`, the entries of the model in
     /// use: each entry's own settings that differ from `from`.
     pub(crate) fn note(&mut self, now: &T, entries: &[(String, Fields)]) {
+        let (now, from) = (serde_json::to_value(now).unwrap_or_default(), serde_json::to_value(&self.from).unwrap_or_default());
         for (key, entry) in entries {
-            let changed = differing(now, &self.from, &T::fields(entry));
+            let changed = differing_values(&now, &from, &T::fields(entry));
             if !changed.is_empty() {
                 self.on.entry(key.clone()).or_default().extend(changed);
             }

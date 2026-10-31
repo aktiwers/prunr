@@ -16,14 +16,45 @@ use super::knob_catalog::{shows, Surface};
 use super::presets::{model_id_key, preset_key};
 use super::settings::SettingsModel;
 
-/// The models that run inside the picked one and keep their own settings.
-pub(crate) const HELPERS: [ModelId; 5] = [
-    ModelId::Teed,
-    ModelId::Sam21HieraSmall,
-    ModelId::FaceGfpgan,
-    ModelId::FaceRestoreFormerPp,
-    ModelId::DepthAnythingV2Small,
+/// A model that runs inside the picked one and keeps its own settings.
+pub(crate) struct Helper {
+    pub id: ModelId,
+    /// How the preset list names it.
+    pub name: &'static str,
+    /// The panel it runs from.
+    pub surface: Surface,
+    pub item: &'static [&'static str],
+    pub brush: &'static [&'static str],
+}
+
+const RESTORER: &[&str] = &["faces.strength_pct", "faces.largest_only", "faces.hair"];
+
+/// Every helper model, in the order the preset list names them.
+pub(crate) const HELPERS: [Helper; 5] = [
+    Helper {
+        id: ModelId::Teed,
+        name: "Lines",
+        surface: Surface::Lines,
+        item: &["line_strength", "solid_line_color", "edge_thickness", "edge_scale", "line_style", "input_transform", "line_fade_pct"],
+        brush: &[],
+    },
+    Helper { id: ModelId::FaceGfpgan, name: "Faces (GFPGAN)", surface: Surface::Faces, item: RESTORER, brush: &[] },
+    Helper { id: ModelId::FaceRestoreFormerPp, name: "Faces (RestoreFormer++)", surface: Surface::Faces, item: RESTORER, brush: &[] },
+    Helper { id: ModelId::DepthAnythingV2Small, name: "Depth", surface: Surface::Depth, item: &["depth"], brush: &[] },
+    Helper {
+        id: ModelId::Sam21HieraSmall,
+        name: "Magic Brush",
+        surface: Surface::Brushes,
+        item: &[],
+        brush: &["magic_confidence_threshold", "magic_remove_specks", "magic_depth", "magic_depth_range"],
+    },
 ];
+
+impl Helper {
+    pub(crate) fn fields(&self) -> Fields {
+        Fields { item: self.item.to_vec(), brush: self.brush.to_vec(), sd: false }
+    }
+}
 
 /// The image settings a surface's controls set that belong to the picked
 /// model.
@@ -98,39 +129,30 @@ pub(crate) fn of(model: SettingsModel) -> Fields {
     Fields { item, brush, sd: shows(model, Surface::SdChips) }
 }
 
-/// A helper model's own settings, wherever it runs.
-pub(crate) fn of_helper(helper: ModelId) -> Fields {
-    let (item, brush): (&[&'static str], &[&'static str]) = match helper {
-        ModelId::Teed => (&["line_strength", "solid_line_color", "edge_thickness", "edge_scale", "line_style", "input_transform", "line_fade_pct"], &[]),
-        ModelId::Sam21HieraSmall => (&[], &["magic_confidence_threshold", "magic_remove_specks", "magic_depth", "magic_depth_range"]),
-        ModelId::FaceGfpgan | ModelId::FaceRestoreFormerPp => (&["faces.strength_pct", "faces.largest_only", "faces.hair"], &[]),
-        ModelId::DepthAnythingV2Small => (&["depth"], &[]),
-        _ => (&[], &[]),
-    };
-    Fields { item: item.to_vec(), brush: brush.to_vec(), sd: false }
+/// The helper models whose panel `model` shows, each face restorer among
+/// them.
+pub(crate) fn may_run(model: SettingsModel) -> impl Iterator<Item = &'static Helper> {
+    HELPERS.iter().filter(move |h| shows(model, h.surface))
 }
 
 /// The helper models that run inside `model`, with `face` the face
-/// restorer it has chosen: the line model with Sketch, the face restorer
-/// with Faces, the depth model with Depth, Magic Brush's with brushes.
-pub(crate) fn helpers_of(model: SettingsModel, face: FaceModel) -> Vec<ModelId> {
-    [
-        (Surface::Lines, ModelId::Teed),
-        (Surface::Faces, face.id()),
-        (Surface::Depth, ModelId::DepthAnythingV2Small),
-        (Surface::Brushes, ModelId::Sam21HieraSmall),
-    ]
-    .into_iter()
-    .filter_map(|(surface, helper)| shows(model, surface).then_some(helper))
-    .collect()
+/// restorer it has chosen.
+pub(crate) fn helpers_of(model: SettingsModel, face: FaceModel) -> impl Iterator<Item = &'static Helper> {
+    may_run(model).filter(move |h| h.surface != Surface::Faces || h.id == face.id())
 }
 
 /// The entries `model` reads, by key, with `face` the restorer it has
 /// chosen: its own, then those of the helper models that run inside it.
 pub(crate) fn entries_of(model: SettingsModel, face: FaceModel) -> Vec<(String, Fields)> {
     std::iter::once((preset_key(model), of(model)))
-        .chain(helpers_of(model, face).into_iter().map(|helper| (model_id_key(helper), of_helper(helper))))
+        .chain(helpers_of(model, face).map(|helper| (model_id_key(helper.id), helper.fields())))
         .collect()
+}
+
+/// `entries_of` for the brush: a face restorer has no brush settings, so
+/// which one runs does not matter.
+pub(crate) fn brush_entries_of(model: SettingsModel) -> Vec<(String, Fields)> {
+    entries_of(model, FaceModel::default())
 }
 
 #[cfg(test)]
@@ -164,10 +186,10 @@ mod tests {
     /// file.
     #[test]
     fn every_setting_belongs_to_a_model() {
-        let helper_item = HELPERS.into_iter().flat_map(|h| of_helper(h).item);
+        let helper_item = HELPERS.iter().flat_map(|h| h.item.iter().copied());
         let item = sorted(Surface::ALL.into_iter().flat_map(item_fields).copied().chain(helper_item));
         assert_eq!(item, names(&ItemSettings::default(), &["faces"]), "an image setting no model keeps");
-        let helper_brush = HELPERS.into_iter().flat_map(|h| of_helper(h).brush);
+        let helper_brush = HELPERS.iter().flat_map(|h| h.brush.iter().copied());
         let brush = sorted(Surface::ALL.into_iter().flat_map(brush_fields).copied().chain(helper_brush).chain(SD_PART.iter().copied()));
         assert_eq!(brush, names(&BrushSettings::default(), &[]), "a brush setting no model keeps");
     }
@@ -187,10 +209,11 @@ mod tests {
     #[test]
     fn a_helper_runs_where_its_panel_shows() {
         use ModelId::*;
-        assert_eq!(helpers_of(SettingsModel::BiRefNetLite, FaceModel::Gfpgan), [Teed, FaceGfpgan, Sam21HieraSmall]);
-        assert_eq!(helpers_of(SettingsModel::None, FaceModel::RestoreFormerPp), [Teed, FaceRestoreFormerPp, DepthAnythingV2Small, Sam21HieraSmall]);
-        assert_eq!(helpers_of(SettingsModel::Nomos2Upscale, FaceModel::Gfpgan), [FaceGfpgan]);
-        assert_eq!(helpers_of(SettingsModel::Inpaint, FaceModel::Gfpgan), [Sam21HieraSmall]);
-        assert!(helpers_of(SettingsModel::ColorizeDdcolor, FaceModel::Gfpgan).is_empty());
+        let ids = |model, face| helpers_of(model, face).map(|h| h.id).collect::<Vec<_>>();
+        assert_eq!(ids(SettingsModel::BiRefNetLite, FaceModel::Gfpgan), [Teed, FaceGfpgan, Sam21HieraSmall]);
+        assert_eq!(ids(SettingsModel::None, FaceModel::RestoreFormerPp), [Teed, FaceRestoreFormerPp, DepthAnythingV2Small, Sam21HieraSmall]);
+        assert_eq!(ids(SettingsModel::Nomos2Upscale, FaceModel::Gfpgan), [FaceGfpgan]);
+        assert_eq!(ids(SettingsModel::Inpaint, FaceModel::Gfpgan), [Sam21HieraSmall]);
+        assert!(ids(SettingsModel::ColorizeDdcolor, FaceModel::Gfpgan).is_empty());
     }
 }
