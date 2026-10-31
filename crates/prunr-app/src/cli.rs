@@ -1323,7 +1323,7 @@ fn run_batch_subprocess(
             let line_fade = lines.fade_pct > 0;
             let engines = prunr_app::gui::memory::CutoutEngines { model, jobs: effective_jobs, cpu_only: true, first_look: false, line_mode: lines.mode, line_fade };
             let held_mb = sub.resident_mb().unwrap_or(0);
-            match engines.jobs_that_fit(held_mb) {
+            match engines.plan(held_mb).map(|plan| plan.jobs) {
                 Ok(fit) if fit < effective_jobs => {
                     sub.kill();
                     max_jobs = fit;
@@ -1429,7 +1429,7 @@ fn run_batch_subprocess(
                 sub.kill();
                 break Some(Crash::Unresponsive);
             }
-            if low_free_memory(in_flight.len(), prunr_app::gui::memory::cutout_watch_free_ram).is_some() {
+            if low_free_memory(in_flight.len(), prunr_app::gui::memory::cutout_watch_free).is_some() {
                 break Some(Crash::MemoryLow);
             }
         };

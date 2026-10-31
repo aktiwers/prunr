@@ -477,7 +477,7 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_instal
         });
         rows.row("Memory guard", "How much memory to leave free for other apps while it runs.", |ui| {
             super::chip::choice_buttons(ui, &[
-                Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1.5 GB free for other apps, as every model does. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
+                Choice { value: SdMemoryGuard::Relaxed, name: "Relaxed", description: "Leaves about 1 GB free for other apps. Fits the Stable Diffusion eraser on a tight machine", enabled: true },
                 Choice { value: SdMemoryGuard::Balanced, name: "Balanced", description: "Leaves about 2 GB free for other apps", enabled: true },
                 Choice { value: SdMemoryGuard::Strict, name: "Strict", description: "Leaves about 4 GB free, for when other apps grab memory while it runs", enabled: true },
             ], &mut settings.sd_memory);

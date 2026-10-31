@@ -154,7 +154,7 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         // worker has loaded nothing yet, and after its events, so a fill
         // it finished still lands.
         if matches!(sub_state, SubState::Ready(_)) {
-            if let Some(free) = crate::subprocess::batch_rules::low_free_memory(strokes.len(), crate::hardware::watchdog_free_ram_bytes) {
+            if let Some(free) = crate::subprocess::batch_rules::low_free_memory(strokes.len(), crate::hardware::watchdog_free_bytes) {
                 tracing::warn!(
                     free_mb = free / (1024 * 1024),
                     in_flight = strokes.len(),

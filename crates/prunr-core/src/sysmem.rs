@@ -19,6 +19,14 @@ pub fn available_ram_bytes() -> Option<u64> {
     reported_available(available, total)
 }
 
+/// Free memory a run may still take before the computer runs out: RAM
+/// available now plus free swap. A model run pushed into swap is slower,
+/// not stopped; `None` when the system reports no memory.
+pub fn free_ram_and_swap_bytes() -> Option<u64> {
+    let (available, total, free_swap) = memory_now(true);
+    reported_available(available, total).map(|available| available + free_swap)
+}
+
 /// What a photo's buffers may use: the memory available now plus free
 /// swap; `None` when free memory cannot be read. Buffers touched once or
 /// twice sit in swap at little cost, so the system pushing idle memory

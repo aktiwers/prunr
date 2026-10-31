@@ -567,6 +567,8 @@ struct BatchRunState {
     /// `config.on_screen`.
     told_first_look: Option<u64>,
     told_on_screen: Option<u64>,
+    /// Memory is too short for the first look beside the engines.
+    no_first_look: bool,
 }
 
 impl BatchRunState {
@@ -589,7 +591,14 @@ impl BatchRunState {
             batch,
             told_first_look: None,
             told_on_screen: None,
+            no_first_look: false,
         }
+    }
+
+    /// The image whose run shows a first look, unless memory is too short
+    /// for one.
+    fn first_look(&self) -> Option<u64> {
+        self.config.first_look.get().filter(|_| !self.no_first_look)
     }
 
     /// An image admitted while the batch runs joins it.
@@ -827,7 +836,10 @@ fn spawn_and_initial_burst(
     let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
     let effective_jobs = match engines_fit(state, warm.as_ref().map(|(sub, _)| sub), effective_jobs) {
-        Ok(jobs) => jobs,
+        Ok(plan) => {
+            state.no_first_look = !plan.first_look;
+            plan.jobs
+        }
         Err(why) => {
             let _ = res_tx.send(WorkerResult::BatchRefused { batch: state.batch, why });
             ctx.request_repaint();
@@ -861,13 +873,13 @@ fn spawn_and_initial_burst(
     Some(InitialBurst { sub, sent, engines })
 }
 
-/// The most of `jobs` engines the batch's cut-out run fits in what is
-/// free now with the reserve kept, a warm worker's memory counted as its
-/// own; `Err`: why the batch is refused. Only full runs need the engines.
-fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<usize, String> {
+/// How the batch's cut-out run fits the memory free now, a warm worker's
+/// memory counted as its own (`CutoutEngines::plan`); `Err`: why the
+/// batch is refused. Only full runs need the engines.
+fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<super::memory::CutoutPlan, String> {
     use super::settings::SettingsModel;
     if state.pending.is_empty() {
-        return Ok(jobs);
+        return Ok(super::memory::CutoutPlan { jobs, first_look: true });
     }
     let EngineSpec { model, cpu_only, .. } = state.config.engines;
     let shown = state.config.first_look.get();
@@ -875,7 +887,7 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
     let line_mode = state.config.run.line_mode;
     let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode, line_fade: false };
     let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
-    engines.jobs_that_fit(held_mb).map_err(|short| {
+    engines.plan(held_mb).map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
         // Lines alone run no cut-out model: the line model is what is short.
         let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
@@ -893,7 +905,7 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
 /// reports it as a crash.
 fn configure(sub: &mut SubprocessManager, state: &mut BatchRunState) {
     let run = &state.config.run;
-    let shown = state.config.first_look.get();
+    let shown = state.first_look();
     let on_screen = state.config.on_screen.get();
     if let Err(err) = sub.send_configure(run.mask, run.line_mode, run.edge, shown, on_screen) {
         tracing::warn!(%err, "worker did not take the batch's run settings");
@@ -922,7 +934,7 @@ fn run_event_loop(
         }
 
         forward_item_cancels(sub, sent, cancels, &mut cancel_notified);
-        if state.config.first_look.get() != state.told_first_look || state.config.on_screen.get() != state.told_on_screen {
+        if state.first_look() != state.told_first_look || state.config.on_screen.get() != state.told_on_screen {
             configure(sub, state);
         }
 
@@ -949,7 +961,7 @@ fn run_event_loop(
             handle_subprocess_event(event, state, sent, res_tx, ctx);
         }
         // After the events, so a result the worker finished still lands.
-        if let Some(free) = crate::subprocess::batch_rules::low_free_memory(sent.len(), super::memory::cutout_watch_free_ram) {
+        if let Some(free) = crate::subprocess::batch_rules::low_free_memory(sent.len(), super::memory::cutout_watch_free) {
             tracing::warn!(in_flight = sent.len(), free_mb = free / (1024 * 1024), "free memory ran low; worker stopped");
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::MemoryLow);
         }
@@ -1382,8 +1394,8 @@ fn spawn_warm(
     let started = Instant::now();
     let neutral = RunSettings::neutral();
     let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode, line_fade: false };
-    let fits = engines.jobs_that_fit(0);
-    if fits != Ok(spec.jobs) {
+    let fits = engines.plan(0);
+    if fits.map(|plan| plan.jobs) != Ok(spec.jobs) {
         tracing::info!(?engines, ?fits, "pre-warm skipped: not enough memory for its engines");
         return None;
     }

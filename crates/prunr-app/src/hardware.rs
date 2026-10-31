@@ -219,12 +219,12 @@ pub fn available_ram_bytes_throttled() -> u64 {
     throttled(&CACHE, available_ram_bytes_now)
 }
 
-/// Free RAM for the run watchdogs, read at most every quarter second: a
-/// model can take gigabytes within a second. `None` when the system
-/// reports no memory.
-pub fn watchdog_free_ram_bytes() -> Option<u64> {
+/// Free RAM and swap for the run watchdogs, read at most every quarter
+/// second: a model can take gigabytes within a second. `None` when the
+/// system reports no memory.
+pub fn watchdog_free_bytes() -> Option<u64> {
     static CACHE: Reading<Option<u64>> = Mutex::new(None);
-    throttled_for(&CACHE, std::time::Duration::from_millis(250), prunr_core::sysmem::available_ram_bytes)
+    throttled_for(&CACHE, std::time::Duration::from_millis(250), prunr_core::sysmem::free_ram_and_swap_bytes)
 }
 
 /// Free memory on CUDA's card in MB, read at most once a second;
