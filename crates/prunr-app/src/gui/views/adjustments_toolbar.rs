@@ -1056,7 +1056,7 @@ fn render_background_chip(
                 BgKind::BlurredSource => {
                     if let BgEffect::BlurredSource { radius } = bg_effect {
                         chip::panel_section(ui, "Blurred photo", None);
-                        let r = chip::slider_row(ui, "Blur radius (px)", radius, 1..=64);
+                        let r = chip::slider_row(ui, "Blur radius (px)", radius, prunr_core::BgEffect::BLUR_RADII);
                         aggregate_bool(r.changed, StaticKnob::BgEffect, change);
                     }
                 }
@@ -1143,7 +1143,7 @@ fn apply_bg_kind(
         }
         BgKind::BlurredSource => {
             *bg = None;
-            *bg_effect = BgEffect::BlurredSource { radius: 12 };
+            *bg_effect = BgEffect::BlurredSource { radius: BgEffect::BLUR_START_RADIUS };
         }
         BgKind::DesaturatedSource => {
             *bg = None;

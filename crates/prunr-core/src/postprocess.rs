@@ -601,7 +601,7 @@ pub fn effect_backdrop(
     let plate = || cutout.and_then(|cutout| clean_plate(source, cutout));
     let mut img = match effect {
         BgEffect::None => return None,
-        BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(plate().as_ref().unwrap_or(source), radius.clamp(1, 64) as f32),
+        BgEffect::BlurredSource { radius } => crate::blur::blur_rgba(plate().as_ref().unwrap_or(source), radius.clamp(*BgEffect::BLUR_RADII.start(), *BgEffect::BLUR_RADII.end()) as f32),
         BgEffect::DesaturatedSource => {
             let mut img = source.clone();
             apply_subject_effect(&mut img, SubjectEffect::Desaturate);
