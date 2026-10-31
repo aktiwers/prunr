@@ -23,8 +23,22 @@ pub fn available_ram_bytes() -> Option<u64> {
 /// available now plus free swap. A model run pushed into swap is slower,
 /// not stopped; `None` when the system reports no memory.
 pub fn free_ram_and_swap_bytes() -> Option<u64> {
+    free_ram_then_swap_bytes().map(|(ram, swap)| ram + swap)
+}
+
+/// Free swap alone; reading it on Windows walks the process table.
+pub fn free_swap_bytes() -> u64 {
+    with_system(|sys| {
+        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_swap());
+        sys.free_swap()
+    })
+}
+
+/// `free_ram_and_swap_bytes` in its two parts: RAM available, then free
+/// swap.
+pub fn free_ram_then_swap_bytes() -> Option<(u64, u64)> {
     let (available, total, free_swap) = memory_now(true);
-    reported_available(available, total).map(|available| available + free_swap)
+    reported_available(available, total).map(|available| (available, free_swap))
 }
 
 /// What a photo's buffers may use: the memory available now plus free

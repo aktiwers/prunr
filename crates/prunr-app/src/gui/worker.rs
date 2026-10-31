@@ -1402,7 +1402,7 @@ fn spawn_warm(
     let started = Instant::now();
     let neutral = RunSettings::neutral();
     let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode, line_fade: false };
-    let fits = engines.plan(0);
+    let fits = engines.plan_in_ram();
     if fits.map(|plan| plan.jobs) != Ok(spec.jobs) {
         tracing::info!(?engines, ?fits, "pre-warm skipped: not enough memory for its engines");
         return None;
