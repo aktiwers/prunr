@@ -66,7 +66,7 @@ impl PrunrApp {
     /// strokes take effect at once, from the cached tensor. Without a
     /// cut-out on screen there is nothing to correct yet; the selection
     /// waits and `on_batch_item_done` applies it when a result lands.
-    fn rerun_with_strokes(&mut self, idx: usize) {
+    pub(super) fn rerun_with_strokes(&mut self, idx: usize) {
         if !self.batch.items[idx].shows_cutout() {
             return;
         }
@@ -75,11 +75,12 @@ impl PrunrApp {
         }
     }
 
-    /// Lines on the subject follow the strokes: when the strokes moved the
-    /// shown cut-out from under them, the lines run a mask slider's release
-    /// starts traces them on the stroked one, filling in the stroke's step,
-    /// so one Undo takes back both. False when none starts now; an edit
-    /// still being made asks again as it lands.
+    /// Lines on the subject follow the strokes: when the strokes shown are
+    /// not the ones the kept lines were traced on, the lines run a mask
+    /// slider's release starts traces them on the stroked cut-out, filling
+    /// in the shown step (a stroke's own, so one Undo takes back both).
+    /// False when none starts now; an edit still being made asks again as
+    /// it lands.
     fn retrace_lines(&mut self, idx: usize) -> bool {
         let Some(model) = self.settings.model.to_model_kind() else { return false };
         let item = &self.batch.items[idx];
