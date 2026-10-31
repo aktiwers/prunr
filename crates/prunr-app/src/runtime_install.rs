@@ -211,31 +211,32 @@ impl RuntimeId {
     }
 
     /// What installing it downloads, as a button says it: the add-on alone
-    /// where NVIDIA's libraries are already here (`nvidia_here`).
-    pub fn download_label(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
+    /// where NVIDIA's libraries are already here, without the small-card
+    /// copies already on disk.
+    pub fn download_label(self, here: OnDisk) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
-        let copies: u64 = self.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum();
+        let copies: u64 = if here.small_card_copies { 0 } else { self.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum() };
         let addon = self.addon().map(|addon| Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes + copies)));
         match self {
             Self::OpenVino => addon.unwrap_or(Cow::Borrowed("80 MB")),
-            Self::Cuda => addon.filter(|_| nvidia_here).unwrap_or(Cow::Borrowed("about 2 GB")),
+            Self::Cuda => addon.filter(|_| here.nvidia_libraries).unwrap_or(Cow::Borrowed("about 2 GB")),
             Self::MiGraphX => Cow::Borrowed("20 MB"),
         }
     }
 
     /// `download_label`, as a sentence says it: what the download brings
     /// beside the runtime.
-    pub fn download_size(self, nvidia_here: bool) -> std::borrow::Cow<'static, str> {
-        let label = self.download_label(nvidia_here);
+    pub fn download_size(self, here: OnDisk) -> std::borrow::Cow<'static, str> {
+        let label = self.download_label(here);
         match self {
-            Self::Cuda if !(nvidia_here && self.is_addon()) => format!("{label} with NVIDIA's CUDA and cuDNN libraries").into(),
+            Self::Cuda if !(here.nvidia_libraries && self.is_addon()) => format!("{label} with NVIDIA's CUDA and cuDNN libraries").into(),
             _ => label,
         }
     }
 
     /// Settings › Hardware's line while this runtime is not installed: its
     /// download, and why to get it when the hardware suits it.
-    pub fn not_installed(self, recommended: bool, nvidia_here: bool) -> String {
+    pub fn not_installed(self, recommended: bool, here: OnDisk) -> String {
         let why = match (self, recommended) {
             (Self::OpenVino, false) => "",
             (Self::OpenVino, true) => " Recommended for Intel hardware: the models run faster, and you can try running them on Intel graphics.",
@@ -246,7 +247,7 @@ impl RuntimeId {
             (Self::MiGraphX, false) => " Runs the models on an AMD graphics card; needs AMD's ROCm 7 with MIGraphX.",
             (Self::MiGraphX, true) => " Recommended for your AMD graphics card: runs the models on it. Needs AMD's ROCm 7 with MIGraphX.",
         };
-        format!("Not installed ({}).{why}", self.download_size(nvidia_here))
+        format!("Not installed ({}).{why}", self.download_size(here))
     }
 
     /// Settings › Hardware's line for an add-on installed while an older
@@ -284,8 +285,8 @@ impl RuntimeId {
     }
 
     /// The first-launch prompt's body.
-    pub fn first_launch_prompt_body(self, nvidia_here: bool) -> String {
-        let size = self.download_size(nvidia_here);
+    pub fn first_launch_prompt_body(self, here: OnDisk) -> String {
+        let size = self.download_size(here);
         match self {
             Self::OpenVino => format!("We detected Intel hardware that can use {}. \
                 Installing it ({size}) makes the models run faster, and lets you \
@@ -314,19 +315,19 @@ impl RuntimeId {
 
     /// The first-launch prompt's body where an earlier Prunr's install of
     /// it is in use.
-    pub fn update_prompt_body(self, nvidia_here: bool) -> String {
+    pub fn update_prompt_body(self, here: OnDisk) -> String {
         format!(
             "This computer runs {} from an earlier version of Prunr. The current one ({}) \
              replaces it; the earlier one is removed at the next start.",
             self.display_name(),
-            self.download_size(nvidia_here),
+            self.download_size(here),
         )
     }
 
     /// Settings › Hardware's line where an earlier Prunr's install of it
     /// is in use.
-    pub fn update_line(self, nvidia_here: bool) -> String {
-        format!("An earlier version is in use. Update ({}); the earlier one is removed at the next start.", self.download_size(nvidia_here))
+    pub fn update_line(self, here: OnDisk) -> String {
+        format!("An earlier version is in use. Update ({}); the earlier one is removed at the next start.", self.download_size(here))
     }
 
     /// The first-launch prompt's and Settings' install-button label.
@@ -714,6 +715,19 @@ fn start_addon(addon: Addon) -> Result<(), String> {
     }
 }
 
+/// What an install finds on disk already and does not download again.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OnDisk {
+    /// NVIDIA's CUDA and cuDNN libraries.
+    pub nvidia_libraries: bool,
+    /// The copies CUDA brings for small cards (`RuntimeId::small_card_copies`).
+    pub small_card_copies: bool,
+}
+
+pub fn small_card_copies_on_disk() -> bool {
+    small_card_copies_missing(RuntimeId::Cuda).is_empty()
+}
+
 /// `rt`'s small-card copies not on disk yet, each with where it goes.
 fn small_card_copies_missing(rt: RuntimeId) -> Vec<(PathBuf, prunr_models::OnDemandVariant)> {
     let Some(dir) = prunr_models::on_demand_dir() else { return Vec::new() };
@@ -1029,12 +1043,25 @@ mod tests {
         assert!(!staging.exists());
     }
 
+    /// CUDA's download counts its small-card copies only while they are
+    /// not on disk.
+    #[test]
+    fn cudas_size_leaves_out_copies_on_disk() {
+        // Not an add-on here: CUDA's size is a fixed "about 2 GB".
+        let Some(addon) = RuntimeId::Cuda.addon() else { return };
+        let here = |small_card_copies| OnDisk { nvidia_libraries: true, small_card_copies };
+        let copies: u64 = RuntimeId::Cuda.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum();
+        assert_eq!(RuntimeId::Cuda.download_label(here(false)), crate::gui::views::format_byte_size(addon.size_bytes + copies));
+        assert_eq!(RuntimeId::Cuda.download_label(here(true)), crate::gui::views::format_byte_size(addon.size_bytes));
+    }
+
     /// CUDA's texts speak of DirectML only where it runs beside it.
     #[test]
     fn cudas_texts_name_directml_only_beside_it() {
         let beside = cfg!(all(windows, target_arch = "x86_64"));
         let cuda = RuntimeId::Cuda;
-        for text in [cuda.not_installed(true, false), cuda.not_installed(false, true), cuda.first_launch_prompt_body(false), cuda.installed_line().to_string()] {
+        let nvidia_here = OnDisk { nvidia_libraries: true, ..OnDisk::default() };
+        for text in [cuda.not_installed(true, OnDisk::default()), cuda.not_installed(false, nvidia_here), cuda.first_launch_prompt_body(OnDisk::default()), cuda.installed_line().to_string()] {
             assert_eq!(text.contains("DirectML"), beside, "{text}");
         }
     }

@@ -1476,7 +1476,7 @@ impl PrunrApp {
         if let Some(rt) = self.runtime_prompt {
             use super::views::runtime_prompt::{RuntimePromptAction, render_runtime_prompt};
             let installs = &self.hardware_install_cache;
-            if let Some(action) = render_runtime_prompt(ctx, rt, installs.nvidia_libraries, installs.updates(rt)) {
+            if let Some(action) = render_runtime_prompt(ctx, rt, installs.on_disk(), installs.updates(rt)) {
                 self.runtime_prompt = None;
                 match action {
                     RuntimePromptAction::Install => self.request_install(crate::runtime_install::InstallTarget::Runtime(rt)),
