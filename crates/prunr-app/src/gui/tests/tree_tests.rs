@@ -438,6 +438,18 @@ fn a_colorize_run_holds_its_strength_chip() {
     }
 }
 
+/// A click on a disabled chip says why at once, without waiting for
+/// the pointer to rest on it.
+#[test]
+fn a_click_on_a_disabled_chip_says_why() {
+    let mut h = loaded_with(|app| app.batch.items[0].settings.line_mode = prunr_core::LineMode::EdgesOnly);
+    let why = crate::gui::capability::Reason::SketchCoversPhoto.text();
+    assert!(!enabled(&h, "Mask"), "Whole photo leaves nothing cut out");
+    assert!(!texts(&h).iter().any(|t| t == why), "not before the click");
+    click(&mut h, "Mask");
+    assert!(texts(&h).iter().any(|t| t == why), "the reason shows on a click");
+}
+
 /// No model's Depth chip: Point picks the lens blur, and Set focus, on
 /// the strip beside it, waits for a click on the image.
 #[test]
