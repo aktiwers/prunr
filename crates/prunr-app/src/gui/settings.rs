@@ -129,7 +129,9 @@ impl SdMemoryGuard {
     pub fn margin_mb(self) -> u64 {
         let balanced = prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB;
         match self {
-            Self::Relaxed => balanced / 2,
+            // Never below the line that stops a fill: one let start here
+            // would be stopped for the memory it was let start with.
+            Self::Relaxed => (balanced / 2).max(prunr_core::memory::STOP_BELOW_FREE_MB),
             Self::Balanced => balanced,
             Self::Strict => balanced * 2,
         }
@@ -1056,6 +1058,16 @@ mod tests {
             assert_eq!(s.sd_memory, guard, "{gb} GB");
         }
         assert_eq!(SdMemoryGuard::Balanced.margin_mb(), prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB);
+    }
+
+    /// A fill a guard lets start keeps the free memory below which the
+    /// eraser's watchdog stops it, so it is never stopped for what it was
+    /// let start with.
+    #[test]
+    fn every_guard_keeps_the_line_that_stops_a_fill() {
+        for guard in [SdMemoryGuard::Relaxed, SdMemoryGuard::Balanced, SdMemoryGuard::Strict] {
+            assert!(guard.margin_mb() >= prunr_core::memory::STOP_BELOW_FREE_MB, "{guard:?}");
+        }
     }
 
     /// Under "CPU only" every reader of the backend (status bar, the
