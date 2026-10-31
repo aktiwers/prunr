@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::brush_state::CutoutAction;
 use super::background_io::BackgroundIO;
 use super::item::{BatchItem, BatchStatus, ImageSource, RunTier};
 use super::memory::{AdmissionController, ImageMemCost, RESIDENT_HISTORY_STEPS};
@@ -750,16 +751,24 @@ impl BatchManager {
     }
 
     /// Sort the images in `ids` by the run a `step` by `cutter` needs
-    /// (`BatchItem::run_tier`). One that chains onto another model's
-    /// cut-out is a full run, whatever its recipe says.
-    pub(crate) fn classify(&mut self, ids: &HashSet<u64>, model: prunr_core::ModelKind, step: Option<super::timeline::StepKind>, cutter: super::item::Cutter) -> ClassifiedTiers {
+    /// (`BatchItem::run_tier`), with the strokes `action` applies. One
+    /// that chains onto another model's cut-out is a full run, whatever
+    /// its recipe says.
+    pub(crate) fn classify(
+        &mut self,
+        ids: &HashSet<u64>,
+        model: prunr_core::ModelKind,
+        step: Option<super::timeline::StepKind>,
+        cutter: super::item::Cutter,
+        action: CutoutAction,
+    ) -> ClassifiedTiers {
         let mut tiers = ClassifiedTiers::default();
         for item in self.in_set(ids) {
             if item.chains(step, cutter) {
                 tiers.full.insert(item.id);
                 continue;
             }
-            match item.run_tier(model) {
+            match item.run_tier(model, action) {
                 RunTier::UpToDate => tiers.up_to_date_count += 1,
                 RunTier::Full => { tiers.full.insert(item.id); }
                 RunTier::Mask => { tiers.mask.insert(item.id); }
@@ -770,16 +779,20 @@ impl BatchManager {
     }
 
     /// The work for the images in `ids` that run again from their cached
-    /// tensor.
-    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>) -> Vec<CachedTensorWork> {
+    /// tensor. A lines run (`strokes`: how the brush applies them) cuts
+    /// the subject with the image's strokes, so its lines follow them.
+    pub(crate) fn cached_tensor_work(&mut self, ids: &HashSet<u64>, strokes: Option<CutoutAction>) -> Vec<CachedTensorWork> {
         self.in_set(ids)
             .filter_map(|item| {
+                let tensor = item.cached_tensor.clone()?;
+                let correction = strokes.and_then(|action| item.cut_with_strokes(action));
                 let work = CachedTensorWork {
                     item_id: item.id,
-                    tensor: item.cached_tensor.clone()?,
+                    tensor,
                     source: item.source.clone(),
                     photo: item.source_rgba.clone(),
                     mask: item.settings.mask_settings(),
+                    correction,
                 };
                 item.mark_running();
                 Some(work)

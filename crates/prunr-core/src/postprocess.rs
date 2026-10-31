@@ -89,6 +89,20 @@ pub fn postprocess_from_flat(
     Ok(postprocess(view, original, opts))
 }
 
+/// The cut-out the line detector traces under Sketch on Subject: `opts`'
+/// mask with its strokes, and no subject effect, which goes on over the
+/// traced lines. Peak working set: `postprocess_from_flat`'s.
+pub fn cut_for_lines(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: &impl crate::formats::AsRgba,
+    opts: &PostprocessOpts<'_>,
+) -> Result<RgbaImage, crate::types::CoreError> {
+    let plain = MaskSettings { effect: SubjectEffect::None, ..*opts.mask_settings };
+    postprocess_from_flat(tensor, tensor_h, tensor_w, original, &PostprocessOpts { mask_settings: &plain, ..*opts })
+}
+
 fn flat_view(tensor: &[f32], h: usize, w: usize) -> Result<ArrayView4<'_, f32>, crate::types::CoreError> {
     ArrayView4::from_shape((1, 1, h, w), tensor)
         .map_err(|e| crate::types::CoreError::Inference(format!("Tensor reshape: {e}")))
@@ -1114,6 +1128,37 @@ mod tests {
             let mask = mask_from_flat(&flat, 64, 64, &original, &opts).expect("fits");
             assert_eq!(finish_with_mask(&original, &mask, &settings), whole, "{settings:?}");
         }
+    }
+
+    /// The cut-out the lines trace carries the strokes: an erase takes
+    /// away what the mask kept, a restore brings back what it left out,
+    /// and the line detector sees both. The subject effect stays off it.
+    #[test]
+    fn the_cut_out_the_lines_trace_has_the_strokes_and_no_effect() {
+        use crate::selection::{MaskArtifact, FULL};
+        let (w, h) = (64u32, 8u32);
+        // Subject on the left half, background on the right.
+        let tensor: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { 1.0 } else { 0.0 }).collect();
+        let original = RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+        // Erased over the left eighth, restored over the right eighth.
+        let cells = (0..w * h).map(|i| match i % w { x if x < 8 => -FULL, x if x >= 56 => FULL, _ => 0 }).collect();
+        let strokes = MaskArtifact::from_cells(w, h, cells);
+        let settings = MaskSettings { effect: SubjectEffect::Invert, ..MaskSettings::default() };
+        let opts = PostprocessOpts::new(&settings, ModelKind::Silueta);
+        let alpha = |cut: &RgbaImage, x: u32| cut.get_pixel(x, 4)[3];
+
+        let unstroked = cut_for_lines(&tensor, h as usize, w as usize, &original, &opts).expect("fits");
+        assert_eq!((alpha(&unstroked, 2), alpha(&unstroked, 60)), (255, 0), "the mask alone");
+        assert_eq!(unstroked.get_pixel(20, 4).0, [200, 40, 40, 255], "no effect on what is traced");
+
+        let stroked = cut_for_lines(&tensor, h as usize, w as usize, &original, &opts.with_correction(Some(&strokes))).expect("fits");
+        let mut traced = None;
+        let _ = crate::edge::outline_subject(stroked, settings.effect, &crate::EdgeSettings::default(), None, |seen| {
+            traced = Some(seen.to_rgba8());
+            Err(crate::types::CoreError::Cancelled)
+        });
+        let traced = traced.expect("the line detector ran");
+        assert_eq!((alpha(&traced, 2), alpha(&traced, 60)), (0, 255), "the strokes reach the line detector");
     }
 
     #[test]

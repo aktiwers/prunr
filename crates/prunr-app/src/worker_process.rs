@@ -137,10 +137,11 @@ fn send_rss(evt_tx: &mpsc::Sender<SubprocessEvent>) {
     }
 }
 
-/// Remove an image's IPC inputs: its file and, for a chained run, its start.
-fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, chain: Option<&std::path::Path>) {
-    match chain {
-        Some(c) => cleanup_ipc_temps(ipc, &[image, c]),
+/// Remove an image's IPC inputs: its file and the one beside it, when
+/// there is one (a chained run's start, a lines run's strokes).
+fn cleanup_image_inputs(ipc: &std::path::Path, image: &std::path::Path, beside: Option<&std::path::Path>) {
+    match beside {
+        Some(b) => cleanup_ipc_temps(ipc, &[image, b]),
         None => cleanup_ipc_temps(ipc, &[image]),
     }
 }
@@ -554,10 +555,9 @@ pub fn run_worker() -> ! {
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
                                     let active_provider = ir.active_provider.clone();
-                                    let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..mask };
-                                    let subject = prunr_core::postprocess_from_flat(
+                                    let subject = prunr_core::cut_for_lines(
                                         &ir.tensor_data, th, tw, original,
-                                        &prunr_core::PostprocessOpts::new(&plain, model),
+                                        &prunr_core::PostprocessOpts::new(&mask, model),
                                     )?;
                                     // Seg tensor captured → Tier 2 mask reruns work in
                                     // SubjectOutline; Off ↔ SubjectOutline can reuse it.
@@ -755,11 +755,13 @@ pub fn run_worker() -> ! {
             SubprocessCommand::AddEdgeInference {
                 item_id, original: photo, seg_tensor_path,
                 seg_tensor_height, seg_tensor_width, model: cmd_model,
-                mask: cmd_mask,
+                mask: cmd_mask, correction,
             } => {
+                let strokes = correction.map(|file| file.0);
                 if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
-                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path, photo.path()]);
+                    cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path]);
+                    cleanup_image_inputs(&ipc_dir, photo.path(), strokes.as_deref());
                     continue;
                 }
                 let evt_tx = evt_tx.clone();
@@ -778,7 +780,8 @@ pub fn run_worker() -> ! {
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
-                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path, photo.path()]);
+                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
+                        cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -795,12 +798,14 @@ pub fn run_worker() -> ! {
                         let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
 
                         let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
+                        let correction = strokes.as_deref()
+                            .map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or("The strokes on the cut-out could not be read"))
+                            .transpose()?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let plain = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::None, ..cmd_mask };
-                        let subject = prunr_core::postprocess_from_flat(
+                        let subject = prunr_core::cut_for_lines(
                             &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&plain, cmd_model),
+                            &original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model).with_correction(correction.as_ref()),
                         ).map_err(|e| e.to_string())?;
 
                         progress.step(prunr_core::Step::DrawingLines);
@@ -849,7 +854,7 @@ pub fn run_worker() -> ! {
                         }
                     };
                     prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
-                    cleanup_ipc_temps(&ipc, &[photo.path()]);
+                    cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
                         drop(sem_guard);

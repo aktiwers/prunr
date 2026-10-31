@@ -221,10 +221,10 @@ pub struct CompressedEdgeTensors {
     pub width: u32,
     /// The pass still to fill the scales this run left for later.
     spare: Option<u64>,
-    /// The mask (`MaskRecipe::alpha_part`) the lines were traced on, when
-    /// a run traced them on the cut-out: a preview of another mask draws
-    /// them where they were.
-    pub(crate) traced_on: Option<prunr_core::MaskRecipe>,
+    /// The cut-out the lines were traced on, when a run traced them on
+    /// one: a preview of another mask or other strokes draws them where
+    /// they were.
+    pub(crate) traced_on: Option<super::item::TracedCut>,
 }
 
 impl CompressedEdgeTensors {
@@ -318,6 +318,9 @@ pub(crate) struct CachedTensorWork {
     /// worker does not decode the file again.
     pub(crate) photo: Option<Arc<image::RgbaImage>>,
     pub(crate) mask: MaskSettings,
+    /// The strokes a lines run cuts the subject with; built, when it
+    /// must be, on the bridge thread.
+    pub(crate) correction: Option<super::item::Correction>,
 }
 
 
@@ -1072,17 +1075,13 @@ fn send_next(
     res_tx: &mpsc::Sender<WorkerResult>,
     ctx: &egui::Context,
 ) -> SendOutcome {
-    let cached = [
-        (Lane::Tier2, SubprocessManager::send_repostprocess as SendCached),
-        (Lane::AddEdge, SubprocessManager::send_add_edge_inference),
-    ];
-    for (lane, send) in cached {
+    for lane in [Lane::Tier2, Lane::AddEdge] {
         let (pending, ids) = match lane {
             Lane::Tier2 => (&mut state.pending_tier2, &mut sent.tier2_ids),
             Lane::AddEdge => (&mut state.pending_add_edge, &mut sent.add_edge_ids),
         };
         let Some(work) = pending.pop_front() else { continue };
-        return match send_cached(sub, &work, send).map_err(|refusal| failure(refusal, sub)) {
+        return match send_cached(sub, &work, lane).map_err(|refusal| failure(refusal, sub)) {
             Ok(()) => {
                 ids.push(work.item_id);
                 SendOutcome::Sent
@@ -1358,8 +1357,6 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
     sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
 }
 
-type SendCached = fn(&mut SubprocessManager, u64, &crate::subprocess::manager::TensorView<'_>, ModelKind, &Photo, MaskSettings) -> Result<(), SendError>;
-
 impl CachedTensorWork {
     /// The unpacked tensor, and the photo: decoded, or the file read. A
     /// corrupt cache or an unreadable file fails the image; its failure
@@ -1378,14 +1375,19 @@ impl CachedTensorWork {
     }
 }
 
-fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, send: SendCached) -> Result<(), Refused> {
+fn send_cached(sub: &mut SubprocessManager, work: &CachedTensorWork, lane: Lane) -> Result<(), Refused> {
     let (data, photo) = work.read_inputs().map_err(Refused::Unreadable)?;
     let tensor = crate::subprocess::manager::TensorView {
         data: &data,
         height: work.tensor.height,
         width: work.tensor.width,
+        model: work.tensor.model,
     };
-    let mut hand_over = |photo: &Photo| send(sub, work.item_id, &tensor, work.tensor.model, photo, work.mask);
+    let correction = work.correction.clone().map(|c| c.resolve().0);
+    let mut hand_over = |photo: &Photo| match lane {
+        Lane::Tier2 => sub.send_repostprocess(work.item_id, &tensor, photo, work.mask),
+        Lane::AddEdge => sub.send_add_edge_inference(work.item_id, &tensor, photo, work.mask, correction.as_deref()),
+    };
     match hand_over(&photo) {
         // The raw pixels are several times the file: a temp folder too
         // full for them may still take the file.
@@ -1527,12 +1529,12 @@ mod tests {
         assert!(unreadable.read_inputs().is_err(), "a start that can't be read fails the run, not cut the file instead");
 
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: ModelKind::Silueta }).unwrap();
-        let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, photo: None, mask: MaskSettings::default() };
+        let cached = CachedTensorWork { item_id: 4, tensor: tensor.clone(), source: file, photo: None, mask: MaskSettings::default(), correction: None };
         assert_eq!(cached.read_inputs().expect("reads").0, vec![0.5; 4]);
         let photo = Some(Arc::new(image::RgbaImage::new(1, 1)));
-        let decoded = CachedTensorWork { item_id: 5, tensor: tensor.clone(), source: missing.clone(), photo, mask: MaskSettings::default() };
+        let decoded = CachedTensorWork { item_id: 5, tensor: tensor.clone(), source: missing.clone(), photo, mask: MaskSettings::default(), correction: None };
         assert!(matches!(decoded.read_inputs().expect("its file is not read").1, Photo::Decoded(_)), "the decoded photo goes as is");
-        let cached = CachedTensorWork { item_id: 5, tensor, source: missing, photo: None, mask: MaskSettings::default() };
+        let cached = CachedTensorWork { item_id: 5, tensor, source: missing, photo: None, mask: MaskSettings::default(), correction: None };
         assert!(cached.read_inputs().is_err_and(|e| e.contains("moved or deleted")));
     }
 
@@ -1566,7 +1568,7 @@ mod tests {
         };
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
-        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default() };
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default(), correction: None };
         let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
@@ -1585,7 +1587,7 @@ mod tests {
         };
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
-        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default() };
+        let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default(), correction: None };
         let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         // Image 1 is cancelled from the start; 2 and 3 from their second look on.
