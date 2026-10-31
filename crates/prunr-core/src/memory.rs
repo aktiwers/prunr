@@ -47,8 +47,8 @@ pub struct Room {
     pub card_mb: Option<u64>,
 }
 
-/// What a refused run was short of. `kept_mb`: the system RAM kept free
-/// for other apps beside the run's own need.
+/// What a refused run was short of. `kept_mb`: memory a run must leave
+/// beside its own need, for the computer to keep running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Short {
     Ram { need_mb: u64, kept_mb: u64, free_mb: u64 },
@@ -61,7 +61,7 @@ impl std::fmt::Display for Short {
             Short::Ram { need_mb, kept_mb: 0, free_mb } => write!(f, "needs about {} of free memory, {} is free", size(need_mb), size(free_mb)),
             Short::Ram { need_mb, kept_mb, free_mb } => write!(
                 f,
-                "needs about {} of free memory, and Prunr keeps {} free for your other apps; {} is free",
+                "needs about {} of free memory, plus {} left over for your computer to keep running; {} is free",
                 size(need_mb), size(kept_mb), size(free_mb),
             ),
             Short::Card { need_mb, free_mb } => write!(f, "needs about {} free on the graphics card, {} is free", size(need_mb), size(free_mb)),
@@ -90,29 +90,20 @@ pub(crate) fn size(mb: u64) -> String {
 /// ComfyUI keeps (more on Windows, where the compositor holds more).
 pub const CARD_RESERVE_MB: u64 = if cfg!(windows) { 600 } else { 400 };
 
-/// System RAM a run leaves free for the rest of the computer: the open
-/// apps' code and files they keep reading. That does not grow with the
-/// machine's RAM, so it is fixed, not a share. Linux without swap thrashes
-/// once they are pushed out: a 7.1 GB cut-out started with 7.9 GB free
+/// Free memory, RAM and swap together, below which a run in a worker is
+/// stopped: the computer is about to run out. 1 GB sits below Linux's
+/// aggressive-reclaim band and above macOS's memory-pressure warning. A
+/// 7.1 GB cut-out started with 7.9 GB free and no swap left 0.7 GB and
 /// froze a desktop for six minutes.
-pub const RAM_RESERVE_MB: u64 = 1536;
-
-/// Free system RAM below which a run in a worker is stopped. 1 GB sits
-/// below Linux's aggressive-reclaim band and above macOS's
-/// memory-pressure warning, so the worker goes before the desktop
-/// thrashes. Under `RAM_RESERVE_MB`, so a run that started within its
-/// figure is never stopped.
 pub const STOP_BELOW_FREE_MB: u64 = 1024;
-const _: () = assert!(RAM_RESERVE_MB > STOP_BELOW_FREE_MB);
 
-/// Whether `charge` fits `room` with `RAM_RESERVE_MB` left free: the card
-/// first (it is the smaller), then system RAM.
+/// Whether `charge` fits `room`: the card first (it is the smaller), then
+/// system RAM.
 pub fn fit(charge: Charge, room: Room) -> Result<(), Short> {
-    fit_keeping(charge, room, RAM_RESERVE_MB)
+    fit_keeping(charge, room, 0)
 }
 
-/// `fit` with `kept_mb` of system RAM left free instead of the reserve,
-/// for a caller that counts its own headroom in `charge`.
+/// `fit` with `kept_mb` of `room` left over beside the run's need.
 pub fn fit_keeping(charge: Charge, room: Room, kept_mb: u64) -> Result<(), Short> {
     if let Some(free_mb) = room.card_mb.filter(|_| charge.on_card()) {
         let need_mb = charge.card_need_mb();
@@ -338,9 +329,9 @@ mod tests {
         let cuda = Charge { ram_mb: 1_000, card_mb: 2_200 };
         let cpu = Charge { ram_mb: 2_500, card_mb: 0 };
         let ram = |ram_mb| Room { ram_mb, card_mb: None };
-        let short = Short::Ram { need_mb: 2_500, kept_mb: RAM_RESERVE_MB, free_mb: 2_000 };
+        let short = Short::Ram { need_mb: 2_500, kept_mb: 0, free_mb: 2_000 };
         assert_eq!(falls_to_cpu(Some((coreml, ram(8_000))), Some((cpu, ram(8_000)))), Ok(false));
-        assert_eq!(falls_to_cpu(Some((coreml, ram(4_100))), Some((cpu, ram(4_100)))), Ok(true));
+        assert_eq!(falls_to_cpu(Some((coreml, ram(4_000))), Some((cpu, ram(4_000)))), Ok(true));
         assert_eq!(falls_to_cpu(Some((coreml, ram(2_000))), Some((cpu, ram(2_000)))), Err(short));
         let card = Room { ram_mb: 16_000, card_mb: Some(1_000) };
         assert_eq!(falls_to_cpu(Some((cuda, card)), Some((cpu, ram(16_000)))), Ok(true), "the card is short, the RAM is not");
@@ -348,16 +339,16 @@ mod tests {
         assert_eq!(falls_to_cpu(None, Some((cpu, ram(0)))), Ok(false), "no reading: trusted");
     }
 
-    /// BiRefNet-lite on the CPU with 7.9 GB free is refused; it runs once
-    /// the reserve is free beside its need.
+    /// A run that keeps memory over: refused while its need and what it
+    /// keeps do not fit, at the boundary it runs.
     #[test]
-    fn a_run_leaves_room_for_the_other_apps() {
+    fn a_run_can_keep_memory_over() {
         let birefnet = charge_on(ModelId::BiRefNetLite, "CPU").expect("registered");
         let ram = |ram_mb| Room { ram_mb, card_mb: None };
-        assert_eq!(fit(birefnet, ram(7_881)), Err(Short::Ram { need_mb: birefnet.ram_mb, kept_mb: RAM_RESERVE_MB, free_mb: 7_881 }));
-        assert!(fit(birefnet, ram(birefnet.ram_mb + RAM_RESERVE_MB - 1)).is_err());
-        assert_eq!(fit(birefnet, ram(birefnet.ram_mb + RAM_RESERVE_MB)), Ok(()));
-        assert_eq!(fit_keeping(birefnet, ram(birefnet.ram_mb), 0), Ok(()), "a caller that counts its own headroom");
+        let kept = STOP_BELOW_FREE_MB;
+        assert_eq!(fit_keeping(birefnet, ram(birefnet.ram_mb + kept - 1), kept), Err(Short::Ram { need_mb: birefnet.ram_mb, kept_mb: kept, free_mb: birefnet.ram_mb + kept - 1 }));
+        assert_eq!(fit_keeping(birefnet, ram(birefnet.ram_mb + kept), kept), Ok(()));
+        assert_eq!(fit(birefnet, ram(birefnet.ram_mb)), Ok(()), "nothing kept");
     }
 
     #[test]
@@ -365,8 +356,8 @@ mod tests {
         assert_eq!(Short::Ram { need_mb: 9_000, kept_mb: 0, free_mb: 4_000 }.to_string(), "needs about 8.8 GB of free memory, 3.9 GB is free");
         assert_eq!(Short::Ram { need_mb: 900, kept_mb: 0, free_mb: 400 }.to_string(), "needs about 900 MB of free memory, 400 MB is free");
         assert_eq!(
-            Short::Ram { need_mb: 7_100, kept_mb: RAM_RESERVE_MB, free_mb: 7_881 }.to_string(),
-            "needs about 6.9 GB of free memory, and Prunr keeps 1.5 GB free for your other apps; 7.7 GB is free",
+            Short::Ram { need_mb: 7_100, kept_mb: STOP_BELOW_FREE_MB, free_mb: 7_881 }.to_string(),
+            "needs about 6.9 GB of free memory, plus 1.0 GB left over for your computer to keep running; 7.7 GB is free",
         );
         assert_eq!(Short::Card { need_mb: 7_000, free_mb: 3_000 }.to_string(), "needs about 6.8 GB free on the graphics card, 2.9 GB is free");
     }
@@ -400,15 +391,14 @@ mod tests {
     fn the_fit_counts_the_card_only_for_a_run_on_it() {
         let card = Charge { ram_mb: 2_000, card_mb: 6_000 };
         let room = |ram_mb, card_mb| Room { ram_mb, card_mb };
-        let ram = 2_000 + RAM_RESERVE_MB;
-        assert_eq!(fit(card, room(ram, Some(6_000 + CARD_RESERVE_MB))), Ok(()));
+        assert_eq!(fit(card, room(2_000, Some(6_000 + CARD_RESERVE_MB))), Ok(()));
         assert_eq!(
-            fit(card, room(ram, Some(6_000 + CARD_RESERVE_MB - 1))),
+            fit(card, room(2_000, Some(6_000 + CARD_RESERVE_MB - 1))),
             Err(Short::Card { need_mb: 6_000 + CARD_RESERVE_MB, free_mb: 6_000 + CARD_RESERVE_MB - 1 })
         );
-        assert_eq!(fit(card, room(ram - 1, Some(u64::MAX))), Err(Short::Ram { need_mb: 2_000, kept_mb: RAM_RESERVE_MB, free_mb: ram - 1 }));
-        assert_eq!(fit(card, room(ram, None)), Ok(()), "no card reading: trusted");
+        assert_eq!(fit(card, room(1_999, Some(u64::MAX))), Err(Short::Ram { need_mb: 2_000, kept_mb: 0, free_mb: 1_999 }));
+        assert_eq!(fit(card, room(2_000, None)), Ok(()), "no card reading: trusted");
         let host = Charge { ram_mb: 2_000, card_mb: 0 };
-        assert_eq!(fit(host, room(ram, Some(0))), Ok(()), "a run on the host ignores the card");
+        assert_eq!(fit(host, room(2_000, Some(0))), Ok(()), "a run on the host ignores the card");
     }
 }

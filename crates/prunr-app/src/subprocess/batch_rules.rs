@@ -17,9 +17,9 @@ pub fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
     max_jobs.saturating_sub(working)
 }
 
-/// The free RAM that stops a worker with work in flight, as `read_free`
-/// reads it (only then): below `memory::STOP_BELOW_FREE_MB`. No reading:
-/// it runs on.
+/// The free memory that stops a worker with work in flight, as
+/// `read_free` reads it (only then): below `memory::STOP_BELOW_FREE_MB`.
+/// No reading: it runs on.
 pub fn low_free_memory(in_flight_count: usize, read_free: impl FnOnce() -> Option<u64>) -> Option<u64> {
     const LINE: u64 = prunr_core::memory::STOP_BELOW_FREE_MB * 1024 * 1024;
     if in_flight_count == 0 {

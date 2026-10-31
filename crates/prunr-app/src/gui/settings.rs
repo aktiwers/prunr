@@ -114,8 +114,7 @@ pub struct Settings {
 /// of the model's need.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SdMemoryGuard {
-    /// The reserve every model run keeps (1.5 GB): fits SD on a tight
-    /// machine.
+    /// About 1 GB: fits SD on a tight machine; other apps may be squeezed.
     Relaxed,
     #[default]
     Balanced,
@@ -127,7 +126,7 @@ impl SdMemoryGuard {
     pub fn margin_mb(self) -> u64 {
         let balanced = prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB;
         match self {
-            Self::Relaxed => prunr_core::memory::RAM_RESERVE_MB,
+            Self::Relaxed => balanced / 2,
             Self::Balanced => balanced,
             Self::Strict => balanced * 2,
         }
@@ -1032,15 +1031,6 @@ mod tests {
             assert_eq!(s.sd_memory, guard, "{gb} GB");
         }
         assert_eq!(SdMemoryGuard::Balanced.margin_mb(), prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB);
-    }
-
-    /// The eraser never keeps less free than every other model run, and
-    /// each guard keeps more than the last.
-    #[test]
-    fn the_erasers_memory_guard_keeps_at_least_the_reserve() {
-        let [relaxed, balanced, strict] = [SdMemoryGuard::Relaxed, SdMemoryGuard::Balanced, SdMemoryGuard::Strict].map(SdMemoryGuard::margin_mb);
-        assert_eq!(relaxed, prunr_core::memory::RAM_RESERVE_MB);
-        assert!(relaxed < balanced && balanced < strict);
     }
 
     /// Under "CPU only" every reader of the backend (status bar, the

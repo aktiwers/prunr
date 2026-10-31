@@ -2444,12 +2444,11 @@ fn refusal(short: Short, margin_mb: u64) -> String {
 
 /// `check_ram_for` with the memory facts passed in. A model that also
 /// runs right on the CPU takes the CPU's rule when its card is short, as
-/// its parts then land there. The headroom is the user's margin, in
-/// `stroke_need`, in place of the general reserve.
+/// its parts then land there.
 fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, resident: bool, bundle: Charge) -> Result<(), Short> {
     let margin_mb = tuning.margin_mb;
     let need = |tall| stroke_need(id, margin_mb, resident, tall, bundle);
-    let fits = |need| crate::memory::fit_keeping(need, room, 0);
+    let fits = |need| crate::memory::fit(need, room);
     if let Err(short @ Short::Card { .. }) = fits(need(false)) {
         let on_cpu = prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, crate::engine::CPU_NAME));
         return match on_cpu {
