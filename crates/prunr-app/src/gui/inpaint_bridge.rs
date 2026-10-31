@@ -127,24 +127,6 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
             poll_spawn_result(&mut sub_state, &mut strokes, &res_tx);
         }
 
-        // Watchdog for `needs` underestimates and mid-load RAM shifts
-        // the pre-flight gate can't see; only once Ready, since a spawning
-        // worker has loaded nothing yet.
-        if matches!(sub_state, SubState::Ready(_)) {
-            if let Some(free) = crate::subprocess::batch_rules::low_free_memory(strokes.len(), crate::hardware::watchdog_free_ram_bytes) {
-                tracing::warn!(
-                    free_mb = free / (1024 * 1024),
-                    in_flight = strokes.len(),
-                    "memory-pressure abort: killing inpaint subprocess",
-                );
-                kill_ready_and_drain(
-                    &mut sub_state, &mut strokes, &res_tx,
-                    crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG,
-                    "eraser worker killed by the memory-pressure watchdog",
-                );
-            }
-        }
-
         if let SubState::Ready(s) = &mut sub_state {
             for evt in s.poll_events() {
                 match evt {
@@ -167,6 +149,25 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
                 }
             }
         }
+        // Watchdog for `needs` underestimates and mid-load RAM shifts
+        // the pre-flight gate can't see; only once Ready, since a spawning
+        // worker has loaded nothing yet, and after its events, so a fill
+        // it finished still lands.
+        if matches!(sub_state, SubState::Ready(_)) {
+            if let Some(free) = crate::subprocess::batch_rules::low_free_memory(strokes.len(), crate::hardware::watchdog_free_ram_bytes) {
+                tracing::warn!(
+                    free_mb = free / (1024 * 1024),
+                    in_flight = strokes.len(),
+                    "memory-pressure abort: killing inpaint subprocess",
+                );
+                kill_ready_and_drain(
+                    &mut sub_state, &mut strokes, &res_tx,
+                    crate::subprocess::protocol::MEMORY_PRESSURE_ABORT_MSG,
+                    "eraser worker killed by the memory-pressure watchdog",
+                );
+            }
+        }
+
         end_if_dead(&mut sub_state, &mut strokes, &res_tx);
 
         if matches!(sub_state, SubState::Ready(_))

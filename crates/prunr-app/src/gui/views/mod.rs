@@ -93,16 +93,7 @@ pub(super) fn variant_index<T>(all: &[T], value: &T) -> usize {
     all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
 }
 
-/// Format a byte count for human display.
-pub fn format_byte_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB { format!("{:.1} GB", bytes as f64 / GB as f64) }
-    else if bytes >= MB { format!("{:.0} MB", bytes as f64 / MB as f64) }
-    else if bytes >= KB { format!("{} KB", bytes / KB) }
-    else { format!("{bytes} B") }
-}
+pub use prunr_core::memory::byte_size as format_byte_size;
 
 /// Model display name (no icon).
 pub fn model_name(model: SettingsModel) -> &'static str {

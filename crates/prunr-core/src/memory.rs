@@ -69,10 +69,21 @@ impl std::fmt::Display for Short {
     }
 }
 
-/// `mb` as a person reads it: whole MB below a gigabyte, else GB to one
-/// decimal.
+/// A byte count as a person reads it, memory or disk: GB to one decimal,
+/// else whole MB, KB or bytes.
+pub fn byte_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB { format!("{:.1} GB", bytes as f64 / GB as f64) }
+    else if bytes >= MB { format!("{:.0} MB", bytes as f64 / MB as f64) }
+    else if bytes >= KB { format!("{} KB", bytes / KB) }
+    else { format!("{bytes} B") }
+}
+
+/// `mb` megabytes as `byte_size` words them.
 pub(crate) fn size(mb: u64) -> String {
-    if mb < 1024 { format!("{mb} MB") } else { format!("{:.1} GB", mb as f64 / 1024.0) }
+    byte_size(mb * 1024 * 1024)
 }
 
 /// The card's memory kept free for the desktop and the driver, as

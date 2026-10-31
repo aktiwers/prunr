@@ -890,8 +890,11 @@ impl PrunrApp {
     fn on_batch_refused(&mut self, batch: u64, why: String) {
         self.drop_batch(batch);
         let why = prunr_core::plain::reason(why);
-        self.status.text = why.clone();
+        if !self.batch.any_awaiting_cut() {
+            self.status.text = why.clone();
+        }
         self.toasts.error(why);
+        self.run_deferred();
     }
 
     /// Every image batch `batch` still held, sent or waiting for room,
