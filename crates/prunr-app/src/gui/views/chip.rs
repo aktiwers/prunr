@@ -1182,11 +1182,40 @@ pub(super) fn reset_fields<T>(fields: &[Field<T>], cur: &mut T, default: &T) {
 
 /// Render `body` disabled, with `reason` on hover, when there is a reason.
 pub(super) fn gated<R>(ui: &mut Ui, reason: Option<&str>, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let r = ui.add_enabled_ui(reason.is_none(), body);
+    let r = ui.add_enabled_ui(reason.is_none(), |ui| {
+        if reason.is_some() {
+            ui.multiply_opacity(GATED_FADE);
+        }
+        body(ui)
+    });
     if let Some(reason) = reason {
+        explain_on_click(ui, &r.response, reason);
         r.response.on_disabled_hover_text(reason);
     }
     r.inner
+}
+
+/// How much further a disabled control fades than egui's own disabled
+/// look: a tuned chip's accent ring otherwise reads as clickable.
+const GATED_FADE: f32 = 0.5;
+
+/// How long a click on a disabled control shows why.
+const WHY_SECS: f64 = 4.0;
+
+/// A click on a disabled control shows why at once, for `WHY_SECS`: the
+/// hover tooltip waits for the pointer to rest, which on a TV it rarely
+/// does.
+fn explain_on_click(ui: &Ui, resp: &Response, reason: &str) {
+    let until_id = resp.id.with("why_until");
+    let now = ui.input(|i| i.time);
+    if resp.contains_pointer() && ui.input(|i| i.pointer.primary_clicked()) {
+        ui.data_mut(|d| d.insert_temp(until_id, now + WHY_SECS));
+    }
+    let until = ui.data(|d| d.get_temp::<f64>(until_id)).unwrap_or(0.0);
+    if now < until {
+        resp.show_tooltip_text(reason);
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+    }
 }
 
 /// A panel's section heading: a small capitals caption, and
