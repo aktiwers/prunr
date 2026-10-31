@@ -803,7 +803,7 @@ impl PrunrApp {
             // then; the switch may have moved since.
             let item = &self.batch.items[idx];
             if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
-                self.dispatch_brush_rerun(idx);
+                self.rerun_with_strokes(idx);
             }
             stepped.push(kind);
         }

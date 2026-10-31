@@ -2301,10 +2301,11 @@ mod timeline_contract_tests {
         let steps = app.batch.items[0].timeline.undo_steps();
 
         app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), StepKind::Stroke);
-        let batch = match rx.try_recv() {
-            Ok(WorkerMessage::BatchProcess { batch, add_edge_items, .. }) if add_edge_items.len() == 1 => batch,
-            _ => panic!("a lines run is sent"),
-        };
+        let batch = rx.try_iter().find_map(|message| match message {
+            WorkerMessage::BatchProcess { batch, add_edge_items, .. } if add_edge_items.len() == 1 => Some(batch),
+            _ => None,
+        });
+        let batch = batch.expect("a lines run is sent");
         let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255])), active_provider: String::new() };
         let lines = crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None);
         app.on_batch_item_done(&ctx, batch, 1, Ok(traced), None, lines);
@@ -2320,6 +2321,41 @@ mod timeline_contract_tests {
         assert_eq!(item.timeline.undo_steps(), steps, "one Undo");
         assert!(item.selection_mask.is_none(), "takes back the stroke");
         assert_eq!(shown(&app), Some(0), "and the lines traced on it");
+    }
+
+    /// Undo onto a live selection applies it again with the current
+    /// action. Under Subject outline the kept lines are then the undone
+    /// stroke's, so they are traced again on the restored cut-out, not
+    /// drawn where they were over it.
+    #[test]
+    fn undo_onto_a_live_selection_traces_the_lines_on_it() {
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        let lines_run = |rx: &std::sync::mpsc::Receiver<WorkerMessage>| rx.try_iter().find_map(|message| match message {
+            WorkerMessage::BatchProcess { batch, add_edge_items, .. } if add_edge_items.len() == 1 && add_edge_items[0].correction.is_some() => Some(batch),
+            _ => None,
+        });
+        for cells in [vec![FULL, 0, 0, 0], vec![FULL; 4]] {
+            app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, cells), StepKind::Stroke);
+            let batch = lines_run(&rx).expect("each stroke traces the lines");
+            let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+            app.on_batch_item_done(&ctx, batch, 1, Ok(traced), None, crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None));
+        }
+
+        app.handle_undo(&ctx);
+        assert!(app.batch.items[0].selection_mask.is_some(), "the first stroke's selection is live");
+        assert!(lines_run(&rx).is_some(), "its lines are traced again, with it");
+        assert!(!app.processor.live_preview.works_on(1), "no render draws the undone stroke's lines over it");
     }
 
     /// Process, Cancel (selected) mid-run, change a knob, Process again:
