@@ -56,6 +56,9 @@ pub(crate) struct WorkItem {
     pub(crate) run: u64,
     pub(crate) source: super::item::ImageSource,
     pub(crate) image: Option<RunImage>,
+    /// The strokes a run that traces lines on its cut-out cuts the
+    /// subject with; built, when it must be, on the bridge thread.
+    pub(crate) correction: Option<super::item::Correction>,
 }
 
 /// What a sent full run reads: the file, the start it runs from (`None`:
@@ -1354,7 +1357,8 @@ fn send_item_to_sub(sub: &mut SubprocessManager, item: &WorkItem, res_tx: &mpsc:
         let _ = res_tx.send(WorkerResult::ChainStart { item_id: item.id, run: item.run, image });
     }
     let chain_input = start.as_deref().map(|rgba| (rgba, rgba.width(), rgba.height()));
-    sub.send_image(item.id, &bytes, chain_input).map_err(Refused::Worker)
+    let correction = item.correction.clone().map(|c| c.resolve().0);
+    sub.send_image(item.id, &bytes, chain_input, correction.as_deref()).map_err(Refused::Worker)
 }
 
 impl CachedTensorWork {
@@ -1516,16 +1520,16 @@ mod tests {
         let missing = ImageSource::file(std::path::PathBuf::from("/nonexistent/photo.png"));
         let file = ImageSource::Bytes(Arc::new(vec![1, 2, 3]));
 
-        let gone = WorkItem { id: 1, run: 0, source: missing.clone(), image: None }.read_inputs();
+        let gone = WorkItem { id: 1, run: 0, source: missing.clone(), image: None, correction: None }.read_inputs();
         assert!(gone.is_err_and(|e| e.contains("moved or deleted")));
 
         let start = crate::gui::timeline::Stored::new(Arc::new(image::RgbaImage::from_pixel(1, 1, image::Rgba([5, 6, 7, 255]))));
-        let stored = WorkItem { id: 2, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))) };
+        let stored = WorkItem { id: 2, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Parked(start))), correction: None };
         let inputs = stored.read_inputs().expect("reads");
         assert_eq!(inputs.bytes.as_slice(), &[1, 2, 3]);
         assert_eq!(inputs.start.expect("unpacked").get_pixel(0, 0).0, [5, 6, 7, 255]);
 
-        let unreadable = WorkItem { id: 3, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Source(missing.clone()))) };
+        let unreadable = WorkItem { id: 3, run: 0, source: file.clone(), image: Some(RunImage::Start(Pixels::Source(missing.clone()))), correction: None };
         assert!(unreadable.read_inputs().is_err(), "a start that can't be read fails the run, not cut the file instead");
 
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: ModelKind::Silueta }).unwrap();
@@ -1569,7 +1573,7 @@ mod tests {
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
         let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default(), correction: None };
-        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
+        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None, correction: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         state.admit(work(4));
         assert!(matches!(state.complete_event(), WorkerResult::BatchComplete { batch: 7 }));
@@ -1588,7 +1592,7 @@ mod tests {
         let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
         let tensor = CompressedTensor::from_raw(RawSegTensor { data: vec![0.0], height: 1, width: 1, model: ModelKind::Silueta }).unwrap();
         let tier2 = CachedTensorWork { item_id: 3, tensor, source: source.clone(), photo: None, mask: MaskSettings::default(), correction: None };
-        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None };
+        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None, correction: None };
         let mut state = BatchRunState::new(7, vec![work(1), work(2)], vec![tier2], Vec::new(), None, cfg);
         // Image 1 is cancelled from the start; 2 and 3 from their second look on.
         let looks = std::cell::RefCell::new(std::collections::HashMap::<u64, u32>::new());

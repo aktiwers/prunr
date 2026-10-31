@@ -47,6 +47,16 @@ impl std::fmt::Display for SendError {
     }
 }
 
+/// The strokes `item_id`'s run cuts the subject with, in a temp file.
+fn write_correction(item_id: u64, plane: Option<&prunr_core::selection::MaskArtifact>) -> Result<Option<PlaneFile>, String> {
+    plane.map(|plane| {
+        let path = super::protocol::IpcKind::Correction.path_for(ipc_temp_dir(), item_id);
+        super::ipc::write_plane(&path, plane).map(|()| PlaneFile(path))
+    })
+    .transpose()
+    .map_err(|e| format!("Failed to write the strokes temp file: {e}"))
+}
+
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
 pub struct SubprocessManager {
     child: Child,
@@ -261,12 +271,14 @@ impl SubprocessManager {
         Self::ready(child, stdin_writer, event_rx)
     }
 
-    /// Send an image for processing. Writes bytes to a temp file first.
+    /// Send an image for processing. Writes bytes to a temp file first,
+    /// and the strokes it is cut with, when it has some.
     pub fn send_image(
         &mut self,
         item_id: u64,
         image_bytes: &[u8],
         chain_input: Option<(&image::RgbaImage, u32, u32)>,
+        correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), String> {
         let image_path = super::protocol::IpcKind::Input.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
@@ -282,17 +294,24 @@ impl SubprocessManager {
                 Ok(ChainInput { path, width: w, height: h })
             })
             .transpose()?;
-        self.send_process_image(item_id, image_path, chain)
+        let correction = write_correction(item_id, correction)?;
+        self.send_process_image(item_id, image_path, chain, correction)
     }
 
     /// Send an image for processing directly from a file path (no copy).
     /// The subprocess reads the file; caller is responsible for cleanup.
     pub fn send_image_path(&mut self, item_id: u64, image_path: std::path::PathBuf) -> Result<(), String> {
-        self.send_process_image(item_id, image_path, None)
+        self.send_process_image(item_id, image_path, None, None)
     }
 
-    fn send_process_image(&mut self, item_id: u64, image_path: std::path::PathBuf, chain_input: Option<ChainInput>) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::ProcessImage { item_id, image_path, chain_input })
+    fn send_process_image(
+        &mut self,
+        item_id: u64,
+        image_path: std::path::PathBuf,
+        chain_input: Option<ChainInput>,
+        correction: Option<PlaneFile>,
+    ) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::ProcessImage { item_id, image_path, chain_input, correction })
             .map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
@@ -346,12 +365,7 @@ impl SubprocessManager {
         mask: prunr_core::MaskSettings,
         correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), SendError> {
-        let correction = correction.map(|plane| {
-            let path = super::protocol::IpcKind::Correction.path_for(ipc_temp_dir(), item_id);
-            super::ipc::write_plane(&path, plane).map(|()| PlaneFile(path))
-        })
-        .transpose()
-        .map_err(|e| SendError::Other(format!("Failed to write the strokes temp file: {e}")))?;
+        let correction = write_correction(item_id, correction).map_err(SendError::Other)?;
         self.send_with_tensor_and_image(
             item_id,
             tensor,
