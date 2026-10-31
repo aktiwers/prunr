@@ -499,6 +499,15 @@ pub(crate) fn prunr_view(model: SettingsModel, scheduler: Option<SdScheduler>) -
     prunr_view_of(model).resolve(scheduler)
 }
 
+/// The settings a command-line run starts from for `model`: preset
+/// `name`'s (one in the presets folder, or a preset file), Prunr's for
+/// `None` or "Prunr"; why not, when the preset cannot be read.
+pub fn command_line_settings(name: Option<&str>, model: SettingsModel) -> Result<(ItemSettings, BrushSettings), String> {
+    let preset = name.filter(|name| !name.eq_ignore_ascii_case(super::settings::PRUNR_PRESET)).map(super::presets_fs::find_preset).transpose()?;
+    let view = preset.map_or_else(|| prunr_view(model, None), |preset| preset.resolve(model, None));
+    Ok((view.item_settings, view.brush))
+}
+
 /// Prunr's image settings for `model`, without cloning its brush.
 pub(crate) fn prunr_item_settings(model: SettingsModel) -> ItemSettings {
     prunr_view_of(model).item_settings

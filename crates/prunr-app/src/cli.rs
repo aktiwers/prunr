@@ -27,6 +27,12 @@ pub struct Cli {
     #[arg(short = 'm', long, default_value = "birefnet-lite")]
     pub model: CliModel,
 
+    /// Start from this preset: a name from the app's Presets menu, or a
+    /// preset file. Every setting below that is not given takes the
+    /// preset's value for the model; without --preset, Prunr's own.
+    #[arg(long, value_name = "NAME|FILE")]
+    pub preset: Option<String>,
+
     /// Images processed at once [default: as the app: half the cores, 2 on
     /// a graphics card, fewer when memory is short].
     #[arg(short = 'j', long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
@@ -53,34 +59,35 @@ pub struct Cli {
     pub debug: bool,
 
     /// Mask gamma (removal strength). >1 = more aggressive, <1 = gentler.
-    #[arg(long, default_value_t = 1.0, value_parser = finite)]
-    pub gamma: f32,
+    #[arg(long, value_parser = finite)]
+    pub gamma: Option<f32>,
 
     /// Edge contrast (0.0–1.0): 0 keeps the soft edge, 1 cuts it hard.
-    #[arg(long, default_value_t = 0.0, value_parser = finite)]
-    pub contrast: f32,
+    #[arg(long, value_parser = finite)]
+    pub contrast: Option<f32>,
 
     /// Shift the cut-out's edge in pixels, -20 to 20: positive grows the
     /// subject, negative shrinks it.
-    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true, value_parser = edge_shift_px)]
-    pub edge_shift: f32,
+    #[arg(long, allow_negative_numbers = true, value_parser = edge_shift_px)]
+    pub edge_shift: Option<f32>,
 
-    /// Refine mask edges using guided filter for better detail on hair, leaves, etc.
-    #[arg(long)]
-    pub refine_edges: bool,
+    /// Refine mask edges using guided filter for better detail on hair,
+    /// leaves, etc. `--refine-edges=false` turns a preset's off.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub refine_edges: Option<bool>,
 
     /// How far from the edge --refine-edges looks, in pixels.
-    #[arg(long, default_value_t = 8)]
-    pub edge_width: u32,
+    #[arg(long)]
+    pub edge_width: Option<u32>,
 
     /// What --refine-edges follows in the photo: brightness, or color too
     /// (also an edge between two colors of the same brightness, slower).
-    #[arg(long, default_value_t = prunr_core::RefineGuide::default(), value_name = "brightness|color")]
-    pub refine_guide: prunr_core::RefineGuide,
+    #[arg(long, value_name = "brightness|color")]
+    pub refine_guide: Option<prunr_core::RefineGuide>,
 
     /// Soften the cut-out's edge by this many pixels (fractions allowed).
-    #[arg(long, default_value_t = 0.0, value_parser = finite)]
-    pub feather: f32,
+    #[arg(long, value_parser = finite)]
+    pub feather: Option<f32>,
 
     /// Extract lines/edges instead of removing background (uses TEED model).
     #[arg(long)]
@@ -92,27 +99,27 @@ pub struct Cli {
 
     /// How much of the detected edges become lines (0.0–1.0): lower draws
     /// bold outlines only, higher adds fine detail.
-    #[arg(long = "line-detail", visible_alias = "line-strength", default_value_t = 0.5, value_parser = finite)]
-    pub line_strength: f32,
+    #[arg(long = "line-detail", visible_alias = "line-strength", value_parser = finite)]
+    pub line_strength: Option<f32>,
 
     /// Line width in pixels (0–20).
-    #[arg(long, default_value_t = 0)]
-    pub line_width: u32,
+    #[arg(long)]
+    pub line_width: Option<u32>,
 
     /// How the lines combine with the subject (with --lines-after-bg):
     /// lines-only, subject-filled, engraving or ghost.
-    #[arg(long, default_value = "lines-only", value_parser = str::parse::<prunr_core::ComposeMode>)]
-    pub line_composition: prunr_core::ComposeMode,
+    #[arg(long, value_parser = str::parse::<prunr_core::ComposeMode>)]
+    pub line_composition: Option<prunr_core::ComposeMode>,
 
     /// Paint all lines a solid color (hex, e.g. "000000" for black, "ff0000" for red).
     #[arg(long)]
     pub line_color: Option<String>,
 
     /// Line scale: `fine` (thin, detailed lines), `bold` (big outlines
-    /// only), `fused` (default, every scale combined). `balanced` is read
-    /// as `fused`.
-    #[arg(long, default_value_t = prunr_core::EdgeScale::Fused)]
-    pub line_scale: prunr_core::EdgeScale,
+    /// only), `fused` (every scale combined). `balanced` is read as
+    /// `fused`.
+    #[arg(long)]
+    pub line_scale: Option<prunr_core::EdgeScale>,
 
     /// Fill transparent background with a color (hex, e.g. "ffffff" for white).
     #[arg(long)]
@@ -123,11 +130,11 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub bg_image: Option<std::path::PathBuf>,
 
-    /// How the background image is positioned: cover (default — fills both
-    /// dims, may crop), contain (fits inside, may letterbox), tile (repeat
-    /// at native size).
-    #[arg(long, default_value_t = prunr_core::BgImageFit::Cover)]
-    pub bg_image_fit: prunr_core::BgImageFit,
+    /// How the background image is positioned: cover (fills both dims, may
+    /// crop), contain (fits inside, may letterbox), tile (repeat at native
+    /// size).
+    #[arg(long)]
+    pub bg_image_fit: Option<prunr_core::BgImageFit>,
 
     /// Restyle the subject's colors, with the effect's default settings:
     /// desaturate, invert, duotone, sepia, threshold, posterize, solarize,
@@ -194,8 +201,8 @@ pub struct Cli {
     /// small areas, large ones shrink to fit one model tile), full, half
     /// or quarter. A large area fills more convincingly at a smaller
     /// scale, a little softer.
-    #[arg(long, requires = "inpaint", default_value = "auto")]
-    pub fill_scale: prunr_core::inpaint::FillScale,
+    #[arg(long, requires = "inpaint")]
+    pub fill_scale: Option<prunr_core::inpaint::FillScale>,
 
     /// Upscale mode: enlarge the image with this model instead of
     /// removing its background. Saves {stem}_x{scale}.png.
@@ -203,24 +210,25 @@ pub struct Cli {
     pub upscale: Option<CliUpscaler>,
 
     /// How much larger the upscale makes the image.
-    #[arg(long, requires = "upscale", default_value_t = 4, value_parser = clap::value_parser!(u8).range(2..=4))]
-    pub scale: u8,
+    #[arg(long, requires = "upscale", value_parser = clap::value_parser!(u8).range(2..=4))]
+    pub scale: Option<u8>,
 
     /// Denoise before the upscale model, 0 (off) to 1.
-    #[arg(long, requires = "upscale", default_value_t = 0.0, value_parser = finite)]
-    pub denoise: f32,
+    #[arg(long, requires = "upscale", value_parser = finite)]
+    pub denoise: Option<f32>,
 
     /// Sharpen after the upscale, -1 (soften) to 1; 0 is off.
-    #[arg(long, requires = "upscale", default_value_t = prunr_core::DEFAULT_SHARPEN, allow_negative_numbers = true, value_parser = finite)]
-    pub sharpen: f32,
+    #[arg(long, requires = "upscale", allow_negative_numbers = true, value_parser = finite)]
+    pub sharpen: Option<f32>,
 
     /// AI blend: 1 keeps the model's output, 0 the plain enlargement.
-    #[arg(long, requires = "upscale", default_value_t = 1.0, value_parser = finite)]
-    pub ai_blend: f32,
+    #[arg(long, requires = "upscale", value_parser = finite)]
+    pub ai_blend: Option<f32>,
 
-    /// Match the upscale's colours to the original.
-    #[arg(long, requires = "upscale")]
-    pub color_match: bool,
+    /// Match the upscale's colours to the original. `--color-match=false`
+    /// turns a preset's off.
+    #[arg(long, requires = "upscale", num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub color_match: Option<bool>,
 
     /// Restore faces with this model after the upscale (downloaded in the
     /// app's Model Store).
@@ -229,8 +237,8 @@ pub struct Cli {
 
     /// Restore faces strength in percent: up to 50 adds detail and keeps
     /// the photo's shading, above it the redrawn shading too.
-    #[arg(long, requires = "restore_faces", default_value_t = 50, value_parser = clap::value_parser!(u8).range(0..=100))]
-    pub face_strength: u8,
+    #[arg(long, requires = "restore_faces", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub face_strength: Option<u8>,
 
     /// Colorize mode: color a black-and-white photo with DDColor
     /// (downloaded in the app's Model Store). Saves {stem}_color.png.
@@ -238,13 +246,13 @@ pub struct Cli {
     pub colorize: bool,
 
     /// Color strength: 0 is grey, 1 the predicted color, up to 1.5.
-    #[arg(long, requires = "colorize", default_value_t = 1.0, value_parser = finite)]
-    pub color_strength: f32,
+    #[arg(long, requires = "colorize", value_parser = finite)]
+    pub color_strength: Option<f32>,
 
     /// Lines fade with distance, 0-100 (needs the depth model, from the
     /// app's Model Store).
-    #[arg(long, value_name = "PERCENT", default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=100))]
-    pub line_fade: u8,
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub line_fade: Option<u8>,
 
     /// Also write each input's depth map as {stem}-depth.png (16-bit grey,
     /// white = near) beside the result. Needs the depth model.
@@ -342,6 +350,16 @@ pub enum CliUpscaler {
 }
 
 impl CliUpscaler {
+    fn settings_model(self) -> SettingsModel {
+        match self {
+            Self::Realesrgan => SettingsModel::RealEsrganUpscale,
+            Self::Nomos => SettingsModel::Nomos8kUpscale,
+            Self::Siax => SettingsModel::FourXNmkdSiaxCxUpscale,
+            Self::Superscale => SettingsModel::FourXNmkdSuperscaleUpscale,
+            Self::Nomos2 => SettingsModel::Nomos2Upscale,
+        }
+    }
+
     fn model_id(self) -> prunr_models::ModelId {
         use prunr_models::ModelId;
         match self {
@@ -364,10 +382,11 @@ pub enum CliFaceModel {
 }
 
 impl CliFaceModel {
-    fn model_id(self) -> prunr_models::ModelId {
+    fn face_model(self) -> crate::gui::item_settings::FaceModel {
+        use crate::gui::item_settings::FaceModel;
         match self {
-            Self::Gfpgan => prunr_models::ModelId::FaceGfpgan,
-            Self::Restoreformer => prunr_models::ModelId::FaceRestoreFormerPp,
+            Self::Gfpgan => FaceModel::Gfpgan,
+            Self::Restoreformer => FaceModel::RestoreFormerPp,
         }
     }
 }
@@ -384,6 +403,14 @@ pub enum CliModel {
 }
 
 impl CliModel {
+    fn settings_model(self) -> SettingsModel {
+        match self {
+            Self::Silueta => SettingsModel::Silueta,
+            Self::U2net => SettingsModel::U2net,
+            Self::BirefnetLite => SettingsModel::BiRefNetLite,
+        }
+    }
+
     /// `--model <value>` for the value that runs `kind`, when one does.
     fn flag_for(kind: prunr_core::ModelKind) -> Option<String> {
         let model = Self::value_variants().iter().find(|m| prunr_core::ModelKind::from(**m) == kind)?;
@@ -418,8 +445,24 @@ use prunr_core::{
     load_image_from_path, downscale_image, encode_rgba_png,
 };
 
-use crate::gui::settings::LineMode;
-use prunr_core::inpaint_blend::{fill_region, finalize_inpaint, DEFAULT_EDGE_BLEND_PX, DEFAULT_GROW_PX};
+use crate::gui::brush_state::BrushSettings;
+use crate::gui::item_settings::{Backdrop, ItemSettings};
+use crate::gui::settings::{LineMode, SettingsModel};
+use prunr_core::inpaint_blend::{fill_region, finalize_inpaint};
+
+/// What a run does: `--preset`'s settings for the model in use (Prunr's
+/// without one), with every setting flag given laid over them.
+struct RunSettings {
+    item: ItemSettings,
+    brush: BrushSettings,
+}
+
+/// `setting` as the flag gives it, when given.
+fn lay<T>(setting: &mut T, flag: Option<T>) {
+    if let Some(value) = flag {
+        *setting = value;
+    }
+}
 
 /// What goes behind each result, from `--bg-effect`, `--bg-image` and
 /// `--bg-color`.
@@ -553,16 +596,15 @@ fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
 
 /// The depth model is needed (a depth map, fading lines, a lens blur)
 /// but not installed: the line to print.
-fn missing_depth_model(args: &Cli) -> Option<String> {
+fn missing_depth_model(args: &Cli, s: &ItemSettings) -> Option<String> {
     let id = prunr_core::depth::MODEL.into();
-    (wants_depth(args) && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
+    (wants_depth(args, s) && !prunr_models::is_available(id)).then(|| prunr_models::not_installed_error(id))
 }
 
 /// Whether the run reads a depth map: a depth-map file, faded lines (only
 /// when lines are drawn), or a lens-blur backdrop.
-fn wants_depth(args: &Cli) -> bool {
-    let draws_lines = args.lines || args.lines_after_bg;
-    args.depth_map || (draws_lines && args.line_fade > 0) || args.bg_effect.is_some_and(prunr_core::BgEffect::needs_depth)
+fn wants_depth(args: &Cli, s: &ItemSettings) -> bool {
+    args.depth_map || (s.line_mode != LineMode::Off && s.line_fade_pct > 0) || s.bg_effect.needs_depth()
 }
 
 fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
@@ -576,13 +618,11 @@ fn parse_outline(s: &str) -> Result<(f32, [u8; 3]), String> {
     Ok((width, color))
 }
 
-/// A colour flag's value: `None` when the flag is absent, `Err` (after
-/// telling the user, with `example`) when it is not 6-digit hex.
-fn flag_color(flag: &str, value: Option<&str>, example: &str) -> Result<Option<[u8; 3]>, ()> {
+/// A colour flag's value: `None` when the flag is absent, `Err` with
+/// `example` when it is not 6-digit hex.
+fn flag_color(flag: &str, value: Option<&str>, example: &str) -> Result<Option<[u8; 3]>, String> {
     let Some(s) = value else { return Ok(None) };
-    parse_hex_color(s).map(Some).ok_or_else(|| {
-        eprintln!("error: {flag}: '{s}' is not a 6-digit hex color (e.g. {example})");
-    })
+    parse_hex_color(s).map(Some).ok_or_else(|| format!("{flag}: '{s}' is not a 6-digit hex color (e.g. {example})"))
 }
 
 fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
@@ -607,19 +647,73 @@ impl Cli {
         !self.worker && !self.doctor && !self.clear_ep_cache && self.command.is_none() && (self.open.is_some() || self.inputs.is_empty())
     }
 
-    fn mask_settings(&self) -> MaskSettings {
-        MaskSettings {
-            gamma: self.gamma,
-            contrast: self.contrast,
-            edge_shift: MaskSettings::edge_shift_for_grow(self.edge_shift),
-            refine_edges: self.refine_edges,
-            guided_radius: self.edge_width.clamp(1, 64),
-            refine_guide: self.refine_guide,
-            feather: self.feather.max(0.0),
-            effect: self.effect.unwrap_or_default(),
-            decoration: self.decoration(),
-            ..Default::default()
+    /// The app's model this run uses: the eraser, the upscaler, the
+    /// colorizer or the background-removal model.
+    fn settings_model(&self) -> SettingsModel {
+        if self.inpaint {
+            SettingsModel::Inpaint
+        } else if let Some(upscaler) = self.upscale {
+            upscaler.settings_model()
+        } else if self.colorize {
+            SettingsModel::ColorizeDdcolor
+        } else {
+            self.model.settings_model()
         }
+    }
+
+    /// `--preset`'s settings for the model in use, every flag given laid
+    /// over them; why not, when the preset or a colour cannot be read.
+    fn run_settings(&self) -> Result<RunSettings, String> {
+        use prunr_core::{BgEffect, OutputScale};
+        let (mut s, mut brush) = crate::gui::presets::command_line_settings(self.preset.as_deref(), self.settings_model())?;
+        lay(&mut s.gamma, self.gamma);
+        lay(&mut s.contrast, self.contrast);
+        lay(&mut s.edge_shift, self.edge_shift.map(MaskSettings::edge_shift_for_grow));
+        lay(&mut s.refine_edges, self.refine_edges);
+        lay(&mut s.guided_radius, self.edge_width.map(|w| w.clamp(1, 64) as u8));
+        lay(&mut s.refine_guide, self.refine_guide);
+        lay(&mut s.feather, self.feather.map(|f| f.max(0.0)));
+        lay(&mut s.effect, self.effect);
+        if let Some((width, color)) = self.outline {
+            (s.decoration.outline_width, s.decoration.outline_color) = (width, color);
+        }
+        lay(&mut s.decoration.shadow, self.shadow);
+
+        let lines = if self.lines_after_bg { Some(LineMode::SubjectOutline) } else { self.lines.then_some(LineMode::EdgesOnly) };
+        lay(&mut s.line_mode, lines);
+        lay(&mut s.line_strength, self.line_strength);
+        lay(&mut s.edge_thickness, self.line_width.map(|w| w.min(20) as u8));
+        lay(&mut s.compose_mode, self.line_composition);
+        lay(&mut s.edge_scale, self.line_scale);
+        lay(&mut s.solid_line_color, flag_color("--line-color", self.line_color.as_deref(), "ff00aa")?.map(Some));
+        lay(&mut s.line_fade_pct, self.line_fade);
+
+        // A background given replaces the preset's, whatever its kind.
+        if self.bg_effect.is_some() || self.bg_image.is_some() || self.bg_color.is_some() {
+            (s.bg, s.bg_effect, s.bg_image_hash) = (None, BgEffect::None, None);
+        }
+        lay(&mut s.bg_effect, self.bg_effect);
+        lay(&mut s.bg, flag_color("--bg-color", self.bg_color.as_deref(), "ffffff")?.map(|[r, g, b]| Some([r, g, b, 255])));
+        lay(&mut s.bg_image_fit, self.bg_image_fit);
+
+        lay(&mut s.output_scale, self.scale.map(|n| match n {
+            2 => OutputScale::X2,
+            3 => OutputScale::X3,
+            _ => OutputScale::X4,
+        }));
+        lay(&mut s.pre_denoise, self.denoise);
+        lay(&mut s.sharpen, self.sharpen.map(|v| v.clamp(-1.0, 1.0)));
+        lay(&mut s.ai_blend, self.ai_blend.map(|v| v.clamp(0.0, 1.0)));
+        lay(&mut s.color_match, self.color_match);
+        if let Some(model) = self.restore_faces {
+            (s.faces.on, s.faces.model) = (true, model.face_model());
+        }
+        lay(&mut s.faces.strength_pct, self.face_strength);
+        if let Some(strength) = self.color_strength {
+            s.set_color_strength(strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX));
+        }
+        lay(&mut brush.inpaint_fill_scale, self.fill_scale);
+        Ok(RunSettings { item: s, brush })
     }
 
     /// Where an input's result is written: `-o` names the file for one
@@ -628,27 +722,6 @@ impl Cli {
         output_path(input, &self.output, self.inputs.len() > 1)
     }
 
-    fn decoration(&self) -> prunr_core::Decoration {
-        let mut d = prunr_core::Decoration::default();
-        if let Some((width, color)) = self.outline {
-            d.outline_width = width;
-            d.outline_color = color;
-        }
-        if let Some(kind) = self.shadow {
-            d.shadow = kind;
-        }
-        d
-    }
-
-    fn line_mode(&self) -> LineMode {
-        if self.lines_after_bg {
-            LineMode::SubjectOutline
-        } else if self.lines {
-            LineMode::EdgesOnly
-        } else {
-            LineMode::Off
-        }
-    }
 }
 
 /// Entry point for processing. Returns exit code (0/1/2).
@@ -691,7 +764,14 @@ pub fn run_remove(args: &Cli) -> i32 {
             return 1;
         }
     }
-    if let Some(err) = missing_depth_model(args) {
+    let run = match args.run_settings() {
+        Ok(run) => run,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return 1;
+        }
+    };
+    if let Some(err) = missing_depth_model(args, &run.item) {
         eprintln!("error: {err}");
         return 1;
     }
@@ -699,14 +779,14 @@ pub fn run_remove(args: &Cli) -> i32 {
     let code = if args.depth_only {
         0
     } else if args.inpaint {
-        run_inpaint(args)
+        run_inpaint(args, &run.brush)
     } else if let Some(upscaler) = args.upscale {
-        run_upscale(args, upscaler)
+        run_upscale(args, upscaler, &run.item)
     } else if args.colorize {
-        run_colorize(args)
+        run_colorize(args, &run.item)
     } else {
         // All processing uses subprocess isolation for OOM protection
-        run_batch(args, &depth)
+        run_batch(args, &depth, &run.item)
     };
     if args.depth_map && write_depth_maps(args, &depth) > 0 {
         return 1;
@@ -782,8 +862,8 @@ fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
         (args.bg_image.is_some(), "--bg-image"),
         (args.bg_effect.is_some(), "--bg-effect"),
         (args.effect.is_some(), "--effect"),
-        (args.contrast > 0.0, "--contrast"),
-        (args.line_fade > 0, "--line-fade"),
+        (args.contrast.is_some(), "--contrast"),
+        (args.line_fade.is_some(), "--line-fade"),
     ]
     .into_iter()
     .filter_map(|(set, flag)| set.then_some(flag))
@@ -793,44 +873,32 @@ fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
 /// Upscale mode: enlarge each input with `upscaler`, Refine after it
 /// (sharpen, AI blend, colour match) and, when asked, restore faces, as
 /// the app does. The model loads once for the whole batch.
-fn run_upscale(args: &Cli, upscaler: CliUpscaler) -> i32 {
-    use prunr_core::OutputScale;
-    let scale = match args.scale {
-        2 => OutputScale::X2,
-        3 => OutputScale::X3,
-        _ => OutputScale::X4,
-    };
+fn run_upscale(args: &Cli, upscaler: CliUpscaler, s: &ItemSettings) -> i32 {
+    let scale = s.output_scale;
     let model = prunr_core::upscale::model_for_scale(upscaler.model_id(), scale, prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus));
-    for needed in std::iter::once(model).chain(args.restore_faces.map(CliFaceModel::model_id)) {
+    for needed in std::iter::once(model).chain(s.faces.wanted()) {
         if !prunr_models::is_available(needed) {
             eprintln!("error: {}", prunr_models::not_installed_error(needed));
             return 1;
         }
     }
     let Some(engine) = load_engine(model, args.cpu, "upscale") else { return 1 };
-    let refine = prunr_core::upscale::Refine {
-        sharpen: args.sharpen.clamp(-1.0, 1.0),
-        sharpen_sigma: scale.sharpen_sigma(),
-        ai_blend: args.ai_blend.clamp(0.0, 1.0),
-        color_match: args.color_match,
-    };
-    let blend = prunr_core::face::FaceBlend { strength: f32::from(args.face_strength) / 100.0, ..Default::default() };
-    let faces = match args.restore_faces.map(|m| prunr_core::face::FaceRestorer::new(m.model_id(), args.cpu)).transpose() {
-        Ok(faces) => faces.map(|restorer| (restorer, blend)),
+    let faces = match s.faces.wanted().map(|model| prunr_core::face::FaceRestorer::new(model, args.cpu)).transpose() {
+        Ok(faces) => faces.map(|restorer| (restorer, s.faces.blend())),
         Err(e) => {
             eprintln!("error: cannot load the face model: {e}");
             return 1;
         }
     };
-    let mut job = UpscaleJob { engine: &engine, on_cpu: None, model, scale, refine, denoise: args.denoise, faces };
+    let mut job = UpscaleJob { engine: &engine, on_cpu: None, model, scale, refine: s.upscale_refine(), denoise: s.pre_denoise, faces };
     run_each_input(args, &format!("_x{}.png", scale.factor()), "Upscaling", |img| job.run(img))
 }
 
 /// Colorize mode: colour each input with DDColor at `--color-strength`.
 /// The model loads once for the whole batch.
-fn run_colorize(args: &Cli) -> i32 {
+fn run_colorize(args: &Cli, s: &ItemSettings) -> i32 {
     let Some(engine) = load_engine(crate::gui::settings::COLORIZER.into(), args.cpu, "colorize") else { return 1 };
-    let strength = args.color_strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX);
+    let strength = s.color_strength();
     run_each_input(args, "_color.png", "Colorizing", |img| {
         let plane = prunr_core::colorize::colorize_plane(&engine, &img, &prunr_core::Progress::none())
             .map_err(|e| format!("colorize failed: {e}"))?;
@@ -888,9 +956,10 @@ fn run_each_input(
     i32::from(failed > 0)
 }
 
-/// Eraser mode: load image + mask, run LaMa, save inpainted result.
-/// Single-file only.
-fn run_inpaint(args: &Cli) -> i32 {
+/// Eraser mode: load image + mask, run LaMa, save inpainted result, with
+/// the eraser's Expand region, Feather, fill scale, Sharpen and edge
+/// colour from `brush`. Single-file only.
+fn run_inpaint(args: &Cli, brush: &BrushSettings) -> i32 {
     if args.inputs.len() != 1 {
         eprintln!("error: --inpaint accepts exactly one input image (got {})", args.inputs.len());
         return 1;
@@ -932,15 +1001,16 @@ fn run_inpaint(args: &Cli) -> i32 {
     if !args.quiet {
         eprintln!("Erasing {} (mask: {})...", input.display(), mask_path.display());
     }
-    let mask = fill_region(&mask, DEFAULT_GROW_PX, DEFAULT_EDGE_BLEND_PX);
-    let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, args.fill_scale, &prunr_core::Progress::none()) {
+    let mask = fill_region(&mask, brush.inpaint_grow, brush.inpaint_feather);
+    let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, brush.inpaint_fill_scale, &prunr_core::Progress::none()) {
         Ok(r) => r.rgba,
         Err(e) => {
             eprintln!("error: {}", could_not(input, "erase", e.message()));
             return 1;
         }
     };
-    let result = finalize_inpaint(raw, &img, &mask, prunr_core::inpaint_blend::Band::Uniform(DEFAULT_EDGE_BLEND_PX), 0.0, prunr_core::inpaint_blend::EdgeColour::default());
+    let band = prunr_core::inpaint_blend::Band::Uniform(brush.inpaint_feather);
+    let result = finalize_inpaint(raw, &img, &mask, band, brush.inpaint_sharpen, brush.edge_colour(false));
     if let Err(e) = prunr_app::fs_util::save_image_replacing(&out_path, &result) {
         eprintln!("error: failed to save {}: {e}", out_path.display());
         return 1;
@@ -1091,7 +1161,7 @@ fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, Core
     encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
 }
 
-fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
+fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     // Validate and decode --bg-image before setting up progress bars.
     // Placing the decode inside the MultiProgress draw region causes
     // eprintln! on decode failure to get overwritten by the next redraw.
@@ -1148,31 +1218,22 @@ fn run_batch(args: &Cli, depth: &CliDepth) -> i32 {
     let spinners_arc = std::sync::Arc::new(spinners);
     let inputs_arc = std::sync::Arc::new(args.inputs.clone());
     let quiet = args.quiet;
-    let mask = args.mask_settings();
-
-    let line_mode = args.line_mode();
-    // "Absent" and "malformed" differ so scripts can detect a typo'd colour.
-    let Ok(solid_line_color) = flag_color("--line-color", args.line_color.as_deref(), "ff00aa") else { return 1 };
-    let Ok(bg_color) = flag_color("--bg-color", args.bg_color.as_deref(), "ffffff") else { return 1 };
+    let mask = s.mask_settings();
     // The app's rule: an effect wins over an image, an image over a colour.
-    let backdrop = match (args.bg_effect, bg_image, bg_color) {
-        (Some(effect), _, _) => CliBackdrop::Effect(effect, depth),
-        (None, Some(image), _) => CliBackdrop::Image(image, args.bg_image_fit),
-        (None, None, Some(color)) => CliBackdrop::Color(color),
-        (None, None, None) => CliBackdrop::Transparent,
-    };
-
-    let edge = prunr_core::EdgeSettings {
-        line_strength: args.line_strength,
-        solid_line_color,
-        edge_thickness: args.line_width.min(20),
-        edge_scale: args.line_scale,
-        compose_mode: args.line_composition,
-        line_style: prunr_core::LineStyle::default(),
-        input_transform: prunr_core::InputTransform::default(),
+    let backdrop = match (s.backdrop(), bg_image) {
+        (Backdrop::Effect(effect), _) => CliBackdrop::Effect(effect, depth),
+        (_, Some(image)) => CliBackdrop::Image(image, s.bg_image_fit),
+        (Backdrop::Color(color), None) => CliBackdrop::Color(color),
+        (Backdrop::Image(_), None) => {
+            if !args.quiet {
+                eprintln!("note: the preset's background picture is not used on the command line; give it with --bg-image");
+            }
+            CliBackdrop::Transparent
+        }
+        (Backdrop::Transparent, None) => CliBackdrop::Transparent,
     };
     let lines = prunr_app::subprocess::manager::WorkerLines {
-        mode: line_mode, edge, fade_pct: args.line_fade,
+        mode: s.line_mode, edge: s.edge_settings(), fade_pct: s.line_fade_pct,
         scales: prunr_app::subprocess::protocol::InferredScales::Drawn,
     };
     let mut success_count = 0usize;
@@ -1727,11 +1788,68 @@ impl ReportFiles {
 mod tests {
     use clap::Parser;
 
+    use super::SettingsModel;
+    use crate::gui::presets::command_line_settings;
+
+    fn cli(args: &[&str]) -> super::Cli {
+        super::Cli::parse_from(["prunr", "a.png"].iter().chain(args).copied())
+    }
+
+    /// The image settings a run with `args` uses.
+    fn settings(args: &[&str]) -> crate::gui::item_settings::ItemSettings {
+        cli(args).run_settings().expect("settings").item
+    }
+
+    /// Without flags or a preset a run takes Prunr's settings for its
+    /// model, as the app does: the eraser's Sharpen, for one, is the
+    /// app's 0.6, not the 0 the command line had.
+    #[test]
+    fn without_flags_a_run_takes_prunrs_settings() {
+        for (args, model) in [
+            (&[][..], SettingsModel::BiRefNetLite),
+            (&["-m", "silueta"][..], SettingsModel::Silueta),
+            (&["--upscale", "nomos2"][..], SettingsModel::Nomos2Upscale),
+            (&["--colorize"][..], SettingsModel::ColorizeDdcolor),
+            (&["--inpaint", "--mask", "m.png"][..], SettingsModel::Inpaint),
+        ] {
+            let run = cli(args).run_settings().unwrap();
+            assert_eq!((run.item, run.brush), command_line_settings(None, model).unwrap(), "{args:?}");
+        }
+        let eraser = cli(&["--inpaint", "--mask", "m.png"]).run_settings().unwrap().brush;
+        assert_eq!(eraser.inpaint_sharpen, 0.6);
+    }
+
+    /// `--preset` is the starting point; a flag given overrides it, and a
+    /// background given replaces the preset's, whatever its kind.
+    #[test]
+    fn a_flag_overrides_the_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("look.json");
+        std::fs::write(&file, r#"{ "format_version": 2, "models": { "BiRefNetLite": { "item_settings": {
+            "gamma": 1.5, "feather": 2.0, "refine_edges": true, "bg_effect": { "blurred_source": { "radius": 20 } }
+        } } } }"#).unwrap();
+        let preset = file.to_str().unwrap();
+        let s = settings(&["--preset", preset, "--gamma", "0.8"]);
+        assert_eq!((s.gamma, s.feather, s.refine_edges), (0.8, 2.0, true));
+        assert_eq!(s.bg_effect, prunr_core::BgEffect::BlurredSource { radius: 20 }, "the preset's background");
+        assert!(!settings(&["--preset", preset, "--refine-edges=false"]).refine_edges);
+        let red = settings(&["--preset", preset, "--bg-color", "ff0000"]);
+        assert_eq!(red.backdrop(), crate::gui::item_settings::Backdrop::Color([255, 0, 0]));
+        assert_eq!(settings(&["-m", "silueta", "--preset", preset]).gamma, 1.0, "the preset has no entry for Silueta");
+    }
+
+    #[test]
+    fn an_unknown_preset_is_refused_with_the_presets_there_are() {
+        let err = cli(&["--preset", "No such look 7f3a"]).run_settings().err().unwrap();
+        assert!(err.contains("no preset named") && err.contains("Prunr"), "{err}");
+        assert!(cli(&["--preset", "prunr"]).run_settings().is_ok(), "Prunr's own, any case");
+    }
+
     #[test]
     fn a_colour_flag_is_absent_hex_or_refused() {
         assert_eq!(super::flag_color("--bg-color", None, "ffffff"), Ok(None));
         assert_eq!(super::flag_color("--bg-color", Some("#ff00aa"), "ffffff"), Ok(Some([255, 0, 170])));
-        assert_eq!(super::flag_color("--bg-color", Some("ff00aa "), "ffffff"), Err(()));
+        assert!(super::flag_color("--bg-color", Some("ff00aa "), "ffffff").is_err());
     }
 
     /// Every run that prints borrows the terminal on Windows, where a
@@ -1846,18 +1964,17 @@ mod tests {
 
     #[test]
     fn outline_and_shadow_flags_reach_the_mask_settings() {
-        let cli = super::Cli::parse_from(["prunr", "a.png", "--outline", "8:000000", "--shadow", "drop"]);
-        let d = cli.mask_settings().decoration;
+        let mask = |args: &[&str]| settings(args).mask_settings();
+        let d = mask(&["--outline", "8:000000", "--shadow", "drop"]).decoration;
         assert_eq!((d.outline_width, d.outline_color, d.shadow), (8.0, [0, 0, 0], prunr_core::ShadowKind::Drop));
-        let white = super::Cli::parse_from(["prunr", "a.png", "--outline", "4"]).mask_settings().decoration;
+        let white = mask(&["--outline", "4"]).decoration;
         assert_eq!(white.outline_color, [255, 255, 255]);
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--outline", "120"]).is_err());
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--shadow", "hard"]).is_err());
         for spelling in ["color", "colour"] {
-            let cli = super::Cli::parse_from(["prunr", "a.png", "--refine-edges", "--refine-guide", spelling]);
-            assert_eq!(cli.mask_settings().refine_guide, prunr_core::RefineGuide::Colour);
+            assert_eq!(mask(&["--refine-edges", "--refine-guide", spelling]).refine_guide, prunr_core::RefineGuide::Colour);
         }
-        assert_eq!(super::Cli::parse_from(["prunr", "a.png"]).mask_settings().refine_guide, prunr_core::RefineGuide::Brightness);
+        assert_eq!(mask(&[]).refine_guide, prunr_core::RefineGuide::Brightness);
     }
 
     /// An `-o` name without an extension saves a PNG, whatever the mode.
@@ -1877,7 +1994,7 @@ mod tests {
     /// on its own it does nothing and must not refuse the run.
     #[test]
     fn line_fade_needs_depth_only_with_lines() {
-        let wants = |args: &[&str]| super::wants_depth(&super::Cli::parse_from(["prunr", "a.png"].iter().chain(args).copied()));
+        let wants = |args: &[&str]| super::wants_depth(&cli(args), &settings(args));
         assert!(!wants(&["--line-fade", "40"]));
         assert!(wants(&["--lines", "--line-fade", "40"]));
         assert!(wants(&["--lines-after-bg", "--line-fade", "40"]));
@@ -1891,8 +2008,10 @@ mod tests {
     fn the_upscale_flags_need_upscale_mode() {
         let cli = super::Cli::parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "3", "--sharpen", "-0.5", "--restore-faces", "restoreformer", "--face-strength", "70"]);
         assert_eq!(cli.upscale, Some(super::CliUpscaler::Nomos));
-        assert_eq!((cli.scale, cli.sharpen, cli.face_strength), (3, -0.5, 70));
-        assert_eq!(cli.restore_faces.map(super::CliFaceModel::model_id), Some(prunr_models::ModelId::FaceRestoreFormerPp));
+        assert_eq!((cli.scale, cli.sharpen, cli.face_strength), (Some(3), Some(-0.5), Some(70)));
+        let s = cli.run_settings().unwrap().item;
+        assert_eq!((s.output_scale, s.sharpen), (prunr_core::OutputScale::X3, -0.5));
+        assert_eq!((s.faces.wanted(), s.faces.strength_pct), (Some(prunr_models::ModelId::FaceRestoreFormerPp), 70));
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--scale", "2"]).is_err(), "--scale needs --upscale");
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--scale", "5"]).is_err());
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--upscale", "nomos", "--face-strength", "50"]).is_err(), "strength needs a face model");
@@ -1906,8 +2025,8 @@ mod tests {
     fn the_colorize_flags_need_colorize_mode() {
         let cli = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--color-strength", "0.6"]);
         assert!(cli.colorize);
-        assert_eq!(cli.color_strength, 0.6);
-        assert_eq!(super::Cli::parse_from(["prunr", "a.png", "--colorize"]).color_strength, 1.0);
+        assert_eq!(cli.run_settings().unwrap().item.color_strength(), 0.6);
+        assert_eq!(settings(&["--colorize"]).color_strength(), 1.0);
         assert!(super::Cli::try_parse_from(["prunr", "a.png", "--color-strength", "0.5"]).is_err(), "--color-strength needs --colorize");
         let both = super::Cli::parse_from(["prunr", "a.png", "--colorize", "--upscale", "nomos"]);
         assert_eq!(super::selected_modes(&both), ["--upscale", "--colorize"]);
@@ -2011,40 +2130,35 @@ mod tests {
     /// which the pipeline stores as a negative (dilating) shift.
     #[test]
     fn a_positive_edge_shift_grows_the_subject() {
-        let grow = super::Cli::try_parse_from(["prunr", "--edge-shift", "3", "x.png"]).unwrap();
-        assert_eq!(grow.mask_settings().edge_shift, -3.0);
-        let shrink = super::Cli::try_parse_from(["prunr", "--edge-shift", "-2", "x.png"]).unwrap();
-        assert_eq!(shrink.mask_settings().edge_shift, 2.0);
+        assert_eq!(settings(&["--edge-shift", "3"]).mask_settings().edge_shift, -3.0);
+        assert_eq!(settings(&["--edge-shift", "-2"]).mask_settings().edge_shift, 2.0);
     }
 
     /// The Sketch flags: --line-detail (and its old name), --line-width
     /// and --line-composition.
     #[test]
     fn sketch_flags_parse() {
-        let a = super::Cli::try_parse_from(["prunr", "--line-detail", "0.8", "--line-width", "3", "--line-composition", "ghost", "x.png"]).unwrap();
-        assert_eq!((a.line_strength, a.line_width, a.line_composition), (0.8, 3, prunr_core::ComposeMode::Ghost));
-        let old = super::Cli::try_parse_from(["prunr", "--line-strength", "0.2", "x.png"]).unwrap();
-        assert_eq!(old.line_strength, 0.2);
+        let a = settings(&["--line-detail", "0.8", "--line-width", "3", "--line-composition", "ghost"]);
+        assert_eq!((a.line_strength, a.edge_thickness, a.compose_mode), (0.8, 3, prunr_core::ComposeMode::Ghost));
+        assert_eq!(settings(&["--line-strength", "0.2"]).line_strength, 0.2);
         assert!(super::Cli::try_parse_from(["prunr", "--line-composition", "inverse", "x.png"]).is_err());
     }
 
     /// Scripts written for the retired Balanced scale keep working.
     #[test]
     fn line_scale_balanced_reads_as_fused() {
-        let a = super::Cli::try_parse_from(["prunr", "--line-scale", "balanced", "x.png"]).unwrap();
-        assert_eq!(a.line_scale, prunr_core::EdgeScale::Fused);
-        let fine = super::Cli::try_parse_from(["prunr", "--line-scale", "fine", "x.png"]).unwrap();
-        assert_eq!(fine.line_scale, prunr_core::EdgeScale::Fine);
+        assert_eq!(settings(&["--line-scale", "balanced"]).edge_scale, prunr_core::EdgeScale::Fused);
+        assert_eq!(settings(&["--line-scale", "fine"]).edge_scale, prunr_core::EdgeScale::Fine);
     }
 
     /// Every Mask panel knob has a flag: Feather and Edge width reach the
-    /// pipeline, defaulting to the panel's defaults.
+    /// pipeline, defaulting to Prunr's for the model.
     #[test]
     fn feather_and_edge_width_reach_the_mask() {
-        let m = super::Cli::try_parse_from(["prunr", "--feather", "1.5", "--edge-width", "12", "x.png"]).unwrap().mask_settings();
+        let m = settings(&["--feather", "1.5", "--edge-width", "12"]).mask_settings();
         assert_eq!((m.feather, m.guided_radius), (1.5, 12));
-        let d = super::Cli::try_parse_from(["prunr", "x.png"]).unwrap().mask_settings();
-        let panel = prunr_core::MaskSettings::default();
-        assert_eq!((d.feather, d.guided_radius), (panel.feather, panel.guided_radius));
+        let d = settings(&[]).mask_settings();
+        let prunr = command_line_settings(None, SettingsModel::BiRefNetLite).unwrap().0.mask_settings();
+        assert_eq!((d.feather, d.guided_radius), (prunr.feather, prunr.guided_radius));
     }
 }

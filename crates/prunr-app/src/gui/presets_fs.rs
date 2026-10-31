@@ -136,6 +136,30 @@ pub(crate) fn load_all() -> (HashMap<String, Preset>, HashSet<String>) {
     (presets, newer)
 }
 
+/// Preset `name` from the presets folder, its case ignored, or the
+/// preset file at that path; why not, when it cannot be read.
+pub(crate) fn find_preset(name: &str) -> Result<Preset, String> {
+    let path = Path::new(name);
+    if path.is_file() {
+        return read_preset(path).map(Preset::from).map_err(|skipped| match skipped {
+            Skipped::Newer => format!("{name} was saved by a newer Prunr"),
+            Skipped::Unreadable => format!("{name} is not a Prunr preset"),
+        });
+    }
+    let (mut presets, newer) = load_all();
+    let found = presets.keys().find(|key| key.eq_ignore_ascii_case(name)).cloned();
+    if let Some(preset) = found.and_then(|key| presets.remove(&key)) {
+        return Ok(preset);
+    }
+    if newer.contains(&name.to_lowercase()) {
+        return Err(format!("the preset \"{name}\" was saved by a newer Prunr"));
+    }
+    let mut names: Vec<String> = presets.into_keys().collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.insert(0, PRUNR_PRESET.to_string());
+    Err(format!("no preset named \"{name}\" (presets: {})", names.join(", ")))
+}
+
 /// Why a preset file was left out.
 #[derive(Debug, PartialEq)]
 enum Skipped {
