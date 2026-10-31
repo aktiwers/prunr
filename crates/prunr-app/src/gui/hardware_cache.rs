@@ -10,6 +10,8 @@ pub(crate) struct HardwareInstallCache {
     pub migraphx: bool,
     /// NVIDIA's libraries beside the CUDA runtime.
     pub nvidia_libraries: bool,
+    /// The copies CUDA brings for small cards.
+    pub small_card_copies: bool,
     /// Bit per runtime (`update_bit`) set when an earlier Prunr's install
     /// of it is there, so installing it is an update.
     updates: u8,
@@ -289,6 +291,7 @@ impl HardwareInstallCache {
             cuda: RuntimeId::Cuda.is_installed(),
             migraphx: RuntimeId::MiGraphX.is_installed(),
             nvidia_libraries: crate::runtime_install::nvidia_libraries_installed(),
+            small_card_copies: crate::runtime_install::small_card_copies_on_disk(),
             updates: RuntimeId::OFFERED.iter().filter(|rt| !rt.superseded().is_empty()).fold(0, |bits, rt| bits | update_bit(*rt)),
             addon_waits: false,
             intel_gpu: prunr_core::ort_runtime::intel_gpu_chosen(),
@@ -310,6 +313,12 @@ impl HardwareInstallCache {
         installs
     }
 
+    /// What a CUDA install would find here and skip, as read at the last
+    /// refresh.
+    pub fn on_disk(&self) -> crate::runtime_install::OnDisk {
+        crate::runtime_install::OnDisk { nvidia_libraries: self.nvidia_libraries, small_card_copies: self.small_card_copies }
+    }
+
     /// Whether `id`'s weights are installed, as read at the last refresh.
     pub fn has_installed(&self, id: prunr_models::ModelId) -> bool {
         prunr_models::REGISTRY.iter().position(|d| d.id == id).is_some_and(|i| self.registry & (1 << i) != 0)
@@ -324,6 +333,7 @@ impl HardwareInstallCache {
             cuda: true,
             migraphx: true,
             nvidia_libraries: false,
+            small_card_copies: false,
             updates: 0,
             addon_waits: false,
             intel_gpu: false,

@@ -657,7 +657,7 @@ fn test_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, intent: &mut Opti
 /// Install.
 fn cuda_offer(ui: &mut egui::Ui, ctx: &HardwareSectionContext, name: &str, intent: &mut Option<HardwareSectionIntent>) {
     let text = cuda_offer_text(&ctx.test, name);
-    let size = RuntimeId::Cuda.download_label(ctx.installs.nvidia_libraries);
+    let size = RuntimeId::Cuda.download_label(ctx.installs.on_disk());
     egui::Frame::NONE.fill(OFFER_FILL).corner_radius(theme::ROW_ROUNDING).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -780,8 +780,8 @@ fn runtime_row(rows: &mut Rows<'_>, ctx: &HardwareSectionContext, rt: RuntimeId,
         Some((_, progress)) => progress.as_str(),
         None if installed && waits => rt.waiting_line(),
         None if installed => failure.as_deref().unwrap_or(rt.installed_line()),
-        None if update => &rt.update_line(ctx.installs.nvidia_libraries),
-        None => &rt.not_installed(recommended, ctx.installs.nvidia_libraries),
+        None if update => &rt.update_line(ctx.installs.on_disk()),
+        None => &rt.not_installed(recommended, ctx.installs.on_disk()),
     };
     rows.row(rt.display_name(), status, |ui| {
         if installing_this.is_some() {

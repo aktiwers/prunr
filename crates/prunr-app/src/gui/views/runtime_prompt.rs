@@ -14,15 +14,15 @@ pub enum RuntimePromptAction {
 }
 
 /// Returns `None` while the modal is open with no user response yet.
-/// `nvidia_here`: NVIDIA's libraries are already installed, so CUDA's
-/// download is smaller. `update`: an earlier Prunr's install of `rt` is
+/// `here`: what is on disk already, so CUDA's download is smaller.
+/// `update`: an earlier Prunr's install of `rt` is
 /// in use, which this one replaces.
-pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId, nvidia_here: bool, update: bool) -> Option<RuntimePromptAction> {
+pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId, here: crate::runtime_install::OnDisk, update: bool) -> Option<RuntimePromptAction> {
     let mut result: Option<RuntimePromptAction> = None;
     let (title, body, install) = if update {
-        ("An update is available", rt.update_prompt_body(nvidia_here), rt.update_button_label())
+        ("An update is available", rt.update_prompt_body(here), rt.update_button_label())
     } else {
-        ("Faster processing is available", rt.first_launch_prompt_body(nvidia_here), rt.install_button_label())
+        ("Faster processing is available", rt.first_launch_prompt_body(here), rt.install_button_label())
     };
 
     let backdrop_closed = theme::standard_modal_window(

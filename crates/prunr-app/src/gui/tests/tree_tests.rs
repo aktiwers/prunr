@@ -167,7 +167,7 @@ fn the_computer_test_is_offered_with_an_accelerator() {
     });
     let never = Arc::new(TestResults { engines: vec![directml], ..Default::default() });
     let driver_changed = Arc::new(TestResults { engines: vec![directml], changed: vec![prunr_core::ep_compat::ScopePart::Drivers], ..Default::default() });
-    let offer = format!("{} ({})", RuntimeId::Cuda.install_button_label(), RuntimeId::Cuda.download_label(false));
+    let offer = format!("{} ({})", RuntimeId::Cuda.install_button_label(), RuntimeId::Cuda.download_label(crate::runtime_install::OnDisk::default()));
     let offer = offer.as_str();
     let shapes = [
         ("never tested", Arc::clone(&never), true, vec!["Test this computer"], vec!["Forget the test", offer], Some("Not tested yet")),
