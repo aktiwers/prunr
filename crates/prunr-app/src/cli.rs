@@ -1301,13 +1301,7 @@ fn run_batch_subprocess(
         if pending.is_empty() { break; }
 
         let effective_jobs = max_jobs.min(pending.len());
-        let engines = prunr_app::gui::memory::CutoutEngines { model, jobs: effective_jobs, cpu_only, first_look: false, line_mode: lines.mode };
-        let started = engines.fit(0).map_err(|short| {
-            let lighter: Vec<String> = engines.lighter_that_fit().into_iter().filter_map(|m| m.to_model_kind()).filter_map(CliModel::flag_for).collect();
-            let subject = CliModel::flag_for(model).unwrap_or_else(|| "the model".into());
-            prunr_app::gui::memory::refusal_text(&format!("not enough memory: {subject}"), short, &lighter, |flags| format!("use {flags}"))
-        });
-        let (mut sub, provider) = match started.and_then(|()| SubprocessManager::spawn(model, effective_jobs, mask, cpu_only, lines)) {
+        let (mut sub, provider) = match SubprocessManager::spawn(model, effective_jobs, mask, cpu_only, lines) {
             Ok(s) => s,
             Err(e) => {
                 for &idx in &pending {
@@ -1316,8 +1310,37 @@ fn run_batch_subprocess(
                 break;
             }
         };
-        if jobs.is_none() && !prunr_core::engine::model_on_host_cpu(model.model_id(), &provider) {
+        // The worker names the accelerator it found, also under --cpu.
+        let on_host_cpu = cpu_only || prunr_core::engine::model_on_host_cpu(model.model_id(), &provider);
+        if jobs.is_none() && !on_host_cpu {
             max_jobs = max_jobs.min(default_on(false));
+        }
+        // Only the worker knows where it runs: this process never probes.
+        // On the processor the run is held to the free memory, the
+        // worker's own counted; a card short of memory falls back to the
+        // processor under the same rule.
+        if on_host_cpu {
+            let line_fade = lines.fade_pct > 0;
+            let engines = prunr_app::gui::memory::CutoutEngines { model, jobs: effective_jobs, cpu_only: true, first_look: false, line_mode: lines.mode, line_fade };
+            let held_mb = sub.resident_mb().unwrap_or(0);
+            match engines.jobs_that_fit(held_mb) {
+                Ok(fit) if fit < effective_jobs => {
+                    sub.kill();
+                    max_jobs = fit;
+                    continue;
+                }
+                Ok(_) => {}
+                Err(short) => {
+                    sub.kill();
+                    let lighter: Vec<String> = engines.lighter_that_fit(held_mb).into_iter().filter_map(|m| m.to_model_kind()).filter_map(CliModel::flag_for).collect();
+                    let subject = CliModel::flag_for(model).unwrap_or_else(|| "the model".into());
+                    let why = prunr_app::gui::memory::refusal_text(&format!("not enough memory: {subject}"), short, &lighter, |flags| format!("use {flags}"));
+                    for &idx in &pending {
+                        give(idx, Err(CoreError::Model(why.clone())));
+                    }
+                    break;
+                }
+            }
         }
 
         let mut in_flight: Vec<usize> = Vec::new();
@@ -1406,7 +1429,7 @@ fn run_batch_subprocess(
                 sub.kill();
                 break Some(Crash::Unresponsive);
             }
-            if low_free_memory(in_flight.len(), prunr_app::hardware::watchdog_free_ram_bytes).is_some() {
+            if low_free_memory(in_flight.len(), prunr_app::gui::memory::cutout_watch_free_ram).is_some() {
                 break Some(Crash::MemoryLow);
             }
         };

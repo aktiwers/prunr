@@ -153,6 +153,18 @@ pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
     prunr_models::descriptor(id).map_or(800, |d| d.needs.host_cpu().host_mb)
 }
 
+/// Whether free RAM bounds what a cut-out may take here. macOS makes room
+/// by compressing other apps' memory, so its free figure is not that
+/// bound: BiRefNet-lite peaks at 12.9 GB and runs on a 16 GB Mac. There
+/// the system's own memory management stays in charge, as before.
+const FREE_RAM_BOUNDS_A_CUTOUT: bool = !cfg!(target_os = "macos");
+
+/// Free RAM for a cut-out worker's watchdog, where free RAM bounds a run
+/// (`FREE_RAM_BOUNDS_A_CUTOUT`); `None` lets it run on.
+pub fn cutout_watch_free_ram() -> Option<u64> {
+    FREE_RAM_BOUNDS_A_CUTOUT.then(crate::hardware::watchdog_free_ram_bytes).flatten()
+}
+
 /// The engines a cut-out worker builds for a batch.
 #[derive(Clone, Copy, Debug)]
 pub struct CutoutEngines {
@@ -162,46 +174,59 @@ pub struct CutoutEngines {
     /// The first-look model may load beside them.
     pub first_look: bool,
     pub line_mode: prunr_core::LineMode,
+    /// Lines fade with depth: the depth model loads beside them.
+    pub line_fade: bool,
 }
 
 impl CutoutEngines {
     /// System RAM they take: the cut-out engines unless lines alone run,
-    /// with the first look beside them (on the CPU), and the line model
-    /// when lines are on.
+    /// with the first look beside them (on the CPU), and with lines on the
+    /// line model and, for a fade, the depth model.
     pub(crate) fn need_bytes(self) -> usize {
         use prunr_core::LineMode;
         let cuts = self.line_mode != LineMode::EdgesOnly;
         let looks = cuts && self.first_look && prunr_core::subject::may_take_first_look(self.model);
         let lines = self.line_mode != LineMode::Off;
+        let fades = lines && self.line_fade;
         let edge = prunr_models::ModelId::Teed;
+        let depth = prunr_core::depth::MODEL;
         usize::from(cuts) * model_overhead(self.model, self.jobs, self.cpu_only)
             + usize::from(looks) * per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL, true)
             + usize::from(lines) * cost_on(edge, prunr_core::memory::provider_now(edge, self.cpu_only))
+            + usize::from(fades) * per_engine_cost(depth, self.cpu_only)
     }
 
-    /// Whether they fit what is free now with the reserve kept for other
-    /// apps. `held_mb`: what a warm worker already holds, its own again for
-    /// the run. No reading of free memory lets them run.
-    pub fn fit(self, held_mb: u64) -> Result<(), prunr_core::memory::Short> {
-        let Some(free) = prunr_core::sysmem::available_ram_bytes() else { return Ok(()) };
-        fits_beside_held(self.need_bytes() as u64, free, held_mb)
+    /// The most jobs, up to `self.jobs`, whose engines fit what is free now
+    /// with the reserve kept for other apps; `Err`: not even one. `held_mb`:
+    /// what a warm worker already holds, its own again for the run. No
+    /// reading of free memory, or macOS, lets all of them run.
+    pub fn jobs_that_fit(self, held_mb: u64) -> Result<usize, prunr_core::memory::Short> {
+        let free = FREE_RAM_BOUNDS_A_CUTOUT.then(prunr_core::sysmem::available_ram_bytes).flatten();
+        let Some(free) = free else { return Ok(self.jobs) };
+        most_jobs(self.jobs, |jobs| fits_beside_held(Self { jobs, ..self }.need_bytes() as u64, free, held_mb))
     }
 
-    /// The cut-out models lighter than these engines' that fit now, the
-    /// lightest first: what a refusal for memory offers instead.
-    pub fn lighter_that_fit(self) -> Vec<super::settings::SettingsModel> {
+    /// The cut-out models lighter than these engines' that fit now at one
+    /// job, the lightest first: what a refusal for memory offers instead.
+    /// `held_mb`: a warm worker's memory, freed by the refusal.
+    pub fn lighter_that_fit(self, held_mb: u64) -> Vec<super::settings::SettingsModel> {
         let Some(free) = prunr_core::sysmem::available_ram_bytes() else { return Vec::new() };
         let mut lighter: Vec<(super::settings::SettingsModel, ModelKind)> = super::settings::SettingsModel::ALL
             .into_iter()
             .filter_map(|m| m.to_model_kind().map(|kind| (m, kind)))
             .filter(|&(_, kind)| {
                 let one = Self { model: kind, jobs: 1, first_look: false, ..self };
-                cpu_need_mb(kind) < cpu_need_mb(self.model) && fits_beside_held(one.need_bytes() as u64, free, 0).is_ok()
+                cpu_need_mb(kind) < cpu_need_mb(self.model) && fits_beside_held(one.need_bytes() as u64, free, held_mb).is_ok()
             })
             .collect();
         lighter.sort_by_key(|&(_, kind)| cpu_need_mb(kind));
         lighter.into_iter().map(|(m, _)| m).collect()
     }
+}
+
+/// The most of up to `max_jobs` that `fits`; one's shortfall when none.
+fn most_jobs(max_jobs: usize, fits: impl Fn(usize) -> Result<(), prunr_core::memory::Short>) -> Result<usize, prunr_core::memory::Short> {
+    (2..=max_jobs).rev().find(|&jobs| fits(jobs).is_ok()).map_or_else(|| fits(1).map(|()| 1), Ok)
 }
 
 fn fits_beside_held(need_bytes: u64, free_bytes: u64, held_mb: u64) -> Result<(), prunr_core::memory::Short> {
@@ -273,7 +298,7 @@ mod tests {
     fn a_cut_out_batch_is_charged_the_engines_it_builds() {
         use prunr_core::LineMode;
         const MB: u64 = 1024 * 1024;
-        let birefnet = CutoutEngines { model: ModelKind::BiRefNetLite, jobs: 1, cpu_only: true, first_look: true, line_mode: LineMode::Off };
+        let birefnet = CutoutEngines { model: ModelKind::BiRefNetLite, jobs: 1, cpu_only: true, first_look: true, line_mode: LineMode::Off, line_fade: false };
         let need = |e: CutoutEngines| e.need_bytes() as u64;
         let look = engine_cost_on(prunr_core::subject::FIRST_LOOK_MODEL, prunr_core::engine::CPU_NAME) as u64;
         let teed = cost_on(prunr_models::ModelId::Teed, prunr_core::engine::CPU_NAME) as u64;
@@ -282,12 +307,28 @@ mod tests {
         assert_eq!(need(silueta), need(CutoutEngines { first_look: false, ..silueta }), "Silueta takes no first look");
         assert_eq!(need(CutoutEngines { line_mode: LineMode::SubjectOutline, ..birefnet }), need(birefnet) + teed, "lines on the subject");
         assert_eq!(need(CutoutEngines { line_mode: LineMode::EdgesOnly, ..birefnet }), teed, "lines alone");
+        let depth = per_engine_cost(prunr_core::depth::MODEL, true) as u64;
+        assert_eq!(need(CutoutEngines { line_mode: LineMode::EdgesOnly, line_fade: true, ..birefnet }), teed + depth, "lines that fade");
+        assert_eq!(need(CutoutEngines { line_fade: true, ..birefnet }), need(birefnet), "no lines, no fade");
 
         let need_mb = need(birefnet).div_ceil(MB);
         assert!(fits_beside_held(need(birefnet), 7_881 * MB, 0).is_err());
         let free = need_mb + prunr_core::memory::RAM_RESERVE_MB - 1_000;
         assert!(fits_beside_held(need(birefnet), free * MB, 0).is_err());
         assert!(fits_beside_held(need(birefnet), free * MB, 1_000).is_ok(), "a warm worker's own memory");
+    }
+
+    /// A batch that does not fit at its job count runs with fewer, and is
+    /// refused only when one does not fit.
+    #[test]
+    fn a_batch_runs_with_fewer_jobs_before_it_is_refused() {
+        let short = prunr_core::memory::Short::Ram { need_mb: 2_000, kept_mb: 1_536, free_mb: 3_000 };
+        let up_to = |limit: usize| move |jobs: usize| if jobs <= limit { Ok(()) } else { Err(short) };
+        assert_eq!(most_jobs(4, up_to(4)), Ok(4));
+        assert_eq!(most_jobs(4, up_to(2)), Ok(2));
+        assert_eq!(most_jobs(4, up_to(1)), Ok(1));
+        assert_eq!(most_jobs(4, up_to(0)), Err(short));
+        assert_eq!(most_jobs(1, up_to(0)), Err(short));
     }
 
     /// A refusal says what the model needs, what Prunr keeps free and

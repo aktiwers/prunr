@@ -826,11 +826,14 @@ fn spawn_and_initial_burst(
     // Cached-tensor work doesn't use the seg engine pool.
     let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
-    if let Err(why) = engines_fit(state, warm.as_ref().map(|(sub, _)| sub), effective_jobs) {
-        let _ = res_tx.send(WorkerResult::BatchRefused { batch: state.batch, why });
-        ctx.request_repaint();
-        return None;
-    }
+    let effective_jobs = match engines_fit(state, warm.as_ref().map(|(sub, _)| sub), effective_jobs) {
+        Ok(jobs) => jobs,
+        Err(why) => {
+            let _ = res_tx.send(WorkerResult::BatchRefused { batch: state.batch, why });
+            ctx.request_repaint();
+            return None;
+        }
+    };
 
     let (mut sub, engines) = match warm {
         Some(pair) => pair,
@@ -858,23 +861,29 @@ fn spawn_and_initial_burst(
     Some(InitialBurst { sub, sent, engines })
 }
 
-/// Whether the batch's cut-out engines fit what is free now with the
-/// reserve kept, a warm worker's memory counted as its own; `Err`: why
-/// the batch is refused. Only full runs need the engines.
-fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<(), String> {
+/// The most of `jobs` engines the batch's cut-out run fits in what is
+/// free now with the reserve kept, a warm worker's memory counted as its
+/// own; `Err`: why the batch is refused. Only full runs need the engines.
+fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<usize, String> {
     use super::settings::SettingsModel;
     if state.pending.is_empty() {
-        return Ok(());
+        return Ok(jobs);
     }
     let EngineSpec { model, cpu_only, .. } = state.config.engines;
     let shown = state.config.first_look.get();
     let first_look = state.pending.iter().any(|item| Some(item.id) == shown);
-    let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode: state.config.run.line_mode };
+    let line_mode = state.config.run.line_mode;
+    let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode, line_fade: false };
     let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
-    engines.fit(held_mb).map_err(|short| {
+    engines.jobs_that_fit(held_mb).map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
-        let lighter: Vec<String> = engines.lighter_that_fit().into_iter().map(|m| super::views::model_name(m).to_string()).collect();
-        let subject = SettingsModel::of_kind(model).map_or("This model", super::views::model_name);
+        // Lines alone run no cut-out model: the line model is what is short.
+        let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
+            ("Sketch", Vec::new())
+        } else {
+            let lighter = engines.lighter_that_fit(held_mb).into_iter().map(|m| super::views::model_name(m).to_string()).collect();
+            (SettingsModel::of_kind(model).map_or("This model", super::views::model_name), lighter)
+        };
         super::memory::refusal_text(subject, short, &lighter, |models| format!("pick {models} in the model list"))
     })
 }
@@ -929,10 +938,6 @@ fn run_event_loop(
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::Unresponsive);
         }
 
-        if let Some(free) = crate::subprocess::batch_rules::low_free_memory(sent.len(), crate::hardware::watchdog_free_ram_bytes) {
-            tracing::warn!(in_flight = sent.len(), free_mb = free / (1024 * 1024), "free memory ran low; worker stopped");
-            return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::MemoryLow);
-        }
 
         for event in sub.poll_events_blocking(Duration::from_millis(50)) {
             // Any event proves liveness.
@@ -942,6 +947,11 @@ fn run_event_loop(
                 continue;
             }
             handle_subprocess_event(event, state, sent, res_tx, ctx);
+        }
+        // After the events, so a result the worker finished still lands.
+        if let Some(free) = crate::subprocess::batch_rules::low_free_memory(sent.len(), super::memory::cutout_watch_free_ram) {
+            tracing::warn!(in_flight = sent.len(), free_mb = free / (1024 * 1024), "free memory ran low; worker stopped");
+            return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::MemoryLow);
         }
         top_up(sub, state, sent, cancels, res_tx, ctx);
 
@@ -1321,7 +1331,7 @@ fn crash_message(crash: &crate::subprocess::manager::Crash) -> &'static str {
     use crate::subprocess::manager::Crash;
     match crash {
         Crash::OutOfMemory => "Ran out of memory. Try a smaller model or fewer images at once.",
-        Crash::MemoryLow => "Stopped before the computer ran out of memory. Close other apps and process again, or pick a lighter model.",
+        Crash::MemoryLow => "Stopped before memory ran short. Close other apps and process again, or pick a lighter model.",
         Crash::Unresponsive => "The model stopped responding. Process again.",
         Crash::Other(_) => "The model stopped unexpectedly. Process again; if it happens again, run prunr --doctor and send the report.",
     }
@@ -1371,9 +1381,10 @@ fn spawn_warm(
 ) -> Option<WarmWorker> {
     let started = Instant::now();
     let neutral = RunSettings::neutral();
-    let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode };
-    if let Err(short) = engines.fit(0) {
-        tracing::info!(?engines, %short, "pre-warm skipped: not enough memory");
+    let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode, line_fade: false };
+    let fits = engines.jobs_that_fit(0);
+    if fits != Ok(spec.jobs) {
+        tracing::info!(?engines, ?fits, "pre-warm skipped: not enough memory for its engines");
         return None;
     }
     let lines = WorkerLines::app(neutral.line_mode, neutral.edge);
@@ -1661,7 +1672,9 @@ mod tests {
     fn a_crash_tells_why() {
         use crate::subprocess::manager::Crash;
         assert!(super::crash_message(&Crash::OutOfMemory).starts_with("Ran out of memory"));
-        assert!(super::crash_message(&Crash::MemoryLow).starts_with("Stopped before the computer ran out of memory"));
+        let stopped = super::crash_message(&Crash::MemoryLow);
+        assert!(stopped.starts_with("Stopped before memory ran short"));
+        assert_eq!(prunr_core::plain::error(stopped), stopped, "shown as written, not as a crash for memory");
         assert!(super::crash_message(&Crash::Unresponsive).starts_with("The model stopped responding"));
         assert!(super::crash_message(&Crash::Other("exited with code 3".into())).starts_with("The model stopped unexpectedly"));
     }
