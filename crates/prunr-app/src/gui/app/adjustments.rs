@@ -296,7 +296,7 @@ impl PrunrApp {
         }
         // A drag shows the lines where they were; its release traces them
         // on the new cut-out. The release frame itself changes no value.
-        if tc.commit && item.lines_traced_on_another_cut() {
+        if tc.commit && item.lines_traced_on_another_cut(self.settings.brush.cutout_action) {
             dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
         dispatch

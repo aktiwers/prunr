@@ -14,12 +14,13 @@ use crate::gui::settings::LineMode;
 use super::protocol::*;
 use super::ipc::{write_message, read_message};
 
-/// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
-/// don't carry three parallel args.
+/// A borrowed seg tensor, its size and the model that made it, so
+/// subprocess `send_*` helpers don't carry four parallel args.
 pub struct TensorView<'a> {
     pub data: &'a [f32],
     pub height: u32,
     pub width: u32,
+    pub model: ModelKind,
 }
 
 /// The photo a re-run finishes: its file's bytes, or the pixels already
@@ -333,18 +334,24 @@ impl SubprocessManager {
     }
 
     /// Send an AddEdgeInference command (seg cached, run TEED on masked).
-    /// Writes the seg tensor + original image bytes to temp files. The worker
-    /// reads the seg tensor without deleting it and hands the path back as
-    /// `tensor_cache` on `ImageDone`, so the parent's reader takes
-    /// ownership — no extra copy round-trip.
+    /// Writes the seg tensor, the original image and the strokes to temp
+    /// files. The worker reads the seg tensor without deleting it and
+    /// hands the path back as `tensor_cache` on `ImageDone`, so the
+    /// parent's reader takes ownership — no extra copy round-trip.
     pub fn send_add_edge_inference(
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
-        model: prunr_core::ModelKind,
         photo: &Photo,
         mask: prunr_core::MaskSettings,
+        correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), SendError> {
+        let correction = correction.map(|plane| {
+            let path = super::protocol::IpcKind::Correction.path_for(ipc_temp_dir(), item_id);
+            super::ipc::write_plane(&path, plane).map(|()| PlaneFile(path))
+        })
+        .transpose()
+        .map_err(|e| SendError::Other(format!("Failed to write the strokes temp file: {e}")))?;
         self.send_with_tensor_and_image(
             item_id,
             tensor,
@@ -357,8 +364,9 @@ impl SubprocessManager {
                 seg_tensor_path,
                 seg_tensor_height: tensor.height,
                 seg_tensor_width: tensor.width,
-                model,
+                model: tensor.model,
                 mask,
+                correction,
             },
         )
     }
@@ -368,7 +376,6 @@ impl SubprocessManager {
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
-        model: prunr_core::ModelKind,
         photo: &Photo,
         mask: prunr_core::MaskSettings,
     ) -> Result<(), SendError> {
@@ -383,7 +390,7 @@ impl SubprocessManager {
                 tensor_path,
                 tensor_height: tensor.height,
                 tensor_width: tensor.width,
-                model,
+                model: tensor.model,
                 original,
                 mask,
             },

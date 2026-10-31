@@ -1751,7 +1751,7 @@ mod timeline_contract_tests {
         item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
         item.settings.input_transform = prunr_core::InputTransform::Grayscale;
         let ids = std::collections::HashSet::from([1]);
-        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta, Some(StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta));
+        let tiers = app.batch.classify(&ids, prunr_core::ModelKind::Silueta, Some(StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::Silueta), app.settings.brush.cutout_action);
         assert!(tiers.add_edge.is_empty(), "no lines composed onto the cached cut-out");
         assert!(tiers.full.contains(&1), "the lines run again on the whole photo");
     }

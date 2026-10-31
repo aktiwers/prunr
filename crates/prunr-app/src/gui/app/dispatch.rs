@@ -303,7 +303,8 @@ impl PrunrApp {
         }
 
         let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
-        let tiers = self.batch.classify(&candidate_ids, model, step, cutter);
+        let action = self.settings.brush.cutout_action;
+        let tiers = self.batch.classify(&candidate_ids, model, step, cutter, action);
         self.notify_skip(tiers.up_to_date_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
 
@@ -316,8 +317,8 @@ impl PrunrApp {
             }
         }
 
-        let mask_work = self.batch.cached_tensor_work(&tiers.mask);
-        let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge);
+        let mask_work = self.batch.cached_tensor_work(&tiers.mask, None);
+        let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge, Some(action));
 
         let jobs = self.settings.parallel_jobs.min(crate::gui::memory::safe_max_jobs(model, self.settings.cpu_only()));
         self.update_on_screen();

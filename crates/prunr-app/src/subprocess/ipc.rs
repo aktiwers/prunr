@@ -69,32 +69,56 @@ pub fn read_and_delete(path: &std::path::Path) -> Option<Vec<u8>> {
 /// (u32 LE), then its raw pixels. No encode on this side, no decode on
 /// the other. A write that fails leaves no partial file behind.
 pub fn write_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path, image: &image::ImageBuffer<P, Vec<u8>>) -> io::Result<()> {
+    write_sized(path, image.dimensions(), image.as_raw())
+}
+
+/// An image `write_image` wrote, its file removed; `None` when it is
+/// missing or short.
+pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Option<image::ImageBuffer<P, Vec<u8>>> {
+    read_sized(path, usize::from(P::CHANNEL_COUNT)).and_then(|((w, h), pixels)| image::ImageBuffer::from_raw(w, h, pixels))
+}
+
+/// Hand a cut-out's correction plane to the other process as a file, as
+/// `write_image` does an image: its size, then one byte per cell. The
+/// fill layer stays behind: a cut-out reads only the cells.
+pub fn write_plane(path: &std::path::Path, plane: &prunr_core::selection::MaskArtifact) -> io::Result<()> {
+    write_sized(path, (plane.width, plane.height), bytemuck::cast_slice(plane.cells()))
+}
+
+/// A plane `write_plane` wrote, its file removed; `None` when it is
+/// missing or its cells do not fill its size.
+pub fn read_plane(path: &std::path::Path) -> Option<prunr_core::selection::MaskArtifact> {
+    let ((w, h), cells) = read_sized(path, 1)?;
+    (cells.len() == w as usize * h as usize)
+        .then(|| prunr_core::selection::MaskArtifact::from_cells(w, h, cells.into_iter().map(|c| c as i8).collect()))
+}
+
+fn write_sized(path: &std::path::Path, (w, h): (u32, u32), bytes: &[u8]) -> io::Result<()> {
     let write = || -> io::Result<()> {
         let mut file = std::fs::File::create(path)?;
-        file.write_all(&image.width().to_le_bytes())?;
-        file.write_all(&image.height().to_le_bytes())?;
-        file.write_all(image.as_raw())
+        file.write_all(&w.to_le_bytes())?;
+        file.write_all(&h.to_le_bytes())?;
+        file.write_all(bytes)
     };
     write().inspect_err(|_| {
         let _ = std::fs::remove_file(path);
     })
 }
 
-/// An image `write_image` wrote, its file removed; `None` when it is
-/// missing or short.
-pub fn read_image<P: image::Pixel<Subpixel = u8>>(path: &std::path::Path) -> Option<image::ImageBuffer<P, Vec<u8>>> {
-    let read = || -> io::Result<Option<image::ImageBuffer<P, Vec<u8>>>> {
+/// What `write_sized` wrote, `per_cell` bytes to a cell, its file removed.
+fn read_sized(path: &std::path::Path, per_cell: usize) -> Option<((u32, u32), Vec<u8>)> {
+    let read = || -> io::Result<((u32, u32), Vec<u8>)> {
         let mut file = std::fs::File::open(path)?;
         let mut header = [0u8; 8];
         file.read_exact(&mut header)?;
         let [w, h] = [0, 4].map(|at| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]));
-        let mut pixels = Vec::with_capacity(w as usize * h as usize * usize::from(P::CHANNEL_COUNT));
-        file.read_to_end(&mut pixels)?;
-        Ok(image::ImageBuffer::from_raw(w, h, pixels))
+        let mut bytes = Vec::with_capacity(w as usize * h as usize * per_cell);
+        file.read_to_end(&mut bytes)?;
+        Ok(((w, h), bytes))
     };
-    let image = read().ok().flatten();
+    let read = read().ok();
     let _ = std::fs::remove_file(path);
-    image
+    read
 }
 
 /// A re-run's photo, upright; a decoded one's file is removed as read.
@@ -192,6 +216,23 @@ mod tests {
         assert_eq!(read_image::<image::Luma<u8>>(&path), Some(gray));
         std::fs::write(&path, [4u8, 0, 0, 0, 4, 0, 0, 0, 1, 2]).unwrap();
         assert_eq!(read_image::<image::Luma<u8>>(&path), None);
+        assert!(!path.exists());
+    }
+
+    /// A correction plane crosses with its cells, erases and restores
+    /// alike, and its file goes once read; a short one reads as nothing.
+    #[test]
+    fn a_correction_plane_round_trips_raw() {
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("correction.raw");
+        let plane = MaskArtifact::from_cells(3, 2, vec![FULL, -FULL, 0, -1, 1, 64]);
+        write_plane(&path, &plane).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 + 3 * 2);
+        assert_eq!(read_plane(&path), Some(plane));
+        assert!(!path.exists());
+        std::fs::write(&path, [2u8, 0, 0, 0, 2, 0, 0, 0, 1]).unwrap();
+        assert_eq!(read_plane(&path), None);
         assert!(!path.exists());
     }
 

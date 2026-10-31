@@ -158,6 +158,10 @@ pub enum SubprocessCommand {
         model: ModelKind,
         /// Per-item mask settings (may differ from Init's mask).
         mask: MaskSettings,
+        /// The strokes on the cut-out: the subject the lines trace is cut
+        /// with them.
+        #[serde(default)]
+        correction: Option<PlaneFile>,
     },
     /// Inpaint a region with `model_id` and the full post-process (color
     /// match, seam-guided blend, sharpen), returning the finished RGBA. Runs
@@ -229,6 +233,11 @@ impl PhotoFile {
         }
     }
 }
+
+/// A cut-out's correction plane in a temp file, as `ipc::write_plane`
+/// writes it.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct PlaneFile(#[serde(with = "wire_path")] pub std::path::PathBuf);
 
 /// The image a run starts from when it is an earlier result: raw RGBA in a temp file.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -551,6 +560,9 @@ pub enum IpcKind {
     Tensor,
     /// Parent → seg worker: original encoded image for a re-postprocess.
     Orig,
+    /// Parent → seg worker: the strokes on a cut-out, for a lines run to
+    /// cut the subject with.
+    Correction,
     /// Seg worker → parent: composited RGBA result.
     Result,
     /// Seg worker → parent: TEED multi-scale edge tensor cache.
@@ -578,6 +590,7 @@ impl IpcKind {
             IpcKind::Seg => "seg_",
             IpcKind::Tensor => "tensor_",
             IpcKind::Orig => "orig_",
+            IpcKind::Correction => "correction_",
             IpcKind::Result => "result_",
             IpcKind::Edge => "edge_",
             IpcKind::SpareEdge => "spare_edge_",
@@ -592,7 +605,7 @@ impl IpcKind {
     pub const fn ext(self) -> &'static str {
         match self {
             IpcKind::Input | IpcKind::Orig | IpcKind::CliDs => "img",
-            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Result | IpcKind::Edge | IpcKind::SpareEdge => "raw",
+            IpcKind::Chain | IpcKind::Seg | IpcKind::Tensor | IpcKind::Correction | IpcKind::Result | IpcKind::Edge | IpcKind::SpareEdge => "raw",
             IpcKind::InpaintImg | IpcKind::InpaintMask | IpcKind::InpaintOut => "png",
         }
     }
@@ -625,6 +638,7 @@ impl IpcKind {
 /// and wiping them once surfaced as bogus "Insufficient memory" errors.
 pub const SEG_PIPELINE_PREFIXES: &[&str] = &[
     IpcKind::Chain.prefix(),
+    IpcKind::Correction.prefix(),
     IpcKind::Edge.prefix(),
     IpcKind::Input.prefix(),
     IpcKind::Orig.prefix(),
@@ -778,6 +792,7 @@ mod tests {
                 seg_tensor_width: 2,
                 model: ModelKind::Silueta,
                 mask: MaskSettings::default(),
+                correction: Some(PlaneFile(path())),
             },
             SubprocessCommand::Inpaint(InpaintJob {
                 item_id: 1,
@@ -1206,11 +1221,11 @@ mod tests {
     fn every_ipc_kind_has_an_owner_that_cleans_it() {
         use IpcKind::*;
         let owner = |kind: IpcKind| match kind {
-            Input | Chain | Seg | Tensor | Orig | Result | Edge | SpareEdge => Some(SEG_PIPELINE_PREFIXES),
+            Input | Chain | Seg | Tensor | Orig | Correction | Result | Edge | SpareEdge => Some(SEG_PIPELINE_PREFIXES),
             CliDs => Some(CLI_PERSISTENT_PREFIXES),
             InpaintImg | InpaintMask | InpaintOut => None,
         };
-        let kinds = [Input, Chain, Seg, Tensor, Orig, Result, Edge, SpareEdge, CliDs, InpaintImg, InpaintMask, InpaintOut];
+        let kinds = [Input, Chain, Seg, Tensor, Orig, Correction, Result, Edge, SpareEdge, CliDs, InpaintImg, InpaintMask, InpaintOut];
         for kind in kinds {
             if let Some(prefixes) = owner(kind) {
                 assert!(prefixes.contains(&kind.prefix()), "{kind:?} is swept by its owner's prefixes");

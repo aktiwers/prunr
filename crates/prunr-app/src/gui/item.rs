@@ -472,6 +472,9 @@ pub(crate) struct Job {
     /// The strokes landed while an erase fills: those whose step is still
     /// in effect are the next area, which the fill's landing keeps.
     pub(crate) painted: Vec<PaintedStroke>,
+    /// The strokes a cut cuts the subject with, sent with it; none unless
+    /// it carries them.
+    pub(crate) strokes: StrokesMark,
 }
 
 /// A stroke landed while an erase fills, cropped to where it painted, and
@@ -665,6 +668,37 @@ impl Correction {
             }
         }
     }
+}
+
+/// Which strokes correct a cut-out: the edits, and the selection with how
+/// the brush applies it. Held by allocation: a `Weak` pins it, so new
+/// strokes never pass for old ones by address, and keeps no plane alive.
+#[derive(Clone, Default)]
+pub(crate) struct StrokesMark {
+    edits: Option<std::sync::Weak<prunr_core::selection::MaskArtifact>>,
+    selection: Option<(std::sync::Weak<prunr_core::selection::MaskArtifact>, CutoutAction)>,
+}
+
+impl StrokesMark {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        let edits = match (&self.edits, &other.edits) {
+            (Some(a), Some(b)) => a.ptr_eq(b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        let selection = match (&self.selection, &other.selection) {
+            (Some((a, x)), Some((b, y))) => a.ptr_eq(b) && x == y,
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        edits && selection
+    }
+}
+
+/// The cut-out a run traced the lines on: its mask
+/// (`MaskRecipe::alpha_part`) and its strokes.
+#[derive(Clone)]
+pub(crate) struct TracedCut {
+    pub(crate) mask: prunr_core::MaskRecipe,
+    pub(crate) strokes: StrokesMark,
 }
 
 /// The photo faces are found in: a run's start image, the original, or an
@@ -1167,12 +1201,16 @@ impl BatchItem {
         self.edge_planes = Default::default();
     }
 
-    /// The lines drawn on the cut-out were traced on another mask than
-    /// the settings make now: a preview moved the cut-out under them.
-    pub(crate) fn lines_traced_on_another_cut(&self) -> bool {
+    /// The lines drawn on the cut-out were traced on another cut-out than
+    /// the settings and the strokes `action` applies make now: a preview
+    /// or a stroke moved the cut-out under them.
+    pub(crate) fn lines_traced_on_another_cut(&self, action: CutoutAction) -> bool {
         self.settings.line_mode == prunr_core::LineMode::SubjectOutline
-            && self.cached_edge_tensors.as_ref().and_then(|lines| lines.traced_on)
-                .is_some_and(|on| on != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part())
+            && self.cached_edge_tensors.as_ref().and_then(|lines| lines.traced_on.as_ref())
+                .is_some_and(|on| {
+                    on.mask != prunr_core::MaskRecipe::from(&self.settings.mask_settings()).alpha_part()
+                        || !on.strokes.same(&self.strokes_mark(action))
+                })
     }
 
     /// A cut-out's mask is kept to adjust it without the model; lines over
@@ -1244,12 +1282,34 @@ impl BatchItem {
         })
     }
 
+    /// The selection as it corrects the cut-out under `action`: none while
+    /// only selecting, or when it is blank.
+    fn applied_selection(&self, action: CutoutAction) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.selection_mask.clone().filter(|m| !m.is_blank() && action != CutoutAction::Select)
+    }
+
+    /// Which strokes `correction(action)` corrects the cut-out with.
+    pub(crate) fn strokes_mark(&self, action: CutoutAction) -> StrokesMark {
+        StrokesMark {
+            edits: self.edits.as_ref().map(Arc::downgrade),
+            selection: self.applied_selection(action).map(|s| (Arc::downgrade(&s), action)),
+        }
+    }
+
+    /// The correction the awaited cut sends, noted on its job as the
+    /// strokes its traced lines follow.
+    pub(crate) fn cut_with_strokes(&mut self, action: CutoutAction) -> Option<Correction> {
+        let strokes = self.strokes_mark(action);
+        if let Some(job) = self.job.as_mut() {
+            job.strokes = strokes;
+        }
+        self.correction(action)
+    }
+
     /// What corrects a cut-out, as a handle: built already, or to build
     /// where it is used. Never builds here.
     pub(crate) fn correction(&self, action: CutoutAction) -> Option<Correction> {
-        let selection = self.selection_mask.clone()
-            .filter(|m| !m.is_blank() && action != CutoutAction::Select);
-        match (&self.edits, selection) {
+        match (&self.edits, self.applied_selection(action)) {
             (None, None) => None,
             (Some(edits), None) => Some(Correction::Ready(Arc::clone(edits))),
             // A selection is stored as an erase: as it is, it erases.
@@ -2264,7 +2324,7 @@ impl BatchItem {
         // Only a cut queues for a worker slot; other runs start at once.
         let running = engine != Engine::Segment;
         let since = self.timeline.current().at;
-        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running, since, painted: Vec::new() });
+        self.job = Some(Job { run: next_run(), version: self.timeline.version(), step, engine, start, seed, region, cutter: None, keep: None, running, since, painted: Vec::new(), strokes: StrokesMark::default() });
         self.failure = None;
         self.tile_preview = None;
         self.subject = None;
@@ -2678,7 +2738,7 @@ impl BatchItem {
     /// ran to what the settings ask for now. Caches the run can't reuse
     /// are dropped, and a change the run doesn't touch is noted on the
     /// applied recipe so the image reads as up to date.
-    pub(crate) fn run_tier(&mut self, model: prunr_core::ModelKind) -> RunTier {
+    pub(crate) fn run_tier(&mut self, model: prunr_core::ModelKind, action: CutoutAction) -> RunTier {
         use prunr_core::RequiredTier;
         let Some(ref old_recipe) = self.applied_recipe else {
             return RunTier::Full;
@@ -2697,8 +2757,9 @@ impl BatchItem {
         let impact = crate::gui::knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current);
         self.apply_cache_impact(impact);
         let has_tensor = self.cached_tensor.is_some();
-        // Lines a preview left on another cut-out are traced on this one.
-        if has_tensor && self.lines_traced_on_another_cut() && tier != RequiredTier::FullPipeline {
+        // Lines a preview or a stroke left on another cut-out are traced
+        // on this one.
+        if has_tensor && self.lines_traced_on_another_cut(action) && tier != RequiredTier::FullPipeline {
             return RunTier::AddEdge;
         }
         match tier {
@@ -2760,7 +2821,10 @@ impl BatchItem {
                 self.reset_result_caches();
                 self.result_rgba = Some(Arc::new(pr.rgba_image));
                 self.failure = None;
-                let traced_on = recipe_snapshot.inference.traces_the_cut_out().then(|| recipe_snapshot.mask.alpha_part());
+                let traced_on = recipe_snapshot.inference.traces_the_cut_out().then(|| TracedCut {
+                    mask: recipe_snapshot.mask.alpha_part(),
+                    strokes: self.job.as_ref().map(|j| j.strokes.clone()).unwrap_or_default(),
+                });
                 self.applied_recipe = Some(recipe_snapshot);
                 // Keep the cache when the worker returned no fresh tensor (a
                 // rerun): clobbering it killed live preview after any rerun.
@@ -3729,21 +3793,49 @@ mod tests {
             }
         };
         let mut item = traced(LineMode::SubjectOutline);
-        assert!(!item.lines_traced_on_another_cut());
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Restore));
         previewed(&mut item, |s| s.feather = 3.0);
-        assert!(item.lines_traced_on_another_cut());
-        assert_eq!(item.run_tier(Silueta), RunTier::AddEdge);
+        assert!(item.lines_traced_on_another_cut(CutoutAction::Restore));
+        assert_eq!(item.run_tier(Silueta, CutoutAction::Restore), RunTier::AddEdge);
 
         let mut look = traced(LineMode::SubjectOutline);
         previewed(&mut look, |s| s.effect = prunr_core::SubjectEffect::Sepia);
-        assert!(!look.lines_traced_on_another_cut(), "the look alone");
+        assert!(!look.lines_traced_on_another_cut(CutoutAction::Restore), "the look alone");
 
         let mut photo = traced(LineMode::EdgesOnly);
         previewed(&mut photo, |s| s.feather = 3.0);
-        assert!(!photo.lines_traced_on_another_cut(), "lines over the whole photo");
+        assert!(!photo.lines_traced_on_another_cut(CutoutAction::Restore), "lines over the whole photo");
 
         item.invalidate_edge_cache();
-        assert!(!item.lines_traced_on_another_cut(), "no lines kept");
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Restore), "no lines kept");
+    }
+
+    /// Lines traced on the cut-out follow its strokes: a stroke that
+    /// restores or erases leaves them on another cut-out, one that only
+    /// selects does not, and a lines run that cut with the strokes traces
+    /// them on this one, so nothing runs again.
+    #[test]
+    fn a_stroke_leaves_the_lines_on_another_cut_out_until_a_run_cuts_with_it() {
+        use crate::gui::tests::fixtures::{cut_with_lines, edge_lines};
+        use prunr_core::{LineMode, ModelKind::Silueta, selection::{MaskArtifact, FULL}};
+        let mut item = fixture_item(1);
+        item.settings.line_mode = LineMode::SubjectOutline;
+        cut_with_lines(&mut item);
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Restore), "traced on the cut-out shown");
+        assert!(item.commit_selection_mask(Arc::new(MaskArtifact::from_cells(2, 2, vec![FULL; 4])), StepKind::Stroke));
+        assert!(item.lines_traced_on_another_cut(CutoutAction::Restore), "a restore");
+        assert!(item.lines_traced_on_another_cut(CutoutAction::Erase), "an erase");
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Select), "only selecting");
+        assert_eq!(item.run_tier(Silueta, CutoutAction::Restore), RunTier::AddEdge);
+
+        item.start_cut(None, Cutter::Model(Silueta));
+        assert!(item.cut_with_strokes(CutoutAction::Restore).is_some(), "the run carries the strokes");
+        let recipe = item.settings.current_recipe(Silueta);
+        item.apply_tier_result(Ok(fixture_process_result("")), None, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
+        item.finish_job();
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Restore), "traced on the strokes");
+        assert_eq!(item.run_tier(Silueta, CutoutAction::Restore), RunTier::UpToDate, "nothing runs again");
+        assert!(item.lines_traced_on_another_cut(CutoutAction::Select), "the selection taken off the cut-out");
     }
 
     /// Each kind of settings change asks for the run it needs: none for a
@@ -3766,11 +3858,11 @@ mod tests {
         let tier = |with_tensor: bool, before: fn(&mut ItemSettings), change: fn(&mut ItemSettings)| {
             let mut item = processed(with_tensor, before);
             change(&mut item.settings);
-            item.run_tier(Silueta)
+            item.run_tier(Silueta, CutoutAction::Restore)
         };
         let lines_on = |s: &mut ItemSettings| s.line_mode = LineMode::SubjectOutline;
 
-        assert_eq!(fixture_item(1).run_tier(Silueta), RunTier::Full, "never processed");
+        assert_eq!(fixture_item(1).run_tier(Silueta, CutoutAction::Restore), RunTier::Full, "never processed");
         assert_eq!(tier(true, |_| {}, |_| {}), RunTier::UpToDate);
         assert_eq!(tier(true, |_| {}, |s| s.sharpen = 0.5), RunTier::UpToDate, "Refine re-finishes the kept run");
         assert_eq!(tier(true, |_| {}, |s| s.feather = 3.0), RunTier::Mask, "a mask knob reruns from the tensor");
@@ -3786,7 +3878,7 @@ mod tests {
 
         let mut item = processed(true, |_| {});
         item.settings.bg = Some([1, 2, 3, 255]);
-        assert_eq!(item.run_tier(Silueta), RunTier::UpToDate, "a backdrop change renders at display time");
+        assert_eq!(item.run_tier(Silueta, CutoutAction::Restore), RunTier::UpToDate, "a backdrop change renders at display time");
         let composite = item.settings.current_recipe(Silueta).composite;
         assert_eq!(item.applied_recipe.as_ref().map(|r| &r.composite), Some(&composite), "and the applied recipe follows it");
     }
