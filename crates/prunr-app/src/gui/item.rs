@@ -1069,6 +1069,8 @@ pub(crate) struct BatchItem {
     /// The preset last applied (dropdown or Reset All); the preset button
     /// compares `settings` against it, and it stays across later tweaks.
     pub(crate) applied_preset: String,
+    /// What was changed since `applied_preset` was applied, per model.
+    pub(crate) preset_changes: super::preset_changes::Changes<super::item_settings::ItemSettings>,
     /// Never mutate outside `set_bg_image_hashed` / `clear_bg_image` /
     /// `adopt_settings`: the writers that keep `settings.bg_image_hash` in step,
     /// which the recipe-diff dispatch reads to fire CompositeOnly.
@@ -1611,6 +1613,7 @@ impl BatchItem {
             edits: store(self.edits.as_ref(), shown.edits.as_ref()),
             settings: self.settings,
             applied_preset: self.applied_preset.clone(),
+            preset_changes: self.preset_changes.clone(),
             // A hand edit makes new pixels no run can redo.
             origin: if kind == StepKind::Edit { None } else { shown.origin.clone() },
             faced: shown.faced,
@@ -2255,6 +2258,7 @@ impl BatchItem {
         }
         self.settings = shown.settings;
         self.applied_preset = shown.applied_preset;
+        self.preset_changes = shown.preset_changes;
         self.job = None;
         self.tile_preview = None;
         self.reset_result_caches();
@@ -3108,6 +3112,7 @@ impl BatchItem {
             cached_masked_base: None,
             kept_alpha: None,
             applied_preset,
+            preset_changes: super::preset_changes::Changes::new(settings),
             bg_image: None,
             backdrop_texture: None,
             lens_focus: None,
@@ -3147,6 +3152,32 @@ impl BatchItem {
 
     /// Take another image's settings and its background picture together,
     /// keeping the picture in step with the settings' reference to it.
+    /// Without a background-removal model there is no subject to
+    /// outline, so Subject lines draw over the whole photo, the nearest
+    /// mode that still has lines.
+    pub(crate) fn fit_line_mode_to(&mut self, model: super::settings::SettingsModel) {
+        if !model.uses_segmentation() && self.settings.line_mode == prunr_core::LineMode::SubjectOutline {
+            self.settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        }
+    }
+
+    /// Leave model `from`, which ran face restorer `face`, for `to` and the
+    /// restorer chosen now: what was changed since the preset was applied
+    /// stays, the rest takes `to`'s settings from `preset` (Prunr's for
+    /// `None`).
+    pub(crate) fn take_preset_for(
+        &mut self,
+        from: super::settings::SettingsModel,
+        face: super::item_settings::FaceModel,
+        to: super::settings::SettingsModel,
+        preset: Option<&super::presets::Preset>,
+    ) {
+        self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
+        self.settings = super::presets::take_untouched_item(preset, to, self.settings, &self.preset_changes);
+        self.fit_line_mode_to(to);
+        self.preset_changes.rebase(&self.settings);
+    }
+
     pub(crate) fn adopt_settings(&mut self, settings: super::item_settings::ItemSettings, bg_image: Option<Arc<BgImage>>) {
         self.settings = settings;
         self.bg_image = bg_image;

@@ -17,8 +17,9 @@ use serde_json::{Map, Value};
 use prunr_models::ModelId;
 
 use super::brush_state::{BrushSettings, SdScheduler};
-use super::item_settings::ItemSettings;
-use super::preset_fields::{helpers_of, HELPERS};
+use super::item_settings::{FaceModel, ItemSettings};
+use super::preset_changes::Changes;
+use super::preset_fields::{entries_of, helpers_of, of_helper, HELPERS};
 use super::settings::SettingsModel;
 
 pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
@@ -47,6 +48,28 @@ fn helper_of_key(key: &str) -> Option<ModelId> {
     HELPERS.into_iter().find(|&h| model_id_key(h) == key)
 }
 
+/// Where `key`'s model sits in a list of models: the picked models in
+/// their menu order, then the helpers, then models this Prunr does not know.
+fn key_order(key: &str) -> usize {
+    let helper = || HELPERS.iter().position(|&h| model_id_key(h) == key).map(|at| SettingsModel::ALL.len() + at);
+    SettingsModel::ALL.iter().position(|&m| preset_key(m) == key).or_else(helper).unwrap_or(usize::MAX)
+}
+
+/// `key`'s model as a person reads it.
+pub(crate) fn entry_name(key: &str) -> &str {
+    if let Some(model) = model_of_key(key) {
+        return super::views::model_name(model);
+    }
+    match helper_of_key(key) {
+        Some(ModelId::Teed) => "Lines",
+        Some(ModelId::Sam21HieraSmall) => "Magic Brush",
+        Some(ModelId::FaceGfpgan) => "Faces (GFPGAN)",
+        Some(ModelId::FaceRestoreFormerPp) => "Faces (RestoreFormer++)",
+        Some(ModelId::DepthAnythingV2Small) => "Depth",
+        _ => key,
+    }
+}
+
 /// The settings of the `sd` part, by name.
 const SD_FIELDS: &[&str] = &["prompt", "negative_prompt", "use_taesd", "seed", "active_scheduler", "schedulers"];
 
@@ -64,7 +87,7 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.item_settings.is_empty() && self.brush.is_empty() && self.sd.is_empty()
     }
 }
@@ -96,18 +119,22 @@ impl PresetFile {
     /// those of their settings that differ from Prunr's. The SD part keeps
     /// the bundles of the qualities not in use. A model with nothing apart
     /// from Prunr's has no entry.
-    pub(crate) fn with_settings(mut self, model: SettingsModel, item: &ItemSettings, brush: &BrushSettings) -> Self {
-        let key = preset_key(model);
-        let mut sd = prunr_view_of(model).sd.as_ref().map(|prunr| {
-            let kept = self.models.get(&key).map_or(Map::new(), |entry| entry.sd.clone());
-            overlay(prunr.clone(), &kept)
-        });
-        if let Some(sd) = &mut sd {
-            take_sd_from_brush(sd, brush);
-        }
-        self.set(key, own_differences(model, item, brush, sd.as_ref()));
-        for helper in helpers_of(model, item.faces.model) {
-            self.set(model_id_key(helper), helper_differences(helper, item, brush));
+    pub(crate) fn with_settings(self, model: SettingsModel, item: &ItemSettings, brush: &BrushSettings) -> Self {
+        let entries: Vec<_> = entries_of(model, item.faces.model)
+            .into_iter()
+            .map(|(key, _)| {
+                let entry = entry_of(&key, &self.models, *item, brush.clone());
+                (key, entry)
+            })
+            .collect();
+        self.with_entries(entries)
+    }
+
+    /// The file with `entries` set, each replacing its model's; an empty
+    /// one removes it.
+    pub(crate) fn with_entries(mut self, entries: impl IntoIterator<Item = (String, Entry)>) -> Self {
+        for (key, entry) in entries {
+            self.set(key, entry);
         }
         self.format_version = PRESET_FORMAT_VERSION;
         self
@@ -131,7 +158,7 @@ impl PresetFile {
         let mut kept = Self { format_version: self.format_version, models: HashMap::new() };
         for (key, entry) in &self.models {
             if let Some(helper) = helper_of_key(key) {
-                let (item, brush) = helper_values(helper, entry);
+                let (item, brush) = helper_values(helper, Some(entry));
                 kept.set(key.clone(), helper_differences(helper, &item, &brush));
             } else if model_of_key(key).is_none() {
                 kept.models.insert(key.clone(), entry.clone());
@@ -177,6 +204,121 @@ fn helper_differences(helper: ModelId, item: &ItemSettings, brush: &BrushSetting
     }
 }
 
+/// `key`'s entry for the settings `item` and `brush`: those that differ
+/// from Prunr's, the SD part's other qualities kept from `entries`. A
+/// model this Prunr does not know keeps its entry in `entries`.
+fn entry_of(key: &str, entries: &HashMap<String, Entry>, item: ItemSettings, brush: BrushSettings) -> Entry {
+    if let Some(model) = model_of_key(key) {
+        let sd = own_view(model, entries).sd.map(|mut sd| {
+            take_sd_from_brush(&mut sd, &brush);
+            sd
+        });
+        own_differences(model, &item, &brush, sd.as_ref())
+    } else if let Some(helper) = helper_of_key(key) {
+        helper_differences(helper, &item, &brush)
+    } else {
+        entries.get(key).cloned().unwrap_or_default()
+    }
+}
+
+/// `key`'s settings as `entries` set them over Prunr's.
+fn values_of(key: &str, entries: &HashMap<String, Entry>) -> (ItemSettings, BrushSettings) {
+    if let Some(model) = model_of_key(key) {
+        let view = own_view(model, entries);
+        (view.item_settings, view.resolve(None).brush)
+    } else if let Some(helper) = helper_of_key(key) {
+        helper_values(helper, entries.get(key))
+    } else {
+        Default::default()
+    }
+}
+
+/// An image's settings as a save reads them, and what was changed since
+/// its preset was applied.
+pub(crate) struct Shown<'a> {
+    pub model: SettingsModel,
+    pub item: &'a ItemSettings,
+    pub brush: &'a BrushSettings,
+    pub item_changes: &'a Changes<ItemSettings>,
+    pub brush_changes: &'a Changes<BrushSettings>,
+}
+
+/// The entries a save of the shown image writes, by key, in menu order:
+/// those of the model in use and its helpers as the image shows them,
+/// then every other model's that `started` (the preset the image started
+/// from) has an entry for or that the user changed, as `started` sets
+/// them with those changes. Such an entry may be empty: that model is
+/// Prunr's again.
+pub(crate) fn draft(started: Option<&Preset>, shown: &Shown) -> Vec<(String, Entry)> {
+    let none = HashMap::new();
+    let entries = started.map_or(&none, |p| &p.file.models);
+    let in_use = entries_of(shown.model, shown.item.faces.model);
+    let item_changes = shown.item_changes.noted(shown.item, &in_use);
+    let brush_changes = shown.brush_changes.noted(shown.brush, &in_use);
+    let changed = |key: &str| item_changes.on(key).is_some() || brush_changes.on(key).is_some();
+    let mut others: Vec<&str> = entries.keys().map(String::as_str).chain(item_changes.keys()).chain(brush_changes.keys())
+        .filter(|key| !in_use.iter().any(|(used, _)| used == key))
+        .collect();
+    others.sort_by_key(|key| (key_order(key), *key));
+    others.dedup();
+    let used = in_use.iter().map(|(key, _)| {
+        let entry = entry_of(key, entries, *shown.item, shown.brush.clone());
+        (key.clone(), entry)
+    });
+    let unchanged = Map::new();
+    let rest = others.into_iter().map(|key| {
+        let (item, brush) = values_of(key, entries);
+        let item = overlay(item, item_changes.on(key).unwrap_or(&unchanged));
+        let brush = overlay(brush, brush_changes.on(key).unwrap_or(&unchanged));
+        (key.to_string(), entry_of(key, entries, item, brush))
+    });
+    used.filter(|(key, entry)| !entry.is_empty() || entries.contains_key(key) || changed(key)).chain(rest).collect()
+}
+
+/// `item` after a switch to `model`: each setting `changes` has not
+/// touched takes `model`'s value from `preset` (Prunr's for `None`), its
+/// own first, then those of the helpers it runs with the face restorer
+/// that leaves it.
+pub(crate) fn take_untouched_item(preset: Option<&Preset>, model: SettingsModel, item: ItemSettings, changes: &Changes<ItemSettings>) -> ItemSettings {
+    let none = HashMap::new();
+    let entries = preset.map_or(&none, |p| &p.file.models);
+    let own = own_view(model, entries).item_settings;
+    let mut item = take(item, &own, &super::preset_fields::of(model).item, changes);
+    for helper in helpers_of(model, item.faces.model) {
+        let (values, _) = helper_values(helper, entries.get(&model_id_key(helper)));
+        item = take(item, &values, &of_helper(helper).item, changes);
+    }
+    item
+}
+
+/// `take_untouched_item` for the brush. A quality the user picked keeps
+/// its own steps and guidance.
+pub(crate) fn take_untouched_brush(preset: Option<&Preset>, model: SettingsModel, brush: BrushSettings, changes: &Changes<BrushSettings>) -> BrushSettings {
+    let none = HashMap::new();
+    let entries = preset.map_or(&none, |p| &p.file.models);
+    let scheduler = changes.touched("sd_scheduler").then_some(brush.sd_scheduler);
+    let own = own_view(model, entries).resolve(scheduler).brush;
+    let mut brush = take(brush, &own, &super::preset_fields::of(model).brush_and_sd(), changes);
+    // A face restorer has no brush settings: which one runs does not matter.
+    for helper in helpers_of(model, FaceModel::default()) {
+        let (_, values) = helper_values(helper, entries.get(&model_id_key(helper)));
+        brush = take(brush, &values, &of_helper(helper).brush, changes);
+    }
+    brush.fit_sd_to_quality();
+    brush
+}
+
+/// `to` with `from`'s `names` that `changes` has not touched.
+fn take<T: super::preset_changes::Part>(to: T, from: &T, names: &[&str], changes: &Changes<T>) -> T {
+    let from = serde_json::to_value(from).unwrap_or_default();
+    let untouched: Map<String, Value> = names
+        .iter()
+        .filter(|name| !changes.touched(name))
+        .map(|&name| (name.to_string(), field(&from, name).cloned().unwrap_or(Value::Null)))
+        .collect();
+    overlay(to, &untouched)
+}
+
 /// A setting by its name in a file: `faces.hair` inside `faces`.
 fn field<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
     name.split('.').try_fold(value, |value, part| value.get(part))
@@ -197,7 +339,7 @@ fn set_field(value: &mut Value, name: &str, to: Value) {
 
 /// `value`'s `fields` that differ from `base`'s. A field written only
 /// when set (an `Option`) is written as null when `value` leaves it out.
-fn differing<T: Serialize>(value: &T, base: &T, fields: &[&str]) -> Map<String, Value> {
+pub(crate) fn differing<T: Serialize>(value: &T, base: &T, fields: &[&str]) -> Map<String, Value> {
     let (value, base) = (serde_json::to_value(value).unwrap_or_default(), serde_json::to_value(base).unwrap_or_default());
     fields
         .iter()
@@ -262,23 +404,33 @@ impl ModelView {
     }
 }
 
-/// `model`'s settings with `entries` (a preset's) laid over Prunr's: its
-/// own entry, then that of each helper model that runs inside it, by the
-/// face restorer it has chosen.
-fn view_of(model: SettingsModel, entries: &HashMap<String, Entry>) -> ModelView {
-    let prunr = prunr_entries();
-    let layers = |key: &str| [prunr.get(key), entries.get(key)].into_iter().flatten().collect::<Vec<_>>();
-    let own = layers(&preset_key(model));
-    let mut item = own.iter().fold(ItemSettings::default(), |item, entry| overlay(item, &entry.item_settings));
-    let mut brush = own.iter().fold(BrushSettings::default(), |brush, entry| overlay(brush, &entry.brush));
+/// `key`'s entries: Prunr's, then `entries`' (a preset's).
+fn layers<'a>(key: &str, entries: &'a HashMap<String, Entry>) -> impl Iterator<Item = &'a Entry> {
+    [prunr_entries().get(key), entries.get(key)].into_iter().flatten()
+}
+
+/// `model`'s own settings with `entries` laid over Prunr's, its helpers'
+/// left out.
+fn own_view(model: SettingsModel, entries: &HashMap<String, Entry>) -> ModelView {
+    let own: Vec<&Entry> = layers(&preset_key(model), entries).collect();
+    let item = own.iter().fold(ItemSettings::default(), |item, entry| overlay(item, &entry.item_settings));
+    let brush = own.iter().fold(BrushSettings::default(), |brush, entry| overlay(brush, &entry.brush));
     let sd = own.first().is_some_and(|entry| !entry.sd.is_empty()).then(|| own.iter().fold(SdPreset::default(), |sd, entry| overlay(sd, &entry.sd)));
-    for helper in helpers_of(model, item.faces.model) {
-        for entry in layers(&model_id_key(helper)) {
-            item = overlay(item, &entry.item_settings);
-            brush = overlay(brush, &entry.brush);
+    ModelView { item_settings: item, brush, sd }
+}
+
+/// `model`'s settings with `entries` laid over Prunr's: its own entry,
+/// then that of each helper model that runs inside it, by the face
+/// restorer it has chosen.
+fn view_of(model: SettingsModel, entries: &HashMap<String, Entry>) -> ModelView {
+    let mut view = own_view(model, entries);
+    for helper in helpers_of(model, view.item_settings.faces.model) {
+        for entry in layers(&model_id_key(helper), entries) {
+            view.item_settings = overlay(view.item_settings, &entry.item_settings);
+            view.brush = overlay(view.brush, &entry.brush);
         }
     }
-    ModelView { item_settings: item, brush, sd }
+    view
 }
 
 #[derive(Debug, Deserialize)]
@@ -311,16 +463,15 @@ fn prunr_view_of(model: SettingsModel) -> &'static ModelView {
 
 /// Prunr's settings for a helper model, over the code's defaults.
 fn prunr_helper(helper: ModelId) -> (ItemSettings, BrushSettings) {
-    helper_values(helper, &Entry::default())
+    helper_values(helper, None)
 }
 
 /// A helper model's settings from `entry` over Prunr's.
-fn helper_values(helper: ModelId, entry: &Entry) -> (ItemSettings, BrushSettings) {
-    let empty = Entry::default();
-    let prunr = prunr_entries().get(&model_id_key(helper)).unwrap_or(&empty);
-    let item = overlay(overlay(ItemSettings::default(), &prunr.item_settings), &entry.item_settings);
-    let brush = overlay(overlay(BrushSettings::default(), &prunr.brush), &entry.brush);
-    (item, brush)
+fn helper_values(helper: ModelId, entry: Option<&Entry>) -> (ItemSettings, BrushSettings) {
+    let own = [prunr_entries().get(&model_id_key(helper)), entry].into_iter().flatten();
+    own.fold((ItemSettings::default(), BrushSettings::default()), |(item, brush), entry| {
+        (overlay(item, &entry.item_settings), overlay(brush, &entry.brush))
+    })
 }
 
 /// Prunr's settings for `model`, resolved for `scheduler` (`None`: its
@@ -342,18 +493,28 @@ pub(crate) struct Preset {
     file: PresetFile,
     /// Per model in `SettingsModel::ALL` order.
     views: Vec<ModelView>,
+    /// The models it has settings for, as the preset list names them.
+    covers: String,
 }
 
 impl From<PresetFile> for Preset {
     fn from(file: PresetFile) -> Self {
         let views = SettingsModel::ALL.into_iter().map(|model| view_of(model, &file.models)).collect();
-        Self { file, views }
+        let mut keys: Vec<&str> = file.models.keys().map(String::as_str).collect();
+        keys.sort_by_key(|key| (key_order(key), *key));
+        let covers = keys.into_iter().map(entry_name).collect::<Vec<_>>().join(" \u{b7} ");
+        Self { file, views, covers }
     }
 }
 
 impl Preset {
     pub(crate) fn file(&self) -> &PresetFile {
         &self.file
+    }
+
+    /// The models it has settings for: "BiRefNet · Lines".
+    pub(crate) fn covers(&self) -> &str {
+        &self.covers
     }
 
     /// The preset's settings for `model`, Prunr's where it has none.
@@ -565,6 +726,120 @@ mod tests {
         let restoreformer = Preset::from(file(r#"{ "format_version": 2, "models": { "Nomos8kSchatL": { "item_settings": { "faces.model": "RestoreFormerPp" } } } }"#));
         let faces = restoreformer.item_settings(SettingsModel::Nomos8kUpscale).faces;
         assert_eq!((faces.model, faces.strength_pct), (FaceModel::RestoreFormerPp, 50), "RestoreFormer++'s own strength, not GFPGAN's");
+    }
+
+    /// A switch keeps what was changed and takes the rest of the new
+    /// model's settings from the preset, Prunr's where it has none.
+    #[test]
+    fn a_switch_keeps_the_changes_and_takes_the_rest_from_the_preset() {
+        use super::super::preset_fields::entries_of;
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": {
+            "BiRefNetLite": { "item_settings": { "gamma": 1.2, "feather": 2.0 } },
+            "Silueta": { "item_settings": { "gamma": 0.8 } }
+        } }"#));
+        let (birefnet, silueta) = (SettingsModel::BiRefNetLite, SettingsModel::Silueta);
+        let mut item = preset.item_settings(birefnet);
+        let mut changes = Changes::new(item);
+        item.contrast = 1.3;
+        changes.note(&item, &entries_of(birefnet, item.faces.model));
+        let item = take_untouched_item(Some(&preset), silueta, item, &changes);
+        assert_eq!(item.gamma, 0.8, "Silueta's own from the preset");
+        assert_eq!(item.feather, prunr_item_settings(silueta).feather, "Prunr's where the preset has none for Silueta");
+        assert_eq!(item.contrast, 1.3, "the change stays");
+    }
+
+    /// Picking the other face restorer takes its own settings from the
+    /// preset; what was changed stays.
+    #[test]
+    fn another_face_restorer_takes_its_own_settings() {
+        use super::super::preset_fields::entries_of;
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": {
+            "FaceRestoreFormerPp": { "item_settings": { "faces.strength_pct": 35 } }
+        } }"#));
+        let model = SettingsModel::BiRefNetLite;
+        let mut item = preset.item_settings(model);
+        let mut changes = Changes::new(item);
+        let hair = !item.faces.hair;
+        item.faces.hair = hair;
+        item.faces.model = FaceModel::RestoreFormerPp;
+        changes.note(&item, &entries_of(model, FaceModel::Gfpgan));
+        let item = take_untouched_item(Some(&preset), model, item, &changes);
+        assert_eq!((item.faces.model, item.faces.strength_pct), (FaceModel::RestoreFormerPp, 35));
+        assert_eq!(item.faces.hair, hair, "a change stays");
+    }
+
+    fn shown_save(started: Option<&Preset>, model: SettingsModel, item: &ItemSettings, item_changes: &Changes<ItemSettings>) -> Vec<(String, Entry)> {
+        let brush = prunr_view(model, None).brush;
+        let brush_changes = Changes::new(brush.clone());
+        draft(started, &Shown { model, item, brush: &brush, item_changes, brush_changes: &brush_changes })
+    }
+
+    /// A save writes the model in use as the image shows it, every model
+    /// left before with the changes made on it, and the started preset's
+    /// other models as it has them.
+    #[test]
+    fn a_save_writes_each_change_under_its_own_model() {
+        use super::super::preset_fields::entries_of;
+        let (birefnet, silueta, nomos2) = (SettingsModel::BiRefNetLite, SettingsModel::Silueta, SettingsModel::Nomos2Upscale);
+        let sharper = ItemSettings { sharpen: 0.4, ..prunr_item_settings(nomos2) };
+        let started = Preset::from(PresetFile::default().with_settings(nomos2, &sharper, &prunr_view(nomos2, None).brush));
+        let mut item = started.item_settings(birefnet);
+        let mut changes = Changes::new(item);
+        item.gamma = 1.4;
+        changes.note(&item, &entries_of(birefnet, item.faces.model));
+        let mut item = take_untouched_item(Some(&started), silueta, item, &changes);
+        changes.rebase(&item);
+        item.contrast = 1.3;
+
+        let saved = shown_save(Some(&started), silueta, &item, &changes);
+        let keys: Vec<&str> = saved.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, [preset_key(silueta), preset_key(birefnet), preset_key(nomos2)], "the model in use first, then menu order");
+        let own = |at: usize| saved[at].1.item_settings.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(own(0), ["contrast", "gamma"], "Silueta as shown");
+        assert_eq!(own(1), ["gamma"], "BiRefNet with what was changed on it");
+        assert_eq!(saved[2].1, started.file().models[&preset_key(nomos2)], "the started preset's other model");
+    }
+
+    /// A model the started preset has an entry for, set back to Prunr's
+    /// settings, is listed with an empty entry: saving it takes the entry
+    /// out.
+    #[test]
+    fn a_model_set_back_to_prunrs_leaves_the_preset() {
+        let birefnet = SettingsModel::BiRefNetLite;
+        let started = Preset::from(file(r#"{ "format_version": 2, "models": { "BiRefNetLite": { "item_settings": { "gamma": 1.2 } } } }"#));
+        let item = prunr_item_settings(birefnet);
+        let saved = shown_save(Some(&started), birefnet, &item, &Changes::new(started.item_settings(birefnet)));
+        assert_eq!(saved, [(preset_key(birefnet), Entry::default())]);
+        assert!(started.file().clone().with_entries(saved).models.is_empty());
+    }
+
+    /// The SD eraser's prompt changed before a switch is saved in its
+    /// own entry's SD part.
+    #[test]
+    fn the_sd_erasers_changes_are_saved_after_a_switch() {
+        use super::super::preset_fields::entries_of;
+        let (sd, lama) = (SettingsModel::SdInpaint, SettingsModel::Inpaint);
+        let mut brush = prunr_view(sd, None).brush;
+        let mut brush_changes = Changes::new(brush.clone());
+        brush.sd_prompt = "a meadow".into();
+        brush_changes.note(&brush, &entries_of(sd, FaceModel::default()));
+        let brush = take_untouched_brush(None, lama, brush, &brush_changes);
+        let item = prunr_item_settings(lama);
+        let item_changes = Changes::new(item);
+        let saved = draft(None, &Shown { model: lama, item: &item, brush: &brush, item_changes: &item_changes, brush_changes: &brush_changes });
+        let sd_entry = saved.iter().find(|(key, _)| *key == preset_key(sd)).map(|(_, entry)| entry);
+        assert_eq!(sd_entry.map(|e| &e.sd["prompt"]), Some(&serde_json::json!("a meadow")));
+    }
+
+    /// The preset list names a preset's models in menu order.
+    #[test]
+    fn a_preset_names_its_models_in_menu_order() {
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": {
+            "Teed": { "item_settings": { "line_strength": 0.5 } },
+            "BiRefNetLite": { "item_settings": { "gamma": 1.2 } },
+            "Silueta": { "item_settings": { "gamma": 0.8 } }
+        } }"#));
+        assert_eq!(preset.covers(), "Silueta \u{b7} BiRefNet \u{b7} Lines");
     }
 
     /// A file from before helper models had entries keeps its line and face

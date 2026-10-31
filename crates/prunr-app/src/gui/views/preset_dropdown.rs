@@ -7,6 +7,8 @@ use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
+use crate::gui::preset_changes::Changes;
+use crate::gui::presets::{draft, entry_name, Entry, Shown};
 use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 use crate::gui::views::chip::{button, ButtonKind};
@@ -48,14 +50,46 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
 }
 
 const SAVE_DIALOG_ID: &str = "preset_save_dialog";
-const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 380.0];
+const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 500.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
+const MODEL_LIST_HEIGHT: f32 = 110.0;
 
-/// The preset state the toolbar edits: the item's applied preset name
-/// and the Save-preset dialog (`Some(name field)` while it is up).
+/// The preset state the toolbar edits: the item's applied preset name,
+/// what was changed since, and the Save-preset dialog.
 pub(crate) struct PresetUi<'a> {
     pub applied: &'a mut String,
-    pub save_dialog: &'a mut Option<String>,
+    pub changes: &'a Changes<ItemSettings>,
+    pub save_dialog: &'a mut Option<SaveDialog>,
+}
+
+/// The Save-preset dialog while it is up: the name typed, and the models
+/// the save writes, each with its entry and whether it is ticked.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SaveDialog {
+    pub name: String,
+    pub models: Vec<ModelRow>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRow {
+    pub key: String,
+    pub entry: Entry,
+    pub ticked: bool,
+}
+
+impl SaveDialog {
+    /// The dialog for the shown image: every model whose settings it
+    /// would save, ticked.
+    fn of(settings: &Settings, item: &ItemSettings, applied: &str, changes: &Changes<ItemSettings>) -> Self {
+        let shown = Shown { model: settings.model, item, brush: &settings.brush, item_changes: changes, brush_changes: &settings.brush_changes };
+        let models = draft(settings.preset(applied), &shown).into_iter().map(|(key, entry)| ModelRow { key, entry, ticked: true }).collect();
+        Self { name: String::new(), models }
+    }
+
+    /// The ticked models' entries.
+    fn ticked(&self) -> impl Iterator<Item = (String, Entry)> + '_ {
+        self.models.iter().filter(|row| row.ticked).map(|row| (row.key.clone(), row.entry.clone()))
+    }
 }
 
 /// Render the Preset dropdown. Returns `Some(name)` when the user applied a
@@ -100,8 +134,7 @@ pub(crate) fn render(
             ui.set_min_width(theme::POPOVER_WIDTH);
             crate::gui::views::chip::popover_header(ui, "Presets", None);
 
-            // Prunr is synthetic: it applies ItemSettings::default() and
-            // cannot be deleted or overwritten.
+            // Prunr's is built in: it cannot be deleted or overwritten.
             for name in all_preset_names(settings) {
                 let is_prunr = name == PRUNR_PRESET;
                 let is_default = settings.default_preset == name;
@@ -163,6 +196,9 @@ pub(crate) fn render(
                         },
                     );
                 });
+                if let Some(covers) = settings.presets.get(&name).map(|p| p.covers()).filter(|c| !c.is_empty()) {
+                    ui.label(RichText::new(covers).color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                }
             }
 
             ui.add_space(theme::SPACE_SM);
@@ -171,7 +207,7 @@ pub(crate) fn render(
 
             let save_label = format!("{}  Save current as…", ICON_BOOKMARK_ADD.codepoint);
             if button(ui, ButtonKind::Secondary, &save_label).clicked() {
-                *presets.save_dialog = Some(String::new());
+                *presets.save_dialog = Some(SaveDialog::of(settings, current_item, presets.applied, presets.changes));
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }
 
@@ -184,7 +220,8 @@ pub(crate) fn render(
         },
     );
 
-    if let Some(name_buf) = presets.save_dialog.as_mut() {
+    if let Some(dialog) = presets.save_dialog.as_mut() {
+        let SaveDialog { name: name_buf, models } = dialog;
         let mut commit = false;
         let mut cancel = false;
         let mut overwrite_target: Option<String> = None;
@@ -219,6 +256,18 @@ pub(crate) fn render(
                 }
 
                 ui.add_space(theme::SPACE_SM);
+                if models.is_empty() {
+                    ui.label(RichText::new("Nothing differs from Prunr's settings.").color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                } else {
+                    ui.label(RichText::new("Saves the settings of:").color(theme::TEXT_PRIMARY).size(theme::FONT_SIZE_SECONDARY));
+                    egui::ScrollArea::vertical().id_salt("save_models").max_height(MODEL_LIST_HEIGHT).show(ui, |ui| {
+                        for row in models.iter_mut() {
+                            ui.checkbox(&mut row.ticked, entry_name(&row.key));
+                        }
+                    });
+                }
+
+                ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled_ui(refusal.is_none(), |ui| button(ui, ButtonKind::Primary, "Save"))
@@ -242,7 +291,7 @@ pub(crate) fn render(
                             .size(theme::FONT_SIZE_SECONDARY),
                     );
                     ui.add_space(theme::SPACE_XS);
-                    egui::ScrollArea::vertical().max_height(OVERWRITE_LIST_HEIGHT).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("overwrite_presets").max_height(OVERWRITE_LIST_HEIGHT).show(ui, |ui| {
                         for name in &existing_names {
                             let label = format!("{}  {name}", ICON_BOOKMARK.codepoint);
                             let btn = button(ui, ButtonKind::Secondary, &label);
@@ -264,11 +313,11 @@ pub(crate) fn render(
                 .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
         });
         if let Some(name) = target_name {
-            // An overwrite merges into the preset as loaded, so other models'
-            // entries and other qualities' bundles stay; the store keeps what
-            // is written, for the preset button's mark.
+            // An overwrite merges into the preset as loaded: the models not
+            // ticked keep their entries. The store keeps what is written,
+            // for the preset button's mark.
             let base = settings.presets.get(&name).filter(|_| is_overwrite).map_or_else(Default::default, |p| p.file().clone());
-            let file = base.with_settings(settings.model, current_item, &settings.brush);
+            let file = base.with_entries(dialog.ticked());
             crate::gui::presets_fs::queue_save(&name, &file);
             settings.presets.insert(name.clone(), file.into());
 

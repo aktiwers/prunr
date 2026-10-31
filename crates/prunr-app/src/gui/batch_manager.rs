@@ -708,11 +708,18 @@ impl BatchManager {
     /// so Subject lines draw over the whole photo, the nearest mode that
     /// still has lines.
     pub fn fit_line_modes_to(&mut self, model: super::settings::SettingsModel) {
-        if model.uses_segmentation() {
-            return;
+        for item in &mut self.items {
+            item.fit_line_mode_to(model);
         }
-        for item in self.items.iter_mut().filter(|i| i.settings.line_mode == prunr_core::LineMode::SubjectOutline) {
-            item.settings.line_mode = prunr_core::LineMode::EdgesOnly;
+    }
+
+    /// A switch from model `from` to the one in `settings`: every image
+    /// keeps the settings it changed and takes the rest from its preset.
+    pub fn switch_model(&mut self, from: super::settings::SettingsModel, settings: &super::settings::Settings) {
+        for item in &mut self.items {
+            let face = item.settings.faces.model;
+            let preset = settings.preset(&item.applied_preset);
+            item.take_preset_for(from, face, settings.model, preset);
         }
     }
 }
