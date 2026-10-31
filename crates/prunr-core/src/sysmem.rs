@@ -15,7 +15,7 @@ fn with_system<T>(f: impl FnOnce(&mut sysinfo::System) -> T) -> T {
 /// The memory free to take, as the system reports it available; `None`
 /// when it reports no memory at all.
 pub fn available_ram_bytes() -> Option<u64> {
-    let (available, total, _) = memory_now();
+    let (available, total, _) = memory_now(false);
     reported_available(available, total)
 }
 
@@ -25,7 +25,7 @@ pub fn available_ram_bytes() -> Option<u64> {
 /// there serves them; a model's weights, read every step, are held to RAM
 /// by the model checks instead.
 pub fn room_for_buffers_bytes() -> Option<u64> {
-    let (available, total, free_swap) = memory_now();
+    let (available, total, free_swap) = memory_now(true);
     // macOS compresses memory and makes swap files as it needs them, so
     // the free swap it reports (part of one file at rest) says nothing of
     // the room: a 294 MP Refine needing 13.1 GB was refused on an idle
@@ -37,11 +37,15 @@ pub fn room_for_buffers_bytes() -> Option<u64> {
     reported_available(available, total).map(|available| available + free_swap)
 }
 
-/// Available memory, total memory and free swap, from one reading.
-fn memory_now() -> (u64, u64, u64) {
+/// Available memory, total memory and, with `swap`, free swap (else 0),
+/// from one reading. Swap is read only when asked: on Windows it walks
+/// the process table, and the run watchdogs read memory several times a
+/// second.
+fn memory_now(swap: bool) -> (u64, u64, u64) {
     with_system(|sys| {
-        sys.refresh_memory();
-        (available_of(sys), sys.total_memory(), sys.free_swap())
+        let ram = sysinfo::MemoryRefreshKind::nothing().with_ram();
+        sys.refresh_memory_specifics(if swap { ram.with_swap() } else { ram });
+        (available_of(sys), sys.total_memory(), if swap { sys.free_swap() } else { 0 })
     })
 }
 
@@ -94,7 +98,7 @@ fn reported_available(available: u64, total: u64) -> Option<u64> {
 /// The system's memory; `None` when it doesn't report it.
 pub fn total_ram_bytes() -> Option<u64> {
     let total = with_system(|sys| {
-        sys.refresh_memory();
+        sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
         sys.total_memory()
     });
     (total > 0).then_some(total)
@@ -114,19 +118,17 @@ pub fn return_freed_memory() {
     }
 }
 
-/// Current process RSS in MB; `None` when sysinfo can't read the process.
+/// Current process RSS in MB; `None` when it cannot be read.
 pub fn process_rss_mb() -> Option<u64> {
-    rss_mb(sysinfo::get_current_pid().ok()?)
+    rss_mb_of(std::process::id())
 }
 
 /// Process `pid`'s RSS in MB; `None` when it cannot be read.
 pub fn rss_mb_of(pid: u32) -> Option<u64> {
-    rss_mb(sysinfo::Pid::from_u32(pid))
-}
-
-fn rss_mb(pid: sysinfo::Pid) -> Option<u64> {
+    let pid = sysinfo::Pid::from_u32(pid);
     with_system(|sys| {
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        let memory = sysinfo::ProcessRefreshKind::nothing().with_memory();
+        sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, memory);
         sys.process(pid).map(|p| p.memory() / (1024 * 1024))
     })
 }

@@ -219,6 +219,14 @@ pub fn available_ram_bytes_throttled() -> u64 {
     throttled(&CACHE, available_ram_bytes_now)
 }
 
+/// Free RAM for the run watchdogs, read at most every quarter second: a
+/// model can take gigabytes within a second. `None` when the system
+/// reports no memory.
+pub fn watchdog_free_ram_bytes() -> Option<u64> {
+    static CACHE: Reading<Option<u64>> = Mutex::new(None);
+    throttled_for(&CACHE, std::time::Duration::from_millis(250), prunr_core::sysmem::available_ram_bytes)
+}
+
 /// Free memory on CUDA's card in MB, read at most once a second;
 /// `None` with no NVIDIA driver.
 pub fn cuda_card_free_mb_throttled() -> Option<u64> {
@@ -258,10 +266,15 @@ type Reading<T> = Mutex<Option<(std::time::Instant, T)>>;
 
 /// `cache`'s reading while under a second old, else `read` afresh.
 fn throttled<T: Copy>(cache: &Reading<T>, read: impl FnOnce() -> T) -> T {
+    throttled_for(cache, std::time::Duration::from_secs(1), read)
+}
+
+/// `cache`'s reading while under `max_age` old, else `read` afresh.
+fn throttled_for<T: Copy>(cache: &Reading<T>, max_age: std::time::Duration, read: impl FnOnce() -> T) -> T {
     let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = std::time::Instant::now();
     match *guard {
-        Some((at, value)) if now.duration_since(at) < std::time::Duration::from_secs(1) => value,
+        Some((at, value)) if now.duration_since(at) < max_age => value,
         _ => {
             let value = read();
             *guard = Some((now, value));

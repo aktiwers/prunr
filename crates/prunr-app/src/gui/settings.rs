@@ -114,7 +114,8 @@ pub struct Settings {
 /// of the model's need.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SdMemoryGuard {
-    /// About 1 GB: fits SD on a tight machine; other apps may be squeezed.
+    /// The reserve every model run keeps (1.5 GB): fits SD on a tight
+    /// machine.
     Relaxed,
     #[default]
     Balanced,
@@ -126,7 +127,7 @@ impl SdMemoryGuard {
     pub fn margin_mb(self) -> u64 {
         let balanced = prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB;
         match self {
-            Self::Relaxed => balanced / 2,
+            Self::Relaxed => prunr_core::memory::RAM_RESERVE_MB,
             Self::Balanced => balanced,
             Self::Strict => balanced * 2,
         }
@@ -689,6 +690,11 @@ impl SettingsModel {
         self.uses_segmentation().then(|| self.dispatch_model_kind()).flatten()
     }
 
+    /// The cut-out model that runs `kind`, the inverse of `to_model_kind`.
+    pub fn of_kind(kind: ModelKind) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.to_model_kind() == Some(kind))
+    }
+
     /// Any registered model's kind; `None` only for `Self::None`.
     pub fn dispatch_model_kind(self) -> Option<ModelKind> {
         self.to_model_id().and_then(|id| ModelKind::try_from(id).ok())
@@ -1026,6 +1032,15 @@ mod tests {
             assert_eq!(s.sd_memory, guard, "{gb} GB");
         }
         assert_eq!(SdMemoryGuard::Balanced.margin_mb(), prunr_core::inpaint_sd::SD_DEFAULT_MARGIN_MB);
+    }
+
+    /// The eraser never keeps less free than every other model run, and
+    /// each guard keeps more than the last.
+    #[test]
+    fn the_erasers_memory_guard_keeps_at_least_the_reserve() {
+        let [relaxed, balanced, strict] = [SdMemoryGuard::Relaxed, SdMemoryGuard::Balanced, SdMemoryGuard::Strict].map(SdMemoryGuard::margin_mb);
+        assert_eq!(relaxed, prunr_core::memory::RAM_RESERVE_MB);
+        assert!(relaxed < balanced && balanced < strict);
     }
 
     /// Under "CPU only" every reader of the backend (status bar, the

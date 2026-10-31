@@ -610,6 +610,7 @@ impl PrunrApp {
                 }
                 WorkerResult::BatchComplete { batch } => self.on_batch_complete(batch),
                 WorkerResult::Cancelled { batch } => self.on_cancelled(batch),
+                WorkerResult::BatchRefused { batch, why } => self.on_batch_refused(batch, why),
                 WorkerResult::SubprocessRetry { reduced_jobs, re_queued_count } => {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
@@ -878,13 +879,28 @@ impl PrunrApp {
     /// The worker stopped batch `batch` for a Cancel. Only that batch
     /// ends: its word can come after the next Process started another.
     fn on_cancelled(&mut self, batch: u64) {
+        self.drop_batch(batch);
+        if !self.batch.any_awaiting_cut() {
+            self.status.text = "Cancelled".to_string();
+        }
+    }
+
+    /// The worker refused batch `batch` for memory before it ran: its
+    /// images go back to what they showed, and why shows once.
+    fn on_batch_refused(&mut self, batch: u64, why: String) {
+        self.drop_batch(batch);
+        let why = prunr_core::plain::reason(why);
+        self.status.text = why.clone();
+        self.toasts.error(why);
+    }
+
+    /// Every image batch `batch` still held, sent or waiting for room,
+    /// stops waiting on it.
+    fn drop_batch(&mut self, batch: u64) {
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
             item.abandon_job();
-        }
-        if !self.batch.any_awaiting_cut() {
-            self.status.text = "Cancelled".to_string();
         }
     }
 
@@ -2285,6 +2301,34 @@ mod timeline_contract_tests {
         app.on_batch_item_done(&ctx, batch, 1, Ok(answer), None, None);
         assert_eq!(rx.try_recv().map(|w| w.id), Ok(2), "1's share lets 2 in");
         assert!(app.batch.items[1].is_cutting(), "sent, 2 runs");
+    }
+
+    /// A batch refused for memory gives back every image it held, the one
+    /// sent and the one waiting for room, and says why once, not that the
+    /// worker lost them.
+    #[test]
+    fn a_batch_refused_for_memory_gives_its_images_back() {
+        use crate::gui::item::Engine;
+        use crate::gui::memory::{AdmissionController, ImageMemCost};
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        for id in [1, 2] {
+            push_test_item(&mut app, id).start_job(Some(StepKind::Process), Engine::Segment);
+        }
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([(1, 1), (2, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
+        let (batch_items, action) = (&mut app.batch, app.settings.brush.cutout_action);
+        let (_first, _rx) = app.processor.open_admission(ctrl, |id| batch_items.find_by_id_mut(id).map(|item| item.full_run_work(action)));
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+        let batch = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
+        app.processor.admission_feeds(batch);
+
+        let why = "BiRefNet needs about 7.5 GB of free memory. Close other apps.";
+        app.on_batch_refused(batch, why.to_string());
+        assert!(app.batch.items.iter().all(|i| !i.awaits_cut()), "both images are given back");
+        assert!(!app.processor.admission_fed(batch), "nothing waits for room");
+        assert_eq!(app.toasts.last_for_test(), Some(("error", why)));
+        assert_eq!(app.status.text, why);
     }
 
     /// A stroke on a cut-out with lines on the subject traces them again:

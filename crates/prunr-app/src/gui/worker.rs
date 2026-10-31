@@ -443,6 +443,9 @@ pub enum WorkerResult {
     BatchComplete { batch: u64 },
     /// Batch `batch` stopped for a Cancel.
     Cancelled { batch: u64 },
+    /// Batch `batch` was refused before it ran: its engines do not fit the
+    /// free memory. `why` says so to the user.
+    BatchRefused { batch: u64, why: String },
     SubprocessRetry {
         reduced_jobs: usize,
         re_queued_count: usize,
@@ -824,8 +827,7 @@ fn spawn_and_initial_burst(
     let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
     if let Err(why) = engines_fit(state, warm.as_ref().map(|(sub, _)| sub), effective_jobs) {
-        emit_pending_errors(state, &why, res_tx);
-        let _ = res_tx.send(state.complete_event());
+        let _ = res_tx.send(WorkerResult::BatchRefused { batch: state.batch, why });
         ctx.request_repaint();
         return None;
     }
@@ -857,38 +859,24 @@ fn spawn_and_initial_burst(
 }
 
 /// Whether the batch's cut-out engines fit what is free now with the
-/// reserve kept, a warm worker's memory counted as its own; `Err`: what
-/// the images it refuses tell the user. Only full runs need the engines.
+/// reserve kept, a warm worker's memory counted as its own; `Err`: why
+/// the batch is refused. Only full runs need the engines.
 fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<(), String> {
+    use super::settings::SettingsModel;
     if state.pending.is_empty() {
         return Ok(());
     }
     let EngineSpec { model, cpu_only, .. } = state.config.engines;
     let shown = state.config.first_look.get();
     let first_look = state.pending.iter().any(|item| Some(item.id) == shown);
-    let held_mb = warm.map_or(0, SubprocessManager::resident_mb);
-    super::memory::cutout_fits(model, jobs, cpu_only, first_look, held_mb).map_err(|short| {
-        tracing::warn!(?model, jobs, held_mb, %short, "cut-out refused: not enough memory");
-        memory_refusal(model, cpu_only, short)
+    let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode: state.config.run.line_mode };
+    let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
+    engines.fit(held_mb).map_err(|short| {
+        tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
+        let lighter: Vec<String> = engines.lighter_that_fit().into_iter().map(|m| super::views::model_name(m).to_string()).collect();
+        let subject = SettingsModel::of_kind(model).map_or("This model", super::views::model_name);
+        super::memory::refusal_text(subject, short, &lighter, |models| format!("pick {models} in the model list"))
     })
-}
-
-/// A cut-out refused for memory: what it needs, and the lighter cut-out
-/// models that fit now.
-fn memory_refusal(model: ModelKind, cpu_only: bool, short: prunr_core::memory::Short) -> String {
-    let name = |kind| {
-        super::settings::SettingsModel::ALL
-            .into_iter()
-            .find(|m| m.to_model_kind() == Some(kind))
-            .map_or("This model", super::views::model_name)
-    };
-    let lighter: Vec<&str> = super::memory::lighter_cutouts_that_fit(model, cpu_only).into_iter().map(name).collect();
-    refusal_text(name(model), short, &lighter)
-}
-
-fn refusal_text(model: &str, short: prunr_core::memory::Short, lighter: &[&str]) -> String {
-    let instead = if lighter.is_empty() { String::new() } else { format!(", or pick {} in the model list", lighter.join(" or ")) };
-    format!("{model} {short}. Close other apps{instead}.")
 }
 
 /// Give the worker the batch's run settings and the image on screen whose
@@ -941,9 +929,8 @@ fn run_event_loop(
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::Unresponsive);
         }
 
-        if crate::subprocess::batch_rules::stops_for_memory(sent.len(), prunr_core::sysmem::available_ram_bytes) {
-            sub.kill();
-            tracing::warn!(in_flight = sent.len(), "free memory ran low; worker stopped");
+        if let Some(free) = crate::subprocess::batch_rules::low_free_memory(sent.len(), crate::hardware::watchdog_free_ram_bytes) {
+            tracing::warn!(in_flight = sent.len(), free_mb = free / (1024 * 1024), "free memory ran low; worker stopped");
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::MemoryLow);
         }
 
@@ -1384,6 +1371,11 @@ fn spawn_warm(
 ) -> Option<WarmWorker> {
     let started = Instant::now();
     let neutral = RunSettings::neutral();
+    let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode };
+    if let Err(short) = engines.fit(0) {
+        tracing::info!(?engines, %short, "pre-warm skipped: not enough memory");
+        return None;
+    }
     let lines = WorkerLines::app(neutral.line_mode, neutral.edge);
     match SubprocessManager::spawn(spec.model, spec.jobs, neutral.mask, spec.cpu_only, lines) {
         Ok((sub, provider)) => {
@@ -1673,21 +1665,4 @@ mod tests {
         assert!(super::crash_message(&Crash::Unresponsive).starts_with("The model stopped responding"));
         assert!(super::crash_message(&Crash::Other("exited with code 3".into())).starts_with("The model stopped unexpectedly"));
     }
-
-    /// A cut-out refused for memory says what it needs, what Prunr keeps
-    /// free and what is free, and names the lighter models that fit; the
-    /// toast shows it as written.
-    #[test]
-    fn a_refusal_for_memory_says_what_to_do() {
-        let short = prunr_core::memory::Short::Ram { need_mb: 7_700, kept_mb: prunr_core::memory::RAM_RESERVE_MB, free_mb: 7_881 };
-        let text = super::refusal_text("BiRefNet", short, &["Silueta", "U2Net"]);
-        assert_eq!(
-            text,
-            "BiRefNet needs about 7.5 GB of free memory, and Prunr keeps 1.5 GB free for your other apps; 7.7 GB is free. \
-             Close other apps, or pick Silueta or U2Net in the model list.",
-        );
-        assert_eq!(prunr_core::plain::error(&text), text);
-        assert!(super::refusal_text("Silueta", short, &[]).ends_with("7.7 GB is free. Close other apps."));
-    }
-
 }

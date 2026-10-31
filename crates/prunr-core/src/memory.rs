@@ -71,7 +71,7 @@ impl std::fmt::Display for Short {
 
 /// `mb` as a person reads it: whole MB below a gigabyte, else GB to one
 /// decimal.
-fn size(mb: u64) -> String {
+pub(crate) fn size(mb: u64) -> String {
     if mb < 1024 { format!("{mb} MB") } else { format!("{:.1} GB", mb as f64 / 1024.0) }
 }
 
@@ -85,6 +85,14 @@ pub const CARD_RESERVE_MB: u64 = if cfg!(windows) { 600 } else { 400 };
 /// once they are pushed out: a 7.1 GB cut-out started with 7.9 GB free
 /// froze a desktop for six minutes.
 pub const RAM_RESERVE_MB: u64 = 1536;
+
+/// Free system RAM below which a run in a worker is stopped. 1 GB sits
+/// below Linux's aggressive-reclaim band and above macOS's
+/// memory-pressure warning, so the worker goes before the desktop
+/// thrashes. Under `RAM_RESERVE_MB`, so a run that started within its
+/// figure is never stopped.
+pub const STOP_BELOW_FREE_MB: u64 = 1024;
+const _: () = assert!(RAM_RESERVE_MB > STOP_BELOW_FREE_MB);
 
 /// Whether `charge` fits `room` with `RAM_RESERVE_MB` left free: the card
 /// first (it is the smaller), then system RAM.
@@ -329,9 +337,8 @@ mod tests {
         assert_eq!(falls_to_cpu(None, Some((cpu, ram(0)))), Ok(false), "no reading: trusted");
     }
 
-    /// The cut-out that froze a desktop: BiRefNet-lite on the CPU took
-    /// 7.1 GB with 7.9 GB free, leaving the open apps 0.8 GB. It is
-    /// refused until the reserve is free beside its need.
+    /// BiRefNet-lite on the CPU with 7.9 GB free is refused; it runs once
+    /// the reserve is free beside its need.
     #[test]
     fn a_run_leaves_room_for_the_other_apps() {
         let birefnet = charge_on(ModelId::BiRefNetLite, "CPU").expect("registered");

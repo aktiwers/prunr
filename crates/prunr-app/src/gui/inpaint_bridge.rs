@@ -131,10 +131,9 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         // the pre-flight gate can't see; only once Ready, since a spawning
         // worker has loaded nothing yet.
         if matches!(sub_state, SubState::Ready(_)) {
-            let mut free = None;
-            if crate::subprocess::batch_rules::stops_for_memory(strokes.len(), || { free = prunr_core::sysmem::available_ram_bytes(); free }) {
+            if let Some(free) = crate::subprocess::batch_rules::low_free_memory(strokes.len(), crate::hardware::watchdog_free_ram_bytes) {
                 tracing::warn!(
-                    free_mb = free.unwrap_or_default() / (1024 * 1024),
+                    free_mb = free / (1024 * 1024),
                     in_flight = strokes.len(),
                     "memory-pressure abort: killing inpaint subprocess",
                 );

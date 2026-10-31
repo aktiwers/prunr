@@ -384,14 +384,10 @@ pub enum CliModel {
 }
 
 impl CliModel {
-    /// The `--model` value that runs `kind`, when one does.
-    fn of(kind: prunr_core::ModelKind) -> Option<Self> {
-        Self::value_variants().iter().copied().find(|m| prunr_core::ModelKind::from(*m) == kind)
-    }
-
-    /// As typed after `--model`.
-    fn flag_value(self) -> String {
-        self.to_possible_value().map(|v| v.get_name().to_string()).unwrap_or_default()
+    /// `--model <value>` for the value that runs `kind`, when one does.
+    fn flag_for(kind: prunr_core::ModelKind) -> Option<String> {
+        let model = Self::value_variants().iter().find(|m| prunr_core::ModelKind::from(**m) == kind)?;
+        model.to_possible_value().map(|v| format!("--model {}", v.get_name()))
     }
 }
 
@@ -1278,7 +1274,7 @@ fn run_batch_subprocess(
     quiet: bool,
     land: &mut dyn FnMut(usize, Result<prunr_core::ProcessResult, CoreError>),
 ) {
-    use prunr_app::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, stops_for_memory, OnCrash, HANG_TIMEOUT};
+    use prunr_app::subprocess::batch_rules::{is_stalled, low_free_memory, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
     use prunr_app::subprocess::manager::{Crash, SubprocessManager};
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
@@ -1305,21 +1301,13 @@ fn run_batch_subprocess(
         if pending.is_empty() { break; }
 
         let effective_jobs = max_jobs.min(pending.len());
-        if let Err(short) = prunr_app::gui::memory::cutout_fits(model, effective_jobs, cpu_only, false, 0) {
-            let lighter: Vec<String> = prunr_app::gui::memory::lighter_cutouts_that_fit(model, cpu_only)
-                .into_iter()
-                .filter_map(CliModel::of)
-                .map(|m| format!("--model {}", m.flag_value()))
-                .collect();
-            let instead = if lighter.is_empty() { String::new() } else { format!(", or use {}", lighter.join(" or ")) };
-            for &idx in &pending {
-                give(idx, Err(CoreError::Model(format!("not enough memory: the model {short}. Close other apps{instead}"))));
-            }
-            break;
-        }
-        let (mut sub, provider) = match SubprocessManager::spawn(
-            model, effective_jobs, mask, cpu_only, lines,
-        ) {
+        let engines = prunr_app::gui::memory::CutoutEngines { model, jobs: effective_jobs, cpu_only, first_look: false, line_mode: lines.mode };
+        let started = engines.fit(0).map_err(|short| {
+            let lighter: Vec<String> = engines.lighter_that_fit().into_iter().filter_map(|m| m.to_model_kind()).filter_map(CliModel::flag_for).collect();
+            let subject = CliModel::flag_for(model).unwrap_or_else(|| "the model".into());
+            prunr_app::gui::memory::refusal_text(&format!("not enough memory: {subject}"), short, &lighter, |flags| format!("use {flags}"))
+        });
+        let (mut sub, provider) = match started.and_then(|()| SubprocessManager::spawn(model, effective_jobs, mask, cpu_only, lines)) {
             Ok(s) => s,
             Err(e) => {
                 for &idx in &pending {
@@ -1418,8 +1406,7 @@ fn run_batch_subprocess(
                 sub.kill();
                 break Some(Crash::Unresponsive);
             }
-            if stops_for_memory(in_flight.len(), prunr_core::sysmem::available_ram_bytes) {
-                sub.kill();
+            if low_free_memory(in_flight.len(), prunr_app::hardware::watchdog_free_ram_bytes).is_some() {
                 break Some(Crash::MemoryLow);
             }
         };
