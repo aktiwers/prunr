@@ -73,11 +73,17 @@ impl PresetStore {
         });
     }
 
-    /// Lay the last read that landed over `settings`' presets; what its
-    /// import did, for the toasts. A read the app's own save or delete
-    /// overtook is read again.
+    /// Lay the last read that landed over `settings`' presets; what every
+    /// import that landed did, for the toasts. A read the app's own save or
+    /// delete overtook is read again.
     pub(crate) fn drain(&self, settings: &mut Settings, ctx: &egui::Context) -> Vec<Imported> {
-        let Some(scan) = self.rx.try_iter().last() else { return Vec::new() };
+        let mut imported = Vec::new();
+        let mut last = None;
+        for scan in self.rx.try_iter() {
+            imported.extend(scan.imported.iter().cloned());
+            last = Some(scan);
+        }
+        let Some(scan) = last else { return imported };
         let unchanged = settings.presets.len() == scan.held.len()
             && settings.presets.iter().all(|(name, preset)| scan.held.get(name).is_some_and(|file| Arc::ptr_eq(file, &preset.shared_file())));
         if unchanged {
@@ -86,7 +92,7 @@ impl PresetStore {
         } else {
             self.rescan(settings, ctx);
         }
-        scan.imported
+        imported
     }
 }
 
@@ -117,6 +123,18 @@ mod tests {
         store.rescan(&settings, &ctx);
         landed(&store, &mut settings);
         assert!(!settings.presets.contains_key(&name));
+    }
+
+    /// Two reads landing together say what each import did.
+    #[test]
+    fn every_import_that_landed_is_told() {
+        let (store, mut settings, ctx) = (PresetStore::new(), Settings::default(), egui::Context::default());
+        let bytes = |name: &str| ImportSource::Bytes { name: name.into(), bytes: std::sync::Arc::from(&b"{ \"hello\": 1 }"[..]) };
+        store.import(vec![bytes("one.json")], &settings, &ctx);
+        store.import(vec![bytes("two.json")], &settings, &ctx);
+        super::super::disk_queue::flush();
+        let told = store.drain(&mut settings, &ctx);
+        assert_eq!(told, [Imported::NotAPreset("one.json".into()), Imported::NotAPreset("two.json".into())]);
     }
 
     /// A read that lands after the app saved a preset of its own is read

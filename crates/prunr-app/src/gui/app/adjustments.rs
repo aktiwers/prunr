@@ -135,7 +135,7 @@ impl PrunrApp {
             }
             // The preset may carry a bg_image_hash: reload its bytes from the
             // persisted path map (or clear) so the recipe diff holds.
-            self.reconcile_bg_image(idx);
+            self.reconcile_bg_images([idx]);
         }
         if let Some(from) = toolbar_change.model_switched_from {
             self.on_model_changed(from);
@@ -157,7 +157,7 @@ impl PrunrApp {
         }
         if let Some(hash) = toolbar_change.bg_image_reset {
             self.batch.items[idx].settings.bg_image_hash = hash;
-            self.reconcile_bg_image(idx);
+            self.reconcile_bg_images([idx]);
             ctx.request_repaint();
         }
         if let Some(action) = toolbar_change.selection_action.filter(|&a| self.can_selection_action(a)) {
@@ -182,10 +182,7 @@ impl PrunrApp {
         if item.settings.faces.model != face {
             // Another face restorer: its own settings, unless changed.
             let model = self.settings.model;
-            item.leave_model(model, face);
-            let preset = self.settings.preset(&item.applied_preset);
-            let values = preset.switch_values(model, preset.face_after(model, &item.settings, &item.preset_changes));
-            item.take_untouched(&values, model);
+            item.switch_to(model, face, model, self.settings.preset(&item.applied_preset));
         }
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
         if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {
@@ -480,6 +477,33 @@ mod preset_switch_tests {
         assert_eq!((shown.gamma, shown.contrast), (ItemSettings::default().gamma, 1.3));
         switch_to(&mut app, SettingsModel::Silueta);
         assert_eq!(app.batch.items[0].settings.contrast, 1.3, "undo brought back what was changed");
+    }
+
+    /// A run gives the images it runs the shown image's settings and the
+    /// preset they came from: a later switch keeps the run alike.
+    #[test]
+    fn a_run_shares_the_preset_with_the_settings() {
+        let mut app = app_with_presets();
+        app.batch.share_settings(0, &std::collections::HashSet::from([2]));
+        switch_to(&mut app, SettingsModel::Silueta);
+        let gammas: Vec<f32> = app.batch.items.iter().map(|i| i.settings.gamma).collect();
+        assert_eq!(gammas, [0.8, 0.8], "both on Soft's Silueta gamma");
+    }
+
+    /// A switch to a model whose preset names a background picture not on
+    /// this computer says so once, however many images take it.
+    #[test]
+    fn a_missing_preset_picture_is_told_once() {
+        let mut app = app_with_presets();
+        let json = serde_json::json!({ "format_version": 2, "models": { "Silueta": { "item_settings": { "bg_image_hash": 12345 } } } });
+        app.settings.presets.insert("Shared".into(), serde_json::from_value(json).unwrap());
+        for item in &mut app.batch.items {
+            item.applied_preset = "Shared".into();
+        }
+        let before = app.toasts.len_for_test();
+        switch_to(&mut app, SettingsModel::Silueta);
+        assert_eq!(app.toasts.len_for_test(), before + 2, "the model's toast and one about the picture");
+        assert!(app.batch.items.iter().all(|i| i.settings.bg_image_hash.is_none()), "the picture is dropped");
     }
 
     /// Applying a preset starts its changes afresh: a later switch takes

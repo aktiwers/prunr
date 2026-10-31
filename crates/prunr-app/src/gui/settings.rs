@@ -251,6 +251,12 @@ impl Settings {
             }
         };
         settings.brush.fit_sd_to_quality();
+        // A file from before the brush's changes were kept: the brush as
+        // saved is where they start, or every setting apart from the
+        // code's default would count as one.
+        if value.get("brush_changes").is_none() {
+            settings.brush_changes = super::preset_changes::Changes::new(settings.brush.clone());
+        }
 
         // v1 per-image fields become a "Previous defaults" preset; new
         // imports still start with factory defaults.
@@ -1009,6 +1015,20 @@ mod tests {
         assert!(!s.keep_sd_loaded);
     }
 
+    /// A settings file from before the brush's changes were kept starts
+    /// them from the brush it saved: nothing counts as changed.
+    #[test]
+    fn an_older_settings_file_starts_the_brush_changes_from_its_brush() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["brush"]["inpaint_sharpen"] = serde_json::json!(0.0);
+        v.as_object_mut().unwrap().remove("brush_changes");
+        std::fs::write(&path, v.to_string()).unwrap();
+        let (s, _) = Settings::read(&path);
+        assert_eq!(s.brush_changes, super::super::preset_changes::Changes::new(s.brush.clone()));
+    }
+
     /// A margin saved by the GB slider loads as the nearest guard.
     #[test]
     fn a_saved_gb_margin_becomes_the_nearest_memory_guard() {
@@ -1123,8 +1143,9 @@ mod tests {
         }
     }
 
-    /// A switch keeps what the user changed and takes the rest of the new
-    /// model's from the preset.
+    /// A switch keeps the brush the user changed and takes the rest of the
+    /// new model's from the preset; an eraser's fill tuning is always its
+    /// own, as changed on it or as the preset has it.
     #[test]
     fn a_model_switch_keeps_the_brush_changes_and_takes_the_rest() {
         use super::super::presets::prunr_view;
@@ -1142,14 +1163,19 @@ mod tests {
 
         s.model = SettingsModel::Inpaint;
         s.switch_brush_model(SettingsModel::BigInpaint, "Foo");
-        assert_eq!((s.brush.radius, s.brush.inpaint_feather, s.brush.inpaint_sharpen), (33.0, 30.0, 0.9), "what the user changed stays");
+        assert_eq!((s.brush.radius, s.brush.inpaint_feather), (33.0, 30.0), "what the user changed stays");
+        assert_eq!(s.brush.inpaint_sharpen, 0.3, "the fill's Sharpen is LaMa's own, not Big-LaMa's");
         assert_eq!(s.brush.inpaint_fill_scale, prunr_core::inpaint::FillScale::Full, "the rest is the new model's from the preset");
         assert_eq!(s.brush.inpaint_grow, 20.0);
 
         s.model = SettingsModel::BigInpaint;
         s.switch_brush_model(SettingsModel::Inpaint, "Foo");
         assert_eq!(s.brush.inpaint_grow, prunr_view(SettingsModel::BigInpaint, None).brush.inpaint_grow, "a model the preset has no entry for takes Prunr's");
-        assert_eq!(s.brush.inpaint_sharpen, 0.9, "a change stays across every switch");
+        assert_eq!(s.brush.inpaint_sharpen, 0.9, "back on Big-LaMa, the Sharpen changed there");
+
+        s.model = SettingsModel::SdInpaint;
+        s.switch_brush_model(SettingsModel::BigInpaint, "Foo");
+        assert_eq!(s.brush.inpaint_sharpen, 0.0, "a generated fill keeps its own Sharpen 0");
     }
 
     /// Without the Fast download, Fast's few steps would run on the full

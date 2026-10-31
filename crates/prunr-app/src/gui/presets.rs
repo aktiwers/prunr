@@ -115,11 +115,12 @@ impl Default for PresetFile {
 }
 
 impl PresetFile {
-    /// A preset of image settings alone, filed under the default model: a
-    /// v1 file, which predates models in presets.
+    /// A preset of image settings alone (a v1 file, which predates models
+    /// in presets): they belong to every model that shows them.
     pub(crate) fn of_item_settings(item_settings: ItemSettings) -> Self {
-        let model = super::settings::DEFAULT_MODEL;
-        Self::default().with_settings(model, &item_settings, prunr_model(model).brush(None))
+        SettingsModel::ALL.into_iter().fold(Self::default(), |file, model| {
+            file.with_settings(model, &item_settings, prunr_model(model).brush(None))
+        })
     }
 
     /// The file with `model`'s entry, and those of the helper models that
@@ -179,7 +180,10 @@ impl PresetFile {
         for model in SettingsModel::ALL {
             let Some(entry) = self.models.get(&preset_key(model)) else { continue };
             let prunr = prunr_model(model);
-            let item = overlay(prunr.item_settings, &entry.item_settings);
+            // Over Prunr's settings for the face restorer the entry picks,
+            // so an untouched restorer setting reads as Prunr's.
+            let face = overlay(prunr.item_settings, &entry.item_settings).faces.model;
+            let item = overlay(view_of(model, &HashMap::new(), Some(face)).item_settings, &entry.item_settings);
             let brush = overlay(prunr.brush.clone(), &entry.brush);
             let sd = prunr.sd.clone().map(|sd| overlay(sd, &entry.sd));
             kept.set(preset_key(model), own_differences(model, &item, &brush, sd.as_ref()));
@@ -285,21 +289,21 @@ pub(crate) fn draft(started: &Preset, shown: &Shown) -> Vec<(String, Entry)> {
     used.filter(|(key, entry)| !entry.is_empty() || entries.contains_key(key) || changed(key)).chain(rest).collect()
 }
 
-/// `item` after a switch to `model`: each setting `changes` has not
-/// touched takes `preset`'s value for `model` (`Preset::switch_values`).
-#[cfg(test)]
-pub(crate) fn take_untouched_item(preset: &Preset, model: SettingsModel, item: ItemSettings, changes: &Changes<ItemSettings>) -> ItemSettings {
-    let values = preset.switch_values(model, preset.face_after(model, &item, changes));
-    take(item, &values, changes)
-}
-
-/// `take_untouched_item` for the brush. A quality the user picked keeps
-/// its own steps and guidance.
+/// The brush after a switch to `model`: each setting `changes` has not
+/// touched takes `preset`'s value for `model`, and the eraser's fill
+/// tuning is its own: what was changed on it, else `preset`'s.
 pub(crate) fn take_untouched_brush(preset: &Preset, model: SettingsModel, brush: BrushSettings, changes: &Changes<BrushSettings>) -> BrushSettings {
-    let scheduler = changes.touched("sd_scheduler").then_some(brush.sd_scheduler);
+    let tuning = super::preset_fields::fill_tuning_of(model);
+    let own = changes.on(&preset_key(model));
+    let scheduler = own.and_then(|own| own.get("sd_scheduler")).and_then(|quality| serde_json::from_value(quality.clone()).ok());
     let target = serde_json::to_value(preset.brush(model, scheduler)).unwrap_or_default();
     let names: Vec<&str> = brush_entries_of(model).iter().flat_map(|(_, fields)| BrushSettings::fields(fields)).collect();
-    let mut brush = take(brush, &pick(&target, &names), changes);
+    let mut values = pick(&target, &names);
+    values.retain(|name, _| tuning.contains(&name.as_str()) || !changes.touched(name));
+    for (name, value) in own.into_iter().flatten().filter(|(name, _)| tuning.contains(&name.as_str())) {
+        values.insert(name.clone(), value.clone());
+    }
+    let mut brush = overlay(brush, &values);
     brush.fit_sd_to_quality();
     brush
 }
@@ -367,20 +371,30 @@ fn tidy(value: Value) -> Value {
     }
 }
 
-/// `base` with `over`'s settings laid on it, by name. A preset whose
-/// settings do not read leaves `base` as it is.
+/// `base` with `over`'s settings laid on it, by name. A setting that does
+/// not read (a newer Prunr's value, a typo) is left out, not the others.
 fn overlay<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> T {
     if over.is_empty() {
         return base;
     }
-    let mut value = serde_json::to_value(&base).unwrap_or_default();
+    let start = serde_json::to_value(&base).unwrap_or_default();
+    let mut value = start.clone();
     for (name, to) in over {
         set_field(&mut value, name, to.clone());
     }
-    serde_json::from_value(value).unwrap_or_else(|err| {
-        tracing::warn!(%err, "preset settings that do not read were left out");
-        base
-    })
+    if let Ok(laid) = serde_json::from_value(value) {
+        return laid;
+    }
+    let mut value = start;
+    for (name, to) in over {
+        let mut tried = value.clone();
+        set_field(&mut tried, name, to.clone());
+        match serde_json::from_value::<T>(tried.clone()) {
+            Ok(_) => value = tried,
+            Err(err) => tracing::warn!(setting = %name, %err, "a preset setting that does not read was left out"),
+        }
+    }
+    serde_json::from_value(value).unwrap_or(base)
 }
 
 /// One model's settings, resolved.
@@ -499,11 +513,17 @@ pub(crate) fn prunr_item_settings(model: SettingsModel) -> ItemSettings {
 
 /// The settings a command-line run starts from for `model`: preset
 /// `name`'s (one in the presets folder, or a preset file), Prunr's for
-/// `None` or "Prunr"; why not, when the preset cannot be read.
-pub fn command_line_settings(name: Option<&str>, model: SettingsModel) -> Result<(ItemSettings, BrushSettings), String> {
+/// `None` or "Prunr"; with `faces`, that face restorer runs with its own
+/// settings from the preset. Why not, when the preset cannot be read.
+pub fn command_line_settings(name: Option<&str>, model: SettingsModel, faces: Option<FaceModel>) -> Result<(ItemSettings, BrushSettings), String> {
     let found = name.filter(|name| !super::presets_fs::is_prunr(name)).map(super::presets_fs::find_preset).transpose()?;
-    let view = found.as_ref().unwrap_or_else(|| Preset::prunr()).resolve(model, None);
-    Ok((view.item_settings, view.brush))
+    let preset = found.as_ref().unwrap_or_else(|| Preset::prunr());
+    let view = preset.resolve(model, None);
+    let mut item = view.item_settings;
+    if let Some(face) = faces {
+        item.faces = FaceSettings { on: true, ..preset.faces(model, face) };
+    }
+    Ok((item, view.brush))
 }
 
 /// Preset `name` in `presets`; Prunr's for "Prunr" or one not there.
@@ -595,6 +615,12 @@ impl Preset {
     /// it chose, or this preset's.
     pub(crate) fn face_after(&self, model: SettingsModel, item: &ItemSettings, changes: &Changes<ItemSettings>) -> FaceModel {
         if changes.touched("faces.model") { item.faces.model } else { self.item_settings(model).faces.model }
+    }
+
+    /// What a switch to `model` gives an image with settings `item` and
+    /// `changes`: `switch_values` for the face restorer it is left on.
+    pub(crate) fn values_after_switch(&self, model: SettingsModel, item: &ItemSettings, changes: &Changes<ItemSettings>) -> Map<String, Value> {
+        self.switch_values(model, self.face_after(model, item, changes))
     }
 
     /// What a switch to `model` gives each image setting it may take, by
@@ -825,7 +851,7 @@ mod tests {
         let mut changes = Changes::new(item);
         item.contrast = 1.3;
         changes.note(&item, &entries_of(birefnet, item.faces.model));
-        let item = take_untouched_item(&preset, silueta, item, &changes);
+        let item = take(item, &preset.values_after_switch(silueta, &item, &changes), &changes);
         assert_eq!(item.gamma, 0.8, "Silueta's own from the preset");
         assert_eq!(item.feather, prunr_item_settings(silueta).feather, "Prunr's where the preset has none for Silueta");
         assert_eq!(item.contrast, 1.3, "the change stays");
@@ -846,7 +872,7 @@ mod tests {
         item.faces.hair = hair;
         item.faces.model = FaceModel::RestoreFormerPp;
         changes.note(&item, &entries_of(model, FaceModel::Gfpgan));
-        let item = take_untouched_item(&preset, model, item, &changes);
+        let item = take(item, &preset.values_after_switch(model, &item, &changes), &changes);
         assert_eq!((item.faces.model, item.faces.strength_pct), (FaceModel::RestoreFormerPp, 35));
         assert_eq!(item.faces.hair, hair, "a change stays");
     }
@@ -870,7 +896,7 @@ mod tests {
         let mut changes = Changes::new(item);
         item.gamma = 1.4;
         changes.note(&item, &entries_of(birefnet, item.faces.model));
-        let mut item = take_untouched_item(&started, silueta, item, &changes);
+        let mut item = take(item, &started.values_after_switch(silueta, &item, &changes), &changes);
         changes.rebase(&item);
         item.contrast = 1.3;
 
@@ -935,6 +961,42 @@ mod tests {
         assert_eq!(old.models["Silueta"].item_settings, serde_json::from_str::<Map<String, Value>>(r#"{ "gamma": 1.5, "faces.on": true }"#).unwrap());
         assert_eq!(old.models["Teed"].item_settings["line_strength"], 0.8);
         assert_eq!(old.models["FaceGfpgan"].item_settings["faces.strength_pct"], 70);
+    }
+
+    /// Every SD part setting is one a save compares: a new one in
+    /// `SdPreset` has to join `SD_FIELDS`, or a save drops it.
+    #[test]
+    fn every_sd_setting_is_compared_on_save() {
+        let full = SdPreset { use_taesd: Some(true), seed: Some(1), ..SdPreset::default() };
+        let mut names: Vec<String> = serde_json::to_value(full).unwrap().as_object().unwrap().keys().cloned().collect();
+        names.sort();
+        let mut fields = SD_FIELDS.to_vec();
+        fields.sort_unstable();
+        assert_eq!(names, fields);
+    }
+
+    /// A v1 preset's settings belong to every model that shows them, as
+    /// they applied before presets had models.
+    #[test]
+    fn a_v1_preset_applies_on_every_model_that_shows_its_settings() {
+        let v1 = ItemSettings { gamma: 1.3, line_strength: 0.8, ..ItemSettings::default() };
+        let preset = Preset::from(PresetFile::of_item_settings(v1));
+        for model in [SettingsModel::Silueta, SettingsModel::U2net, SettingsModel::BiRefNetLite] {
+            assert_eq!(preset.item_settings(model).gamma, 1.3, "{model:?}");
+        }
+        assert_eq!(preset.item_settings(SettingsModel::None).line_strength, 0.8, "the line model's, wherever it runs");
+        assert_eq!(preset.item_settings(SettingsModel::Nomos2Upscale), prunr_item_settings(SettingsModel::Nomos2Upscale), "an upscaler shows none of them");
+    }
+
+    /// A setting that does not read leaves the others of its entry.
+    #[test]
+    fn a_setting_that_does_not_read_leaves_the_others() {
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": { "Silueta": { "item_settings": {
+            "gamma": 1.4, "fill_style": { "not_an_effect_yet": {} }, "feather": 2.0
+        } } } }"#));
+        let item = preset.item_settings(SettingsModel::Silueta);
+        assert_eq!((item.gamma, item.feather), (1.4, 2.0));
+        assert_eq!(item.effect, prunr_item_settings(SettingsModel::Silueta).effect);
     }
 
     /// No model files under its own key.

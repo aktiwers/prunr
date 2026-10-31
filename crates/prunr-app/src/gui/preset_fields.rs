@@ -1,7 +1,7 @@
 //! Which settings each model's preset entry holds, by their names in a
 //! preset file. A setting lives with the model that makes its result: a
-//! model the user picks keeps the settings of its own panels
-//! (`knob_catalog::shows`), and a helper model that runs inside them (the
+//! model the user picks keeps the settings of the panels it shows, and a
+//! helper model that runs inside them (the
 //! face restorers, the depth model, Magic Brush's, the line model) keeps
 //! its own wherever it runs. Prunr's preset lists exactly these for every
 //! model; a saved preset keeps those of them that differ.
@@ -92,6 +92,26 @@ fn brush_fields(surface: Surface) -> &'static [&'static str] {
 /// The brush settings the Stable Diffusion eraser keeps in its entry's
 /// `sd` part.
 const SD_PART: &[&str] = &["sd_prompt", "sd_negative_prompt", "sd_guidance_scale", "sd_scheduler", "sd_steps", "sd_seed", "sd_use_taesd"];
+
+/// Whether a surface's brush settings tune an eraser's fill rather than
+/// the brush.
+fn tunes_the_fill(surface: Surface) -> bool {
+    matches!(surface, Surface::FillChips | Surface::SdChips | Surface::RoremChips)
+}
+
+/// The brush settings that tune `model`'s fill, its SD part's included.
+/// They follow the eraser on a switch even when changed: a value tuned
+/// for one eraser lowers another's fill (Sharpen crunches a generated
+/// one).
+pub(crate) fn fill_tuning_of(model: SettingsModel) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Surface::ALL.into_iter().filter(|&s| tunes_the_fill(s) && shows(model, s)).flat_map(brush_fields).copied().collect();
+    if shows(model, Surface::SdChips) {
+        names.extend(SD_PART);
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 /// The settings a model's preset entry holds.
 #[derive(Debug, Default, PartialEq, Eq)]
