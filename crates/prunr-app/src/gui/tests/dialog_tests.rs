@@ -33,7 +33,7 @@ fn png_on_disk(dir: &Path, name: &str) -> PathBuf {
 
 fn answer(app: &mut PrunrApp, paths: Option<Vec<PathBuf>>) {
     app.system.answer_for_test(paths);
-    app.drain_dialog_answer();
+    app.drain_dialog_answer(&egui::Context::default());
 }
 
 fn asked(app: &PrunrApp) -> Option<&DialogRequest> {
@@ -396,4 +396,93 @@ fn open_button_asks_and_the_frame_loop_lands_the_answer() {
 
     assert_eq!(harness.state().batch.items.len(), 1);
     assert!(!harness.state().open_modals().contains(&"file_dialog"));
+}
+
+/// A preset file in the test config's presets folder, under a name no
+/// other test uses; removed when dropped.
+struct FolderPreset(String);
+
+impl FolderPreset {
+    fn named(what: &str) -> Self {
+        Self(format!("{what} {}", std::process::id()))
+    }
+}
+
+impl Drop for FolderPreset {
+    fn drop(&mut self) {
+        crate::gui::presets_fs::queue_delete(&self.0);
+        crate::gui::disk_queue::flush();
+    }
+}
+
+/// A window that reads the presets folder, as the app's does.
+fn reading_presets() -> egui_kittest::Harness<'static, PrunrApp> {
+    super::harness::loaded_with(|app| app.preset_store = crate::gui::preset_store::PresetStore::new())
+}
+
+/// What the disk queue was asked to do has landed and been drained.
+fn landed(h: &mut egui_kittest::Harness<'_, PrunrApp>) {
+    crate::gui::disk_queue::flush();
+    settle(h);
+}
+
+/// Opening the preset list reads the folder again: a preset put there
+/// by hand is listed.
+#[test]
+fn opening_the_preset_list_reads_the_folder_again() {
+    let by_hand = FolderPreset::named("By hand");
+    let mut h = reading_presets();
+    crate::gui::presets_fs::queue_save(&by_hand.0, &crate::gui::presets::PresetFile::default());
+    click(&mut h, "Preset");
+    landed(&mut h);
+    assert!(super::harness::texts(&h).contains(&by_hand.0), "the list shows it");
+}
+
+/// Import asks for preset files; the picked ones are added to the
+/// presets folder and the list.
+#[test]
+fn import_adds_the_picked_presets() {
+    let shared = FolderPreset::named("Shared");
+    let mut h = reading_presets();
+    click(&mut h, "Preset");
+    click(&mut h, "Import…");
+    assert_eq!(asked(h.state()), Some(&DialogRequest::ImportPresets));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(format!("{}.json", shared.0));
+    std::fs::write(&file, br#"{ "format_version": 2, "models": { "Silueta": { "item_settings": { "gamma": 1.5 } } } }"#).unwrap();
+    h.state_mut().system.answer_for_test(Some(vec![file]));
+    landed(&mut h);
+    landed(&mut h);
+    assert!(h.state().settings.presets.contains_key(&shared.0));
+}
+
+/// A preset file dropped on the window is added to the presets, not
+/// opened as an image.
+#[test]
+fn a_dropped_preset_file_is_added_to_the_presets() {
+    let dropped = FolderPreset::named("Dropped");
+    let mut h = reading_presets();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(format!("{}.json", dropped.0));
+    std::fs::write(&file, br#"{ "format_version": 2, "models": {} }"#).unwrap();
+    h.input_mut().dropped_files.push(egui::DroppedFile { path: Some(file), ..Default::default() });
+    landed(&mut h);
+    landed(&mut h);
+    assert!(h.state().settings.presets.contains_key(&dropped.0));
+    assert_eq!(h.state().batch.items.len(), 1, "no image was added");
+}
+
+/// Export saves the preset's file where the user picks; Prunr's is its
+/// built-in file.
+#[test]
+fn export_writes_the_preset_to_the_picked_file() {
+    let mut h = super::harness::loaded();
+    click(&mut h, "Preset");
+    click(&mut h, "Export preset");
+    assert_eq!(asked(h.state()), Some(&DialogRequest::ExportPreset { name: "Prunr".into() }));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Prunr.json");
+    h.state_mut().system.answer_for_test(Some(vec![path.clone()]));
+    landed(&mut h);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), crate::gui::presets::prunr_file_json());
 }

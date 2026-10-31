@@ -20,6 +20,7 @@ mod export;
 pub(crate) mod import;
 mod installs;
 mod machine_test;
+mod presets;
 mod preview;
 mod results;
 mod textures;
@@ -174,6 +175,8 @@ pub struct PrunrApp {
 
     /// The Save-preset dialog; `Some` while it is up.
     pub(crate) save_preset: Option<super::views::preset_dropdown::SaveDialog>,
+    /// The presets folder, read and added to off the UI thread.
+    pub(crate) preset_store: super::preset_store::PresetStore,
     /// When a pending settings save falls due (see `save_settings_soon`).
     settings_save_due: Option<std::time::Instant>,
 }
@@ -420,6 +423,7 @@ impl PrunrApp {
             worker_rx,
         );
         app.hardware_install_cache = super::hardware_cache::HardwareInstallCache::all_installed();
+        app.preset_store = super::preset_store::PresetStore::new_for_test();
         app.processor.stub_model_runs();
         app.fit_brush_models_to_model();
         app
@@ -484,6 +488,7 @@ impl PrunrApp {
             drag_export: super::drag_export_state::DragExportState::new(),
             automation: None,
             save_preset: None,
+            preset_store: super::preset_store::PresetStore::new(),
             settings_save_due: None,
         };
         // `--open <path>` arrives as PRUNR_OPEN_FILE, read once and cleared
@@ -547,10 +552,12 @@ impl PrunrApp {
     }
 
     /// Resume the action whose file dialog the user answered.
-    pub(crate) fn drain_dialog_answer(&mut self) {
+    pub(crate) fn drain_dialog_answer(&mut self, ctx: &egui::Context) {
         let Some(DialogAnswer { request, paths }) = self.system.take_dialog_answer() else { return };
         let Some(path) = paths.first().cloned() else { return };
         match request {
+            DialogRequest::ImportPresets => self.import_presets(paths.into_iter().map(super::presets_fs::ImportSource::Path).collect(), ctx),
+            DialogRequest::ExportPreset { name } => self.on_preset_export_picked(&name, path),
             DialogRequest::OpenImages => self.on_open_picked(paths),
             DialogRequest::Background { item_id } => self.on_background_picked(item_id, path),
             DialogRequest::SaveImage { item_id, preferred, .. } => self.on_save_image_picked(item_id, preferred, path),
@@ -1269,7 +1276,8 @@ impl eframe::App for PrunrApp {
         }
         super::automation::pump(self, ctx);
         self.system.show_dialog(ctx, frame);
-        self.drain_dialog_answer();
+        self.drain_dialog_answer(ctx);
+        self.drain_preset_scans(ctx);
         if self.system.dialog_open() {
             // An idle Wayland window can drop the dialog thread's
             // wake-up; polling lands the answer regardless.
@@ -1841,6 +1849,7 @@ mod field_list_tests {
             drag_export: _,
             automation: _,
             save_preset: _,
+            preset_store: _,
             settings_save_due: _,
         } = app;
     }

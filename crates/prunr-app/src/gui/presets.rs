@@ -438,11 +438,16 @@ struct PrunrFile {
     models: HashMap<String, Entry>,
 }
 
+/// Prunr's own preset's built-in file.
+pub(crate) fn prunr_file_json() -> &'static str {
+    include_str!("../../presets/Prunr.json")
+}
+
 /// Prunr's own preset as its built-in file lists it.
 fn prunr_entries() -> &'static HashMap<String, Entry> {
     static FILE: std::sync::OnceLock<HashMap<String, Entry>> = std::sync::OnceLock::new();
     // A test reads the file and resolves every model from it.
-    FILE.get_or_init(|| serde_json::from_str::<PrunrFile>(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads").models)
+    FILE.get_or_init(|| serde_json::from_str::<PrunrFile>(prunr_file_json()).expect("Prunr.json reads").models)
 }
 
 /// Prunr's settings for every picked model, in `SettingsModel::ALL`

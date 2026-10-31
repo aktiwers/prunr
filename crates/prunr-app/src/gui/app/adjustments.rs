@@ -146,6 +146,9 @@ impl PrunrApp {
         if let Some(req) = toolbar_change.open_model_store {
             self.open_model_store(req, ctx);
         }
+        if let Some(request) = toolbar_change.preset_request.clone() {
+            self.handle_preset_request(request, ctx);
+        }
         if toolbar_change.pick_bg_image {
             self.handle_pick_bg_image(idx);
         } else if toolbar_change.clear_bg_image {

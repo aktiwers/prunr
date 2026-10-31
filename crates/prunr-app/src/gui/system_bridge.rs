@@ -26,6 +26,10 @@ pub(crate) enum DialogRequest {
     SaveLayers { targets: Vec<u64> },
     /// These images' results go into the picked folder.
     SaveSelected { targets: Vec<u64> },
+    /// Import the picked preset files.
+    ImportPresets,
+    /// Save preset `name` as the picked file.
+    ExportPreset { name: String },
 }
 
 /// A dialog the user answered: what it was for and the paths picked,
@@ -234,6 +238,7 @@ struct Look {
 /// The file types Open takes, from the dialog or a dropped folder.
 pub(crate) const OPEN_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "svg"];
 const BACKGROUND_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp"];
+const PRESET_EXTENSIONS: &[&str] = &[super::presets_fs::PRESET_EXT];
 
 fn look(request: &DialogRequest) -> Look {
     let images = |extensions| vec![("Images".to_string(), extensions)];
@@ -263,7 +268,33 @@ fn look(request: &DialogRequest) -> Look {
         }
         DialogRequest::SaveLayers { .. } => folder("Save layers \u{2014} Choose folder"),
         DialogRequest::SaveSelected { .. } => folder("Save Selected \u{2014} Choose Folder"),
+        DialogRequest::ImportPresets => Look { pick: Pick::Files, title: "Import presets", filters: presets(), file_name: None },
+        DialogRequest::ExportPreset { name } => Look {
+            pick: Pick::SaveFile,
+            title: "Export preset",
+            filters: presets(),
+            file_name: Some(format!("{name}.{}", super::presets_fs::PRESET_EXT)),
+        },
     }
+}
+
+fn presets() -> Vec<(String, &'static [&'static str])> {
+    vec![("Prunr preset".to_string(), PRESET_EXTENSIONS)]
+}
+
+/// Open `dir` in the system's file manager, without waiting for it.
+pub(crate) fn show_folder(dir: &Path) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(opener).arg(dir).spawn()?;
+    // Reaped on its own thread, so it leaves no zombie behind.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 type PendingReply = Pin<Box<dyn Future<Output = Reply> + Send>>;

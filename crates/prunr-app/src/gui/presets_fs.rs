@@ -11,7 +11,8 @@
 //! The tests below are the tripwires.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
@@ -22,7 +23,7 @@ use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
 const PRESETS_SUBDIR: &str = "prunr/presets";
 
-const PRESET_EXT: &str = "json";
+pub(crate) const PRESET_EXT: &str = "json";
 
 /// Present once the built-ins were seeded, so a deleted built-in stays
 /// deleted. Bump the suffix when shipping a fresh batch of built-ins.
@@ -183,6 +184,86 @@ fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
         Skipped::Newer => tracing::warn!(?path, "skipping a preset a newer Prunr saved; it is kept as it is"),
         Skipped::Unreadable => tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)"),
     })
+}
+
+/// A preset file to import: picked or dropped by path, or dropped as its
+/// bytes.
+pub(crate) enum ImportSource {
+    Path(PathBuf),
+    Bytes { name: String, bytes: Arc<[u8]> },
+}
+
+/// How the import of one file went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Imported {
+    /// Added under this name.
+    As(String),
+    /// A newer Prunr's, added under this name: listed once Prunr is
+    /// updated.
+    Newer(String),
+    /// This file is not a Prunr preset, or could not be read.
+    NotAPreset(String),
+    /// This file could not be copied into the presets folder.
+    NotCopied(String),
+}
+
+/// Copy each preset in `sources` into the presets folder as it is, under
+/// its file's name or, when that is taken, the next free one
+/// ("Portrait 2"), so no preset is replaced.
+pub(crate) fn import(sources: Vec<ImportSource>) -> Vec<Imported> {
+    let Some(dir) = presets_dir() else { return Vec::new() };
+    import_into(&dir, sources)
+}
+
+fn import_into(dir: &Path, sources: Vec<ImportSource>) -> Vec<Imported> {
+    sources.into_iter().map(|source| import_one(dir, source)).collect()
+}
+
+fn import_one(dir: &Path, source: ImportSource) -> Imported {
+    let (file, bytes) = match source {
+        ImportSource::Path(path) => (path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(), std::fs::read(&path).ok()),
+        ImportSource::Bytes { name, bytes } => (name, Some(bytes.to_vec())),
+    };
+    let Some((bytes, value)) = bytes.and_then(|b| serde_json::from_slice(&b).ok().map(|value| (b, value))).filter(|(_, v)| names_a_setting(v)) else {
+        return Imported::NotAPreset(file);
+    };
+    let newer = match parse_preset_value(value) {
+        Ok(_) => false,
+        Err(Skipped::Newer) => true,
+        Err(Skipped::Unreadable) => return Imported::NotAPreset(file),
+    };
+    let stem = Path::new(&file).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let name = free_name(dir, stem);
+    match crate::fs_util::write_bytes_replacing(&dir.join(format!("{name}.{PRESET_EXT}")), &bytes) {
+        Ok(()) if newer => Imported::Newer(name),
+        Ok(()) => Imported::As(name),
+        Err(err) => {
+            tracing::warn!(%err, file, "preset not imported");
+            Imported::NotCopied(file)
+        }
+    }
+}
+
+/// Whether `value` reads as a preset rather than any JSON: it has a
+/// format version, or names an image setting. Loading takes any object as
+/// an old preset; an import would add one from any JSON file.
+fn names_a_setting(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else { return false };
+    let settings = serde_json::to_value(ItemSettings::default()).unwrap_or_default();
+    map.contains_key("format_version") || settings.as_object().is_some_and(|known| map.keys().any(|key| known.contains_key(key)))
+}
+
+/// `stem` as a preset name no file in `dir` has yet, and not "Prunr".
+fn free_name(dir: &Path, stem: &str) -> String {
+    let base = preset_name(stem).unwrap_or_else(|| "Imported".to_string());
+    let taken = |name: &str| name.eq_ignore_ascii_case(PRUNR_PRESET) || dir.join(format!("{name}.{PRESET_EXT}")).exists();
+    let mut name = base.clone();
+    let mut n = 1;
+    while taken(&name) {
+        n += 1;
+        name = format!("{base} {n}");
+    }
+    name
 }
 
 /// Overwrites a file of the same name; "Prunr" is refused.
@@ -574,5 +655,34 @@ mod tests {
         save_at(&path, sd, &prunr_item_settings(sd), &brush).unwrap();
         let reloaded = Preset::from(read_preset(&path).expect("reloads"));
         assert_eq!(reloaded.resolve(sd, None).brush, brush);
+    }
+
+    /// An import copies each preset in under its file's name, the next
+    /// free one when that is taken or "Prunr", keeps a newer Prunr's for
+    /// it, and leaves out what is not a preset.
+    #[test]
+    fn an_import_adds_each_preset_under_a_free_name() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let preset: &[u8] = br#"{ "format_version": 2, "models": { "Silueta": { "item_settings": { "gamma": 1.5 } } } }"#;
+        std::fs::write(dir.path().join("Portrait.json"), preset).unwrap();
+        let file = |name: &str, bytes: &[u8]| ImportSource::Bytes { name: name.into(), bytes: Arc::from(bytes) };
+        let done = import_into(dir.path(), vec![
+            file("Portrait.json", preset),
+            file("Prunr.json", preset),
+            file("old.json", br#"{ "gamma": 1.2 }"#),
+            file("package.json", br#"{ "name": "web", "version": "1.0" }"#),
+            file("broken.json", b"{ not json"),
+            file("Future.json", br#"{ "format_version": 99 }"#),
+        ]);
+        assert_eq!(done, [
+            Imported::As("Portrait 2".into()),
+            Imported::As("Prunr 2".into()),
+            Imported::As("old".into()),
+            Imported::NotAPreset("package.json".into()),
+            Imported::NotAPreset("broken.json".into()),
+            Imported::Newer("Future".into()),
+        ]);
+        assert_eq!(std::fs::read(dir.path().join("Portrait 2.json")).unwrap(), preset, "copied as it is");
+        assert_eq!(std::fs::read(dir.path().join("Portrait.json")).unwrap(), preset, "the one there stays");
     }
 }
