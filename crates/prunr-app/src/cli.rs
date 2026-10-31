@@ -470,12 +470,12 @@ fn edge_shift_px(s: &str) -> Result<f32, String> {
 fn parse_bg_effect(s: &str) -> Result<prunr_core::BgEffect, String> {
     use prunr_core::BgEffect;
     match s.split_once(':') {
-        None if s == "blur" => Ok(BgEffect::BlurredSource { radius: 12 }),
+        None if s == "blur" => Ok(BgEffect::BlurredSource { radius: BgEffect::BLUR_START_RADIUS }),
         None if s == "lens" => Ok(BgEffect::LensBlur { amount_pct: prunr_core::depth::LENS_BLUR_START_PCT }),
         None if s == "bw" => Ok(BgEffect::DesaturatedSource),
         Some(("blur", n)) => match n.parse::<u32>() {
-            Ok(radius @ 1..=64) => Ok(BgEffect::BlurredSource { radius }),
-            _ => Err(format!("'{n}' is not a blur radius from 1 to 64")),
+            Ok(radius) if BgEffect::BLUR_RADII.contains(&radius) => Ok(BgEffect::BlurredSource { radius }),
+            _ => Err(format!("'{n}' is not a blur radius from {} to {}", BgEffect::BLUR_RADII.start(), BgEffect::BLUR_RADII.end())),
         },
         Some(("lens", n)) => match n.parse::<u8>() {
             Ok(amount_pct @ 0..=100) => Ok(BgEffect::LensBlur { amount_pct }),

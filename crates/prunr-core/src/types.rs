@@ -737,7 +737,7 @@ pub enum BgEffect {
     #[serde(alias = "inverted_source")]
     None,
     /// Fill transparent areas with the source image, blurred. `radius` is the
-    /// Gaussian sigma in pixels — higher = softer. Clamped 1..=64.
+    /// Gaussian sigma in pixels — higher = softer, within `BLUR_RADII`.
     BlurredSource { radius: u32 },
     /// Fill transparent areas with the luma grayscale of the source.
     DesaturatedSource,
@@ -748,6 +748,11 @@ pub enum BgEffect {
 }
 
 impl BgEffect {
+    /// A Blurred photo's radius when it is picked.
+    pub const BLUR_START_RADIUS: u32 = 12;
+    /// The radii a Blurred photo takes, in pixels.
+    pub const BLUR_RADII: std::ops::RangeInclusive<u32> = 1..=64;
+
     /// Whether its picture is made with the photo's depth map.
     pub fn needs_depth(self) -> bool {
         matches!(self, BgEffect::LensBlur { .. })
@@ -761,7 +766,7 @@ impl BgEffect {
 
     pub const ALL: &'static [Self] = &[
         BgEffect::None,
-        BgEffect::BlurredSource { radius: 12 },
+        BgEffect::BlurredSource { radius: Self::BLUR_START_RADIUS },
         BgEffect::DesaturatedSource,
         BgEffect::LensBlur { amount_pct: crate::depth::LENS_BLUR_START_PCT },
     ];
