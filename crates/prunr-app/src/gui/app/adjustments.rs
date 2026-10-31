@@ -133,9 +133,6 @@ impl PrunrApp {
             if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
                 item.commit(StepKind::Preset);
             }
-            // The preset may carry a bg_image_hash: reload its bytes from the
-            // persisted path map (or clear) so the recipe diff holds.
-            self.reconcile_bg_images([idx]);
         }
         if let Some(from) = toolbar_change.model_switched_from {
             self.on_model_changed(from);
@@ -157,7 +154,6 @@ impl PrunrApp {
         }
         if let Some(hash) = toolbar_change.bg_image_reset {
             self.batch.items[idx].settings.bg_image_hash = hash;
-            self.reconcile_bg_images([idx]);
             ctx.request_repaint();
         }
         if let Some(action) = toolbar_change.selection_action.filter(|&a| self.can_selection_action(a)) {
@@ -182,9 +178,7 @@ impl PrunrApp {
         if item.settings.faces.model != face {
             // Another face restorer: its own settings, unless changed.
             let model = self.settings.model;
-            if item.switch_to(model, face, model, self.settings.preset(&item.applied_preset)) {
-                self.reconcile_bg_images([idx]);
-            }
+            item.switch_to(model, face, model, self.settings.preset(&item.applied_preset));
         }
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
         if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {
@@ -504,6 +498,8 @@ mod preset_switch_tests {
         }
         let before = app.toasts.len_for_test();
         switch_to(&mut app, SettingsModel::Silueta);
+        app.keep_bg_images_in_step();
+        app.keep_bg_images_in_step();
         assert_eq!(app.toasts.len_for_test(), before + 2, "the model's toast and one about the picture");
         assert!(app.batch.items.iter().all(|i| i.settings.bg_image_hash.is_none()), "the picture is dropped");
     }
@@ -550,6 +546,7 @@ mod preset_switch_tests {
         let before = app.batch.items[0].settings;
         app.batch.items[0].settings.faces.model = FaceModel::RestoreFormerPp;
         app.apply_toolbar_change(&egui::Context::default(), ToolbarChange::default(), before);
+        app.keep_bg_images_in_step();
         assert!(app.batch.items[0].settings.bg_image_hash.is_none(), "the picture is dropped");
     }
 }

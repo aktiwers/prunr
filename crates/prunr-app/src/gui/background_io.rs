@@ -4,14 +4,15 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 /// start built for it.
 pub type FilterOnlyResult = (u64, u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
 
-/// A background picture loaded off the UI thread: the item, the file,
-/// whether the user picked it (it then becomes the background) or a preset
-/// names it (it fills in the picture the preset's settings refer to), and
-/// the decoded image with its content hash.
+/// A background picture loaded off the UI thread: the item it was asked
+/// for, the file, the decoded image with its content hash, and what it is
+/// for: `None`, the user picked it and it becomes the background; the
+/// hash of the picture settings name, which it fills in on every image
+/// that names it.
 pub struct BgImageLoad {
     pub item_id: u64,
     pub path: std::path::PathBuf,
-    pub picked: bool,
+    pub fills: Option<u64>,
     pub result: Result<(image::DynamicImage, u64), String>,
 }
 
