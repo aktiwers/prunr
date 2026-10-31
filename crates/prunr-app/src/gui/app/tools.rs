@@ -28,7 +28,7 @@ impl PrunrApp {
                 .map(|(idx, _)| idx)
                 .collect();
             for idx in follow {
-                self.dispatch_brush_rerun(idx);
+                self.rerun_with_strokes(idx);
             }
         }
     }
@@ -936,6 +936,15 @@ mod stroke_lines_tests {
         app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![cell; 4]), StepKind::Stroke);
     }
 
+    /// The lines run under way lands, traced on what it was sent with.
+    fn land_lines(app: &mut PrunrApp) {
+        let item = &mut app.batch.items[0];
+        let recipe = item.settings.current_recipe(prunr_core::ModelKind::Silueta);
+        let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+        item.apply_tier_result(Ok(traced), None, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
+        item.finish_job();
+    }
+
     /// The lines runs sent since last asked, each with whether it carries
     /// strokes.
     fn lines_runs(rx: &Receiver<WorkerMessage>) -> Vec<bool> {
@@ -989,14 +998,24 @@ mod stroke_lines_tests {
         let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
         stroke(&mut app, FULL);
         assert_eq!(lines_runs(&rx), vec![true]);
-        let item = &mut app.batch.items[0];
-        let recipe = item.settings.current_recipe(prunr_core::ModelKind::Silueta);
-        let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
-        item.apply_tier_result(Ok(traced), None, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
-        item.finish_job();
+        land_lines(&mut app);
         app.apply_selection_to_active_model(1);
         assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "traced on these strokes already");
         assert!(app.processor.live_preview.works_on(1), "the re-cut renders");
+    }
+
+    /// Switching Restore / Erase / Select applies the selection anew; the
+    /// lines follow it as they follow a stroke.
+    #[test]
+    fn switching_what_the_selection_does_traces_the_lines_again() {
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        stroke(&mut app, FULL);
+        assert_eq!(lines_runs(&rx), vec![true]);
+        land_lines(&mut app);
+        app.settings.brush.cutout_action = CutoutAction::Erase;
+        app.apply_brush_change(crate::gui::views::brush_chip::BrushChipOutcome { action_changed: true, ..Default::default() });
+        assert_eq!(lines_runs(&rx), vec![true], "traced on the erased cut-out");
+        assert!(!app.processor.live_preview.works_on(1), "no render draws the restored one's lines");
     }
 
     /// A stroke that lands while the lines run is under way starts no
