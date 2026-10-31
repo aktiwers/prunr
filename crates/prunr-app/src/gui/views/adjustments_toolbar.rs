@@ -28,7 +28,7 @@ use super::{differs, model_info, variant_index};
 /// Summary of what a toolbar render cycle changed. Cache-invalidation
 /// flags are granular so a still-valid cache (the seg tensor after a
 /// line_mode toggle) survives and the next tweak can still live-preview.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolbarChange {
     /// Any chip signalled a committed value (slider released, toggle
     /// flipped, color picked). Flushes pending debounced previews.
@@ -71,6 +71,8 @@ pub struct ToolbarChange {
     /// The Background panel's Reset set this picture (`None`: none): the
     /// app loads it, or drops the one shown.
     pub bg_image_reset: Option<Option<std::num::NonZeroU64>>,
+    /// The preset list asked for something done with preset files.
+    pub(crate) preset_request: Option<super::preset_dropdown::PresetRequest>,
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
     pub(crate) selection_action: Option<SelectionAction>,
     pub(crate) toggle_paint: bool,
@@ -1181,7 +1183,7 @@ pub(super) fn render_reset_preset_cluster(
         mark_preset_apply(change);
     }
 
-    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets) {
+    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets, &mut change.preset_request) {
         *presets.applied = name;
         mark_preset_apply(change);
     }

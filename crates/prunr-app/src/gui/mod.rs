@@ -9,6 +9,7 @@ pub mod settings;
 pub mod item_settings;
 pub mod preset_changes;
 pub mod preset_fields;
+pub mod preset_store;
 pub mod presets;
 pub mod presets_fs;
 pub mod worker;

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::item::{BatchItem, ImageSource};
 use crate::gui::background_io::FileLoad;
+use crate::gui::presets_fs::ImportSource;
 use crate::gui::system_bridge::{DialogRequest, OPEN_EXTENSIONS};
 use super::PrunrApp;
 
@@ -159,6 +160,15 @@ impl PrunrApp {
             ctx.stop_dragging();
             return;
         }
+
+        // A preset file dropped on the window is added to the presets.
+        let is_preset = |name: &std::ffi::OsStr| name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(crate::gui::presets_fs::PRESET_EXT));
+        let (preset_paths, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| p.extension().is_some_and(is_preset));
+        let (preset_bytes, inline_items): (Vec<_>, Vec<_>) = inline_items.into_iter()
+            .partition(|(_, name)| std::path::Path::new(name).extension().is_some_and(is_preset));
+        let presets = preset_paths.into_iter().map(ImportSource::Path)
+            .chain(preset_bytes.into_iter().map(|(bytes, name)| ImportSource::Bytes { name, bytes }));
+        self.import_presets(presets.collect(), ctx);
 
         if !paths.is_empty() {
             queue_file_loads(&self.batch.bg_io.file_load_tx, paths);

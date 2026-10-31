@@ -54,6 +54,19 @@ const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 500.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
 const MODEL_LIST_HEIGHT: f32 = 110.0;
 
+/// What the preset list asks the app to do with preset files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PresetRequest {
+    /// The list opened: read the presets folder again.
+    Rescan,
+    /// Pick preset files to add.
+    Import,
+    /// Save this preset as a file to share.
+    Export(String),
+    /// Open the presets folder.
+    ShowFolder,
+}
+
 /// The preset state the toolbar edits: the item's applied preset name,
 /// what was changed since, and the Save-preset dialog.
 pub(crate) struct PresetUi<'a> {
@@ -104,6 +117,7 @@ pub(crate) fn render(
     settings: &mut Settings,
     current_item: &mut ItemSettings,
     presets: &mut PresetUi<'_>,
+    request: &mut Option<PresetRequest>,
 ) -> Option<String> {
     let pop_id = egui::Id::new("preset_popover");
     // A delete armed in the list is forgotten once the list closes.
@@ -121,6 +135,9 @@ pub(crate) fn render(
     );
 
     if resp.clicked() {
+        if !egui::Popup::is_id_open(ui.ctx(), pop_id) {
+            *request = Some(PresetRequest::Rescan);
+        }
         ui.memory_mut(|m| m.toggle_popup(pop_id));
     }
 
@@ -193,6 +210,11 @@ pub(crate) fn render(
                             if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
                                 settings.default_preset = name.clone();
                             }
+                            let export = ui.small_button(RichText::new(ICON_IOS_SHARE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+                            if crate::gui::views::chip::named(export, "Export preset").on_hover_text("Save this preset as a file to share").clicked() {
+                                *request = Some(PresetRequest::Export(name.clone()));
+                                egui::Popup::close_id(ui.ctx(), pop_id);
+                            }
                         },
                     );
                 });
@@ -210,6 +232,18 @@ pub(crate) fn render(
                 *presets.save_dialog = Some(SaveDialog::of(settings, current_item, presets.applied, presets.changes));
                 egui::Popup::close_id(ui.ctx(), pop_id);
             }
+            ui.horizontal(|ui| {
+                let import = format!("{}  Import…", ICON_FILE_OPEN.codepoint);
+                if button(ui, ButtonKind::Secondary, &import).on_hover_text("Add preset files someone shared").clicked() {
+                    *request = Some(PresetRequest::Import);
+                    egui::Popup::close_id(ui.ctx(), pop_id);
+                }
+                let folder = format!("{}  Show folder", ICON_FOLDER_OPEN.codepoint);
+                if button(ui, ButtonKind::Secondary, &folder).on_hover_text("Open the folder the presets are kept in").clicked() {
+                    *request = Some(PresetRequest::ShowFolder);
+                    egui::Popup::close_id(ui.ctx(), pop_id);
+                }
+            });
 
             ui.add_space(theme::SPACE_XS);
             ui.label(
