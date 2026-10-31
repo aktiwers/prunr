@@ -51,7 +51,8 @@ const WHICH: [chip::Choice<bool>; 2] = [
 
 const ID_SALT: &str = "faces";
 
-pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
+/// `default`: the default preset's settings for the chosen restorer.
+pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, default: &FaceSettings, outlines: &mut bool, installed: HardwareInstallCache, found: FoundCount) -> FacesChange {
     let mut change = FacesChange::default();
     let any_installed = FaceModel::ALL.iter().any(|&m| installed.has_face_model(m));
     let summary: std::borrow::Cow<'static, str> = if !any_installed {
@@ -68,6 +69,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, ins
         summary: &summary,
         tooltip: "Redraw soft, small or compressed faces.",
         tuned: s.on,
+        at_default: s == default,
         width: PANEL_WIDTH,
         live: true,
     };
@@ -85,8 +87,7 @@ pub(crate) fn render(ui: &mut Ui, s: &mut FaceSettings, outlines: &mut bool, ins
         }
         chip::Part::Full { reset } => {
             if reset {
-                let model = s.model;
-                *s = FaceSettings { model, ..FaceSettings::default() };
+                *s = *default;
                 change.search = true;
             }
             hint(ui, &found_text(s.on, found));

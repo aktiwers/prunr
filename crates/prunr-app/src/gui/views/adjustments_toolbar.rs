@@ -68,6 +68,9 @@ pub struct ToolbarChange {
     /// User picked a non-image bg kind (color or effect) while a bg image
     /// was active — drop the image so the chosen kind takes over.
     pub clear_bg_image: bool,
+    /// The Background panel's Reset set this picture (`None`: none): the
+    /// app loads it, or drops the one shown.
+    pub bg_image_reset: Option<Option<std::num::NonZeroU64>>,
     /// User clicked a selection action button (Delete/Copy/Cut/Invert/Clear).
     pub(crate) selection_action: Option<SelectionAction>,
     pub(crate) toggle_paint: bool,
@@ -116,8 +119,8 @@ pub struct ModelStoreRequest {
 }
 
 /// The Faces chip; a missing face model opens the Model Store on Faces.
-pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, outlines: &mut bool, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
-    let faces = super::faces_chip::render(ui, &mut item_settings.faces, outlines, state.installed, state.faces_found);
+pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, default: &crate::gui::item_settings::FaceSettings, outlines: &mut bool, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let faces = super::faces_chip::render(ui, &mut item_settings.faces, default, outlines, state.installed, state.faces_found);
     if faces.open_store {
         change.open_model_store = Some(ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Face) });
     }
@@ -125,8 +128,8 @@ pub(super) fn render_faces_chip(ui: &mut Ui, item_settings: &mut ItemSettings, o
 }
 
 /// The Depth chip; a missing depth model opens the Model Store on Depth.
-fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
-    let depth = super::depth_chip::render(ui, &mut item_settings.depth, state.installed.depth, state.picking_depth_focus);
+fn render_depth_chip(ui: &mut Ui, item_settings: &mut ItemSettings, default: &prunr_core::depth::DepthLook, state: &ToolbarState<'_>, change: &mut ToolbarChange) {
+    let depth = super::depth_chip::render(ui, &mut item_settings.depth, default, state.installed.depth, state.picking_depth_focus);
     if depth.open_store {
         change.open_model_store = Some(super::get_model::store_request(super::depth_chip::DEPTH_MODEL));
     }
@@ -183,19 +186,25 @@ pub(crate) fn render(
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, gate(Surface::Upscale)));
+            row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, &defaults, state.source_dims, gate(Surface::Upscale)));
         }
         if shows(model, Surface::Colorize) {
-            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings)));
+            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings, defaults.color_strength_pct)));
         }
         if shows(model, Surface::SdChips) && row.chip(ui, "sd", |ui| super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed)) {
             change.brush_settings_committed = true;
         }
-        if shows(model, Surface::RoremChips) && row.chip(ui, "rorem", |ui| super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed)) {
-            change.brush_settings_committed = true;
+        if shows(model, Surface::RoremChips) {
+            let defaults = app_settings.resolve_active_preset(None).brush;
+            if row.chip(ui, "rorem", |ui| super::eraser_chip::render_rorem(ui, &mut app_settings.brush, &defaults, state.shown_seed)) {
+                change.brush_settings_committed = true;
+            }
         }
-        if shows(model, Surface::FillChips) && row.chip(ui, "fill", |ui| super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush)) {
-            change.brush_settings_committed = true;
+        if shows(model, Surface::FillChips) {
+            let defaults = app_settings.resolve_active_preset(None).brush;
+            if row.chip(ui, "fill", |ui| super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush, &defaults)) {
+                change.brush_settings_committed = true;
+            }
         }
         if shows(model, Surface::Mask) {
             row.chip(ui, "mask", |ui| chip::gated(ui, gate(Surface::Mask), |ui| {
@@ -209,21 +218,22 @@ pub(crate) fn render(
         }
         if shows(model, Surface::Effect) {
             row.chip(ui, "effect", |ui| chip::gated(ui, gate(Surface::Effect), |ui| {
-                let changed = super::effect_chip::render(ui, &mut item_settings.effect);
+                let changed = super::effect_chip::render(ui, &mut item_settings.effect, defaults.effect);
                 aggregate_bool(changed, StaticKnob::SubjectEffect, &mut change);
             }));
         }
         if shows(model, Surface::Faces) {
             row.chip(ui, "faces", |ui| chip::gated(ui, gate(Surface::Faces), |ui| {
-                render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
+                let default = app_settings.preset_faces(&app_settings.default_preset, item_settings.faces.model);
+                render_faces_chip(ui, item_settings, &default, &mut app_settings.face_outlines, &state, &mut change);
             }));
         }
         if shows(model, Surface::Depth) {
-            row.chip(ui, "depth", |ui| render_depth_chip(ui, item_settings, &state, &mut change));
+            row.chip(ui, "depth", |ui| render_depth_chip(ui, item_settings, &defaults.depth, &state, &mut change));
         }
         if shows(model, Surface::Decoration) {
             row.chip(ui, "decoration", |ui| chip::gated(ui, gate(Surface::Decoration), |ui| {
-                let changed = render_decoration_chip(ui, &mut item_settings.decoration);
+                let changed = render_decoration_chip(ui, &mut item_settings.decoration, &defaults.decoration);
                 aggregate_bool(changed, StaticKnob::Decoration, &mut change);
             }));
         }
@@ -235,8 +245,10 @@ pub(crate) fn render(
                     bg: &mut item_settings.bg,
                     bg_effect: &mut item_settings.bg_effect,
                     bg_image_fit: &mut item_settings.bg_image_fit,
+                    bg_image_hash: item_settings.bg_image_hash,
                     has_bg_image: state.has_bg_image,
                     bg_image_label: state.bg_image_label,
+                    default: &defaults,
                 }, &mut change);
             }));
         }
@@ -407,6 +419,7 @@ fn render_mask_group(
         summary: &summary,
         tooltip: "How the subject is cut out, in five steps. Each step works on the result of the one above it.",
         tuned: tuned > 0,
+        at_default: tuned == 0,
         width: theme::POPOVER_WIDTH,
         live: true,
     };
@@ -528,6 +541,7 @@ fn render_lines_group(
         summary: mode_label(s.line_mode),
         tooltip: "Trace the outlines of the image or of the subject, then style the lines.",
         tuned,
+        at_default: chip::tuned_count(LINES_FIELDS, s, d) == 0,
         width: LINES_PANEL_WIDTH,
         live: true,
     };
@@ -786,7 +800,7 @@ fn line_style_params(ui: &mut Ui, style: &mut prunr_core::LineStyle) -> bool {
 
 /// The Outline and shadow chip: a sticker outline and a shadow under the
 /// cut-out. Returns true when a knob moved.
-fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
+fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration, default: &prunr_core::Decoration) -> bool {
     let value = match (d.has_outline(), d.has_shadow()) {
         (false, false) => "Off",
         (true, false) => "Outline",
@@ -801,11 +815,13 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
         summary: value,
         tooltip: "A sticker outline and a shadow under the cut-out.",
         tuned: on,
+        at_default: d == default,
         width: DECORATION_PANEL_WIDTH,
         live: true,
     };
     let mut changed = false;
-    let header = chip::PanelHeader { note: "", reset: "Back to none" };
+    let back = if default.has_outline() || default.has_shadow() { "Reset" } else { "Back to none" };
+    let header = chip::PanelHeader { note: "", reset: back };
     chip::strip_chip_faced(ui, group, value, "All outline and shadow settings", header, |ui, part| match part {
         chip::Part::Quick => {
             changed |= outline_width(ui, "Outline", d);
@@ -813,7 +829,7 @@ fn render_decoration_chip(ui: &mut Ui, d: &mut prunr_core::Decoration) -> bool {
         }
         chip::Part::Full { reset } => {
             if reset {
-                *d = prunr_core::Decoration::default();
+                *d = *default;
                 changed = true;
             }
             chip::panel_section(ui, "Outline", None);
@@ -897,8 +913,11 @@ struct BgChipState<'a> {
     bg: &'a mut Option<[u8; 4]>,
     bg_effect: &'a mut prunr_core::BgEffect,
     bg_image_fit: &'a mut prunr_core::BgImageFit,
+    bg_image_hash: Option<std::num::NonZeroU64>,
     has_bg_image: bool,
     bg_image_label: Option<&'a str>,
+    /// The default preset's settings, for Reset.
+    default: &'a ItemSettings,
 }
 
 /// Unified Background chip: one control for "what fills the transparent
@@ -913,8 +932,10 @@ fn render_background_chip(
         bg,
         bg_effect,
         bg_image_fit,
+        bg_image_hash,
         has_bg_image,
         bg_image_label,
+        default,
     } = state;
     use prunr_core::BgEffect;
 
@@ -927,10 +948,12 @@ fn render_background_chip(
         summary: current.name(),
         tooltip: "What fills the transparent area behind the subject: a solid color, an image, or a blurred, lens-blurred or black-and-white copy of the photo.",
         tuned: current != BgKind::Transparent,
+        at_default: (*bg, *bg_effect, *bg_image_fit, bg_image_hash) == (default.bg, default.bg_effect, default.bg_image_fit, default.bg_image_hash),
         width: BACKGROUND_PANEL_WIDTH,
         live: true,
     };
-    let header = chip::PanelHeader { note: "", reset: "Back to transparent" };
+    let back = if BgKind::of(default.backdrop()) == BgKind::Transparent { "Back to transparent" } else { "Reset" };
+    let header = chip::PanelHeader { note: "", reset: back };
     let pick = |kind: BgKind, bg: &mut Option<[u8; 4]>, bg_effect: &mut BgEffect, change: &mut ToolbarChange| {
         // The picture lives on the item and loads off the UI thread; it
         // replaces the background when it lands.
@@ -970,7 +993,9 @@ fn render_background_chip(
         }
         chip::Part::Full { reset } => {
             if reset {
-                pick(BgKind::Transparent, bg, bg_effect, change);
+                (*bg, *bg_effect, *bg_image_fit) = (default.bg, default.bg_effect, default.bg_image_fit);
+                change.bg_image_reset = Some(default.bg_image_hash);
+                aggregate_bool(true, StaticKnob::BgColor, change);
             }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1180,8 +1205,7 @@ const POPUP_GAP: f32 = 4.0;
 /// The picker's last row: its title and description.
 const MORE_MODELS: (&str, &str) = ("Get more models", "Open the Model Store");
 
-fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
-    let default_pct = ItemSettings::default().color_strength_pct;
+fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings, default_pct: u8) {
     let tuned = s.color_strength_pct != default_pct;
     let summary = fmt::percent(s.color_strength());
     let group = chip::GroupChip {
@@ -1191,6 +1215,7 @@ fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings) {
         summary: &summary,
         tooltip: "Color strength. 0% = black and white, 100% = the model's colors, up to 150%.",
         tuned,
+        at_default: !tuned,
         width: theme::POPOVER_WIDTH,
         live: true,
     };

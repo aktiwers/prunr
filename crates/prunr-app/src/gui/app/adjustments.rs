@@ -135,7 +135,7 @@ impl PrunrApp {
             }
             // The preset may carry a bg_image_hash: reload its bytes from the
             // persisted path map (or clear) so the recipe diff holds.
-            self.reconcile_bg_image_after_preset(idx);
+            self.reconcile_bg_image(idx);
         }
         if let Some(from) = toolbar_change.model_switched_from {
             self.on_model_changed(from);
@@ -150,6 +150,11 @@ impl PrunrApp {
             self.handle_pick_bg_image(idx);
         } else if toolbar_change.clear_bg_image {
             self.batch.items[idx].clear_bg_image();
+            ctx.request_repaint();
+        }
+        if let Some(hash) = toolbar_change.bg_image_reset {
+            self.batch.items[idx].settings.bg_image_hash = hash;
+            self.reconcile_bg_image(idx);
             ctx.request_repaint();
         }
         if let Some(action) = toolbar_change.selection_action.filter(|&a| self.can_selection_action(a)) {

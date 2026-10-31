@@ -22,9 +22,9 @@ const REFINE_FIELDS: &[Field<ItemSettings>] = &[
 
 const PANEL_WIDTH: f32 = 400.0;
 
-pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
-    let d = ItemSettings::default();
-    let tuned = chip::tuned_count(REFINE_FIELDS, s, &d);
+/// `d`: the default preset's settings.
+pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings, d: &ItemSettings) {
+    let tuned = chip::tuned_count(REFINE_FIELDS, s, d);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "refine",
@@ -33,6 +33,7 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         summary: &summary,
         tooltip: "Clean the photo before upscaling and tune the result after.",
         tuned: tuned > 0,
+        at_default: tuned == 0,
         width: PANEL_WIDTH,
         live: true,
     };
@@ -44,7 +45,7 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         }
         chip::Part::Full { reset } => {
             if reset {
-                chip::reset_fields(REFINE_FIELDS, s, &d);
+                chip::reset_fields(REFINE_FIELDS, s, d);
             }
             chip::panel_section(ui, "Before upscaling", Some("Requires reprocessing."));
             chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));

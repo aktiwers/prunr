@@ -581,11 +581,11 @@ impl PrunrApp {
         }
     }
 
-    /// Reconcile `BatchItem.bg_image` with `settings.bg_image_hash` after a
-    /// preset apply. Preset apply copies `ItemSettings` (which includes the
-    /// hash) but not the picture; this loads it from the path the hash was
-    /// saved with, or drops the hash.
-    fn reconcile_bg_image_after_preset(&mut self, idx: usize) {
+    /// Reconcile `BatchItem.bg_image` with `settings.bg_image_hash` after
+    /// a preset apply, a model switch or a Background Reset, which set the
+    /// hash but not the picture: load it from the path the hash was saved
+    /// with, or drop the hash.
+    fn reconcile_bg_image(&mut self, idx: usize) {
         let Some(item) = self.batch.items.get_mut(idx) else { return };
         let want = item.settings.bg_image_hash;
         let have = item.bg_image.as_ref().map(|b| b.hash);
@@ -797,7 +797,7 @@ impl PrunrApp {
                 }
             };
             if self.batch.items[idx].settings.bg_image_hash != preset_before {
-                self.reconcile_bg_image_after_preset(idx);
+                self.reconcile_bg_image(idx);
             }
             // The step's image shows its selection as the switch stood
             // then; the switch may have moved since. Lines kept from other
@@ -1375,7 +1375,7 @@ impl PrunrApp {
     fn on_model_changed(&mut self, from: super::settings::SettingsModel) {
         self.batch.switch_model(from, &self.settings);
         for idx in 0..self.batch.items.len() {
-            self.reconcile_bg_image_after_preset(idx);
+            self.reconcile_bg_image(idx);
         }
         // The brush is the app's, not an image's: the shown image's preset
         // is the one in front of the user.

@@ -6,18 +6,46 @@
 use egui::RichText;
 use egui_material_icons::icons::*;
 
-use crate::gui::brush_state::{
-    default_sd_strength, default_sharpen, BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE,
-};
+use crate::gui::brush_state::{BrushSettings, SdScheduler, DEFAULT_SD_NEGATIVE_PROMPT, ROREM_STEPS_RANGE};
 use prunr_core::inpaint::FillScale;
 use prunr_core::inpaint_blend::EdgeColour;
-use prunr_core::inpaint_sd::ROREM_STEPS;
-use crate::gui::presets::SdSchedulerBundle;
 use crate::gui::settings::Settings;
 use crate::gui::theme;
 
-use super::chip::{self, GroupChip};
+use super::chip::{self, Field, GroupChip};
 use super::{differs, fmt, get_model, hint};
+
+const FILL_SCALE: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.inpaint_fill_scale != d.inpaint_fill_scale, reset: |s, d| s.inpaint_fill_scale = d.inpaint_fill_scale };
+const SHARPEN: Field<BrushSettings> = Field { knob: None, differs: |s, d| differs(s.inpaint_sharpen, d.inpaint_sharpen), reset: |s, d| s.inpaint_sharpen = d.inpaint_sharpen };
+const SEED: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.sd_seed != d.sd_seed, reset: |s, d| s.sd_seed = d.sd_seed };
+const SOFT_EDGE: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.sd_soft_edge != d.sd_soft_edge, reset: |s, d| s.sd_soft_edge = d.sd_soft_edge };
+const GENERATED_EDGE_COLOUR: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.edge_colour(true) != d.edge_colour(true), reset: |s, d| s.inpaint_edge_colour = d.inpaint_edge_colour };
+const FILL_EDGE_COLOUR: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.edge_colour(false) != d.edge_colour(false), reset: |s, d| s.inpaint_edge_colour = d.inpaint_edge_colour };
+
+/// The SD eraser's Advanced, for the quality in use.
+const SD_ADVANCED: &[Field<BrushSettings>] = &[
+    FILL_SCALE,
+    SHARPEN,
+    Field { knob: None, differs: |s, d| s.sd_steps != d.sd_steps, reset: |s, d| s.sd_steps = d.sd_steps },
+    Field { knob: None, differs: |s, d| differs(s.sd_guidance_scale, d.sd_guidance_scale), reset: |s, d| s.sd_guidance_scale = d.sd_guidance_scale },
+    Field { knob: None, differs: |s, d| differs(s.sd_strength, d.sd_strength), reset: |s, d| s.sd_strength = d.sd_strength },
+    SEED,
+    Field { knob: None, differs: |s, d| s.sd_use_taesd != d.sd_use_taesd, reset: |s, d| s.sd_use_taesd = d.sd_use_taesd },
+    Field { knob: None, differs: |s, d| s.sd_sampler != d.sd_sampler, reset: |s, d| s.sd_sampler = d.sd_sampler },
+    SOFT_EDGE,
+    GENERATED_EDGE_COLOUR,
+];
+
+const ROREM_ADVANCED: &[Field<BrushSettings>] = &[
+    FILL_SCALE,
+    SHARPEN,
+    Field { knob: None, differs: |s, d| s.rorem_steps != d.rorem_steps, reset: |s, d| s.rorem_steps = d.rorem_steps },
+    SEED,
+    SOFT_EDGE,
+    GENERATED_EDGE_COLOUR,
+];
+
+const FILL_ADVANCED: &[Field<BrushSettings>] = &[FILL_SCALE, SHARPEN, FILL_EDGE_COLOUR];
 
 /// Render the SD-eraser chips. Caller decides placement. Returns true
 /// when a setting was committed.
@@ -28,22 +56,16 @@ pub(crate) fn render(
     shown_seed: Option<u64>,
 ) -> bool {
     let mut committed = render_quality_chip(ui, app_settings, installed.lcm_bundle);
-    committed |= render_prompt_chip(ui, &mut app_settings.brush);
-    committed |= render_advanced_group(ui, &mut app_settings.brush, installed.taesd, shown_seed);
+    // The default preset's, for the quality in use.
+    let defaults = app_settings.resolve_active_preset(Some(app_settings.brush.sd_scheduler)).brush;
+    committed |= render_prompt_chip(ui, &mut app_settings.brush, &defaults);
+    committed |= render_advanced_group(ui, &mut app_settings.brush, &defaults, installed.taesd, shown_seed);
     committed
 }
 
-fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
+fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
     let quality = brush.sd_scheduler;
-    let shipped = SdSchedulerBundle::default_for(quality);
-    let tuned = usize::from(brush.sd_steps != shipped.steps)
-        + usize::from(differs(brush.sd_guidance_scale, shipped.guidance_scale))
-        + usize::from(differs(brush.sd_strength, default_sd_strength()))
-        + usize::from(brush.sd_seed.is_some())
-        + usize::from(brush.sd_use_taesd.is_some())
-        + usize::from(brush.sd_sampler.is_some())
-        + generated_edge_tuned(brush)
-        + fill_tuned(brush, true);
+    let tuned = chip::tuned_count(SD_ADVANCED, brush, defaults);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "eraser_advanced",
@@ -52,20 +74,14 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, taesd_ins
         summary: &summary,
         tooltip: "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler, seed and how it meets the photo.",
         tuned: tuned > 0,
+        at_default: tuned == 0,
         width: theme::POPOVER_WIDTH,
         live: false,
     };
     let mut committed = false;
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
-            brush.sd_steps = shipped.steps;
-            brush.sd_guidance_scale = shipped.guidance_scale;
-            brush.sd_strength = default_sd_strength();
-            brush.sd_seed = None;
-            brush.sd_use_taesd = None;
-            brush.sd_sampler = None;
-            reset_generated_edge(brush);
-            reset_fill(brush, true);
+            chip::reset_fields(SD_ADVANCED, brush, defaults);
             committed = true;
         }
 
@@ -128,11 +144,6 @@ fn edge_colour_row(ui: &mut egui::Ui, brush: &mut BrushSettings, generated: bool
     changed
 }
 
-/// Whether the edge colour differs from the eraser's own.
-fn edge_colour_tuned(brush: &BrushSettings, generated: bool) -> bool {
-    brush.edge_colour(generated) != crate::gui::brush_state::default_edge_colour(generated)
-}
-
 /// The edge of a generated fill (SD and RORem): Soft edge, then Edge colour.
 fn generated_edge_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let mut committed = chip::toggle_row(ui, "Soft edge", &mut brush.sd_soft_edge).changed;
@@ -142,20 +153,10 @@ fn generated_edge_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     committed
 }
 
-/// How many of the generated edge's settings differ from the shipped ones.
-fn generated_edge_tuned(brush: &BrushSettings) -> usize {
-    usize::from(!brush.sd_soft_edge) + usize::from(edge_colour_tuned(brush, true))
-}
-
-fn reset_generated_edge(brush: &mut BrushSettings) {
-    brush.sd_soft_edge = true;
-    brush.inpaint_edge_colour = None;
-}
-
 /// LaMa, Big-LaMa and MI-GAN's Advanced group: the fill's scale and
 /// sharpness, and how it meets the photo.
-pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
-    let tuned = usize::from(edge_colour_tuned(brush, false)) + fill_tuned(brush, false);
+pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings) -> bool {
+    let tuned = chip::tuned_count(FILL_ADVANCED, brush, defaults);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "fill_advanced",
@@ -164,14 +165,14 @@ pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings)
         summary: &summary,
         tooltip: "The fill's scale and sharpness, and how it meets the photo around it.",
         tuned: tuned > 0,
+        at_default: tuned == 0,
         width: theme::POPOVER_WIDTH,
         live: false,
     };
     let mut committed = false;
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
-            brush.inpaint_edge_colour = None;
-            reset_fill(brush, false);
+            chip::reset_fields(FILL_ADVANCED, brush, defaults);
             committed = true;
         }
         committed |= fill_rows(ui, brush);
@@ -199,16 +200,6 @@ fn fill_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     committed
 }
 
-/// How many of the fill's scale and sharpness differ from the shipped ones.
-fn fill_tuned(brush: &BrushSettings, generated: bool) -> usize {
-    usize::from(brush.inpaint_fill_scale != FillScale::default()) + usize::from(differs(brush.inpaint_sharpen, default_sharpen(generated)))
-}
-
-fn reset_fill(brush: &mut BrushSettings, generated: bool) {
-    brush.inpaint_fill_scale = FillScale::default();
-    brush.inpaint_sharpen = default_sharpen(generated);
-}
-
 /// Pin the seed of the fill on screen, or let each fill draw its own.
 fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
     let mut pinned = brush.sd_seed.is_some();
@@ -226,8 +217,8 @@ fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64
 
 /// RORem's Advanced group: steps, seed and the edge. Its prompt is baked
 /// in, so there is nothing else to tell it.
-pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
-    let tuned = usize::from(brush.rorem_steps != ROREM_STEPS) + usize::from(brush.sd_seed.is_some()) + generated_edge_tuned(brush) + fill_tuned(brush, true);
+pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, shown_seed: Option<u64>) -> bool {
+    let tuned = chip::tuned_count(ROREM_ADVANCED, brush, defaults);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
         id_salt: "rorem_advanced",
@@ -236,16 +227,14 @@ pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_s
         summary: &summary,
         tooltip: "How the eraser generates the fill: its scale and sharpness, steps, seed and how it meets the photo.",
         tuned: tuned > 0,
+        at_default: tuned == 0,
         width: theme::POPOVER_WIDTH,
         live: false,
     };
     let mut committed = false;
     chip::group_chip(ui, group, |ui, reset| {
         if reset {
-            brush.rorem_steps = ROREM_STEPS;
-            brush.sd_seed = None;
-            reset_generated_edge(brush);
-            reset_fill(brush, true);
+            chip::reset_fields(ROREM_ADVANCED, brush, defaults);
             committed = true;
         }
         committed |= fill_rows(ui, brush);
@@ -295,7 +284,7 @@ fn render_quality_chip(
     changed
 }
 
-fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
+fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings) -> bool {
     let pop_id = egui::Id::new("eraser_prompt_popover");
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_EDIT_NOTE.codepoint, "Prompt", !brush.sd_prompt.trim().is_empty()),
@@ -306,11 +295,12 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     let mut changed = false;
     chip::popup_for(ui, pop_id, &resp, |ui| {
         ui.set_min_width(theme::POPOVER_WIDTH_WIDE);
-        let already_default = brush.sd_prompt.is_empty()
-            && brush.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT;
-        if chip::popover_header(ui, "Prompt", Some(("Clear the prompt and restore the shipped negative prompt", already_default))) {
-            brush.sd_prompt.clear();
-            brush.sd_negative_prompt = DEFAULT_SD_NEGATIVE_PROMPT.to_string();
+        let already_default = brush.sd_prompt == defaults.sd_prompt && brush.sd_negative_prompt == defaults.sd_negative_prompt;
+        let shipped = defaults.sd_prompt.is_empty() && defaults.sd_negative_prompt == DEFAULT_SD_NEGATIVE_PROMPT;
+        let tip = if shipped { "Clear the prompt and restore the shipped negative prompt" } else { "Back to your default preset's prompts" };
+        if chip::popover_header(ui, "Prompt", Some((tip, already_default))) {
+            brush.sd_prompt.clone_from(&defaults.sd_prompt);
+            brush.sd_negative_prompt.clone_from(&defaults.sd_negative_prompt);
             changed = true;
         }
         let p = chip::named(ui.add(

@@ -461,6 +461,20 @@ fn prunr_view_of(model: SettingsModel) -> &'static ModelView {
     &prunr_models()[model_index(model)]
 }
 
+/// Each helper model's image settings, in `HELPERS` order, from
+/// `entries` over Prunr's.
+fn helpers_from(entries: &HashMap<String, Entry>) -> Vec<ItemSettings> {
+    HELPERS.into_iter().map(|helper| helper_values(helper, entries.get(&model_id_key(helper))).0).collect()
+}
+
+/// A helper model's image settings as `preset` (Prunr's for `None`) sets
+/// them, wherever it runs.
+pub(crate) fn helper_item_settings(preset: Option<&Preset>, helper: ModelId) -> ItemSettings {
+    static PRUNR: std::sync::OnceLock<Vec<ItemSettings>> = std::sync::OnceLock::new();
+    let all = preset.map_or_else(|| PRUNR.get_or_init(|| helpers_from(&HashMap::new())).as_slice(), |p| p.helpers.as_slice());
+    HELPERS.iter().position(|&h| h == helper).and_then(|at| all.get(at)).copied().unwrap_or_default()
+}
+
 /// Prunr's settings for a helper model, over the code's defaults.
 fn prunr_helper(helper: ModelId) -> (ItemSettings, BrushSettings) {
     helper_values(helper, None)
@@ -493,6 +507,8 @@ pub(crate) struct Preset {
     file: PresetFile,
     /// Per model in `SettingsModel::ALL` order.
     views: Vec<ModelView>,
+    /// Per helper model in `HELPERS` order, its image settings.
+    helpers: Vec<ItemSettings>,
     /// The models it has settings for, as the preset list names them.
     covers: String,
 }
@@ -500,10 +516,11 @@ pub(crate) struct Preset {
 impl From<PresetFile> for Preset {
     fn from(file: PresetFile) -> Self {
         let views = SettingsModel::ALL.into_iter().map(|model| view_of(model, &file.models)).collect();
+        let helpers = helpers_from(&file.models);
         let mut keys: Vec<&str> = file.models.keys().map(String::as_str).collect();
         keys.sort_by_key(|key| (key_order(key), *key));
         let covers = keys.into_iter().map(entry_name).collect::<Vec<_>>().join(" \u{b7} ");
-        Self { file, views, covers }
+        Self { file, views, helpers, covers }
     }
 }
 

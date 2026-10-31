@@ -167,11 +167,7 @@ pub(crate) fn default_edge_colour(generated: bool) -> prunr_core::inpaint_blend:
     use prunr_core::inpaint_blend::EdgeColour;
     if generated { EdgeColour::Off } else { EdgeColour::AlongEdge }
 }
-/// A fill's Sharpen as shipped. A generated fill (SD, RORem) draws its own
-/// detail; sharpening on top crunches it.
-pub(crate) fn default_sharpen(generated: bool) -> f32 {
-    if generated { 0.0 } else { 0.6 }
-}
+fn default_sharpen() -> f32 { 0.6 }
 fn default_grow() -> f32 { prunr_core::inpaint_blend::DEFAULT_GROW_PX }
 fn default_magic_confidence_threshold() -> f32 { 0.5 }
 fn default_magic_remove_specks() -> bool { true }
@@ -343,7 +339,7 @@ impl Default for BrushSettings {
             mode: BrushMode::Add,
             cutout_action: CutoutAction::default(),
             shape: BrushShape::Circle,
-            inpaint_sharpen: default_sharpen(false),
+            inpaint_sharpen: default_sharpen(),
             inpaint_feather: default_feather(),
             inpaint_grow: default_grow(),
             inpaint_fill_scale: Default::default(),

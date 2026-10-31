@@ -10,11 +10,12 @@ use crate::gui::item_settings::ItemSettings;
 use crate::gui::settings::Settings;
 
 /// `source_dims` is `(w, h)` of the image the next upscale starts from,
-/// resolved by the caller.
+/// resolved by the caller; `defaults` the default preset's settings.
 pub(crate) fn render_upscale_chips(
     ui: &mut Ui,
     app_settings: &Settings,
     item_settings: &mut ItemSettings,
+    defaults: &ItemSettings,
     source_dims: (u32, u32),
     gate: Option<&'static str>,
 ) {
@@ -25,7 +26,7 @@ pub(crate) fn render_upscale_chips(
         return;
     }
     chip::gated(ui, gate, |ui| {
-        render_output_scale_chip(ui, &mut item_settings.output_scale, (out_w, out_h));
-        render_refine_group(ui, item_settings);
+        render_output_scale_chip(ui, &mut item_settings.output_scale, defaults.output_scale, (out_w, out_h));
+        render_refine_group(ui, item_settings, defaults);
     });
 }
