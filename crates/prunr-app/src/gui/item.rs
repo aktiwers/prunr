@@ -1213,6 +1213,16 @@ impl BatchItem {
                 })
     }
 
+    /// Lines a preview or a stroke left on another cut-out, which a lines
+    /// run from the kept segmentation traces on this one: no setting asks
+    /// for a new cut, and the cut-out does not start from an earlier result.
+    pub(crate) fn lines_need_only_a_retrace(&self, model: prunr_core::ModelKind, action: CutoutAction) -> bool {
+        let cut_as_set = self.applied_recipe.as_ref().is_some_and(|applied| {
+            prunr_core::resolve_tier(applied, &self.settings.current_recipe(model)) != prunr_core::RequiredTier::FullPipeline
+        });
+        self.cached_tensor.is_some() && self.run_start(Engine::Segment).is_none() && cut_as_set && self.lines_traced_on_another_cut(action)
+    }
+
     /// A cut-out's mask is kept to adjust it without the model; lines over
     /// the whole photo keep none. Not a gate: an undone step may own it.
     pub(crate) fn keeps_cut_mask(&self) -> bool {
@@ -2757,9 +2767,7 @@ impl BatchItem {
         let impact = crate::gui::knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current);
         self.apply_cache_impact(impact);
         let has_tensor = self.cached_tensor.is_some();
-        // Lines a preview or a stroke left on another cut-out are traced
-        // on this one.
-        if has_tensor && self.lines_traced_on_another_cut(action) && tier != RequiredTier::FullPipeline {
+        if self.lines_need_only_a_retrace(model, action) {
             return RunTier::AddEdge;
         }
         match tier {

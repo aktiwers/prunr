@@ -70,7 +70,29 @@ impl PrunrApp {
         if !self.batch.items[idx].shows_cutout() {
             return;
         }
-        self.dispatch_brush_rerun(idx);
+        if !self.retrace_lines(idx) {
+            self.dispatch_brush_rerun(idx);
+        }
+    }
+
+    /// Lines on the subject follow the strokes: when the strokes moved the
+    /// shown cut-out from under them, the lines run a mask slider's release
+    /// starts traces them on the stroked one, filling in the stroke's step,
+    /// so one Undo takes back both. False when none starts now; an edit
+    /// still being made asks again as it lands.
+    fn retrace_lines(&mut self, idx: usize) -> bool {
+        let Some(model) = self.settings.model.to_model_kind() else { return false };
+        let item = &self.batch.items[idx];
+        // A run takes the shown image's settings, which are not this one's.
+        if !self.batch.is_selected(item.id) {
+            return false;
+        }
+        if !item.lines_need_only_a_retrace(model, self.settings.brush.cutout_action) || !self.run_may_start(item) {
+            return false;
+        }
+        let item_id = item.id;
+        self.process_items(|item| item.id == item_id, None);
+        self.batch.items[idx].awaits_cut()
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
@@ -124,6 +146,7 @@ impl PrunrApp {
     /// now. Undo / redo held for the queue run once it is empty.
     pub(crate) fn land_selection_edits(&mut self, ctx: &egui::Context) {
         let mut landed = false;
+        let mut changed_items: Vec<u64> = Vec::new();
         for done in self.batch.selection_queue.take_done() {
             landed = true;
             let item_id = done.item_id;
@@ -156,10 +179,15 @@ impl PrunrApp {
             if let Some(patch) = done.stroke {
                 item.note_painted_during_erase(patch);
             }
-            if changed {
-                self.apply_selection_to_active_model(item_id);
+            if changed && !changed_items.contains(&item_id) {
+                changed_items.push(item_id);
             }
             ctx.request_repaint();
+        }
+        // Once every edit of the frame has landed: a run started for an
+        // earlier one would be made stale by the next.
+        for item_id in changed_items {
+            self.apply_selection_to_active_model(item_id);
         }
         let processor = &self.processor;
         for (action, ids) in self.batch.selection_queue.take_deferred(|id| processor.selecting(id)) {
@@ -873,5 +901,114 @@ mod tool_mutual_exclusion_tests {
         app.settings.model = SettingsModel::RealEsrganUpscale;
         app.fit_brush_models_to_model();
         assert_eq!((on(&app), app.active_tool()), ((false, false), None));
+    }
+}
+
+#[cfg(test)]
+mod stroke_lines_tests {
+    use std::sync::mpsc::Receiver;
+    use prunr_core::selection::{MaskArtifact, FULL};
+    use prunr_core::LineMode;
+    use super::PrunrApp;
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::{cut_with_lines, edge_lines, push_test_item};
+    use crate::gui::timeline::StepKind;
+    use crate::gui::worker::WorkerMessage;
+
+    /// Image 1 on screen, cut by Silueta with lines under `line_mode`; the
+    /// worker's messages are read from the receiver.
+    fn lined_cut_out(line_mode: LineMode) -> (PrunrApp, Receiver<WorkerMessage>) {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.settings.line_mode = line_mode;
+        cut_with_lines(item);
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        (app, rx)
+    }
+
+    fn stroke(app: &mut PrunrApp, cell: i8) {
+        app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![cell; 4]), StepKind::Stroke);
+    }
+
+    /// The lines runs sent since last asked, each with whether it carries
+    /// strokes.
+    fn lines_runs(rx: &Receiver<WorkerMessage>) -> Vec<bool> {
+        rx.try_iter()
+            .filter_map(|message| match message {
+                WorkerMessage::BatchProcess { add_edge_items, .. } => Some(add_edge_items),
+                _ => None,
+            })
+            .flatten()
+            .map(|work| work.correction.is_some())
+            .collect()
+    }
+
+    /// A Restore or Erase stroke on a cut-out with lines on the subject
+    /// starts one lines run, cut with the strokes, instead of a render
+    /// that would draw the lines where they were.
+    #[test]
+    fn a_stroke_on_a_subject_outline_traces_the_lines_on_the_stroked_cut_out() {
+        for action in [CutoutAction::Restore, CutoutAction::Erase] {
+            let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+            app.settings.brush.cutout_action = action;
+            stroke(&mut app, FULL);
+            assert_eq!(lines_runs(&rx), vec![true], "{action:?}: one lines run, carrying the strokes");
+            assert!(app.batch.items[0].awaits_cut(), "{action:?}: the image waits for its lines");
+            assert!(!app.processor.live_preview.works_on(1), "{action:?}: no render lands over them");
+        }
+    }
+
+    /// Lines over the whole photo, Sketch off, and a stroke that only
+    /// selects keep the render a stroke always made: no lines run.
+    #[test]
+    fn a_stroke_runs_no_lines_where_none_follow_the_cut_out() {
+        let cases = [
+            ("Sketch off", LineMode::Off, CutoutAction::Restore),
+            ("lines over the whole photo", LineMode::EdgesOnly, CutoutAction::Restore),
+            ("a stroke that only selects", LineMode::SubjectOutline, CutoutAction::Select),
+        ];
+        for (what, line_mode, action) in cases {
+            let (mut app, rx) = lined_cut_out(line_mode);
+            app.settings.brush.cutout_action = action;
+            stroke(&mut app, FULL);
+            assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "{what}");
+            assert!(app.batch.items[0].is_idle(), "{what}");
+        }
+    }
+
+    /// Lines already traced on the strokes shown do not run again: a
+    /// re-cut asked after the lines run landed renders, as before.
+    #[test]
+    fn lines_traced_on_the_strokes_shown_run_no_more() {
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        stroke(&mut app, FULL);
+        assert_eq!(lines_runs(&rx), vec![true]);
+        let item = &mut app.batch.items[0];
+        let recipe = item.settings.current_recipe(prunr_core::ModelKind::Silueta);
+        let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+        item.apply_tier_result(Ok(traced), None, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
+        item.finish_job();
+        app.apply_selection_to_active_model(1);
+        assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "traced on these strokes already");
+        assert!(app.processor.live_preview.works_on(1), "the re-cut renders");
+    }
+
+    /// A stroke that lands while the lines run is under way starts no
+    /// second run beside it: the image's one run goes on, and its result
+    /// is the older strokes', which no longer lands.
+    #[test]
+    fn a_stroke_during_a_lines_run_starts_no_second_run() {
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        stroke(&mut app, FULL);
+        let run = app.batch.items[0].job_run();
+        stroke(&mut app, -FULL);
+        assert_eq!(lines_runs(&rx), vec![true], "one run");
+        assert_eq!(app.batch.items[0].job_run(), run, "still the first");
+        assert!(!app.batch.items[0].job_is_current(), "made stale by the newer stroke");
     }
 }

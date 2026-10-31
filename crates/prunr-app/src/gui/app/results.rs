@@ -2281,6 +2281,47 @@ mod timeline_contract_tests {
         assert!(app.batch.items[1].is_cutting(), "sent, 2 runs");
     }
 
+    /// A stroke on a cut-out with lines on the subject traces them again:
+    /// the run's result fills in the stroke's step, so one Undo takes
+    /// back the stroke and its lines together.
+    #[test]
+    fn a_strokes_lines_land_on_its_step_and_go_with_it_on_undo() {
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        let steps = app.batch.items[0].timeline.undo_steps();
+
+        app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), StepKind::Stroke);
+        let batch = match rx.try_recv() {
+            Ok(WorkerMessage::BatchProcess { batch, add_edge_items, .. }) if add_edge_items.len() == 1 => batch,
+            _ => panic!("a lines run is sent"),
+        };
+        let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255])), active_provider: String::new() };
+        let lines = crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None);
+        app.on_batch_item_done(&ctx, batch, 1, Ok(traced), None, lines);
+        let item = &app.batch.items[0];
+        assert!(item.is_idle(), "the lines run landed");
+        assert_eq!(item.timeline.undo_steps(), steps + 1, "no step of its own");
+        assert_eq!(item.timeline.current().kind, StepKind::Stroke, "on the stroke's step");
+        assert_eq!(shown(&app), Some(9));
+        assert!(!item.lines_traced_on_another_cut(app.settings.brush.cutout_action), "traced on the stroke");
+
+        app.handle_undo(&ctx);
+        let item = &app.batch.items[0];
+        assert_eq!(item.timeline.undo_steps(), steps, "one Undo");
+        assert!(item.selection_mask.is_none(), "takes back the stroke");
+        assert_eq!(shown(&app), Some(0), "and the lines traced on it");
+    }
+
     /// Process, Cancel (selected) mid-run, change a knob, Process again:
     /// the cancelled run's late answer, whatever it is, never lands on the
     /// new run, and the new run's own result does.
