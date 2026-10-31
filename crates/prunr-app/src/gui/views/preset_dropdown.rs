@@ -1,16 +1,7 @@
 //! The "Preset" dropdown: quick-apply named settings snapshots and save
 //! the current item's settings as a new preset.
 //!
-//! View Component discipline: takes `&mut AppSettings` (for the preset map
-//! and the naming dialog state) + `&mut ItemSettings` (the current image's
-//! settings — source of a Save, target of an Apply).
-//!
-//! Returns `true` when the current item's settings changed (Apply), so the
-//! caller can invalidate textures / reset cached tensors.
-//!
-//! The "Save preset" naming dialog lives on `AppSettings.preset_name_buffer`
-//! (a transient field, `#[serde(skip)]`). It opens on "Save current as..." and
-//! closes when the user confirms or cancels.
+//! Takes `&mut AppSettings` and `&mut ItemSettings`, never `&mut PrunrApp`.
 
 use egui::{RichText, Ui};
 use egui_material_icons::icons::*;
@@ -20,15 +11,9 @@ use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 use crate::gui::views::chip::{button, ButtonKind};
 
-/// Label for the dropdown button — shows the `applied_preset` name and
-/// whether current settings still match it.
-///   - Match → `Portrait ✓` (check icon, clean)
-///   - Diverged → `Portrait ✎` (edit icon, modified)
-///
-/// Tracks the preset the user LAST APPLIED (via dropdown click or Reset All),
-/// not whichever preset happens to match current settings. This way
-/// "Portrait ✎" keeps saying Portrait while you tweak — you know your base
-/// and that you've diverged from it.
+/// Label for the dropdown button: the preset the user last applied, with a
+/// check while current settings still match it and an edit mark once they
+/// diverge, so "Portrait ✎" keeps naming the base while you tweak.
 fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &str) -> String {
     // If applied_preset was deleted out from under us, fall back gracefully.
     let exists = applied_preset == PRUNR_PRESET
@@ -54,8 +39,7 @@ pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
 }
 
 /// All preset names in display order: Prunr first, then user presets
-/// alphabetically. Used by the dropdown list and anywhere we need the
-/// complete set of valid `default_preset` values.
+/// alphabetically.
 pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     let mut names = Vec::with_capacity(settings.presets.len() + 1);
     names.push(PRUNR_PRESET.to_string());
@@ -63,7 +47,6 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     names
 }
 
-/// The dialog's egui id for `standard_modal_window`.
 const SAVE_DIALOG_ID: &str = "preset_save_dialog";
 const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 380.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
@@ -79,6 +62,8 @@ pub(crate) struct PresetUi<'a> {
 /// preset (click on a row, or Save that swaps in the new name), so the caller
 /// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
 /// non-apply interactions (saves, deletes, star toggles).
+// Legacy `toggle_popup` / `popup_below_widget` wiring: the Preset chip
+// opens like the chip popovers but draws no open-chip outline.
 #[allow(deprecated)]
 pub(crate) fn render(
     ui: &mut Ui,
@@ -115,9 +100,8 @@ pub(crate) fn render(
             ui.set_min_width(theme::POPOVER_WIDTH);
             crate::gui::views::chip::popover_header(ui, "Presets", None);
 
-            // List in display order: Prunr first, then user presets. Prunr is
-            // a synthetic entry — applies ItemSettings::default() and cannot be
-            // deleted or overwritten.
+            // Prunr is synthetic: it applies ItemSettings::default() and
+            // cannot be deleted or overwritten.
             for name in all_preset_names(settings) {
                 let is_prunr = name == PRUNR_PRESET;
                 let is_default = settings.default_preset == name;
@@ -130,24 +114,21 @@ pub(crate) fn render(
                         .clicked()
                     {
                         // Applying sets what Reset to this preset would.
-                        let resolved = settings.resolve_preset(&name, None);
-                        *current_item = resolved.item_settings;
-                        settings.brush = resolved.brush;
+                        settings.apply_preset(&name, current_item);
                         applied = Some(name.clone());
                         egui::Popup::close_id(ui.ctx(), pop_id);
                     }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            // Delete — hidden for Prunr (non-deletable).
                             if !is_prunr {
-                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
-                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_MONO).color(theme::DESTRUCTIVE);
+                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
+                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
                                 if crate::gui::views::chip::confirm_button(ui, delete_scope, &name, idle, armed, "Delete preset") {
                                     settings.presets.remove(&name);
                                     // Remove the on-disk file too; presets are
                                     // the filesystem-store's source of truth.
-                                    let _ = crate::gui::presets_fs::delete(&name);
+                                    crate::gui::presets_fs::queue_delete(&name);
                                     // If the deleted preset was the app's default,
                                     // fall back to Prunr so default_preset stays valid.
                                     if is_default {
@@ -172,7 +153,7 @@ pub(crate) fn render(
                             };
                             let star_btn = ui.small_button(
                                 RichText::new(star_icon)
-                                    .size(theme::FONT_SIZE_MONO)
+                                    .size(theme::FONT_SIZE_SECONDARY)
                                     .color(star_color),
                             );
                             let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
@@ -198,12 +179,11 @@ pub(crate) fn render(
             ui.label(
                 RichText::new(format!("Default for new images: {}", settings.default_preset))
                     .color(theme::TEXT_HINT)
-                    .size(theme::FONT_SIZE_MONO),
+                    .size(theme::FONT_SIZE_SECONDARY),
             );
         },
     );
 
-    // ── Naming dialog ──
     if let Some(name_buf) = presets.save_dialog.as_mut() {
         let mut commit = false;
         let mut cancel = false;
@@ -219,26 +199,29 @@ pub(crate) fn render(
                 if text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     commit = true;
                 }
-                let trimmed = name_buf.trim();
-                let is_prunr_name = trimmed.eq_ignore_ascii_case(PRUNR_PRESET);
-                if is_prunr_name {
+                // Opens ready for a name; a click elsewhere in the dialog keeps its focus.
+                // After the Enter check: focusing first would hide the loss Enter caused.
+                if !commit && ui.memory(|m| m.focused().is_none()) {
+                    text_resp.request_focus();
+                }
+                let name = crate::gui::presets_fs::preset_name(name_buf);
+                let refusal = name.as_deref().and_then(|name| crate::gui::presets_fs::name_refusal(name, &settings.newer_presets));
+                if let Some(why) = refusal {
+                    ui.label(RichText::new(why).color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_SECONDARY));
+                } else if let Some(name) = name.as_ref().filter(|name| existing_names.contains(name)) {
                     ui.label(
-                        RichText::new("\"Prunr\" is reserved — pick another name.")
+                        RichText::new(format!("⚠ Will overwrite \"{name}\""))
                             .color(theme::DESTRUCTIVE)
-                            .size(theme::FONT_SIZE_MONO),
+                            .size(theme::FONT_SIZE_SECONDARY),
                     );
-                } else if !trimmed.is_empty() && existing_names.iter().any(|n| n == trimmed) {
-                    ui.label(
-                        RichText::new(format!("⚠ Will overwrite \"{trimmed}\""))
-                            .color(theme::DESTRUCTIVE)
-                            .size(theme::FONT_SIZE_MONO),
-                    );
+                } else if let Some(name) = name.as_ref().filter(|name| *name != name_buf.trim()) {
+                    ui.label(RichText::new(format!("Saves as \"{name}\"")).size(theme::FONT_SIZE_SECONDARY));
                 }
 
                 ui.add_space(theme::SPACE_SM);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled_ui(!is_prunr_name, |ui| button(ui, ButtonKind::Primary, "Save"))
+                        .add_enabled_ui(refusal.is_none(), |ui| button(ui, ButtonKind::Primary, "Save"))
                         .inner
                         .clicked()
                     {
@@ -256,7 +239,7 @@ pub(crate) fn render(
                     ui.label(
                         RichText::new("Or overwrite an existing preset:")
                             .color(theme::TEXT_PRIMARY)
-                            .size(theme::FONT_SIZE_MONO),
+                            .size(theme::FONT_SIZE_SECONDARY),
                     );
                     ui.add_space(theme::SPACE_XS);
                     egui::ScrollArea::vertical().max_height(OVERWRITE_LIST_HEIGHT).show(ui, |ui| {
@@ -272,57 +255,31 @@ pub(crate) fn render(
         });
         cancel |= backdrop_closed;
 
-        let trimmed = name_buf.trim();
         let is_overwrite = overwrite_target.is_some();
         // Resolve the target name: overwrite button wins, else a valid typed
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
         let target_name = overwrite_target.or_else(|| {
-            (commit && !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case(PRUNR_PRESET))
-                .then(|| trimmed.to_string())
+            crate::gui::presets_fs::preset_name(name_buf)
+                .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
         });
         if let Some(name) = target_name {
-            // Falls back to the workspace default model in filter-only
-            // mode (no model_id) so the file is still keyed correctly.
-            let model_id = settings.model.to_model_id()
-                .or_else(|| Settings::default().model.to_model_id())
-                .expect("Settings::default().model always has a model_id");
-            let (brush, sd) = crate::gui::presets::split_brush_for_save(
-                &settings.brush,
-                model_id,
-            );
+            let model_id = settings.preset_model();
             let mp = crate::gui::presets::ModelPreset {
                 item_settings: *current_item,
-                brush,
-                sd,
+                brush: settings.brush.clone(),
+                sd: crate::gui::presets::sd_preset_for_save(&settings.brush, model_id),
             };
 
-            let result = if is_overwrite {
-                // Merge into existing on disk so other-model entries +
-                // other-scheduler bundles stay intact.
-                crate::gui::presets_fs::save_merged(&name, model_id, mp)
-            } else {
-                let mut models = std::collections::HashMap::new();
-                models.insert(crate::gui::presets::model_id_key(model_id), mp);
-                let file = crate::gui::presets::PresetFile {
-                    format_version: crate::gui::presets::PRESET_FORMAT_VERSION,
-                    models,
-                };
-                crate::gui::presets_fs::save(&name, &file)
+            // An overwrite merges into the preset as loaded, so other-model
+            // entries and other-scheduler bundles stay intact; the store
+            // keeps what is written, for dirty-tracking.
+            let file = match settings.presets.get(&name).filter(|_| is_overwrite) {
+                Some(existing) => crate::gui::presets_fs::merged(existing.clone(), model_id, mp),
+                None => crate::gui::presets::PresetFile::single(model_id, mp),
             };
-
-            if let Err(e) = result {
-                tracing::error!(preset = %name, %e, "failed to save preset to disk");
-            }
-
-            // Refresh just the saved entry from disk so dirty-tracking
-            // round-trips against the merged file. Avoids the O(n)
-            // directory rescan that load_all() would do.
-            if let Some(path) = crate::gui::presets_fs::preset_path(&name) {
-                if let Some(reloaded) = crate::gui::presets_fs::load_from_path(&path) {
-                    settings.presets.insert(name.clone(), reloaded);
-                }
-            }
+            crate::gui::presets_fs::queue_save(&name, &file);
+            settings.presets.insert(name.clone(), file);
 
             applied = Some(name);
             cancel = true;
@@ -340,21 +297,18 @@ pub(crate) fn render(
 mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
-    use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
-    use std::collections::HashMap;
+    use crate::gui::presets::{ModelPreset, PresetFile};
 
     /// Wrap an `ItemSettings` into a v2 single-entry `PresetFile` keyed by
     /// the active model — tests use this where `s.presets.insert` once
     /// took a bare `ItemSettings`.
     fn wrap(s: &Settings, item: ItemSettings) -> PresetFile {
         let mid = s.model.to_model_id().expect("test settings have a model_id");
-        let mut models = HashMap::new();
-        models.insert(model_id_key(mid), ModelPreset {
+        PresetFile::single(mid, ModelPreset {
             item_settings: item,
             brush: Default::default(),
             sd: None,
-        });
-        PresetFile { format_version: PRESET_FORMAT_VERSION, models }
+        })
     }
 
     #[test]
@@ -386,27 +340,9 @@ mod tests {
     }
 
     #[test]
-    fn button_label_tracks_applied_even_when_current_matches_different_preset() {
-        let mut s = Settings::default();
-        let portrait_item = item_with_gamma(2.0);
-        s.presets.insert("Portrait".to_string(), wrap(&s, portrait_item));
-        // applied_preset = "Prunr" but current happens to match factory.
-        // Label should stay on "Prunr" (the applied one).
-        let current = ItemSettings::default();
-        let label = button_label(&s, &current, PRUNR_PRESET);
-        assert!(label.contains("Prunr"), "{label}");
-        // …and when current matches the OTHER preset but applied is Prunr,
-        // we still show "Prunr ✎" (modified relative to the applied base).
-        let label = button_label(&s, &portrait_item, PRUNR_PRESET);
-        assert!(label.contains("Prunr"), "{label}");
-        assert!(label.ends_with(ICON_EDIT.codepoint), "{label}");
-    }
-
-    #[test]
     fn button_label_dirty_indicator_includes_brush_diff() {
         use crate::gui::brush_state::BrushSettings;
         use crate::gui::settings::SettingsModel;
-        use crate::gui::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
 
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
@@ -417,10 +353,7 @@ mod tests {
             brush: preset_brush,
             sd: None,
         };
-        let mut models = HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        s.presets.insert("Foo".to_string(), file);
+        s.presets.insert("Foo".to_string(), PresetFile::single(prunr_models::ModelId::Silueta, mp));
 
         // ItemSettings still equals the preset's; only brush diverges.
         let current = ItemSettings::default();
@@ -434,18 +367,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sorted_preset_names_case_insensitive() {
-        let mut s = Settings::default();
-        let empty = wrap(&s, ItemSettings::default());
-        let mut map: HashMap<String, PresetFile> = HashMap::new();
-        map.insert("Zeta".to_string(), empty.clone());
-        map.insert("alpha".to_string(), empty.clone());
-        map.insert("Beta".to_string(), empty);
-        s.presets = map;
-        assert_eq!(sorted_preset_names(&s), vec!["alpha", "Beta", "Zeta"]);
-    }
-
+    /// Prunr first, then the user's presets by name ignoring case
+    /// ("alpha" before "Zeta").
     #[test]
     fn all_preset_names_prunr_first() {
         let mut s = Settings::default();

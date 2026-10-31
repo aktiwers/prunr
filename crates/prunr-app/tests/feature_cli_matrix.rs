@@ -1,4 +1,4 @@
-//! Phase 23-07: invoke the `prunr` CLI binary across a representative
+//! Invoke the `prunr` CLI binary across a representative
 //! flag matrix and verify each combination produces a valid output PNG.
 //!
 //! NOT a Cartesian product — picks the corners of the user-visible
@@ -165,4 +165,191 @@ fn cli_help_text_succeeds() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("--model"), "--help must list --model");
     assert!(stdout.contains("--lines"), "--help must list --lines");
+}
+
+/// Run the CLI on several inputs, killed if it outlives `limit`: the exit
+/// code (`None`: it hung) and stderr.
+fn run_cli_batch(inputs: &[&std::path::Path], out_dir: &std::path::Path, extra: &[&str], limit: std::time::Duration) -> (Option<i32>, String) {
+    let mut child = Command::new(CLI_BIN)
+        .args(inputs)
+        .arg("-o").arg(out_dir).arg("-f")
+        .args(extra)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn prunr binary");
+    let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr_pipe, &mut text);
+        text
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait on prunr") {
+            break status.code();
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    (code, reader.join().unwrap_or_default())
+}
+
+/// A batch goes on past an image that fails: the next one is processed
+/// and the run ends with a partial-failure exit.
+#[test]
+fn cli_batch_goes_on_after_an_image_fails() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let bytes = std::fs::read(&good).expect("read fixture");
+    // Its header reads, so it reaches the worker; its pixels do not decode.
+    let broken = dir.path().join("broken.png");
+    std::fs::write(&broken, &bytes[..bytes.len() / 2]).expect("write broken.png");
+    let (code, stderr) = run_cli_batch(&[&broken, &good], dir.path(), &["-m", "silueta", "-j", "1"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_batch_error] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(2), "a partial failure, not a hang; stderr:\n{stderr}");
+    assert_output_decodes(&dir.path().join("input.prunr.png"), "the image after the failure");
+}
+
+/// An input that is not an image says so on stderr when no spinner shows
+/// it (output piped, as from a script), and the batch goes on.
+#[test]
+fn an_input_that_is_not_an_image_says_so() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let notes = dir.path().join("notes.png");
+    std::fs::write(&notes, b"not an image").expect("write notes.png");
+    let (code, stderr) = run_cli_batch(&[&notes, &good], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_not_an_image] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(2), "stderr:\n{stderr}");
+    assert!(stderr.lines().any(|l| l.contains("notes.png") && l.contains("not a valid image")), "stderr:\n{stderr}");
+}
+
+/// A file name that is not UTF-8 (Linux allows any bytes) reaches the
+/// worker and is processed like any other.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_processes_a_file_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.png"));
+    std::fs::copy(&good, &odd).expect("copy to a non-UTF-8 name");
+    let (code, stderr) = run_cli_batch(&[&odd], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
+    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        eprintln!("[cli_non_utf8] SKIP: prerequisite not available");
+        return;
+    }
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_output_decodes(&dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.prunr.png")), "non-UTF-8 name");
+}
+
+/// A batch leaves nothing in its IPC folder, which on Linux is RAM
+/// (`/dev/shm`): the worker writes each run's tensors for a parent that
+/// re-runs from them, and the CLI, which never does, deletes them.
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_batch_leaves_no_ipc_files() {
+    let dir = tempdir().expect("tempdir");
+    let good = write_fixture_png(dir.path());
+    let second = dir.path().join("second.png");
+    std::fs::copy(&good, &second).expect("copy fixture");
+    for extra in [&["-m", "silueta"][..], &["-m", "silueta", "--lines"]] {
+        let child = Command::new(CLI_BIN)
+            .args([&good, &second]).arg("-o").arg(dir.path()).arg("-f").args(extra)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped())
+            .spawn().expect("spawn prunr binary");
+        let pid = child.id();
+        let out = child.wait_with_output().expect("wait on prunr");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+            eprintln!("[cli_ipc_files] SKIP: prerequisite not available");
+            return;
+        }
+        assert!(out.status.success(), "{extra:?}: stderr:\n{stderr}");
+        let ipc = std::path::PathBuf::from(format!("/dev/shm/prunr-ipc-{pid}"));
+        let left: Vec<_> = std::fs::read_dir(&ipc).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+        assert!(left.is_empty(), "{extra:?}: left in {}: {left:?}", ipc.display());
+    }
+}
+
+/// Each result is written as it lands, while the worker goes on with the
+/// next image: a batch stopped halfway keeps what it finished, and holds
+/// one result in memory at a time. So when the first output appears, the
+/// worker (a child of the CLI) is still running.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_batch_writes_each_result_while_the_rest_run() {
+    let dir = tempdir().expect("tempdir");
+    let first = write_fixture_png(dir.path());
+    let big = dir.path().join("big.png");
+    image::RgbaImage::from_fn(3000, 3000, |x, y| image::Rgba([(x % 251) as u8, (y % 241) as u8, 90, 255]))
+        .save(&big)
+        .expect("write big.png");
+    let mut child = Command::new(CLI_BIN)
+        .args([&first, &big]).arg("-o").arg(dir.path()).arg("-f").args(["-m", "silueta", "-j", "1"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .spawn().expect("spawn prunr binary");
+    let pid = child.id();
+    let first_out = dir.path().join("input.prunr.png");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let worker_alive = loop {
+        if first_out.exists() {
+            break children_of(pid) > 0;
+        }
+        if child.try_wait().expect("wait on prunr").is_some() || std::time::Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let status = child.wait().expect("wait on prunr");
+    if !status.success() && !first_out.exists() {
+        eprintln!("[cli_streams] SKIP: prerequisite not available");
+        return;
+    }
+    assert!(worker_alive, "the first result was written only once the worker had stopped");
+}
+
+/// How many processes `pid` started that are still running.
+#[cfg(target_os = "linux")]
+fn children_of(pid: u32) -> usize {
+    std::fs::read_dir("/proc").map(|d| d.flatten().filter(|e| {
+        std::fs::read_to_string(e.path().join("stat")).ok()
+            .and_then(|stat| stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(1).map(str::to_string)))
+            .is_some_and(|ppid| ppid == pid.to_string())
+    }).count()).unwrap_or(0)
+}
+
+/// A worker started by another version of the app (an update replaced
+/// the binary while the app ran) stops at once with its own exit code,
+/// before it reads a message it might not understand.
+#[test]
+fn a_worker_of_another_version_stops_at_once() {
+    for args in [&["--worker", "--worker-of", "0.0.0-another"][..], &["--worker"]] {
+        let out = Command::new(CLI_BIN).args(args).stdin(std::process::Stdio::null()).output().expect("spawn prunr binary");
+        assert_eq!(out.status.code(), Some(75), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+/// A knob given as nan or inf is refused at once, naming the flag, rather
+/// than cutting a clear image or overflowing.
+#[test]
+fn a_knob_that_is_not_a_number_is_refused() {
+    // `=`: a value starting with '-' is otherwise read as a flag.
+    for (flag, value) in [("--gamma", "nan"), ("--feather", "inf"), ("--edge-shift", "-inf"), ("--contrast", "NaN")] {
+        let out = Command::new(CLI_BIN).args(["in.png", &format!("{flag}={value}")]).output().expect("spawn prunr binary");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}: {stderr}");
+        assert!(stderr.contains(flag) && stderr.contains("not a finite number"), "{flag} {value}: {stderr}");
+    }
 }

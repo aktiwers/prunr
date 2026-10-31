@@ -1,6 +1,5 @@
 //! One undo timeline per image: the states it has been in, and which one
-//! is shown. A list and a cursor, the shape every editor converges on.
-//! Undo and redo move the cursor; any other edit cuts the redo tail and
+//! is shown. Undo and redo move the cursor; any other edit cuts the redo tail and
 //! appends. Each state is complete (result, recipe, selection, settings),
 //! so stepping back shows a stored image instead of re-running a model.
 //! The version, bumped on every move, lets a background job land only on
@@ -18,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use prunr_core::selection::MaskArtifact;
 
+use super::brush_state::{StrokeDrawn, Tool};
 use super::item::Engine;
 use super::item_settings::ItemSettings;
 
@@ -26,7 +26,7 @@ pub(crate) const TIMELINE_DEPTH: usize = 64;
 
 /// Knob changes closer together than this are one step: a slider drag,
 /// or a few clicks on a stepper.
-const ADJUST_MERGE_WINDOW: Duration = Duration::from_millis(1200);
+const ADJUST_MERGE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepKind {
@@ -37,8 +37,11 @@ pub(crate) enum StepKind {
     Edit,
     Erase,
     Upscale,
+    Colorize,
     Preset,
     Adjust,
+    /// Every stroke since the picture changed, drawn again.
+    Strokes,
 }
 
 impl StepKind {
@@ -52,8 +55,10 @@ impl StepKind {
             StepKind::Edit => "Edit",
             StepKind::Erase => "Erase",
             StepKind::Upscale => "Upscale",
+            StepKind::Colorize => "Colorize",
             StepKind::Preset => "Preset",
             StepKind::Adjust => "Adjustment",
+            StepKind::Strokes => "Stroke adjustment",
         }
     }
 }
@@ -62,9 +67,16 @@ impl StepKind {
 pub(crate) trait Payload: Send + Sync + Sized + 'static {
     fn encode(&self) -> std::io::Result<Vec<u8>>;
     fn decode(bytes: &[u8]) -> std::io::Result<Self>;
+    /// Width and height, kept beside the stored form so a reader needs
+    /// no unpack to know them.
+    fn dims(&self) -> (u32, u32);
 }
 
 impl Payload for image::RgbaImage {
+    fn dims(&self) -> (u32, u32) {
+        self.dimensions()
+    }
+
     fn encode(&self) -> std::io::Result<Vec<u8>> {
         super::history_disk::compress_to_ram(self)
     }
@@ -75,24 +87,33 @@ impl Payload for image::RgbaImage {
 }
 
 impl Payload for MaskArtifact {
+    fn dims(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// The size, the cells, and the fill layer after them when there is one.
     fn encode(&self) -> std::io::Result<Vec<u8>> {
-        let mut raw = Vec::with_capacity(8 + self.cells().len());
+        let fill = self.fill_layer().unwrap_or_default();
+        let mut raw = Vec::with_capacity(8 + self.cells().len() + fill.len());
         raw.extend_from_slice(&self.width.to_le_bytes());
         raw.extend_from_slice(&self.height.to_le_bytes());
         raw.extend(self.cells().iter().map(|&c| c as u8));
-        zstd::encode_all(raw.as_slice(), 1)
+        raw.extend_from_slice(fill);
+        zstd::encode_all(raw.as_slice(), super::history_disk::ZSTD_LEVEL)
     }
 
     fn decode(bytes: &[u8]) -> std::io::Result<Self> {
         let raw = zstd::decode_all(bytes)?;
         let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "selection plane does not match its size");
-        let (head, cells) = raw.split_at_checked(8).ok_or_else(bad)?;
-        let w = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
-        let h = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
-        if cells.len() != (w as usize) * (h as usize) {
-            return Err(bad());
-        }
-        Ok(MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect()))
+        let (head, rest) = raw.split_first_chunk::<8>().ok_or_else(bad)?;
+        let (w, h) = super::history_disk::read_dims(head);
+        let n = (w as usize) * (h as usize);
+        let (cells, fill) = match rest.len() {
+            len if len == n => (rest, None),
+            len if len == 2 * n => (&rest[..n], Some(rest[n..].to_vec())),
+            _ => return Err(bad()),
+        };
+        Ok(MaskArtifact::from_cells(w, h, cells.iter().map(|&c| c as i8).collect()).with_fill_layer(fill))
     }
 }
 
@@ -111,6 +132,7 @@ enum Tier<T> {
 /// One stored payload, shared by every state that has it.
 pub(crate) struct Stored<T: Payload> {
     tier: Mutex<Tier<T>>,
+    dims: (u32, u32),
 }
 
 #[derive(Clone, PartialEq)]
@@ -120,10 +142,11 @@ enum Encoded {
 }
 
 impl Encoded {
-    fn read(&self) -> std::io::Result<Vec<u8>> {
+    /// The stored bytes: borrowed when they are in memory, never copied.
+    fn read(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
         match self {
-            Encoded::Bytes(b) => Ok(b.to_vec()),
-            Encoded::File(p) => std::fs::read(p),
+            Encoded::Bytes(b) => Ok(std::borrow::Cow::Borrowed(b.as_slice())),
+            Encoded::File(p) => std::fs::read(p).map(std::borrow::Cow::Owned),
         }
     }
 
@@ -137,7 +160,8 @@ impl Encoded {
 
 impl<T: Payload> Stored<T> {
     pub(crate) fn new(value: Arc<T>) -> Arc<Self> {
-        Arc::new(Self { tier: Mutex::new(Tier::Plain(value)) })
+        let dims = value.dims();
+        Arc::new(Self { tier: Mutex::new(Tier::Plain(value)), dims })
     }
 
     fn lock(&self) -> MutexGuard<'_, Tier<T>> {
@@ -168,6 +192,20 @@ impl<T: Payload> Stored<T> {
         Some(value)
     }
 
+    /// The payload's width and height, packed or not.
+    pub(crate) fn dims(&self) -> (u32, u32) {
+        self.dims
+    }
+
+    /// The payload when it is already decoded; `None` while it is stored
+    /// compressed or on disk. Never decodes, so the UI thread may ask.
+    pub(crate) fn loaded(&self) -> Option<Arc<T>> {
+        match &*self.lock() {
+            Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) => Some(Arc::clone(v)),
+            Tier::Compressed(_) | Tier::OnDisk(_) => None,
+        }
+    }
+
     /// True when `value` is the payload this cell hands out.
     pub(crate) fn holds(&self, value: &Arc<T>) -> bool {
         matches!(&*self.lock(), Tier::Plain(v) | Tier::Compressing(v) | Tier::Loaded(v, _) if Arc::ptr_eq(v, value))
@@ -180,7 +218,8 @@ impl<T: Payload> Stored<T> {
         match &*tier {
             Tier::Loaded(v, encoded) if Arc::strong_count(v) == 1 => {
                 let stored = encoded.clone().into_tier();
-                *tier = stored;
+                // The read-back value frees off the UI thread the sweep runs on.
+                super::reclaim::later(std::mem::replace(&mut *tier, stored));
                 None
             }
             Tier::Plain(v) if Arc::strong_count(v) == 1 => {
@@ -202,16 +241,12 @@ impl<T: Payload> Stored<T> {
         };
     }
 
-    /// Compress on a worker thread when nothing else uses the payload.
-    /// `slots` caps how many encoders run at once.
-    pub(crate) fn compress_when_idle(self: &Arc<Self>, slots: &Arc<super::background_io::DecodeSlots>) {
-        let Some(value) = self.begin_compress() else { return };
+    /// The compression to run on a worker, when nothing else uses the
+    /// payload.
+    pub(crate) fn compress_job(self: &Arc<Self>) -> Option<CompressJob> {
+        let value = self.begin_compress()?;
         let cell = Arc::clone(self);
-        let slots = Arc::clone(slots);
-        std::thread::spawn(move || {
-            let _slot = slots.acquire();
-            cell.finish_compress(value.encode());
-        });
+        Some(Box::new(move || cell.finish_compress(value.encode())))
     }
 
     /// Move a compressed payload to disk; true when it moved.
@@ -234,6 +269,28 @@ impl<T: Payload> Stored<T> {
         }
     }
 
+    /// It can be read back: all but one kept on disk whose file was
+    /// removed under the app (a cache cleaner). No decode.
+    pub(crate) fn is_readable(&self) -> bool {
+        match &*self.lock() {
+            Tier::OnDisk(p) => p.is_file(),
+            _ => true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disk_path(&self) -> Option<PathBuf> {
+        match &*self.lock() {
+            Tier::OnDisk(p) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_on_disk(&self) -> bool {
+        self.disk_path().is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn is_compressed(&self) -> bool {
         matches!(&*self.lock(), Tier::Compressed(_) | Tier::OnDisk(_))
@@ -243,10 +300,13 @@ impl<T: Payload> Stored<T> {
 impl<T: Payload> Drop for Stored<T> {
     fn drop(&mut self) {
         if let Tier::OnDisk(path) | Tier::Loaded(_, Encoded::File(path)) = &*self.lock() {
-            let _ = std::fs::remove_file(path);
+            super::disk_queue::remove(path.clone());
         }
     }
 }
+
+/// One payload's compression, run off the UI thread.
+pub(crate) type CompressJob = Box<dyn FnOnce() + Send>;
 
 pub(crate) type StoredImage = Arc<Stored<image::RgbaImage>>;
 pub(crate) type StoredSelection = Arc<Stored<MaskArtifact>>;
@@ -261,12 +321,27 @@ pub(crate) struct DocState {
     pub(crate) selection: Option<StoredSelection>,
     /// The selection's content hash, so restoring it costs no rehash.
     pub(crate) selection_hash: Option<u64>,
+    /// On a cut-out, the restores and erases already made (signed: plus
+    /// restores, minus erases); the selection is applied on top.
+    pub(crate) edits: Option<StoredSelection>,
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
     /// The run that made this step's image; `None` for the original and
     /// for edits made by hand.
     pub(crate) origin: Option<Origin>,
+    /// The image has restored faces in it, blended by its own run or
+    /// carried over from the image it was made from.
+    pub(crate) faced: bool,
     pub(crate) at: Instant,
+    /// Which step this is (`next_step_id`): two can share an `at`.
+    pub(crate) id: u64,
+    /// What the step did to the selection, for a replay of the strokes.
+    pub(crate) made: Option<super::selection_queue::Made>,
+}
+
+pub(crate) fn next_step_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// What made a step's image: the engine, and where its run started
@@ -276,20 +351,46 @@ pub(crate) struct DocState {
 pub(crate) struct Origin {
     pub(crate) engine: Engine,
     pub(crate) start: Option<RunStart>,
-    /// The upscale run kept for Refine when this step is one
-    /// (`UpscaleCache::run`), so another step never re-finishes it.
-    pub(crate) upscale_run: Option<u64>,
+    /// The kept run (an upscale for Refine, a colorize for Strength) that
+    /// made this step, so another step never re-renders it. Run ids are
+    /// unique across both kinds.
+    pub(crate) kept_run: Option<u64>,
+    /// The seed a generated fill ran with, for Pin seed.
+    pub(crate) seed: Option<u64>,
+    /// The region an erase filled, so "Try another" can fill it again
+    /// (shared with the stroke step that painted it).
+    pub(crate) region: Option<StoredSelection>,
+    /// How large an erase filled its region: 1 is full size.
+    pub(crate) fill_scale: Option<f32>,
+    /// Who cut this step out (`None`: another engine, or not known), so a
+    /// Process by a different one builds on it.
+    pub(crate) cutter: Option<super::item::Cutter>,
+    /// The image a live render on this step started from, when the step
+    /// is another run's (an erase, an upscale): the run stays the step's
+    /// own, and the next render redoes from here, not on its own output.
+    pub(crate) rendered_from: Option<RunStart>,
+}
+
+impl Origin {
+    /// A run of `engine` from `start` (`None`: the original), with no seed,
+    /// kept run or region.
+    pub(crate) fn new(engine: Engine, start: Option<RunStart>) -> Self {
+        Self { engine, start, kept_run: None, seed: None, region: None, fill_scale: None, cutter: None, rendered_from: None }
+    }
 }
 
 /// An image a run starts from: a stored timeline image, loaded only when
-/// the run reads it, and its size.
-#[derive(Clone)]
-pub(crate) struct RunStart {
-    pub(crate) image: StoredImage,
-    pub(crate) dims: (u32, u32),
-}
+/// the run reads it; its size is known without loading it.
+pub(crate) type RunStart = StoredImage;
 
 impl DocState {
+    /// Every stored part of the step can be read back.
+    pub(crate) fn readable(&self) -> bool {
+        let starts = self.origin.iter().flat_map(|o| o.start.iter().chain(&o.rendered_from));
+        self.result.iter().chain(starts).all(|s| s.is_readable())
+            && self.selection.iter().chain(self.edits.as_ref()).all(|s| s.is_readable())
+    }
+
     /// The image as imported: no result, no selection.
     pub(crate) fn original(settings: ItemSettings, applied_preset: String) -> Self {
         Self {
@@ -298,11 +399,57 @@ impl DocState {
             recipe: None,
             selection: None,
             selection_hash: None,
+            edits: None,
             settings,
             applied_preset,
             origin: None,
+            faced: false,
             at: Instant::now(),
+            id: next_step_id(),
+            made: None,
         }
+    }
+}
+
+/// Strokes to draw again: the step they start from, with its selection
+/// and edits, and what each step after it did.
+#[derive(Clone)]
+pub(crate) struct StrokeHistory {
+    pub(crate) from: u64,
+    pub(crate) selection: Option<StoredSelection>,
+    pub(crate) edits: Option<StoredSelection>,
+    pub(crate) ops: Arc<Vec<super::selection_queue::SelectionMade>>,
+    /// The ops are the shown step's own one stroke, made on the step
+    /// before it; else a redraw of several steps from `from`.
+    pub(crate) own_step: bool,
+}
+
+impl StrokeHistory {
+    fn from_step(start: &DocState, ops: Vec<super::selection_queue::SelectionMade>, own_step: bool) -> Self {
+        Self { from: start.id, selection: start.selection.clone(), edits: start.edits.clone(), ops: Arc::new(ops), own_step }
+    }
+
+    /// Where the latest stroke `tool` drew is among the ops.
+    pub(crate) fn latest_of(&self, tool: Tool) -> Option<usize> {
+        self.ops.iter().rposition(|op| op.drawn_by(tool))
+    }
+
+    /// The same strokes, each `tool` drew as `change` makes it.
+    pub(crate) fn changed(&self, tool: Tool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        self.changed_where(|i| self.ops[i].drawn_by(tool), change)
+    }
+
+    /// The same strokes, the latest `tool` drew as `change` makes it.
+    pub(crate) fn latest_changed(&self, tool: Tool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        let latest = self.latest_of(tool);
+        self.changed_where(|i| Some(i) == latest, change)
+    }
+
+    fn changed_where(&self, at: impl Fn(usize) -> bool, change: impl Fn(&StrokeDrawn) -> StrokeDrawn) -> Self {
+        let ops = self.ops.iter().enumerate()
+            .map(|(i, op)| if at(i) { op.changed(&change) } else { op.clone() })
+            .collect();
+        Self { ops: Arc::new(ops), ..self.clone() }
     }
 }
 
@@ -310,15 +457,35 @@ pub(crate) struct Timeline {
     states: VecDeque<DocState>,
     cursor: usize,
     version: u64,
+    revision: u64,
+    /// The photo as opened fell off the end.
+    opened_dropped: bool,
 }
 
 impl Timeline {
     pub(crate) fn new(original: DocState) -> Self {
-        Self { states: VecDeque::from([original]), cursor: 0, version: 0 }
+        Self { states: VecDeque::from([original]), cursor: 0, version: 0, revision: 0, opened_dropped: false }
     }
 
     pub(crate) fn current(&self) -> &DocState {
         &self.states[self.cursor]
+    }
+
+    /// The latest run at or before the shown step: hand edits after a
+    /// run keep building on what that run made.
+    pub(crate) fn latest_run(&self) -> Option<&Origin> {
+        self.states.range(..=self.cursor).rev().find_map(|s| s.origin.as_ref())
+    }
+
+    /// Whether a step holding `image` has restored faces in it.
+    pub(crate) fn image_faced(&self, image: &StoredImage) -> bool {
+        self.states.iter().any(|s| s.faced && s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, image)))
+    }
+
+    /// Whether step `id` is the shown one or before it: not undone, nor
+    /// dropped by a step made after an undo.
+    pub(crate) fn in_effect(&self, id: u64) -> bool {
+        self.states.range(..=self.cursor).any(|s| s.id == id)
     }
 
     /// The state before the shown one.
@@ -326,8 +493,65 @@ impl Timeline {
         self.cursor.checked_sub(1).map(|i| &self.states[i])
     }
 
+    /// The state a redo goes to.
+    pub(crate) fn next(&self) -> Option<&DocState> {
+        self.states.get(self.cursor + 1)
+    }
+
+    /// The strokes since the picture last changed, up to the shown step,
+    /// to draw again. Steps that change only the settings pass through;
+    /// any other step without a record, or one that changed the picture,
+    /// is where they start. A redraw of earlier strokes stands in for the
+    /// steps it redrew. `None` without a stroke to draw.
+    pub(crate) fn strokes_since_picture(&self) -> Option<StrokeHistory> {
+        use super::selection_queue::{Made, SelectionMade};
+        let mut ops = Vec::new();
+        for i in (0..=self.cursor).rev() {
+            let step = &self.states[i];
+            let start = match (&step.made, step.kind) {
+                (Some(Made::Redrawn { from, ops: redrawn }), _) => {
+                    ops.extend(redrawn.iter().rev().cloned());
+                    self.states.range(..i).find(|s| s.id == *from)?
+                }
+                (Some(Made::One(made)), _) => {
+                    ops.push(made.clone());
+                    continue;
+                }
+                (None, StepKind::Adjust | StepKind::Preset) if i > 0 => continue,
+                (None, _) => step,
+            };
+            ops.reverse();
+            return ops.iter().any(|op| matches!(op, SelectionMade::Stroke(_))).then(|| StrokeHistory::from_step(start, ops, false));
+        }
+        None
+    }
+
+    /// The latest stroke `tool` drew since the picture changed, to draw
+    /// again: the shown step's own, from the step before it, while that
+    /// step is the newest; else every stroke since the picture changed,
+    /// that one the latest of `tool`'s among them.
+    pub(crate) fn latest_stroke(&self, tool: Tool) -> Option<StrokeHistory> {
+        use super::selection_queue::Made;
+        match &self.current().made {
+            Some(Made::One(op)) if op.drawn_by(tool) && !self.can_redo() => Some(StrokeHistory::from_step(self.previous()?, vec![op.clone()], true)),
+            _ => self.strokes_of(tool),
+        }
+    }
+
+    /// The strokes since the picture last changed, to draw again, when
+    /// `tool` drew one of them.
+    pub(crate) fn strokes_of(&self, tool: Tool) -> Option<StrokeHistory> {
+        self.strokes_since_picture().filter(|h| h.latest_of(tool).is_some())
+    }
+
+    /// Whether step `id` is the shown one and nothing is ahead of it.
+    pub(crate) fn is_newest_shown(&self, id: u64) -> bool {
+        self.current().id == id && !self.can_redo()
+    }
+
     /// Fill in the shown state as a job it started lands: no new step.
     pub(crate) fn current_mut(&mut self) -> &mut DocState {
+        self.revision += 1;
         &mut self.states[self.cursor]
     }
 
@@ -337,9 +561,17 @@ impl Timeline {
         self.version
     }
 
+    /// Changes whenever the shown state may have: every move, and every
+    /// change in place (a merged knob change, a fill-in), which `version`
+    /// lets pass so jobs stay valid. What a save is checked against.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// A new step after the shown one; any redo tail goes. A knob change
     /// right after another knob change joins it instead.
     pub(crate) fn push(&mut self, state: DocState) {
+        self.revision += 1;
         let at_end = self.cursor + 1 == self.states.len();
         let top = &self.states[self.cursor];
         if state.kind == StepKind::Adjust
@@ -350,10 +582,14 @@ impl Timeline {
             self.states[self.cursor] = state;
             return;
         }
-        self.states.truncate(self.cursor + 1);
+        // Dropped states (the redo tail, the oldest past the depth) free
+        // off the UI thread.
+        let redo_tail: Vec<DocState> = self.states.drain(self.cursor + 1..).collect();
+        super::reclaim::later(redo_tail);
         self.states.push_back(state);
         while self.states.len() > TIMELINE_DEPTH {
-            self.states.pop_front();
+            super::reclaim::later(self.states.pop_front());
+            self.opened_dropped = true;
         }
         self.cursor = self.states.len() - 1;
         self.version += 1;
@@ -364,6 +600,7 @@ impl Timeline {
         let undone = self.can_undo().then(|| self.states[self.cursor].kind)?;
         self.cursor -= 1;
         self.version += 1;
+        self.revision += 1;
         Some(undone)
     }
 
@@ -374,6 +611,7 @@ impl Timeline {
         }
         self.cursor += 1;
         self.version += 1;
+        self.revision += 1;
         Some(self.states[self.cursor].kind)
     }
 
@@ -390,16 +628,22 @@ impl Timeline {
         self.cursor
     }
 
+    /// Whether the photo as it was opened is the state shown.
+    pub(crate) fn shows_opened(&self) -> bool {
+        self.cursor == 0 && !self.opened_dropped
+    }
+
     /// Every stored image: each step's result, and each step's start
     /// that is no longer any step's result (its step fell off the end).
     pub(crate) fn stored_images(&self) -> impl Iterator<Item = &StoredImage> {
         let is_a_result = |b: &StoredImage| self.states.iter().any(|s| s.result.as_ref().is_some_and(|r| Arc::ptr_eq(r, b)));
         self.states.iter().filter_map(|s| s.result.as_ref())
-            .chain(self.states.iter().filter_map(|s| Some(&s.origin.as_ref()?.start.as_ref()?.image)).filter(move |b| !is_a_result(b)))
+            .chain(self.states.iter().filter_map(|s| s.origin.as_ref()).flat_map(|o| o.start.iter().chain(&o.rendered_from)).filter(move |b| !is_a_result(b)))
     }
 
+    /// Every stored selection and cut-out edits plane.
     pub(crate) fn stored_selections(&self) -> impl Iterator<Item = &StoredSelection> {
-        self.states.iter().filter_map(|s| s.selection.as_ref())
+        self.states.iter().flat_map(|s| s.selection.iter().chain(s.edits.iter()))
     }
 }
 
@@ -424,10 +668,14 @@ mod tests {
             recipe: None,
             selection: None,
             selection_hash: None,
+            edits: None,
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
             origin: None,
+            faced: false,
             at: Instant::now(),
+            id: next_step_id(),
+            made: None,
         }
     }
 
@@ -463,6 +711,31 @@ mod tests {
         assert!(v0 < v1 && v1 < v2 && v2 < t.version());
     }
 
+    /// The revision moves on anything that changes what the image shows:
+    /// a step, a knob change merged into the last one, a fill-in, an undo
+    /// or a redo. A save is current while the revision it wrote is.
+    #[test]
+    fn every_change_moves_the_revision() {
+        let mut t = Timeline::new(state(StepKind::Original, 1.0));
+        let mut last = t.revision();
+        let mut moved = |t: &Timeline, what: &str| {
+            assert!(t.revision() > last, "{what}");
+            last = t.revision();
+        };
+        t.push(state(StepKind::Adjust, 2.0));
+        moved(&t, "a step");
+        t.push(state(StepKind::Adjust, 3.0));
+        moved(&t, "a knob change merged into the last one");
+        t.current_mut().recipe = None;
+        moved(&t, "a fill-in");
+        t.undo();
+        moved(&t, "an undo");
+        t.redo();
+        moved(&t, "a redo");
+        let _ = (t.current(), t.version(), t.undo_steps());
+        assert_eq!(t.revision(), last, "reading changes nothing");
+    }
+
     #[test]
     fn knob_changes_in_quick_succession_are_one_step() {
         let mut t = Timeline::new(state(StepKind::Original, 1.0));
@@ -471,11 +744,13 @@ mod tests {
             t.push(DocState { at: start + Duration::from_millis(100 * i as u64), ..state(StepKind::Adjust, g) });
         }
         assert_eq!((t.undo_steps(), gamma(&t)), (1, 1.3));
+        t.push(DocState { at: start + Duration::from_millis(800), ..state(StepKind::Adjust, 1.4) });
+        assert_eq!(t.undo_steps(), 2, "two knobs set 0.6 s apart are two steps");
         t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.5) });
-        assert_eq!(t.undo_steps(), 2, "a pause starts a new step");
+        assert_eq!(t.undo_steps(), 3, "a pause starts a new step");
         t.undo();
         t.push(DocState { at: start + Duration::from_secs(5), ..state(StepKind::Adjust, 1.6) });
-        assert_eq!(t.undo_steps(), 2, "after an undo a knob change is its own step");
+        assert_eq!(t.undo_steps(), 3, "after an undo a knob change is its own step");
     }
 
     #[test]
@@ -534,16 +809,27 @@ mod tests {
         };
         assert_eq!(cell.load().unwrap().get_pixel(3, 3), &image::Rgba([9, 9, 9, 255]));
         drop(cell);
+        super::super::disk_queue::flush();
         assert!(!path.exists(), "the file is removed with its last state");
     }
 
+    /// Masks and images stored for undo come back as they went in, and
+    /// a payload's size header reads back as written.
     #[test]
-    fn a_selection_plane_round_trips_through_compression() {
-        let mut cells = vec![0i8; 64];
-        cells[9] = prunr_core::selection::FULL;
-        cells[20] = -40;
-        let plane = MaskArtifact::from_cells(8, 8, cells);
-        assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane);
+    fn payloads_round_trip() {
+        let mut seed = 0x9E37_79B9u32;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
+        for (w, h) in [(1, 1), (3, 7), (64, 48), (257, 129)] {
+            let plane = MaskArtifact::from_cells(w, h, (0..w * h).map(|_| next() as i8).collect());
+            assert_eq!(MaskArtifact::decode(&plane.encode().unwrap()).unwrap(), plane, "{w}x{h} mask");
+            let filled = plane.clone().with_fill_layer((0..w * h).map(|_| next() as u8).collect::<Vec<u8>>());
+            assert_eq!(MaskArtifact::decode(&filled.encode().unwrap()).unwrap(), filled, "{w}x{h} mask with its fill layer");
+            let img = image::RgbaImage::from_fn(w, h, |_, _| image::Rgba(next().to_le_bytes()));
+            assert_eq!(image::RgbaImage::decode(&img.encode().unwrap()).unwrap(), img, "{w}x{h} image");
+            let (wb, hb) = (w.to_le_bytes(), h.to_le_bytes());
+            let header = [wb[0], wb[1], wb[2], wb[3], hb[0], hb[1], hb[2], hb[3]];
+            assert_eq!(super::super::history_disk::read_dims(&header), (w, h));
+        }
     }
 
     #[test]

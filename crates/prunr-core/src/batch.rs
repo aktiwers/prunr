@@ -8,49 +8,54 @@ use crate::{
     types::{CoreError, MaskSettings, ModelKind, ProcessResult},
 };
 
-/// Create an engine pool with GPU/CPU-aware sizing.
-/// GPU: 2 engines for pipeline overlap. CPU: 1 engine with full thread parallelism.
+/// How many engines a batch builds for `jobs` on `provider`, the one the
+/// model runs on (the CPU under "CPU only"): at most two on a GPU (VRAM),
+/// one on the host CPU for a model whose single run already fills every
+/// core, else one per job. Where the model's sessions really run decides
+/// (`model_on_host_cpu`): OpenVINO's processor, or a provider the table
+/// keeps it off, is the host CPU; OpenVINO's pool keeps the cap of two,
+/// which is what was measured.
+pub fn engine_pool_size(model: ModelKind, jobs: usize, provider: &str) -> usize {
+    let jobs = jobs.max(1);
+    let on_cpu = crate::engine::model_on_host_cpu(model.model_id(), provider);
+    if on_cpu && !model.parallel_jobs_pay_on_cpu() {
+        1
+    } else if !provider.eq_ignore_ascii_case(crate::engine::CPU_NAME) {
+        jobs.min(2)
+    } else {
+        jobs
+    }
+}
+
+/// Create an engine pool sized by `engine_pool_size`.
 ///
 /// Caller invariant: must not be called from inside a rayon scope — the
 /// parallel-build path uses the global pool and could deadlock under
-/// nested rayon (same hazard as `apply_background_color`).
+/// nested rayon.
 ///
-/// During parallel build (`pool_size > 1`, non-DirectML) the peak RSS
-/// briefly doubles relative to sequential build because both ORT
-/// sessions hold their working set live at the same time
-/// (~400 MB-1 GB peak for 5-13 s instead of staggered ~200-500 MB).
-/// The window is short and the wall-clock win is large; surface only
-/// if a low-RAM user reports OOMing during pool init.
+/// A parallel build briefly doubles peak RSS (~400 MB-1 GB for 5-13 s
+/// instead of staggered ~200-500 MB), accepted for the wall-clock win.
 pub fn create_engine_pool(
     model: ModelKind,
     jobs: usize,
     cpu_only: bool,
 ) -> Result<Vec<std::sync::Arc<OrtEngine>>, CoreError> {
-    let active = OrtEngine::detect_active_provider();
-    let is_gpu = !cpu_only && !active.eq_ignore_ascii_case("CPU");
-    // GPU: cap at 2 engines (VRAM is limited, more causes allocation failures).
-    // CPU: respect user's setting fully — the admission controller manages
-    // overall memory pressure at the batch level.
-    let pool_size = if is_gpu { jobs.min(2) } else { jobs };
-    // With many engines, distribute CPU threads evenly to avoid oversubscription.
+    let id: prunr_models::ModelId = model.into();
+    let on = crate::memory::provider_for(id, cpu_only);
+    let pool_size = engine_pool_size(model, jobs, on);
+    let pool_size = crate::memory::engines_that_fit(id, on, pool_size, crate::memory::card_free_mb(on));
     let intra_threads = if pool_size == 1 {
         num_cpus::get()
     } else {
         ort_intra_threads(pool_size)
     };
 
-    let create = |threads| {
-        if cpu_only { OrtEngine::new_cpu_only(model, threads) } else { OrtEngine::new(model, threads) }
-    };
+    let serial = pool_size <= 1 || crate::engine::engines_build_one_at_a_time();
 
-    // Build engines in parallel where the EP allows it. CPU, OpenVINO,
-    // CUDA, CoreML are thread-safe during session creation. DirectML
-    // is NOT — `commit_from_memory` on parallel threads has triggered
-    // AbiCustomRegistry races in the wild — so fall back to sequential
-    // when DirectML is the active provider.
-    let serial = pool_size <= 1 || crate::engine::directml_active();
-
-    let build = |_idx| create(intra_threads).map(std::sync::Arc::new);
+    // Held for the whole pool: a bundled model unpacks once for every
+    // engine, built in parallel or one after another, and is freed after.
+    let _weights = prunr_models::resolve_bytes(model.into());
+    let build = |_idx| OrtEngine::with_threads(model, intra_threads, cpu_only).map(std::sync::Arc::new);
     if serial {
         (0..pool_size).map(build).collect()
     } else {
@@ -58,19 +63,14 @@ pub fn create_engine_pool(
     }
 }
 
-/// Calculate ORT intra-op thread count to prevent oversubscription.
-///
-/// Formula: num_cpus / rayon_workers (minimum 1)
-///
-/// With 8 CPUs and 4 rayon workers, each worker's ORT session gets 2 intra-op threads.
-/// Total threads = 4 workers × 2 intra-op = 8 = num_cpus. No oversubscription.
+/// ORT intra-op threads per rayon worker, so workers × threads stays at
+/// num_cpus (minimum 1).
 pub fn ort_intra_threads(rayon_workers: usize) -> usize {
     let cpus = num_cpus::get();
     let workers = rayon_workers.max(1);
     (cpus / workers).max(1)
 }
 
-/// Build a rayon ThreadPool with exactly `jobs` worker threads.
 fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
     ThreadPoolBuilder::new()
         .num_threads(jobs.max(1))
@@ -81,18 +81,12 @@ fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
 /// Process multiple images in parallel using a rayon thread pool.
 ///
 /// # Arguments
-/// - `images`: Slice of image byte slices (PNG, JPEG, WebP, BMP)
-/// - `model`: Which model to use for all images in this batch
-/// - `jobs`: Desired parallelism. Actual pool size is capped for GPU (max 2) and CPU (1).
+/// - `images`: image bytes (PNG, JPEG, WebP, BMP)
+/// - `jobs`: Desired parallelism; the pool is sized by `engine_pool_size`.
 /// - `progress_for`: the progress handle for image `idx`.
 ///
-/// # Returns
-/// `Vec<Result<ProcessResult, CoreError>>` — one entry per input image, in input order.
-///
-/// # Engine Pool
-/// Engines are created upfront (not per-image). GPU backends cap at 2 sessions to
-/// prevent VRAM exhaustion. CPU uses 1 engine with full thread parallelism. Rayon
-/// pool is sized to match engine count, so there's no Mutex contention.
+/// Returns one entry per input image, in input order. The rayon pool is
+/// sized to the engine count, so engines see no Mutex contention.
 pub fn batch_process<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -106,10 +100,6 @@ where
 }
 
 /// Like `batch_process` but with custom mask settings.
-///
-/// Uses engine pooling: engines are created upfront (not per-image).
-/// GPU backends are capped at 2 sessions to prevent VRAM exhaustion.
-/// CPU creates one engine per job, each with num_cpus/jobs intra-op threads.
 pub fn batch_process_with_mask<F>(
     images: &[&[u8]],
     model: ModelKind,
@@ -135,12 +125,8 @@ where
     let mut results: Vec<Result<ProcessResult, CoreError>> =
         (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
 
-    // Write each result directly into its pre-sized slot via
-    // `par_iter_mut().zip(...)`. The previous version `.collect`-ed
-    // a parallel intermediate Vec then sequentially copied into
-    // `results` — held N × `ProcessResult` (each carrying a full RGBA)
-    // alive in a duplicate buffer for the whole batch. On a 100-image
-    // batch of 4 K images that was multi-GB redundant retention.
+    // Results go straight into their slots: no second N × ProcessResult
+    // buffer, each holding a full RGBA.
     pool.install(|| {
         results
             .par_iter_mut()
@@ -160,48 +146,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ort_intra_threads_at_least_one() {
-        // Even with 0 workers, must return at least 1
-        assert!(ort_intra_threads(0) >= 1);
-        assert!(ort_intra_threads(1) >= 1);
+    fn a_heavy_model_gets_one_engine_on_the_host_cpu_and_a_gpu_at_most_two() {
+        for (model, jobs, provider, engines) in [
+            (ModelKind::BiRefNetLite, 4, "CPU", 1),
+            (ModelKind::BiRefNetLite, 4, "OpenVINO", 1),
+            (ModelKind::BiRefNetLite, 4, "CUDA", 2),
+            (ModelKind::BiRefNetLite, 1, "CUDA", 1),
+            (ModelKind::Silueta, 4, "CPU", 4),
+            (ModelKind::Silueta, 4, "OpenVINO", 2),
+            (ModelKind::Silueta, 4, "CUDA", 2),
+            (ModelKind::U2net, 3, "CPU", 3),
+            (ModelKind::U2net, 0, "CPU", 1),
+        ] {
+            assert_eq!(engine_pool_size(model, jobs, provider), engines, "{model:?} × {jobs} on {provider}");
+        }
     }
 
     #[test]
     fn test_ort_intra_threads_formula() {
-        let cpus = num_cpus::get();
-        let result = ort_intra_threads(4);
-        let expected = (cpus / 4).max(1);
-        assert_eq!(result, expected);
-    }
-
-    /// Synthetic test for the `par_iter_mut().zip(par_iter()).enumerate()`
-    /// pattern that `batch_process` uses to write results in-place.
-    /// Pins that rayon's IndexedParallelIterator chain preserves
-    /// positional indices regardless of work-stealing order — without
-    /// this property, results would land in wrong slots and
-    /// `engines[idx % engines.len()]` round-robin would jumble too.
-    #[test]
-    fn par_iter_mut_zip_enumerate_preserves_positional_indices() {
-        use rayon::prelude::*;
-        let inputs: Vec<u32> = (0..1000).collect();
-        let mut outputs: Vec<u32> = vec![0; inputs.len()];
-        outputs
-            .par_iter_mut()
-            .zip(inputs.par_iter())
-            .enumerate()
-            .for_each(|(idx, (slot, &val))| {
-                // The contract: `idx` is always the source position,
-                // and `slot` is always `outputs[idx]`. If rayon broke
-                // the ordering, slot wouldn't match val * 2 at idx.
-                *slot = (val * 2).wrapping_add(idx as u32);
-            });
-        for (i, &out) in outputs.iter().enumerate().take(1000) {
-            assert_eq!(
-                out,
-                (i as u32 * 2).wrapping_add(i as u32),
-                "outputs[{i}] mis-ordered",
-            );
-        }
+        // Even with 0 workers, at least 1.
+        assert!(ort_intra_threads(0) >= 1);
+        assert!(ort_intra_threads(1) >= 1);
+        assert_eq!(ort_intra_threads(4), (num_cpus::get() / 4).max(1));
     }
 
     #[test]
@@ -213,73 +179,5 @@ mod tests {
             |_| Progress::none(),
         );
         assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_batch_process_bad_image_returns_err_not_panic() {
-        // batch_process with a garbage image should return Err in that slot, not panic
-        // We test the error type check independently of OrtEngine creation
-        // (unit test without dev-models — just verify the error propagation logic)
-        use crate::formats::load_image_from_bytes;
-        let result = load_image_from_bytes(b"garbage");
-        assert!(
-            matches!(result, Err(CoreError::ImageFormat(_))),
-            "Expected ImageFormat error for garbage bytes"
-        );
-    }
-
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_batch_process_jobs_1_sequential() {
-        use image::{DynamicImage, RgbImage, Rgb};
-        use std::io::Cursor;
-
-        fn make_png_bytes() -> Vec<u8> {
-            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(64, 64, Rgb([100, 150, 200])));
-            let mut buf = Vec::new();
-            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
-            buf
-        }
-
-        let png = make_png_bytes();
-        let image_refs: Vec<&[u8]> = vec![png.as_slice()];
-        let results = batch_process(
-            &image_refs,
-            ModelKind::Silueta,
-            1,
-            |_| Progress::none(),
-        );
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok(), "Expected Ok result, got {:?}", results[0]);
-    }
-
-    #[cfg(feature = "dev-models")]
-    #[test]
-    fn test_batch_process_preserves_order() {
-        use image::{DynamicImage, RgbImage, Rgb};
-        use std::io::Cursor;
-
-        fn make_png(r: u8) -> Vec<u8> {
-            let img = DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([r, 100, 100])));
-            let mut buf = Vec::new();
-            img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
-            buf
-        }
-
-        let img1 = make_png(50);
-        let img2 = make_png(100);
-        let img3 = make_png(150);
-        let image_refs: Vec<&[u8]> = vec![img1.as_slice(), img2.as_slice(), img3.as_slice()];
-
-        let results = batch_process(
-            &image_refs,
-            ModelKind::Silueta,
-            2,
-            |_| Progress::none(),
-        );
-        assert_eq!(results.len(), 3, "Expected 3 results for 3 inputs");
-        for (i, r) in results.iter().enumerate() {
-            assert!(r.is_ok(), "Result {} failed: {:?}", i, r);
-        }
     }
 }

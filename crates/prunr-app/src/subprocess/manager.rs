@@ -4,21 +4,64 @@
 //! items, and monitors RSS for admission throttling.
 
 use std::collections::HashSet;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
 use crate::gui::settings::LineMode;
 use super::protocol::*;
-use super::ipc::{write_message, flush_writer, read_message};
+use super::ipc::{write_message, read_message};
 
-/// Borrowed `(data, height, width)` triple so subprocess `send_*` helpers
-/// don't carry three parallel args.
+/// A borrowed seg tensor, its size and the model that made it, so
+/// subprocess `send_*` helpers don't carry four parallel args.
 pub struct TensorView<'a> {
     pub data: &'a [f32],
     pub height: u32,
     pub width: u32,
+    pub model: ModelKind,
+}
+
+/// The photo a re-run finishes: its file's bytes, or the pixels already
+/// decoded.
+pub enum Photo {
+    Encoded(std::sync::Arc<Vec<u8>>),
+    Decoded(std::sync::Arc<image::RgbaImage>),
+}
+
+/// Why a re-run was not handed over.
+#[derive(Debug)]
+pub enum SendError {
+    /// The photo's temp file could not be written.
+    PhotoFile(String),
+    /// The tensor's temp file or the pipe.
+    Other(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PhotoFile(why) | Self::Other(why) => f.write_str(why),
+        }
+    }
+}
+
+/// The strokes `item_id`'s run cuts the subject with, in a temp file.
+/// Remove `item_id`'s temp files of `kinds`, written for a send that failed.
+fn remove_inputs(item_id: u64, kinds: &[super::protocol::IpcKind]) {
+    for kind in kinds {
+        let _ = std::fs::remove_file(kind.path_for(ipc_temp_dir(), item_id));
+    }
+}
+
+fn write_correction(item_id: u64, plane: Option<&prunr_core::selection::MaskArtifact>) -> Result<Option<PlaneFile>, String> {
+    plane.map(|plane| {
+        let path = super::protocol::IpcKind::Correction.path_for(ipc_temp_dir(), item_id);
+        super::ipc::write_plane(&path, plane).map(|()| PlaneFile(path))
+    })
+    .transpose()
+    .map_err(|e| format!("Failed to write the strokes temp file: {e}"))
 }
 
 /// Manages a subprocess worker: spawning, IPC, in-flight tracking, RSS throttling.
@@ -27,13 +70,13 @@ pub struct SubprocessManager {
     stdin_writer: BufWriter<std::process::ChildStdin>,
     /// Channel from the reader thread (reads child stdout → events).
     event_rx: mpsc::Receiver<ReaderEvent>,
-    /// Items currently being processed by this subprocess.
+    /// When the reader thread was seen to end, its last event delivered.
+    reader_gone_at: Option<Instant>,
     in_flight: HashSet<u64>,
     /// RSS limit: pause admission when child RSS exceeds this.
     rss_limit: u64,
     /// Resume threshold (hysteresis): resume when RSS drops below this.
     rss_resume: u64,
-    /// Whether admission is paused due to high RSS.
     rss_paused: bool,
     /// Counter into `RSS_LIMIT_REFRESH_EVERY`: re-query system memory
     /// every Nth `RssUpdate` so a sibling subprocess loading a 5 GB
@@ -41,18 +84,78 @@ pub struct SubprocessManager {
     rss_update_count: u32,
 }
 
-/// Refresh `rss_limit` every Nth `RssUpdate` from the child. Children
-/// emit RssUpdate at ~1 Hz, so 16 ≈ once every ~15 s — cheap enough
-/// (one `sysinfo::refresh_memory` ≈ a few ms) and responsive enough
-/// for cross-subprocess pressure shifts.
+/// Children emit one `RssUpdate` per finished job, so system memory is
+/// re-queried every 16th job (a few ms each).
 const RSS_LIMIT_REFRESH_EVERY: u32 = 16;
 
-/// Events from the reader thread.
+/// A child closes its output a moment before it can be waited on, so its
+/// exit is awaited this long before a live one with no reader is killed.
+const READER_GONE_GRACE: Duration = Duration::from_secs(1);
+
 enum ReaderEvent {
-    /// Successfully read a subprocess event.
     Event(SubprocessEvent),
     /// Reader thread exited (child stdout closed or error).
     Disconnected,
+}
+
+/// The lines a worker draws: the mode, their settings, how much they
+/// fade with distance (0-100), and the scales it runs the detector at.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerLines {
+    pub mode: LineMode,
+    pub edge: EdgeSettings,
+    pub fade_pct: u8,
+    pub scales: InferredScales,
+}
+
+impl WorkerLines {
+    /// The app's lines: it fades the lines it shows from its own depth
+    /// map, and keeps every scale of the image on screen so a scale
+    /// switch there needs no new run.
+    pub fn app(mode: LineMode, edge: EdgeSettings) -> Self {
+        Self { mode, edge, fade_pct: 0, scales: InferredScales::DrawnFirst }
+    }
+}
+
+/// Why a worker died. What the user is told depends on it; `Display` is
+/// the detail for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Crash {
+    /// The system killed it (SIGKILL), which on a desktop means memory.
+    OutOfMemory,
+    /// It is alive but can no longer be heard: it sent nothing for too
+    /// long, or what it sent could not be read.
+    Unresponsive,
+    /// A crash or exit, described.
+    Other(String),
+}
+
+impl Crash {
+    /// How a process that ended with `status` stopped.
+    fn of(status: std::process::ExitStatus) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return match signal {
+                    9 => Crash::OutOfMemory,
+                    11 => Crash::Other("crashed (segmentation fault)".into()),
+                    _ => Crash::Other(format!("killed by signal {signal}")),
+                };
+            }
+        }
+        Crash::Other(status.code().map_or_else(|| "terminated unexpectedly".into(), |code| format!("exited with code {code}")))
+    }
+}
+
+impl std::fmt::Display for Crash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutOfMemory => f.write_str("killed by the system (out of memory)"),
+            Self::Unresponsive => f.write_str("stopped responding"),
+            Self::Other(what) => f.write_str(what),
+        }
+    }
 }
 
 impl SubprocessManager {
@@ -60,29 +163,25 @@ impl SubprocessManager {
     /// Blocks until the child sends `Ready` or `InitError`.
     #[tracing::instrument(
         skip_all,
-        fields(model = ?model, jobs, force_cpu, line_mode = ?line_mode),
+        fields(model = ?model, jobs, cpu_only, line_mode = ?lines.mode),
     )]
     pub fn spawn(
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
-        force_cpu: bool,
-        line_mode: LineMode,
-        edge: EdgeSettings,
+        cpu_only: bool,
+        lines: WorkerLines,
     ) -> Result<(Self, String), String> {
-        Self::spawn_inner(model, jobs, mask, force_cpu, line_mode, edge, false)
+        Self::spawn_inner(model, jobs, mask, cpu_only, lines, false)
     }
 
-    /// Spawn a SD-inpaint-only subprocess. The worker skips engine
-    /// creation when `inpaint_only` is set, so the seg fields on
-    /// `Init` are dead weight at this stage — we pass placeholders.
-    /// Used by `Processor::dispatch_inpaint` for SD models so an OOM
-    /// during the bundle build kills the subprocess, not the GUI.
+    /// Spawn a SD-inpaint-only subprocess, so an OOM during the bundle build
+    /// kills it rather than the GUI. The seg fields on `Init` are placeholders.
     pub fn spawn_inpaint_only() -> Result<(Self, String), String> {
         Self::spawn_inner(
             ModelKind::Silueta, 1,
             MaskSettings::default(), false,
-            LineMode::Off, EdgeSettings::default(),
+            WorkerLines::app(LineMode::Off, EdgeSettings::default()),
             true,
         )
     }
@@ -91,101 +190,54 @@ impl SubprocessManager {
         model: ModelKind,
         jobs: usize,
         mask: MaskSettings,
-        force_cpu: bool,
-        line_mode: LineMode,
-        edge: EdgeSettings,
+        cpu_only: bool,
+        lines: WorkerLines,
         inpaint_only: bool,
     ) -> Result<(Self, String), String> {
-        // Stale-file cleanup is owned by `ipc_temp_dir()`'s init-time
-        // sweep. Spawning a subprocess must NOT touch the temp dir —
-        // callers like the CLI downscale path and the inpaint bridge's
-        // lazy first-dispatch write input files BEFORE spawn, so a
-        // spawn-time wipe would race those writes.
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Failed to get current exe: {e}"))?;
+        let WorkerLines { mode: line_mode, edge, fade_pct: line_fade_pct, scales: edge_scales } = lines;
+        // Spawn must NOT touch the temp dir: the CLI and the inpaint bridge write
+        // inputs before spawning. `ipc_temp_dir()`'s init-time sweep owns cleanup.
+        let exe = worker_exe()?;
 
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        prunr_core::ort_runtime::same_runtime_for(&mut command);
+        let mut child = command
             .arg("--worker")
+            .args(["--worker-of", WORKER_VERSION])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // child errors visible in parent console
             .spawn()
             .map_err(|e| format!("Failed to spawn worker: {e}"))?;
+        let (mut stdin_writer, event_rx) = attach(&mut child)?;
 
-        let child_stdin = child.stdin.take()
-            .ok_or("Failed to capture worker stdin")?;
-        let child_stdout = child.stdout.take()
-            .ok_or("Failed to capture worker stdout")?;
-
-        let mut stdin_writer = BufWriter::new(child_stdin);
-
-        // Send Init command — flush immediately so the child's blocking
-        // `read_message` sees it without waiting for the buffer to fill.
-        write_message(&mut stdin_writer, &SubprocessCommand::Init {
-            model, jobs, mask, force_cpu, line_mode, edge,
+        let child = send_init(child, &mut stdin_writer, &SubprocessCommand::Init {
+            model, jobs, mask, cpu_only, line_mode, edge,
             ipc_dir: ipc_temp_dir().to_path_buf(),
             inpaint_only,
-        }).map_err(|e| format!("Failed to send Init: {e}"))?;
-        flush_writer(&mut stdin_writer).map_err(|e| format!("Failed to flush Init: {e}"))?;
+            line_fade_pct,
+            edge_scales,
+        })?;
 
-        // Spawn reader thread for non-blocking stdout consumption
-        let (event_tx, event_rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("subprocess-reader".into())
-            .spawn(move || {
-                let mut reader = BufReader::new(child_stdout);
-                loop {
-                    match read_message::<_, SubprocessEvent>(&mut reader) {
-                        Ok(Some(evt)) => {
-                            if event_tx.send(ReaderEvent::Event(evt)).is_err() {
-                                break; // parent dropped receiver
-                            }
-                        }
-                        Ok(None) => {
-                            // Child stdout closed (clean exit or crash)
-                            let _ = event_tx.send(ReaderEvent::Disconnected);
-                            break;
-                        }
-                        Err(_) => {
-                            let _ = event_tx.send(ReaderEvent::Disconnected);
-                            break;
-                        }
-                    }
-                }
-            })
-            .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
-
-        // Wait for Ready or InitError. The seg/edge subprocess loads
-        // engine pools at Init (CoreML first-run compilation alone can
-        // take 2–5 min on slow Macs), so it gets the long 300s budget.
-        // The inpaint-only subprocess skips engine creation entirely
-        // (`process_inpaint_with` builds the bundle lazily on first
-        // dispatch), so a 30s budget is plenty AND bounds the bridge's
-        // pre-Ready hang when something like an OpenVINO `is_available()`
-        // probe wedges the worker thread before it can send Ready.
-        let init_timeout = if inpaint_only {
-            std::time::Duration::from_secs(30)
-        } else {
-            std::time::Duration::from_secs(300)
-        };
+        // Seg/edge workers build engine pools at Init (a CoreML first-run compile
+        // alone can take 2–5 min), so 300 s; inpaint-only builds lazily, so 30 s
+        // bounds a pre-Ready hang such as a wedged OpenVINO probe.
+        let init_timeout = std::time::Duration::from_secs(if inpaint_only { 30 } else { 300 });
         let active_provider = match event_rx.recv_timeout(init_timeout) {
             Ok(ReaderEvent::Event(SubprocessEvent::Ready { active_provider })) => {
                 active_provider
             }
             Ok(ReaderEvent::Event(SubprocessEvent::InitError { error })) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!("Worker init failed: {error}"));
             }
-            Ok(ReaderEvent::Disconnected) => {
-                let _ = child.kill();
-                return Err("Worker exited during initialization".to_string());
-            }
+            Ok(ReaderEvent::Disconnected) => return Err(init_ended(child, "Worker exited during initialization")),
             Ok(ReaderEvent::Event(other)) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!("Unexpected event during init: {other:?}"));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
+                stop(child);
                 return Err(format!(
                     "Worker init timed out ({:?}). \
                      If this happened on first SD eraser use, the \
@@ -195,43 +247,68 @@ impl SubprocessManager {
                 ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
+                stop(child);
                 return Err("Worker reader thread died during init".to_string());
             }
         };
 
-        // Calculate RSS limits from available system RAM
-        let (rss_limit, rss_resume) = current_rss_thresholds();
+        Ok((Self::ready(child, stdin_writer, event_rx), active_provider))
+    }
 
-        Ok((Self {
+    fn ready(child: Child, stdin_writer: BufWriter<std::process::ChildStdin>, event_rx: mpsc::Receiver<ReaderEvent>) -> Self {
+        let (rss_limit, rss_resume) = current_rss_thresholds();
+        Self {
             child,
             stdin_writer,
             event_rx,
+            reader_gone_at: None,
             in_flight: HashSet::new(),
             rss_limit,
             rss_resume,
             rss_paused: false,
             rss_update_count: 0,
-        }, active_provider))
+        }
     }
 
-    /// Send an image for processing. Writes bytes to a temp file first.
+    /// A manager around any piped child, taken as ready: a stand-in worker
+    /// a test can let die.
+    #[cfg(test)]
+    pub(crate) fn for_test(mut child: Child) -> Self {
+        let (stdin_writer, event_rx) = attach(&mut child).expect("a piped child");
+        Self::ready(child, stdin_writer, event_rx)
+    }
+
+    /// Send an image for processing. Writes bytes to a temp file first,
+    /// and the strokes it is cut with, when it has some.
     pub fn send_image(
         &mut self,
         item_id: u64,
         image_bytes: &[u8],
         chain_input: Option<(&image::RgbaImage, u32, u32)>,
+        correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), String> {
-        // Write image bytes to temp file
+        let sent = self.write_and_send_image(item_id, image_bytes, chain_input, correction);
+        // Nothing will read what was written: up to a photo, its start
+        // image and its strokes plane, in a RAM-backed folder.
+        if sent.is_err() {
+            remove_inputs(item_id, &[super::protocol::IpcKind::Input, super::protocol::IpcKind::Chain, super::protocol::IpcKind::Correction]);
+        }
+        sent
+    }
+
+    fn write_and_send_image(
+        &mut self,
+        item_id: u64,
+        image_bytes: &[u8],
+        chain_input: Option<(&image::RgbaImage, u32, u32)>,
+        correction: Option<&prunr_core::selection::MaskArtifact>,
+    ) -> Result<(), String> {
         let image_path = super::protocol::IpcKind::Input.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write input temp file: {e}"))?;
 
-        // Write chain input to temp file if present. Propagate write
-        // errors — discarding them produced a `ChainInput` pointing at
-        // a missing or partially-written file, which the worker silently
-        // dropped via `RgbaImage::from_raw -> None`, processing the
-        // *original* image instead of the chained input.
+        // Propagate write errors: a missing or partial chain file made the worker
+        // silently process the original image instead.
         let chain = chain_input
             .map(|(rgba, w, h)| -> Result<ChainInput, String> {
                 let path = super::protocol::IpcKind::Chain.path_for(ipc_temp_dir(), item_id);
@@ -240,29 +317,25 @@ impl SubprocessManager {
                 Ok(ChainInput { path, width: w, height: h })
             })
             .transpose()?;
-
-        self.send_cmd(&SubprocessCommand::ProcessImage {
-            item_id,
-            image_path,
-            chain_input: chain,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
-
-        self.in_flight.insert(item_id);
-        Ok(())
+        let correction = write_correction(item_id, correction)?;
+        self.send_process_image(item_id, image_path, chain, correction)
     }
 
     /// Send an image for processing directly from a file path (no copy).
     /// The subprocess reads the file; caller is responsible for cleanup.
-    pub fn send_image_path(
+    pub fn send_image_path(&mut self, item_id: u64, image_path: std::path::PathBuf) -> Result<(), String> {
+        self.send_process_image(item_id, image_path, None, None)
+    }
+
+    fn send_process_image(
         &mut self,
         item_id: u64,
         image_path: std::path::PathBuf,
+        chain_input: Option<ChainInput>,
+        correction: Option<PlaneFile>,
     ) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::ProcessImage {
-            item_id,
-            image_path,
-            chain_input: None,
-        }).map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
+        self.send_cmd(&SubprocessCommand::ProcessImage { item_id, image_path, chain_input, correction })
+            .map_err(|e| format!("Failed to send ProcessImage: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
@@ -272,7 +345,7 @@ impl SubprocessManager {
     /// on the child side until the buffer fills.
     fn send_cmd(&mut self, cmd: &SubprocessCommand) -> std::io::Result<()> {
         write_message(&mut self.stdin_writer, cmd)?;
-        flush_writer(&mut self.stdin_writer)
+        self.stdin_writer.flush()
     }
 
     /// Write tensor + image to temp files, then dispatch the caller-built command.
@@ -281,53 +354,62 @@ impl SubprocessManager {
         item_id: u64,
         tensor: &TensorView<'_>,
         tensor_kind: super::protocol::IpcKind,
-        image_bytes: &[u8],
+        photo: &Photo,
         image_kind: super::protocol::IpcKind,
-        build_cmd: impl FnOnce(std::path::PathBuf, std::path::PathBuf) -> SubprocessCommand,
-    ) -> Result<(), String> {
+        build_cmd: impl FnOnce(std::path::PathBuf, PhotoFile) -> SubprocessCommand,
+    ) -> Result<(), SendError> {
         let tensor_path = tensor_kind.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&tensor_path, super::ipc::f32s_as_le_bytes(tensor.data))
-            .map_err(|e| format!("Failed to write tensor temp file: {e}"))?;
+            .map_err(|e| SendError::Other(format!("Failed to write tensor temp file: {e}")))?;
         let image_path = image_kind.path_for(ipc_temp_dir(), item_id);
-        std::fs::write(&image_path, image_bytes)
-            .map_err(|e| format!("Failed to write image temp file: {e}"))?;
+        let original = match photo {
+            Photo::Encoded(bytes) => std::fs::write(&image_path, bytes.as_slice()).map(|()| PhotoFile::Encoded(image_path)),
+            Photo::Decoded(rgba) => super::ipc::write_image(&image_path, rgba).map(|()| PhotoFile::Decoded(image_path)),
+        }
+        .map_err(|e| SendError::PhotoFile(format!("Failed to write image temp file: {e}")))?;
 
-        self.send_cmd(&build_cmd(tensor_path, image_path))
-            .map_err(|e| format!("Failed to send command: {e}"))?;
+        self.send_cmd(&build_cmd(tensor_path, original))
+            .map_err(|e| SendError::Other(format!("Failed to send command: {e}")))?;
 
         self.in_flight.insert(item_id);
         Ok(())
     }
 
-    /// Send an AddEdgeInference command (seg cached, run DexiNed on masked).
-    /// Writes the seg tensor + original image bytes to temp files. The worker
-    /// reads the seg tensor without deleting it and hands the path back as
-    /// `tensor_cache_path` on `ImageDone`, so the parent's reader takes
-    /// ownership — no extra copy round-trip.
+    /// Send an AddEdgeInference command (seg cached, run TEED on masked).
+    /// Writes the seg tensor, the original image and the strokes to temp
+    /// files. The worker reads the seg tensor without deleting it and
+    /// hands the path back as `tensor_cache` on `ImageDone`, so the
+    /// parent's reader takes ownership — no extra copy round-trip.
     pub fn send_add_edge_inference(
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
-        model: prunr_core::ModelKind,
-        original_image_bytes: &[u8],
+        photo: &Photo,
         mask: prunr_core::MaskSettings,
-    ) -> Result<(), String> {
-        self.send_with_tensor_and_image(
+        correction: Option<&prunr_core::selection::MaskArtifact>,
+    ) -> Result<(), SendError> {
+        let correction = write_correction(item_id, correction).map_err(SendError::Other)?;
+        let sent = self.send_with_tensor_and_image(
             item_id,
             tensor,
             super::protocol::IpcKind::Seg,
-            original_image_bytes,
+            photo,
             super::protocol::IpcKind::Input,
-            |seg_tensor_path, image_path| SubprocessCommand::AddEdgeInference {
+            |seg_tensor_path, original| SubprocessCommand::AddEdgeInference {
                 item_id,
-                image_path,
+                original,
                 seg_tensor_path,
                 seg_tensor_height: tensor.height,
                 seg_tensor_width: tensor.width,
-                model,
+                model: tensor.model,
                 mask,
+                correction,
             },
-        )
+        );
+        if sent.is_err() {
+            remove_inputs(item_id, &[super::protocol::IpcKind::Correction, super::protocol::IpcKind::Seg, super::protocol::IpcKind::Input]);
+        }
+        sent
     }
 
     /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
@@ -335,62 +417,51 @@ impl SubprocessManager {
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
-        model: prunr_core::ModelKind,
-        original_image_bytes: &[u8],
+        photo: &Photo,
         mask: prunr_core::MaskSettings,
-    ) -> Result<(), String> {
+    ) -> Result<(), SendError> {
         self.send_with_tensor_and_image(
             item_id,
             tensor,
             super::protocol::IpcKind::Tensor,
-            original_image_bytes,
+            photo,
             super::protocol::IpcKind::Orig,
-            |tensor_path, original_image_path| SubprocessCommand::RePostProcess {
+            |tensor_path, original| SubprocessCommand::RePostProcess {
                 item_id,
                 tensor_path,
                 tensor_height: tensor.height,
                 tensor_width: tensor.width,
-                model,
-                original_image_path,
+                model: tensor.model,
+                original,
                 mask,
             },
         )
     }
 
     /// Send an `Inpaint` command. Caller writes image + mask to PNG
-    /// files (worker decodes); this method just forwards the paths +
-    /// model_id + sd_req + post-process tuning. Returns immediately —
-    /// completion comes back via `InpaintDone` / `InpaintError` events
-    /// through `poll_events`.
-    #[allow(clippy::too_many_arguments)] // args mirror the IPC variant fields
-    pub fn send_inpaint(
-        &mut self,
-        item_id: u64,
-        model_id: prunr_models::ModelId,
-        image_path: std::path::PathBuf,
-        mask_path: std::path::PathBuf,
-        sd_req: Option<prunr_core::inpaint_sd::SdInpaintRequest>,
-        feather_px: f32,
-        sharpen: f32,
-    ) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::Inpaint {
-            item_id, model_id, image_path, mask_path, sd_req, feather_px, sharpen,
-        }).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
+    /// files (worker decodes); this method just forwards the job.
+    /// Returns immediately — completion comes back via `InpaintDone` /
+    /// `InpaintError` events through `poll_events`.
+    pub fn send_inpaint(&mut self, job: InpaintJob) -> Result<(), String> {
+        let item_id = job.item_id;
+        self.send_cmd(&SubprocessCommand::Inpaint(job)).map_err(|e| format!("Failed to send Inpaint: {e}"))?;
         self.in_flight.insert(item_id);
         Ok(())
     }
 
+    /// New mask, Sketch mode and line settings for the running worker,
+    /// the image that shows a first look (`None`: no first look, and the
+    /// worker lets its first-look model go) and the image on screen.
+    pub fn send_configure(&mut self, mask: MaskSettings, line_mode: LineMode, edge: EdgeSettings, first_look: Option<u64>, on_screen: Option<u64>) -> Result<(), String> {
+        self.send_cmd(&SubprocessCommand::Configure { mask, line_mode, edge, first_look, on_screen })
+            .map_err(|e| format!("Failed to send Configure: {e}"))
+    }
+
     /// Cancel one item by id — worker drops it at the next dispatch check
-    /// and emits `ImageError { error: "Cancelled" }`.
+    /// and emits `ImageError` with `CANCELLED_ERR_MSG`.
     pub fn send_cancel_item(&mut self, item_id: u64) -> Result<(), String> {
         self.send_cmd(&SubprocessCommand::CancelItem { item_id })
             .map_err(|e| format!("Failed to send CancelItem: {e}"))
-    }
-
-    /// Send shutdown signal to the child.
-    pub fn send_shutdown(&mut self) -> Result<(), String> {
-        self.send_cmd(&SubprocessCommand::Shutdown)
-            .map_err(|e| format!("Failed to send Shutdown: {e}"))
     }
 
     /// Send Shutdown and wait up to `timeout` for the child to exit.
@@ -446,20 +517,21 @@ impl SubprocessManager {
 
     /// Pull at most one event from the channel, applying state updates
     /// (in-flight removal, RSS pause/resume). `None` timeout = `try_recv`,
-    /// `Some(t)` = `recv_timeout`. Disconnected and recv-error both
-    /// collapse to `None`; caller checks `is_alive`.
+    /// `Some(t)` = `recv_timeout`. A reader that has ended is noted for
+    /// `died`.
     fn next_event_with_state(&mut self, timeout: Option<std::time::Duration>) -> Option<SubprocessEvent> {
         let raw = match timeout {
-            None => self.event_rx.try_recv().ok(),
-            Some(t) => self.event_rx.recv_timeout(t).ok(),
+            None => self.event_rx.try_recv().map_err(|e| e == mpsc::TryRecvError::Disconnected),
+            Some(t) => self.event_rx.recv_timeout(t).map_err(|e| e == mpsc::RecvTimeoutError::Disconnected),
         };
-        let evt = match raw? {
-            ReaderEvent::Event(e) => e,
-            ReaderEvent::Disconnected => return None,
+        let evt = match raw {
+            Ok(ReaderEvent::Event(e)) => e,
+            Ok(ReaderEvent::Disconnected) | Err(true) => {
+                self.reader_gone_at.get_or_insert_with(Instant::now);
+                return None;
+            }
+            Err(false) => return None,
         };
-        // Re-derive RSS thresholds periodically so a sibling subprocess
-        // (e.g. inpaint loading a 5 GB SD bundle after seg started)
-        // shifts our pause/resume bands accordingly.
         if matches!(evt, SubprocessEvent::RssUpdate { .. }) {
             self.rss_update_count = self.rss_update_count.wrapping_add(1);
             if self.rss_update_count.is_multiple_of(RSS_LIMIT_REFRESH_EVERY) {
@@ -478,7 +550,6 @@ impl SubprocessManager {
         Some(evt)
     }
 
-    /// Check if the subprocess is still alive.
     pub fn is_alive(&mut self) -> bool {
         match self.child.try_wait() {
             Ok(Some(_)) => false, // exited
@@ -497,32 +568,28 @@ impl SubprocessManager {
         &self.in_flight
     }
 
-    /// Describe why the subprocess died (for user-facing messages).
-    pub fn crash_reason(&mut self) -> String {
+    /// Why the subprocess died, once it has. One still running whose output
+    /// can no longer be read (a frame too large, garbage) is as good as
+    /// dead: it is killed and reported unresponsive.
+    pub fn died(&mut self) -> Option<Crash> {
+        if !self.is_alive() {
+            return Some(self.crash());
+        }
+        let gone = self.reader_gone_at?;
+        (gone.elapsed() >= READER_GONE_GRACE).then(|| {
+            tracing::warn!("worker output unreadable; killed");
+            self.kill();
+            Crash::Unresponsive
+        })
+    }
+
+    fn crash(&mut self) -> Crash {
         match self.child.try_wait() {
-            Ok(Some(status)) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    if let Some(signal) = status.signal() {
-                        return match signal {
-                            9 => "Process killed by OS (out of memory)".to_string(),
-                            11 => "Process crashed (segmentation fault)".to_string(),
-                            _ => format!("Process killed by signal {signal}"),
-                        };
-                    }
-                }
-                if let Some(code) = status.code() {
-                    format!("Process exited with code {code}")
-                } else {
-                    "Process terminated unexpectedly".to_string()
-                }
-            }
-            _ => "Worker process stopped responding".to_string(),
+            Ok(Some(status)) => Crash::of(status),
+            _ => Crash::Unresponsive,
         }
     }
 
-    /// Kill the subprocess forcefully.
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait(); // reap zombie
@@ -537,15 +604,82 @@ impl Drop for SubprocessManager {
     }
 }
 
-/// (rss_limit, rss_resume) derived from the current system available
-/// memory. Called at spawn and re-called every `RSS_LIMIT_REFRESH_EVERY`
-/// `RssUpdate` events so the pause/resume bands track sibling
-/// subprocesses' allocations.
+/// The binary to run a worker from: this process's own. On Linux an update
+/// can replace the file while the app runs (the path then reads
+/// "… (deleted)"); /proc/self/exe still reaches the binary running.
+pub(crate) fn worker_exe() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let own = std::path::PathBuf::from("/proc/self/exe");
+        if own.exists() {
+            return Ok(own);
+        }
+    }
+    std::env::current_exe().map_err(|e| format!("Failed to get current exe: {e}"))
+}
+
+/// Why a worker that closed its output during Init stopped, once it has:
+/// `otherwise` unless it was one of another version.
+fn init_ended(mut child: Child, otherwise: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => break None,
+        }
+    };
+    if status.is_none() {
+        stop(child);
+    }
+    if status.and_then(|s| s.code()) == Some(WORKER_OF_ANOTHER_VERSION) {
+        "Prunr was updated while it was open. Restart it to keep processing.".to_string()
+    } else {
+        otherwise.to_string()
+    }
+}
+
+/// Send `init` to a worker just spawned, flushed at once: its blocking
+/// `read_message` waits on it. One that already stopped (of another
+/// version) closed the pipe, so its exit says why, not the write.
+fn send_init(child: Child, stdin: &mut BufWriter<std::process::ChildStdin>, init: &SubprocessCommand) -> Result<Child, String> {
+    match write_message(stdin, init).and_then(|()| stdin.flush()) {
+        Ok(()) => Ok(child),
+        Err(e) => Err(init_ended(child, &format!("Failed to send Init: {e}"))),
+    }
+}
+
+/// Kill a worker and reap it, so no zombie stays until the app exits.
+fn stop(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Take `child`'s pipes: its stdin to write commands to, and its stdout
+/// read on a thread into events, ending with `Disconnected`.
+fn attach(child: &mut Child) -> Result<(BufWriter<std::process::ChildStdin>, mpsc::Receiver<ReaderEvent>), String> {
+    let child_stdin = child.stdin.take().ok_or("Failed to capture worker stdin")?;
+    let child_stdout = child.stdout.take().ok_or("Failed to capture worker stdout")?;
+    let (event_tx, event_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("subprocess-reader".into())
+        .spawn(move || {
+            let mut reader = BufReader::new(child_stdout);
+            // A closed stdout (clean exit or crash) or garbage ends it.
+            while let Ok(Some(evt)) = read_message::<_, SubprocessEvent>(&mut reader) {
+                if event_tx.send(ReaderEvent::Event(evt)).is_err() {
+                    return; // parent dropped receiver
+                }
+            }
+            let _ = event_tx.send(ReaderEvent::Disconnected);
+        })
+        .map_err(|e| format!("Failed to spawn reader thread: {e}"))?;
+    Ok((BufWriter::new(child_stdin), event_rx))
+}
+
+/// (rss_limit, rss_resume) from the system's current available memory.
 fn current_rss_thresholds() -> (u64, u64) {
-    use sysinfo::System;
-    let mut sys = System::new();
-    sys.refresh_memory();
-    let available = sys.available_memory();
+    let available = crate::hardware::available_ram_bytes_now();
     let limit = (available as f64 * 0.80) as u64;
     let resume = (limit as f64 * 0.70) as u64;
     (limit, resume)
@@ -579,6 +713,7 @@ fn apply_event_state(
         // Non-terminal / one-off variants — no state change here.
         SubprocessEvent::Ready { .. }
         | SubprocessEvent::Report { .. }
+        | SubprocessEvent::SpareEdgeScales { .. }
         | SubprocessEvent::Finished
         | SubprocessEvent::InitError { .. } => {}
     }
@@ -589,6 +724,46 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A worker that stopped as soon as it began says why: one of another
+    /// version (the app was updated while open) asks for a restart.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_that_stops_at_init_says_why() {
+        let exit = |code: i32| Command::new("sh").args(["-c", &format!("exit {code}")]).spawn().unwrap();
+        assert!(init_ended(exit(WORKER_OF_ANOTHER_VERSION), "").starts_with("Prunr was updated while it was open"));
+        assert_eq!(init_ended(exit(3), "Worker exited during initialization"), "Worker exited during initialization");
+    }
+
+    /// One that stopped before its Init was even written closed the pipe:
+    /// the write fails, and the reason is still its exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_gone_before_its_init_says_why() {
+        let mut child = Command::new("sh").args(["-c", &format!("exit {WORKER_OF_ANOTHER_VERSION}")])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let (mut stdin, _events) = attach(&mut child).unwrap();
+        while child.try_wait().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // A test spawning beside this one holds a copy of the pipe from its
+        // fork to its exec; once a write finds the pipe closed, it stays so.
+        while std::io::Write::write(stdin.get_mut(), &[0]).is_ok() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let why = send_init(child, &mut stdin, &SubprocessCommand::Shutdown).expect_err("the pipe is closed");
+        assert!(why.starts_with("Prunr was updated while it was open"), "{why}");
+    }
+
+    /// The worker runs from this process's own binary, which on Linux an
+    /// update may have replaced on disk.
+    #[test]
+    fn the_worker_runs_from_this_processs_own_binary() {
+        let exe = worker_exe().unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(exe, PathBuf::from("/proc/self/exe"));
+        assert!(exe.exists());
+    }
+
     fn fresh_state() -> (HashSet<u64>, bool) {
         let in_flight: HashSet<u64> = (0..10).collect();
         (in_flight, false)
@@ -598,12 +773,10 @@ mod tests {
         apply_event_state(state.0, state.1, 1_000_000_000, 800_000_000, evt);
     }
 
-    /// Phase 21-01 / B1 fix: every terminal Done/Error variant must
-    /// decrement `in_flight`. Caught the regression where adding
-    /// `InpaintDone`/`InpaintError` IPC variants in the SD subprocess
-    /// refactor left them falling through `_ => {}` — the SD bundle
-    /// stayed resident forever after the first stroke because the idle
-    /// eviction gate keyed off `in_flight_items().is_empty()`.
+    /// Every terminal Done/Error variant must decrement `in_flight`. A
+    /// variant that falls through `_ => {}` leaves the SD bundle resident
+    /// forever, because the idle eviction gate keys off
+    /// `in_flight_items().is_empty()`.
     #[test]
     fn apply_event_state_decrements_on_every_terminal_variant() {
         let (mut in_flight, mut rss_paused) = fresh_state();
@@ -615,12 +788,9 @@ mod tests {
                 width: 100,
                 height: 100,
                 active_provider: "CPU".into(),
-                tensor_cache_path: None,
-                tensor_cache_height: None,
-                tensor_cache_width: None,
-                edge_cache_path: None,
-                edge_cache_height: None,
-                edge_cache_width: None,
+                tensor_cache: None,
+                edge_cache: None,
+                spare_scales: None,
             },
             SubprocessEvent::ImageError {
                 item_id: 2,
@@ -628,12 +798,15 @@ mod tests {
             },
             SubprocessEvent::InpaintDone {
                 item_id: 3,
+                generation: 1,
                 rgba_path: PathBuf::from("/tmp/y"),
                 width: 100,
                 height: 100,
+                fill_scale: 1.0,
             },
             SubprocessEvent::InpaintError {
                 item_id: 4,
+                generation: 1,
                 error: "lama session failed".into(),
             },
         ];
@@ -644,8 +817,8 @@ mod tests {
 
         assert!(!in_flight.contains(&1), "ImageDone must decrement in_flight");
         assert!(!in_flight.contains(&2), "ImageError must decrement in_flight");
-        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight (B1 regression)");
-        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight (B1 regression)");
+        assert!(!in_flight.contains(&3), "InpaintDone must decrement in_flight");
+        assert!(!in_flight.contains(&4), "InpaintError must decrement in_flight");
         // Items not referenced by any event are still in flight
         for id in 5..10 {
             assert!(in_flight.contains(&id));

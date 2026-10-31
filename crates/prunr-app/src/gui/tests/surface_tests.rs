@@ -4,27 +4,29 @@
 use egui_kittest::Harness;
 
 use super::fixtures::push_test_item;
-use super::tree_tests::{click, harness, settle};
+use super::harness::{
+    assert_all_controls_named, click, enabled, harness, harness_builder, loaded, loaded_with, names, new_app, settle, settle_until_shown, tree,
+};
 use crate::gui::app::PrunrApp;
 use crate::gui::item::BatchStatus;
 
 /// A point on the canvas, below any popover and left of the sidebar.
 const CANVAS_POINT: egui::Pos2 = egui::pos2(600.0, 820.0);
 
-pub(super) fn loaded() -> Harness<'static, PrunrApp> {
-    let mut h = harness();
-    {
-        let app = h.state_mut();
-        push_test_item(app, 1).status = BatchStatus::Done;
-        app.batch.select_item(0);
-    }
-    settle(&mut h);
-    h
-}
-
 fn pointer_to(h: &mut Harness<'_, PrunrApp>, pos: egui::Pos2) {
     h.input_mut().events.push(egui::Event::PointerMoved(pos));
     h.step();
+}
+
+/// A raw click where the button named `name` is drawn, whatever window
+/// is over it: what a click through a modal's backdrop would reach.
+fn click_where(h: &mut Harness<'_, PrunrApp>, name: &str) {
+    use egui_kittest::kittest::Queryable;
+    let at = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some(name) && n.role() == egui::accesskit::Role::Button).rect().center();
+    pointer_to(h, at);
+    press(h, at, true);
+    press(h, at, false);
+    settle(h);
 }
 
 fn press(h: &mut Harness<'_, PrunrApp>, pos: egui::Pos2, pressed: bool) {
@@ -45,6 +47,39 @@ fn scroll(h: &mut Harness<'_, PrunrApp>, lines: f32) {
         modifiers: egui::Modifiers::NONE,
     });
     h.step();
+}
+
+/// A Magic Brush stroke starts only where it is pressed on the image: a
+/// press elsewhere (a toolbar button, the strip) carried onto the image
+/// picks nothing, while a click on the image picks. A pick made before
+/// the image is encoded is held, so the held list counts them.
+#[test]
+fn a_press_off_the_image_never_becomes_a_magic_brush_pick() {
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        let item = push_test_item(app, 1);
+        item.dimensions = (800, 600);
+        super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+    }
+    settle_until_shown(&mut h);
+    let on_image = egui::pos2(600.0, 480.0);
+    let off_image = egui::pos2(40.0, 25.0); // the top toolbar
+    press(&mut h, off_image, true);
+    for x in [560.0, 600.0, 640.0] {
+        pointer_to(&mut h, egui::pos2(x, 480.0));
+    }
+    press(&mut h, egui::pos2(640.0, 480.0), false);
+    settle(&mut h);
+    assert!(h.state().magic_brush_state.pending_sam_picks.is_empty(), "a press off the image picked");
+
+    pointer_to(&mut h, on_image);
+    press(&mut h, on_image, true);
+    press(&mut h, on_image, false);
+    settle(&mut h);
+    assert_eq!(h.state().magic_brush_state.pending_sam_picks.len(), 1, "a click on the image picks");
 }
 
 #[test]
@@ -108,39 +143,147 @@ fn escape_closes_the_flyout_and_keeps_the_selection() {
     assert!(!egui::Popup::is_any_open(&h.ctx), "Escape closed the flyout");
     assert!(h.state().batch.items[0].selection_mask.is_some(), "and did not clear the selection");
     h.key_press(egui::Key::Escape);
-    settle(&mut h);
+    super::harness::settle_until_selection_lands(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
 
 #[test]
 fn the_tool_strip_follows_the_paint_brush() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip without a tool");
-    h.state_mut().brush_state.toggle();
+    h.state_mut().brush_state.enable();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Restore", "Erase", "Size", "Hardness", "Opacity", "More Paint Brush settings"] {
+    // Every brush setting is on the strip: nothing waits behind a click.
+    for knob in ["Restore", "Erase", "Select", "Next", "Last", "All", "Size", "Hardness", "Opacity", "Feather", "Circle", "Square", "Line", "Reset the brush"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
     }
     assert_all_controls_named(&h, "paint brush strip");
-    click(&mut h, "More Paint Brush settings");
-    assert!(egui::Popup::is_any_open(&h.ctx), "the dots open the full panel");
-    assert!(names(&h).iter().any(|n| n == "Feather"), "{:?}", names(&h));
-    assert_all_controls_named(&h, "paint brush panel");
     h.state_mut().brush_state.disable();
     settle(&mut h);
     assert!(!names(&h).iter().any(|n| n == "Hardness"), "the strip leaves with the tool");
 }
 
+/// Over the image a brush draws its own cursor, so the system's (an
+/// arrow, or a cross on GNOME) is hidden there and only there: over the
+/// strip floating on the image, and off the image, it shows. Zoomed in,
+/// the image reaches under the toolbar, where the canvas shows none of
+/// it: the toolbar keeps the system's cursor there too, and a press on
+/// it starts no stroke.
+#[test]
+fn a_brush_over_the_image_hides_the_system_cursor() {
+    for magic in [false, true] {
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            let item = push_test_item(app, 1);
+            item.dimensions = (800, 600);
+            super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            // Encoded already: while it encodes the Magic Brush shows Wait.
+            item.magic_brush_embedding = Some(std::sync::Arc::new(prunr_core::sam::SamEmbedding {
+                image_embed: vec![0.0; 4],
+                high_res_feats_0: vec![0.0; 4],
+                high_res_feats_1: vec![0.0; 4],
+            }));
+            app.batch.select_item(0);
+            if magic { app.magic_brush_state.activate(); } else { app.brush_state.enable(); }
+        }
+        settle_until_shown(&mut h);
+        let cursor = |h: &mut Harness<'_, PrunrApp>, pos| {
+            pointer_to(h, pos);
+            h.step();
+            h.output().platform_output.cursor_icon
+        };
+        assert_eq!(cursor(&mut h, egui::pos2(600.0, 480.0)), egui::CursorIcon::None, "magic {magic}: over the image");
+        assert_ne!(cursor(&mut h, egui::pos2(40.0, 25.0)), egui::CursorIcon::None, "magic {magic}: over the toolbar");
+        h.state_mut().zoom_state.zoom = 8.0;
+        h.run_steps(2);
+        assert_eq!(cursor(&mut h, egui::pos2(600.0, 480.0)), egui::CursorIcon::None, "magic {magic}: zoomed, over the image");
+        assert_ne!(cursor(&mut h, egui::pos2(40.0, 25.0)), egui::CursorIcon::None, "magic {magic}: zoomed, the image under the toolbar");
+        let second_row = {
+            use egui_kittest::kittest::Queryable;
+            let chip = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Model") && n.role() == egui::accesskit::Role::Button).rect();
+            egui::pos2(chip.max.x + 40.0, chip.center().y)
+        };
+        assert_ne!(cursor(&mut h, second_row), egui::CursorIcon::None, "magic {magic}: zoomed, the image under the second row");
+        press(&mut h, second_row, true);
+        let stroking = h.state().brush_state.has_active_stroke() || !h.state().magic_brush_state.active_stroke.is_empty();
+        press(&mut h, second_row, false);
+        assert!(!stroking, "magic {magic}: a press on the toolbar starts no stroke on the image under it");
+    }
+}
+
+/// The strip draws on the foreground layer: under an open dialog it
+/// would sit on top of the dialog, so it leaves while one is up.
+#[test]
+fn the_tool_strip_leaves_while_a_dialog_is_open() {
+    let mut h = loaded();
+    h.state_mut().brush_state.enable();
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is up");
+    h.state_mut().show_cli_help = true;
+    settle(&mut h);
+    assert!(!names(&h).iter().any(|n| n == "Hardness"), "no strip over the command-line reference");
+    h.state_mut().show_cli_help = false;
+    settle(&mut h);
+    assert!(names(&h).iter().any(|n| n == "Hardness"), "the strip is back once the dialog closes");
+}
+
+/// A native file dialog is a separate window the app keeps drawing
+/// under; the canvas holds still until the user answers it.
+#[test]
+fn the_canvas_holds_still_while_a_file_dialog_is_up() {
+    let mut h = loaded();
+    click(&mut h, "Open");
+    assert!(h.state().system.dialog_open(), "Open asked for a dialog");
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    assert!(!h.state().zoom_state.is_panning, "no pan under the dialog");
+    press(&mut h, CANVAS_POINT, false);
+    h.state_mut().system.answer_for_test(None);
+    settle(&mut h);
+    assert!(!h.state().system.dialog_open(), "a cancel closes it");
+    press(&mut h, CANVAS_POINT, true);
+    assert!(h.state().zoom_state.is_panning, "the canvas pans again");
+    press(&mut h, CANVAS_POINT, false);
+}
+
+/// Under an eraser both brushes carry the region knobs, since either
+/// paints the region the erase fills.
+#[test]
+fn an_erasers_magic_brush_strip_has_the_region_knobs() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::Inpaint;
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    let present = names(&h);
+    for knob in ["Expand region", "Feather"] {
+        assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
+    }
+}
+
+/// An eraser turns the Paint Brush on by itself, at start too; with no
+/// image on the canvas its strip has nothing to paint and stays away.
+#[test]
+fn an_erasers_brush_strip_waits_for_an_image() {
+    let mut h = harness();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::RoremInpaint;
+    h.state_mut().fit_brush_models_to_model();
+    settle(&mut h);
+    assert!(h.state().active_tool().is_some(), "the eraser's brush is on");
+    let present = names(&h);
+    for knob in ["Size", "Try another"] {
+        assert!(!present.iter().any(|n| n == knob), "{knob} shown on the empty canvas: {present:?}");
+    }
+}
+
 #[test]
 fn the_tool_strip_follows_the_magic_brush() {
-    use super::tree_tests::{assert_all_controls_named, names};
     let mut h = loaded();
     h.state_mut().magic_brush_state.activate();
     settle(&mut h);
     let present = names(&h);
-    for knob in ["Confidence", "More Magic Brush settings"] {
+    for knob in ["Restore", "Erase", "Select", "Object", "Depth", "Confidence", "Next", "Last", "All", "Remove specks", "Feather", "Reset the brush"] {
         assert!(present.iter().any(|n| n == knob), "{knob} missing from the strip: {present:?}");
     }
     // Magic Brush picks objects; size, hardness and shape would change nothing.
@@ -148,18 +291,71 @@ fn the_tool_strip_follows_the_magic_brush() {
         assert!(!present.iter().any(|n| n == knob), "{knob} on the Magic Brush strip: {present:?}");
     }
     assert_all_controls_named(&h, "magic brush strip");
-    click(&mut h, "More Magic Brush settings");
-    assert!(egui::Popup::is_any_open(&h.ctx));
-    let panel = names(&h);
-    assert!(!panel.iter().any(|n| n == "Size" || n == "Hardness"), "{panel:?}");
-    assert!(panel.iter().any(|n| n == "Remove specks"), "{panel:?}");
-    assert_all_controls_named(&h, "magic brush panel");
+}
+
+/// Magic Brush's Depth choice trades Confidence for Range on the strip.
+#[test]
+fn the_magic_brush_strip_selects_by_depth() {
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache.depth = true;
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    click(&mut h, "Depth");
+    assert!(h.state().settings.brush.magic_depth);
+    let present = names(&h);
+    assert!(present.iter().any(|n| n == "Range") && !present.iter().any(|n| n == "Confidence"), "{present:?}");
+    assert_all_controls_named(&h, "magic brush strip with depth");
+    assert!(h.state().model_store.is_none(), "the model is installed: no store");
+}
+
+/// Turning on a depth knob without the depth model opens the Model Store
+/// on Depth, from the Depth strip's own button too.
+#[test]
+fn a_depth_knob_without_the_model_offers_the_store() {
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache = Default::default();
+    h.state_mut().magic_brush_state.activate();
+    settle(&mut h);
+    click(&mut h, "Depth");
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
+
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.hardware_install_cache = Default::default();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+    }
+    settle(&mut h);
+    click(&mut h, "Depth");
+    click(&mut h, crate::gui::views::get_model::label(prunr_core::depth::MODEL.into()));
+    settle(&mut h);
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Depth)));
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the Depth strip closed");
+}
+
+/// While Set focus waits, a click on the canvas belongs to it: no pan,
+/// and the wait ends whether or not the click hit the image.
+#[test]
+fn picking_the_focus_takes_the_canvas_click() {
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+        app.picking_depth_focus = true;
+    }
+    settle(&mut h);
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    assert!(!h.state().zoom_state.is_panning, "the press does not pan");
+    press(&mut h, CANVAS_POINT, false);
+    settle(&mut h);
+    assert!(!h.state().picking_depth_focus, "the click ended the wait");
 }
 
 #[test]
 fn bracket_keys_step_the_brush_size() {
     let mut h = loaded();
-    h.state_mut().brush_state.toggle();
+    h.state_mut().brush_state.enable();
     settle(&mut h);
     let start = h.state().settings.brush.radius;
     h.key_press(egui::Key::CloseBracket);
@@ -180,26 +376,212 @@ fn applying_a_preset_closes_the_popover() {
     assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes a set-and-go popover");
 }
 
+/// Ask the window to close, as the title bar's close button or Cmd+Q
+/// does; whether the app held it back.
+fn request_close(h: &mut Harness<'static, PrunrApp>) -> bool {
+    h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().events.push(egui::ViewportEvent::Close);
+    h.step();
+    let held = h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::CancelClose);
+    settle(h);
+    held
+}
+
+/// Closing with work no save wrote asks first: Cancel (or Escape) keeps
+/// the window, "Close without saving" closes it. Nothing unsaved, and the
+/// window closes at once.
 #[test]
-fn the_save_preset_dialog_is_a_modal_that_escape_closes() {
-    use super::tree_tests::{assert_all_controls_named, names};
+fn closing_with_unsaved_work_asks_first() {
+    use egui_kittest::kittest::Queryable;
     let mut h = loaded();
-    {
-        let item = &mut h.state_mut().batch.items[0];
-        item.selection_mask = Some(std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(1, 1, vec![100])));
+    assert!(!request_close(&mut h), "nothing unsaved: the window closes");
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    assert!(request_close(&mut h), "unsaved work holds the close");
+    assert!(h.state().open_modals().contains(&"discard_prompt"));
+    assert_all_controls_named(&h, "discard prompt");
+    for name in ["Cancel", "Close without saving"] {
+        assert!(names(&h).iter().any(|n| n == name), "{name} missing");
     }
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().open_modals().is_empty(), "Escape keeps the window");
+    assert!(request_close(&mut h), "and asks again");
+    h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some("Close without saving")).click();
+    h.step();
+    assert!(h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Close), "the window closes");
+    assert!(!request_close(&mut h), "the close goes through");
+}
+
+/// A save that lands while the prompt is up leaves nothing to ask
+/// about: the close or removal the user asked for goes ahead.
+#[test]
+fn a_save_landing_under_the_prompt_goes_ahead() {
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    assert!(request_close(&mut h), "unsaved work holds the close");
+    let mark = h.state().batch.items[0].save_mark();
+    h.state_mut().batch.mark_saved(&[mark]);
+    h.step();
+    assert!(h.output().viewport_output[&egui::ViewportId::ROOT].commands.contains(&egui::ViewportCommand::Close), "the window closes");
+    settle(&mut h);
+    assert!(h.state().open_modals().is_empty());
+
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 2, "held until answered");
+    let mark = h.state().batch.items[0].save_mark();
+    h.state_mut().batch.mark_saved(&[mark]);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "removed once saved");
+    assert!(h.state().open_modals().is_empty());
+}
+
+/// Removing an image with unsaved work asks first; one without is
+/// removed at once.
+#[test]
+fn removing_unsaved_work_asks_first() {
+    let mut h = loaded_with(|app| {
+        push_test_item(app, 2);
+    });
+    h.state_mut().batch.items[0].commit(crate::gui::timeline::StepKind::Adjust);
+    h.state_mut().remove_batch_item(1);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "nothing unsaved: removed at once");
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "held until answered");
+    click(&mut h, "Cancel");
+    settle(&mut h);
+    assert_eq!(h.state().batch.items.len(), 1, "Cancel keeps it");
+    h.state_mut().remove_batch_item(0);
+    settle(&mut h);
+    click(&mut h, "Remove");
+    settle(&mut h);
+    assert!(h.state().batch.items.is_empty(), "Remove takes it out");
+}
+
+/// The first-launch runtime prompt is a modal for each runtime it can
+/// offer, as an install or, over an earlier Prunr's install, an update:
+/// its buttons are named, and Escape closes it as Not now.
+#[test]
+fn the_runtime_prompt_is_a_modal_that_escape_closes() {
+    use crate::runtime_install::RuntimeId;
+    let mut h = loaded();
+    let installs = h.state().hardware_install_cache;
+    for &rt in RuntimeId::OFFERED {
+        for (update, offer) in [(false, rt.install_button_label()), (true, rt.update_button_label())] {
+            h.state_mut().hardware_install_cache = if update { installs.with_update(rt) } else { installs };
+            h.state_mut().runtime_prompt = Some(rt);
+            settle(&mut h);
+            let present = names(&h);
+            for n in [offer, "Not now", "Open Settings"] {
+                assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
+            }
+            assert_all_controls_named(&h, rt.display_name());
+            h.key_press(egui::Key::Escape);
+            settle(&mut h);
+            assert!(h.state().runtime_prompt.is_none(), "Escape closed the {rt:?} prompt");
+            assert!(h.state().settings.is_runtime_prompt_snoozed(rt), "as Not now");
+        }
+    }
+}
+
+/// A test of this computer owns the window while it runs: its dialog
+/// names every control, Escape leaves it up, a click on the toolbar under
+/// it and a shortcut do nothing (the Settings it was started from stays
+/// open), and Cancel ends it and stops its process.
+#[test]
+fn the_computer_test_holds_the_window_until_cancelled() {
+    let child = crate::gui::tests::fixtures::idle_child();
+    #[cfg(target_os = "linux")]
+    let pid = child.id();
+    let mut h = loaded();
+    h.state_mut().show_settings = true;
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(child, None));
+    settle(&mut h);
+    assert!(h.state().open_modals().contains(&"machine_test"));
+    assert_all_controls_named(&h, "computer test");
+    assert!(names(&h).iter().any(|n| n == "Cancel"), "{:?}", names(&h));
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    assert!(h.state().machine_test.is_some(), "Escape leaves it up");
+    assert!(h.state().show_settings, "Escape leaves the Settings under it too");
+    click_where(&mut h, "Settings");
+    assert!(h.state().show_settings, "the toolbar under it takes no click, nor closes the Settings under it");
+    let ctx = h.ctx.clone();
+    h.state_mut().perform(crate::gui::views::shortcuts::Action::Settings, &ctx);
+    assert!(h.state().show_settings, "no shortcut acts under it");
+    click(&mut h, "Cancel");
+    settle(&mut h);
+    assert!(h.state().machine_test.is_none(), "Cancel ends it");
+    #[cfg(target_os = "linux")]
+    {
+        let gone = (0..200).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !std::path::Path::new(&format!("/proc/{pid}")).exists()
+        });
+        assert!(gone, "its process stopped");
+    }
+}
+
+/// A Model Store card's test owns the window too: a click on the toolbar
+/// under the store lands on nothing, the store does not close, the tested
+/// card cannot be removed, and Cancel on the card ends it.
+#[test]
+fn a_card_test_holds_the_window_until_cancelled() {
+    let mut h = loaded();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    h.state_mut().machine_test = Some(crate::gui::machine_test::MachineTest::for_test(crate::gui::tests::fixtures::idle_child(), Some(prunr_models::ModelId::U2net)));
+    settle(&mut h);
+    assert_all_controls_named(&h, "a card's test");
+    assert!(!enabled(&h, "Close Model Store"), "the store stays up");
+    assert!(names(&h).iter().any(|n| n == "Remove U2Net") && !enabled(&h, "Remove U2Net"), "the model under test stays");
+    click_where(&mut h, "Settings");
+    assert!(!h.state().show_settings, "the toolbar under it takes no click");
+    assert!(h.state().model_store.is_some(), "nor closes the store");
+    click(&mut h, "Cancel the test of U2Net");
+    settle(&mut h);
+    assert!(h.state().machine_test.is_none(), "Cancel ends it");
+    assert!(enabled(&h, "Close Model Store"));
+}
+
+/// The save dialog takes the popover's place and opens ready for a name:
+/// text typed at once goes into it. (Saving writes the presets folder, so
+/// Enter is checked live.)
+#[test]
+fn the_save_preset_dialog_takes_a_name_typed_at_once() {
+    let mut h = loaded();
     click(&mut h, "Preset");
     click(&mut h, "Save current as…");
     assert!(!egui::Popup::is_any_open(&h.ctx), "opening the dialog closed the popover");
-    let present = names(&h);
-    for n in ["Save", "Cancel", "Close window"] {
-        assert!(present.iter().any(|x| x == n), "{n} missing: {present:?}");
-    }
-    assert_all_controls_named(&h, "save preset dialog");
-    h.key_press(egui::Key::Escape);
+    h.event(egui::Event::Text("Mine".into()));
     settle(&mut h);
-    assert!(!names(&h).iter().any(|x| x == "Close window"), "Escape closed the dialog");
-    assert!(h.state().batch.items[0].selection_mask.is_some(), "and kept the selection");
+    assert_eq!(h.state().save_preset.as_deref(), Some("Mine"), "the typing went into the name");
+}
+
+/// One click beside stacked modals closes one, the topmost, as one
+/// Escape does: the licence dialog over the Model Store goes, the store
+/// stays for the next click.
+#[test]
+fn a_click_beside_stacked_modals_closes_only_the_top_one() {
+    let mut h = loaded();
+    h.state_mut().model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: None });
+    settle(&mut h);
+    h.state_mut().pending_license_request = Some(crate::gui::views::model_store::LicenseRequest::Model(prunr_models::ModelId::SdV15InpaintFp16));
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    settle(&mut h);
+    let corner = egui::pos2(8.0, 8.0);
+    pointer_to(&mut h, corner);
+    press(&mut h, corner, true);
+    press(&mut h, corner, false);
+    settle(&mut h);
+    assert!(h.state().pending_license_request.is_none(), "the top one closed");
+    assert!(h.state().model_store.is_some(), "the one under it stays");
 }
 
 #[test]
@@ -216,7 +598,7 @@ fn escape_closes_a_modal_before_touching_the_selection() {
     assert!(h.state().model_store.is_none(), "Escape closed the Model Store");
     assert!(h.state().batch.items[0].selection_mask.is_some(), "the selection survived");
     h.key_press(egui::Key::Escape);
-    settle(&mut h);
+    super::harness::settle_until_selection_lands(&mut h);
     assert!(h.state().batch.items[0].selection_mask.is_none(), "the next Escape clears it");
 }
 
@@ -224,7 +606,6 @@ fn escape_closes_a_modal_before_touching_the_selection() {
 /// style (its color pickers) and each pre-filter (its steps).
 #[test]
 fn the_sketch_flyout_names_every_control_in_every_mode() {
-    use super::tree_tests::{assert_all_controls_named, names};
     use prunr_core::{InputTransform, LineMode, LineStyle};
     for mode in [LineMode::SubjectOutline, LineMode::EdgesOnly] {
         for (i, style) in LineStyle::ALL.iter().enumerate() {
@@ -245,55 +626,304 @@ fn the_sketch_flyout_names_every_control_in_every_mode() {
     }
 }
 
-/// The Background flyout names every control for each choice it can show.
+/// The Background flyout names every control with a background image:
+/// picking one takes a file dialog, so the catalog's clicks never reach it.
 #[test]
-fn the_background_flyout_names_every_control_for_each_choice() {
-    use super::tree_tests::assert_all_controls_named;
-    use prunr_core::BgEffect;
-    type Choose = fn(&mut crate::gui::item::BatchItem);
-    let set: [(&str, Choose); 5] = [
-        ("transparent", |_| {}),
-        ("solid", |i| i.settings.bg = Some([10, 20, 30, 255])),
-        ("image", |i| i.set_bg_image(image::DynamicImage::new_rgba8(4, 4), None)),
-        ("blurred", |i| i.settings.bg_effect = BgEffect::BlurredSource { radius: 5 }),
-        ("black and white", |i| i.settings.bg_effect = BgEffect::DesaturatedSource),
+fn the_background_flyout_names_every_control_with_an_image() {
+    let mut h = loaded();
+    h.state_mut().batch.items[0].set_bg_image(image::DynamicImage::new_rgba8(4, 4), None);
+    settle(&mut h);
+    click(&mut h, "Background");
+    assert!(egui::Popup::is_any_open(&h.ctx), "the Background flyout opened");
+    assert_all_controls_named(&h, "background strip, image");
+    click(&mut h, "All background settings");
+    assert_all_controls_named(&h, "background panel, image");
+}
+
+/// Colorize's Strength is a flyout: it names its slider and stays open
+/// while the canvas is used.
+#[test]
+fn the_colorize_strength_flyout_names_its_control_and_stays_open() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::ColorizeDdcolor;
+    settle(&mut h);
+    click(&mut h, "Strength");
+    assert!(egui::Popup::is_any_open(&h.ctx), "Strength opened");
+    assert_all_controls_named(&h, "Strength on the colorizer");
+    pointer_to(&mut h, CANVAS_POINT);
+    press(&mut h, CANVAS_POINT, true);
+    press(&mut h, CANVAS_POINT, false);
+    settle(&mut h);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the canvas click did not close it");
+    click(&mut h, "Strength");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "its chip closes it");
+}
+
+/// Quality is a set-and-go popover: picking one closes it.
+#[test]
+fn picking_a_quality_closes_its_popover() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
+    h.state_mut().settings.brush.sd_scheduler = crate::gui::brush_state::SdScheduler::DpmPlusPlus2MKarras;
+    settle(&mut h);
+    click(&mut h, "Quality");
+    let quality = names(&h).into_iter().find(|n| n.starts_with("Quality") && n != "Quality").expect("the Quality row");
+    click(&mut h, &quality);
+    assert!(!egui::Popup::is_any_open(&h.ctx), "a pick closes it");
+}
+
+/// Save options is a set-and-go popover by the Save button: it names its
+/// controls, offers Separate layers only for a cut-out model, and a format
+/// pick sticks as the setting.
+#[test]
+fn save_options_name_their_controls_and_follow_the_model() {
+    use crate::gui::settings::SettingsModel;
+    use std::sync::Arc;
+    for (model, layers) in [(SettingsModel::BiRefNetLite, true), (SettingsModel::Inpaint, false)] {
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            app.settings.model = model;
+            let item = push_test_item(app, 1);
+            item.dimensions = (4, 4);
+            item.source_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+            item.commit(crate::gui::timeline::StepKind::Process);
+            app.batch.select_item(0);
+        }
+        settle(&mut h);
+        click(&mut h, "Save options");
+        assert_all_controls_named(&h, "save options");
+        let names = names(&h);
+        assert_eq!(names.iter().any(|n| n == "Separate layers"), layers, "{model:?}");
+        click(&mut h, "WebP");
+        assert_eq!(h.state().settings.export_format, prunr_core::ExportFormat::Webp);
+    }
+}
+
+/// The Outline and shadow flyout names every control, with the outline on
+/// and a Drop shadow (every row showing).
+#[test]
+fn the_outline_and_shadow_flyout_names_every_control() {
+    let mut h = loaded();
+    {
+        let d = &mut h.state_mut().batch.items[0].settings.decoration;
+        d.outline_width = 6.0;
+        d.shadow = prunr_core::ShadowKind::Drop;
+    }
+    settle(&mut h);
+    click(&mut h, "Outline and shadow");
+    click(&mut h, "All outline and shadow settings");
+    assert_all_controls_named(&h, "outline and shadow");
+    let names = names(&h);
+    for expected in ["Width", "Color", "No shadow", "Soft", "Drop", "Opacity", "Blur", "Distance"] {
+        assert!(names.iter().any(|n| n.starts_with(expected)), "{expected} missing from {names:?}");
+    }
+}
+
+/// With the SD eraser's brush on, the strip offers "Try another", greyed
+/// until a fill exists, and names it.
+#[test]
+fn the_sd_eraser_strip_offers_try_another() {
+    let mut h = loaded();
+    h.state_mut().settings.model = crate::gui::settings::SettingsModel::SdInpaint;
+    settle(&mut h);
+    h.state_mut().brush_state.enable();
+    settle(&mut h);
+    let tree = tree(&h);
+    let node = tree.iter().find(|n| n.name.as_deref() == Some("Try another")).expect("Try another on the strip");
+    assert!(node.disabled, "greyed before any fill");
+    assert_all_controls_named(&h, "SD eraser strip");
+}
+
+/// The Model picker lists a model that is not downloaded with "Get" and
+/// its size; picking it opens the Model Store on its section instead of
+/// switching to a model that cannot run.
+#[test]
+fn the_picker_offers_a_model_that_is_not_downloaded() {
+    use crate::gui::views::get_model;
+    let mut h = loaded();
+    {
+        let app = h.state_mut();
+        app.hardware_install_cache = Default::default();
+        app.settings.model = crate::gui::settings::SettingsModel::None;
+    }
+    settle(&mut h);
+    click(&mut h, "Model");
+    let row = format!("BiRefNet\n{}", get_model::badge_and_size(prunr_models::ModelId::BiRefNetLite));
+    click(&mut h, &row);
+    settle(&mut h);
+    assert_eq!(h.state().model_store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Segmentation)));
+    assert_eq!(h.state().settings.model, crate::gui::settings::SettingsModel::None, "the model did not switch");
+}
+
+/// Without a face model the Faces strip offers the Model Store on its
+/// Faces tab, and closes as the store opens rather than staying over it.
+#[test]
+fn the_faces_strip_opens_the_store_and_steps_aside() {
+    let mut h = loaded();
+    h.state_mut().hardware_install_cache = Default::default();
+    settle(&mut h);
+    click(&mut h, "Faces");
+    click(&mut h, "Get a face model");
+    settle(&mut h);
+    let store = h.state().model_store;
+    assert_eq!(store.map(|r| r.filter), Some(Some(prunr_models::ModelCategory::Face)));
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the Faces strip closed");
+}
+
+/// A dialog closed by a shortcut rather than its own backdrop or button
+/// still ignores the click that opens it again: Help › Keyboard
+/// shortcuts used to flash Settings open and shut after an earlier
+/// Settings had been closed with its shortcut.
+#[test]
+fn a_dialog_reopened_from_a_menu_stays_open() {
+    use crate::gui::views::shortcuts::Action;
+    let mut h = loaded();
+    let ctx = h.ctx.clone();
+    h.state_mut().perform(Action::Settings, &ctx);
+    settle(&mut h);
+    assert!(h.state().show_settings);
+    h.state_mut().perform(Action::Settings, &ctx);
+    h.run_steps(30);
+    assert!(!h.state().show_settings, "closed by its shortcut");
+    click(&mut h, "Help");
+    click(&mut h, "Keyboard shortcuts");
+    h.run_steps(10);
+    assert!(h.state().show_settings, "Settings opened on Shortcuts stays open");
+}
+
+/// The capsule and the canvas animate while a run works, for minutes at
+/// a time: thirty frames a second keeps them smooth at half the drawing.
+#[test]
+fn a_run_in_flight_draws_thirty_frames_a_second() {
+    use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
+    for status in [BatchStatus::Done, BatchStatus::Processing] {
+        let mut h = paced_harness();
+        let photo = h.ctx.load_texture("photo", egui::ColorImage::filled([4, 4], egui::Color32::GRAY), Default::default());
+        {
+            let app = h.state_mut();
+            let item = push_test_item(app, 1);
+            crate::gui::tests::fixtures::put_in(item, status.clone());
+            item.source_texture = Some(photo.clone().into());
+            item.thumb.landed(photo);
+            app.batch.select_item(0);
+            app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Upscale, prunr_core::Step::Upscaling.label()));
+        }
+        // Work landing off the UI thread (a texture, a startup probe) asks
+        // for one frame at once, and on a loaded machine (an Intel Mac
+        // runner, parallel tests) it lands at any time, over 10 s in. The
+        // pace is what the frames return to after such a frame and hold:
+        // one landing is made here, and only a failure waits out the budget.
+        let delay = repaint_delay;
+        let paced = |d: std::time::Duration| d >= std::time::Duration::from_millis(15);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let (mut streak, mut landed, mut unpaced) = (0, false, None);
+        while (streak < 10 || !landed) && std::time::Instant::now() < deadline {
+            h.step();
+            if !paced(delay(&h)) {
+                streak = 0;
+                unpaced = Some((delay(&h), h.ctx.repaint_causes()));
+            } else if streak == 3 && !landed {
+                h.ctx.request_repaint();
+                (streak, landed) = (0, true);
+            } else {
+                streak += 1;
+            }
+        }
+        assert!(landed && streak >= 10, "{status:?}: the frames never held a pace; last asked {unpaced:?}");
+    }
+}
+
+/// A window nothing changes in stops drawing: each of these once drew
+/// every frame for as long as it lasted, a laptop's battery spent on the
+/// same picture.
+#[test]
+fn an_unchanging_window_stops_drawing() {
+    type Setup = fn(&mut Harness<'_, PrunrApp>);
+    let cases: [(&str, Setup); 4] = [
+        ("the empty window's tips with Animations off", |h| h.state_mut().settings.animations = false),
+        ("a photo that could not be opened", |h| {
+            let item = push_test_item(h.state_mut(), 1);
+            item.land_decode(Err("The file was moved or deleted since it was opened. Open it again.".into()));
+            h.state_mut().batch.select_item(0);
+        }),
+        ("the pointer left on a thumbnail", |h| {
+            let app = h.state_mut();
+            super::fixtures::cut_out(push_test_item(app, 1), prunr_core::ModelKind::Silueta);
+            app.batch.select_item(0);
+            settle_until_shown(h);
+            let row = sidebar_row(h);
+            pointer_to(h, row);
+            // The rest is timed on the clock, not in frames.
+            std::thread::sleep(crate::gui::drag_export_state::HOVER_DWELL * 2);
+        }),
+        ("a download read by read with the Model Store closed", |h| {
+            h.state_mut().settings.animations = false;
+            let id = prunr_models::ModelId::LaMaFp32;
+            let dm = &mut h.state_mut().download_manager;
+            dm.begin_for_test(id);
+            let send = dm.sender_for_test();
+            std::thread::spawn(move || {
+                for bytes_so_far in 0..5_000 {
+                    send(crate::gui::download_manager::DownloadEvent::Progress { id, bytes_so_far, total: 5_000 });
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+        }),
     ];
-    for (name, apply) in set {
-        let mut h = loaded();
-        apply(&mut h.state_mut().batch.items[0]);
-        settle(&mut h);
-        click(&mut h, "Background");
-        assert!(egui::Popup::is_any_open(&h.ctx), "{name}: the Background flyout opened");
-        assert_all_controls_named(&h, &format!("background flyout, {name}"));
+    for (case, setup) in cases {
+        let mut h = paced_harness();
+        setup(&mut h);
+        // A thumbnail or texture a busy test run makes late animates its
+        // spinner until it lands: the window is unchanging only then.
+        super::harness::settle_until_quiet(&mut h);
+        // A second for what ends by itself (a tooltip's delay), then a
+        // tip's whole cycle and more; work landing off the UI thread asks
+        // for the odd frame.
+        h.run_steps(60);
+        let at_once = (0..330).filter(|_| {
+            h.step();
+            repaint_delay(&h) <= crate::gui::theme::ANIM_FRAME
+        }).count();
+        assert!(at_once < 12, "{case}: {at_once} of 330 frames asked for the next one at an animation's pace; last asked by {:?}", h.ctx.repaint_causes());
     }
 }
 
-/// The Effect flyout names every control for each effect, "None" first.
-#[test]
-fn the_effect_flyout_names_every_control_for_each_effect() {
-    use super::tree_tests::{assert_all_controls_named, names};
-    for style in prunr_core::FillStyle::ALL {
-        let mut h = loaded();
-        h.state_mut().batch.items[0].settings.fill_style = *style;
-        settle(&mut h);
-        click(&mut h, "Effect");
-        assert!(egui::Popup::is_any_open(&h.ctx), "{style:?}: the Effect flyout opened");
-        assert!(names(&h).iter().any(|n| n == "None"), "{style:?}: None is in the list");
-        assert_all_controls_named(&h, &format!("effect flyout, {style:?}"));
-    }
+/// egui takes the frame time off every wait it is asked for: at the
+/// harness's default quarter second, each would read as none.
+fn paced_harness() -> Harness<'static, PrunrApp> {
+    harness_builder().with_step_dt(1.0 / 60.0).build_eframe(|cc| new_app(cc))
 }
 
-/// The upscale row's Scale popover and Refine flyout name every control.
+fn repaint_delay(h: &Harness<'_, PrunrApp>) -> std::time::Duration {
+    h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay
+}
+
+/// The middle of the first thumbnail in the batch list.
+fn sidebar_row(h: &Harness<'_, PrunrApp>) -> egui::Pos2 {
+    use egui_kittest::kittest::Queryable;
+    h.get_by_label("test1.png").rect().center()
+}
+
+/// A strip's full panel keeps its width while its values change: Mask's
+/// ends in a right-aligned row, which takes all the room it is given,
+/// and the panel only had a minimum width, so every wider value pushed
+/// it further right and it never came back.
 #[test]
-fn the_upscale_surfaces_name_every_control() {
-    use super::tree_tests::{assert_all_controls_named, names};
-    for (chip, expect) in [("Scale", "2\u{00d7}"), ("Refine", "Sharpen")] {
-        let mut h = loaded();
-        h.state_mut().settings.model = crate::gui::settings::SettingsModel::RealEsrganUpscale;
-        settle(&mut h);
-        click(&mut h, chip);
-        assert!(egui::Popup::is_any_open(&h.ctx), "{chip} opened");
-        assert!(names(&h).iter().any(|n| n == expect), "{chip}: {expect} shown");
-        assert_all_controls_named(&h, &format!("{chip} on an upscaler"));
+fn a_strip_s_full_panel_keeps_its_width() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = loaded();
+    click(&mut h, "Mask");
+    click(&mut h, "All mask settings");
+    let right = |h: &Harness<'_, PrunrApp>| h.get_by_label("Contrast").rect().right();
+    let first = right(&h);
+    for shift in [-20.0, 0.0, -20.0, 0.0] {
+        h.state_mut().batch.items[0].settings.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(shift);
+        h.run_steps(5);
     }
+    assert_eq!(right(&h), first, "the panel's sliders end where they did");
+    let strip_right = h.get_by_label("All mask settings").rect().right();
+    assert!((first - strip_right).abs() < 100.0, "the panel spans the strip above it: {first} vs {strip_right}");
 }

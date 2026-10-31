@@ -7,12 +7,12 @@ use crate::gui::app::PrunrApp;
 use crate::gui::item::{BatchItem, BatchStatus};
 use crate::gui::theme;
 
-/// Manual pointer hit test for a rect — returns (hovered, clicked).
-fn hit_test(ui: &egui::Ui, rect: Rect) -> (bool, bool) {
-    ui.ctx().input(|i| {
-        let hover = i.pointer.hover_pos().is_some_and(|p| rect.contains(p));
-        (hover, hover && i.pointer.primary_clicked())
-    })
+/// A control drawn over a row: a real widget on top of the row, so it
+/// takes the click and carries a name for the accessibility tree.
+fn row_control(ui: &egui::Ui, rect: Rect, id: egui::Id, info: impl Fn() -> egui::WidgetInfo) -> egui::Response {
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    resp.widget_info(info);
+    resp
 }
 
 /// Collected per-frame actions produced by the item rows, applied after the
@@ -24,10 +24,11 @@ struct SidebarActions {
     remove_idx: Option<usize>,
     save_idx: Option<usize>,
     needs_repaint: bool,
+    /// The row under the pointer, and whether it is pressed.
+    hovered: Option<(u64, bool)>,
 }
 
-/// Values that are constant for the whole item loop — computed once and
-/// passed by reference to avoid re-reading per-row.
+/// Values constant for the whole item loop, computed once.
 struct RowContext<'a> {
     dragging_ids: Option<&'a HashSet<u64>>,
     sidebar_escape_rect: Rect,
@@ -52,12 +53,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         render_header(ui, app);
         ui.add_space(theme::SPACE_XS);
 
-        let anim_time = ui.ctx().input(|i| i.time) as f32;
+        let anim_time = theme::motion_clock(ui.ctx());
         let actions = render_item_list(ui, app, dragging_ids.as_ref(), sidebar_escape_rect, anim_time);
 
         // Request repaint for animations/pending thumbnails — throttled to ~15fps.
-        if actions.needs_repaint || app.batch.items.iter().any(|i| i.has_pending_work()) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(66));
+        if actions.needs_repaint || app.batch.has_pending_work() {
+            ui.ctx().request_repaint_after(theme::ANIM_FRAME);
+        }
+        if let Some(due) = app.drag_export.note_hover(actions.hovered, std::time::Instant::now()) {
+            ui.ctx().request_repaint_after(due.saturating_duration_since(std::time::Instant::now()));
         }
         apply_actions(app, &actions);
     });
@@ -78,41 +82,43 @@ fn render_empty_state(ui: &mut egui::Ui) {
         |ui| {
             ui.label(
                 RichText::new("Drop images here\nto queue them")
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
             );
         },
     );
 }
 
+/// The tick boxes on the thumbnails and on Select All: one size, big
+/// enough to hit on a thumbnail.
+const TICK_SIZE: f32 = 22.0;
+
 /// Select-all checkbox + "N/M" selected counter.
 fn render_header(ui: &mut egui::Ui, app: &mut PrunrApp) {
     let count = app.batch.items.len();
-    let all_selected = app.batch.all_selected();
-    let mut select_all = all_selected;
+    let all_ticked = app.batch.all_ticked();
+    let mut select_all = all_ticked;
     ui.horizontal(|ui| {
-        ui.spacing_mut().icon_width = 20.0;
+        ui.spacing_mut().icon_width = TICK_SIZE;
         ui.spacing_mut().icon_spacing = 8.0;
         if ui
             .checkbox(
                 &mut select_all,
-                RichText::new("Select All")
+                RichText::new("Select all")
                     .size(theme::FONT_SIZE_BODY)
                     .color(theme::TEXT_PRIMARY),
             )
             .changed()
         {
-            for item in &mut app.batch.items {
-                item.selected = select_all;
-            }
+            app.batch.set_all_ticked(select_all);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Always show "N/M" for consistency — "0/4" reads as "0 of 4
             // selected" rather than the ambiguous "4" when nothing's checked.
-            let selected = app.batch.selected_count();
+            let ticked = app.batch.ticked_count();
             ui.label(
-                RichText::new(format!("{selected}/{count}"))
-                    .size(theme::FONT_SIZE_MONO)
+                RichText::new(format!("{ticked}/{count}"))
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
         });
@@ -176,20 +182,27 @@ fn render_item_row(
     }
 
     let checkbox_clicked = paint_selection_checkbox(ui, &mut app.batch.items[i], item_rect);
+    let row_hovered = ui.rect_contains_pointer(item_rect);
+    if row_hovered {
+        actions.hovered = Some((app.batch.items[i].id, item_response.is_pointer_button_down_on()));
+    }
 
-    if matches!(app.batch.items[i].status, BatchStatus::Processing) {
+    // The row shows any run on the image (an upscale, an erase) as work
+    // under way; status() is Processing only for a cut, which the canvas
+    // animates differently.
+    let running = app.batch.items[i].is_running();
+    if running {
         paint_processing_animation(ui, item_rect, ctx.anim_time);
         actions.needs_repaint = true;
     }
 
-    if paint_status_indicator(ui, &app.batch.items[i].status, item_rect, ctx.anim_time) {
+    let status = if running { &BatchStatus::Processing } else { &app.batch.items[i].status() };
+    if paint_status_indicator(ui, status, item_rect, ctx.anim_time) {
         actions.needs_repaint = true;
     }
 
-    let close_clicked =
-        paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, &item_response, actions);
+    let close_clicked = paint_hover_buttons(ui, &app.batch.items[i], i, item_rect, row_hovered, actions);
 
-    // DnD: set drag payload (intra-sidebar reorder) and check for drops.
     item_response.dnd_set_drag_payload(i);
     if let Some(src_idx) = item_response.dnd_release_payload::<usize>() {
         actions.swap_from = Some(*src_idx);
@@ -200,17 +213,13 @@ fn render_item_row(
 
     // Click to select (skip if a hover button or the checkbox absorbed the click).
     if !close_clicked && !checkbox_clicked && item_response.clicked() && app.batch.select_item(i) {
-        app.canvas_switch_id += 1;
-        app.zoom_state.reset();
         let egui_ctx = ui.ctx().clone();
-        app.sync_selected_batch_textures(&egui_ctx);
-        // Force a repaint now AND shortly after — when the selected item's
-        // result_texture was previously evicted, `sync_selected_batch_textures`
-        // kicks off an async tex_prep whose completion-time repaint can race
-        // with egui's idle state. Without these, the canvas waits for the
-        // next mouse event before showing the new image.
+        app.on_selected_changed(&egui_ctx);
+        // Repaint now and shortly after: an evicted result's async tex_prep
+        // can land while egui idles, leaving the old image up until the
+        // next mouse event.
         egui_ctx.request_repaint();
-        egui_ctx.request_repaint_after(std::time::Duration::from_millis(66));
+        egui_ctx.request_repaint_after(theme::ANIM_FRAME);
     }
 
     paint_insertion_line(ui, &item_response, item_rect);
@@ -222,8 +231,8 @@ fn render_item_row(
 }
 
 /// Request on demand, show a spinner while pending, then fade the texture in.
-/// Returns `true` if anything painted here is still animating and the frame
-/// needs another repaint.
+/// Returns `true` while a thumbnail is on its way; egui draws the fade's
+/// frames itself.
 fn render_thumbnail_layer(
     ui: &mut egui::Ui,
     app: &mut PrunrApp,
@@ -236,41 +245,37 @@ fn render_thumbnail_layer(
         request_item_thumbnail(app, i);
         needs_repaint = true;
     }
-    if app.batch.items[i].thumb_texture.is_none() && app.batch.items[i].thumb_pending {
+    if app.batch.items[i].thumb.texture().is_none() && app.batch.items[i].thumb.is_pending() {
         draw_loading_spinner(ui, item_rect);
         needs_repaint = true;
     }
     // Compute fade unconditionally so the animation bookkeeping stays in sync
     // whether or not the texture is available yet.
-    let has_thumb = app.batch.items[i].thumb_texture.is_some();
+    let has_thumb = app.batch.items[i].thumb.texture().is_some();
     let fade = ui.ctx().animate_bool_with_time(
         egui::Id::new(("thumb_fade", app.batch.items[i].id)),
         has_thumb,
-        0.2,
+        theme::fade_secs(ui.ctx(), theme::IMAGE_FADE_SECS),
     );
     let is_dragging_out = dragging_ids.is_some_and(|s| s.contains(&app.batch.items[i].id));
-    // Bg-image texture is built off-thread (kicked from the file-pick
-    // and preset-apply paths). The thumbnail paint reads the handle
-    // directly; if still pending the bg-color path renders below.
+    // A bg-image texture still building off-thread falls back to the bg colour.
     paint_thumbnail(ui, &app.batch.items[i], item_rect, is_dragging_out, fade);
-    needs_repaint || fade < 1.0
+    needs_repaint
 }
 
 /// True when the item needs a thumbnail but hasn't asked for one yet.
-/// Viewport-visibility gating happens upstream: `render_item_row`
-/// early-returns on the virtualization check before this is called, so
-/// off-screen rows never trigger a request.
+/// Off-screen rows never get here: the row returns early before painting.
 fn should_request_thumbnail(item: &BatchItem) -> bool {
-    item.thumb_texture.is_none() && !item.thumb_pending
+    item.thumb.wanted()
 }
 
 fn request_item_thumbnail(app: &mut PrunrApp, i: usize) {
-    app.batch.items[i].thumb_pending = true;
+    app.batch.items[i].thumb.asked();
     let item_id = app.batch.items[i].id;
     app.batch.request_thumbnail(
         item_id,
         &app.batch.items[i].source,
-        app.batch.items[i].result_rgba.as_ref(),
+        app.batch.items[i].result_pixels(),
     );
 }
 
@@ -292,9 +297,12 @@ fn paint_item_background(ui: &egui::Ui, item_rect: Rect, is_selected: bool) {
     }
 }
 
-fn draw_loading_spinner(ui: &mut egui::Ui, item_rect: Rect) {
-    let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(20.0));
-    ui.put(spinner_rect, egui::Spinner::new().size(20.0).color(theme::ACCENT));
+/// Painted, not placed: `ui.put` moves the list's layout to under the
+/// spinner, so the next row would start inside this one.
+fn draw_loading_spinner(ui: &egui::Ui, item_rect: Rect) {
+    const SPINNER: f32 = 20.0;
+    let spinner_rect = Rect::from_center_size(item_rect.center(), Vec2::splat(SPINNER));
+    egui::Spinner::new().size(SPINNER).color(theme::ACCENT).paint_at(ui, spinner_rect);
 }
 
 fn paint_thumbnail(
@@ -304,7 +312,7 @@ fn paint_thumbnail(
     is_dragging_out: bool,
     fade: f32,
 ) {
-    let Some(ref thumb_tex) = item.thumb_texture else {
+    let Some(thumb_tex) = item.thumb.texture() else {
         return;
     };
     let tex_size = thumb_tex.size_vec2();
@@ -316,16 +324,16 @@ fn paint_thumbnail(
     let fitted = tex_size * scale;
     let thumb_rect = Rect::from_center_size(item_rect.center(), fitted);
 
-    // Gate on `Done`, not `result_rgba`: a background item's result may be
-    // released while its thumbnail, built from the result, stays.
-    if matches!(item.status, BatchStatus::Done) {
+    // A result, parked or not: a background item's result may be released
+    // while its thumbnail, built from the result, stays.
+    if item.has_result() {
         let (w, h) = item.dimensions;
         super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32));
     }
 
     // Dim to ~40% while being dragged out to an external app.
     let dim = if is_dragging_out { 0.4 } else { 1.0 };
-    let alpha = (fade * dim * 255.0) as u8;
+    let alpha = prunr_core::math::round_u8(fade * dim * 255.0);
     ui.painter().image(
         thumb_tex.id(),
         thumb_rect,
@@ -336,22 +344,24 @@ fn paint_thumbnail(
 
 /// Returns `true` when the checkbox absorbed a click this frame — the row's
 /// click-to-select handler must then skip, so toggling the check does NOT
-/// also switch the main canvas to this item. Mirrors the `close_clicked`
-/// contract used for the delete/save hover buttons.
+/// also switch the main canvas to this item.
 fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect) -> bool {
-    let cb_size = 16.0;
     let cb_center = Pos2::new(
-        item_rect.min.x + 4.0 + cb_size * 0.5,
-        item_rect.min.y + 4.0 + cb_size * 0.5,
+        item_rect.min.x + 4.0 + TICK_SIZE * 0.5,
+        item_rect.min.y + 4.0 + TICK_SIZE * 0.5,
     );
-    let cb_rect = Rect::from_center_size(cb_center, Vec2::splat(cb_size));
+    let cb_rect = Rect::from_center_size(cb_center, Vec2::splat(TICK_SIZE));
 
-    let (cb_hovered, cb_clicked) = hit_test(ui, cb_rect);
+    let resp = row_control(
+        ui, cb_rect, egui::Id::new(("sidebar_tick", item.id)),
+        || egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, item.ticked, format!("Tick {}", item.filename)),
+    );
+    let (cb_hovered, cb_clicked) = (resp.hovered(), resp.clicked());
     if cb_clicked {
-        item.selected = !item.selected;
+        item.ticked = !item.ticked;
     }
 
-    let cb_bg = if item.selected {
+    let cb_bg = if item.ticked {
         theme::ACCENT
     } else if cb_hovered {
         theme::WIDGET_INACTIVE_BG
@@ -365,12 +375,12 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
         Stroke::new(theme::STROKE_DEFAULT, theme::TEXT_SECONDARY),
         egui::StrokeKind::Outside,
     );
-    if item.selected {
+    if item.ticked {
         ui.painter().text(
             cb_center,
             egui::Align2::CENTER_CENTER,
             ICON_CHECK.codepoint,
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(TICK_SIZE * 0.75),
             Color32::WHITE,
         );
     }
@@ -378,7 +388,6 @@ fn paint_selection_checkbox(ui: &egui::Ui, item: &mut BatchItem, item_rect: Rect
 }
 
 fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
-    // Shimmer sweep.
     let sweep =
         ((anim_time * 0.7).fract()) * (item_rect.width() + 40.0) - 20.0 + item_rect.min.x;
     let shimmer = Rect::from_min_max(
@@ -393,7 +402,6 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
             theme::PROCESSING_SWEEP,
         );
     }
-    // Pulsing blue border.
     let pulse = (anim_time * 2.5).sin() * 0.5 + 0.5;
     let border_alpha = (40.0 + pulse * 80.0) as u8;
     ui.painter().rect_stroke(
@@ -401,7 +409,7 @@ fn paint_processing_animation(ui: &egui::Ui, item_rect: Rect, anim_time: f32) {
         theme::THUMBNAIL_ROUNDING,
         Stroke::new(
             2.0,
-            Color32::from_rgba_unmultiplied(0x7b, 0x2d, 0x8e, border_alpha),
+            Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), border_alpha),
         ),
         egui::StrokeKind::Inside,
     );
@@ -461,35 +469,36 @@ fn paint_hover_buttons(
     item: &BatchItem,
     i: usize,
     item_rect: Rect,
-    item_response: &egui::Response,
+    row_hovered: bool,
     actions: &mut SidebarActions,
 ) -> bool {
-    if !item_response.hovered() || ui.ctx().dragged_id().is_some() {
+    if !row_hovered || ui.ctx().dragged_id().is_some() {
         return false;
     }
     let mut close_clicked = false;
     let btn_size = 20.0;
 
-    // Delete — top-right.
     let del_center = Pos2::new(
         item_rect.max.x - 4.0 - btn_size * 0.5,
         item_rect.min.y + 4.0 + btn_size * 0.5,
     );
-    if paint_hover_circle_btn(ui, del_center, btn_size, ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
+    let del_id = egui::Id::new(("sidebar_delete", item.id));
+    let del_name = || format!("Delete {}", item.filename);
+    if paint_hover_circle_btn(ui, del_center, btn_size, del_id, del_name, ICON_DELETE.codepoint, theme::DESTRUCTIVE) {
         actions.remove_idx = Some(i);
         close_clicked = true;
     }
 
-    // Save — bottom-left, Done items only.
-    if matches!(item.status, BatchStatus::Done) {
-        let save_center = Pos2::new(
-            item_rect.min.x + 4.0 + btn_size * 0.5,
-            item_rect.max.y - 4.0 - btn_size * 0.5,
-        );
-        if paint_hover_circle_btn(ui, save_center, btn_size, ICON_SAVE.codepoint, theme::ACCENT) {
-            actions.save_idx = Some(i);
-            close_clicked = true;
-        }
+    // Save — bottom-left: what the image shows, processed or not.
+    let save_center = Pos2::new(
+        item_rect.min.x + 4.0 + btn_size * 0.5,
+        item_rect.max.y - 4.0 - btn_size * 0.5,
+    );
+    let save_id = egui::Id::new(("sidebar_save", item.id));
+    let save_name = || format!("Save {}", item.filename);
+    if paint_hover_circle_btn(ui, save_center, btn_size, save_id, save_name, ICON_SAVE.codepoint, theme::ACCENT) {
+        actions.save_idx = Some(i);
+        close_clicked = true;
     }
     close_clicked
 }
@@ -500,11 +509,14 @@ fn paint_hover_circle_btn(
     ui: &egui::Ui,
     center: Pos2,
     size: f32,
+    id: egui::Id,
+    name: impl Fn() -> String,
     icon: &str,
     hover_color: Color32,
 ) -> bool {
     let rect = Rect::from_center_size(center, Vec2::splat(size));
-    let (hovered, pressed) = hit_test(ui, rect);
+    let resp = row_control(ui, rect, id, || egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name()));
+    let (hovered, pressed) = (resp.hovered(), resp.clicked());
     let bg = if hovered {
         hover_color
     } else {
@@ -523,7 +535,7 @@ fn paint_hover_circle_btn(
 
 /// If this row is being dragged AND the pointer has crossed outside the
 /// sidebar's dead-zone, queue an OS-level drag of the item (or the whole
-/// checkbox-selected group). Skips items still processing.
+/// ticked group). Skips items still processing.
 fn detect_drag_escape(
     ui: &egui::Ui,
     app: &mut PrunrApp,
@@ -544,19 +556,7 @@ fn detect_drag_escape(
         return;
     }
 
-    let source_selected = app.batch.items[i].selected;
-    let ids: Vec<u64> = if source_selected {
-        app.batch
-            .items
-            .iter()
-            .filter(|b| b.selected && !matches!(b.status, BatchStatus::Processing))
-            .map(|b| b.id)
-            .collect()
-    } else if !matches!(app.batch.items[i].status, BatchStatus::Processing) {
-        vec![app.batch.items[i].id]
-    } else {
-        Vec::new()
-    };
+    let ids = app.batch.drag_targets(i);
     if !ids.is_empty() {
         app.drag_export.pending = Some(ids);
     }
@@ -576,8 +576,8 @@ fn paint_insertion_line(ui: &egui::Ui, item_response: &egui::Response, item_rect
     }
 }
 
-/// Apply everything collected during the row loop. Ordering mirrors the
-/// pre-refactor code: remove → save → reorder.
+/// Apply everything collected during the row loop, in the order
+/// remove → save → reorder.
 fn apply_actions(app: &mut PrunrApp, actions: &SidebarActions) {
     if let Some(idx) = actions.remove_idx {
         app.remove_batch_item(idx);
@@ -617,7 +617,17 @@ mod tests {
     #[test]
     fn should_not_request_when_already_pending() {
         let mut item = fresh_item();
-        item.thumb_pending = true;
+        item.thumb.asked();
         assert!(!should_request_thumbnail(&item));
+    }
+
+    /// A thumbnail that could not be made is not asked for every frame.
+    #[test]
+    fn should_not_request_again_after_a_failure() {
+        let mut item = fresh_item();
+        item.thumb.asked();
+        item.thumb.failed();
+        assert!(!should_request_thumbnail(&item));
+        assert!(!item.thumb.is_pending(), "a failed one is no longer on its way");
     }
 }

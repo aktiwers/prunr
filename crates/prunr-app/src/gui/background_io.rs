@@ -1,12 +1,9 @@
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 
-/// Filter-only Process result: `Ok(rgba)` on success, `Err(msg)` so load /
-/// decode failures take the same channel path as successful results
-/// (drained in `drain_background_channels`, mapped to `BatchStatus::Error`).
-pub type FilterOnlyResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
+/// A filter-only pass: the item, its run, the result, and the chained
+/// start built for it.
+pub type FilterOnlyResult = (u64, u64, Result<std::sync::Arc<image::RgbaImage>, String>, Option<std::sync::Arc<image::RgbaImage>>);
 
-/// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
-/// image clears `decode_pending` instead of leaving the item stuck.
 /// A background picture loaded off the UI thread: the item, the file,
 /// whether the user picked it (it then becomes the background) or a preset
 /// names it (it fills in the picture the preset's settings refer to), and
@@ -18,7 +15,52 @@ pub struct BgImageLoad {
     pub result: Result<(image::DynamicImage, u64), String>,
 }
 
+/// Pre-decode result: `Ok(rgba)` on success, `Err(msg)` so a malformed
+/// image clears `decode_pending` instead of leaving the item stuck.
 pub type DecodeResult = (u64, Result<std::sync::Arc<image::RgbaImage>, String>);
+
+/// An import, read off the UI thread: an image (a file, or bytes dropped
+/// in) with its batch name, size in bytes and pixel size (`None`: its
+/// header could not be read), or word that the folders dropped held no
+/// images.
+pub(crate) enum FileLoad {
+    Image { source: crate::gui::item::ImageSource, name: String, len: usize, dims: Option<(u32, u32)> },
+    NoImagesInFolder,
+}
+
+/// Where an uploaded texture lands.
+pub(crate) enum TexLanding {
+    /// An image texture, with the parked result its build unpacked.
+    Image { item_id: u64, target: TexTarget, unpacked: Option<std::sync::Arc<image::RgbaImage>> },
+    /// A whole selection overlay and the mask it shows.
+    Selection {
+        item_id: u64,
+        key: SelectionTextureKey,
+        shown: Arc<prunr_core::selection::MaskArtifact>,
+    },
+    /// The picture behind the result, for `key`.
+    Backdrop { item_id: u64, key: u64 },
+}
+
+impl TexLanding {
+    pub(crate) fn item_id(&self) -> u64 {
+        match *self {
+            Self::Image { item_id, .. } | Self::Selection { item_id, .. } | Self::Backdrop { item_id, .. } => item_id,
+        }
+    }
+}
+
+/// A texture built off-thread for upload.
+pub(crate) struct TexPrepMsg {
+    pub item_id: u64,
+    pub name: String,
+    /// Its tiles; `None`: the pixels could not be read (a packed step
+    /// whose file is gone).
+    pub image: Option<crate::gui::image_texture::PreparedImage>,
+    pub target: TexTarget,
+    /// A parked result the build unpacked, for the item to hold again.
+    pub unpacked: Option<std::sync::Arc<image::RgbaImage>>,
+}
 
 /// What a selection texture was built from: the mask's content hash and
 /// the style baked into it. The item compares this against the current
@@ -33,24 +75,32 @@ pub(crate) struct SelectionTextureResult {
     pub(crate) item_id: u64,
     pub(crate) image: SelectionImage,
     pub(crate) key: SelectionTextureKey,
+    /// The plane the texture now shows: the painted mask, or under an
+    /// eraser its reach, which the next stroke patches from.
+    pub(crate) shown: Arc<prunr_core::selection::MaskArtifact>,
+}
+
+/// A finished save: its toast text (`Ok` when everything was written,
+/// `Err` when anything failed), and the images whose files were all
+/// written, as they were when it began.
+pub(crate) struct SaveDone {
+    pub(crate) outcome: Result<String, String>,
+    pub(crate) wrote: Vec<crate::gui::item::SaveMark>,
 }
 
 pub(crate) enum SelectionImage {
-    /// The whole overlay, and the feathered plane it was built from when
-    /// the style feathers (so actions can reuse it).
-    Full { image: egui::ColorImage, feathered: Option<Arc<prunr_core::selection::MaskArtifact>> },
+    /// The whole overlay.
+    Full { image: crate::gui::image_texture::PreparedImage },
     /// The pixels that differ from the texture showing `base_hash`,
     /// to upload at `pos` into that texture.
     Patch { base_hash: u64, pos: [usize; 2], image: egui::ColorImage },
 }
 
-/// Counting semaphore used to bound the number of simultaneously-decoding
-/// background threads. Without this, a 50-image Process All fans out 50
-/// threads each holding `compressed bytes + DynamicImage + RgbaImage`
-/// (~50–80 MB at 4 K) → multi-GB transient before any thread releases.
-/// Threads still spawn immediately; they park on `acquire` until a slot
-/// opens. Cap is `available_parallelism()` so cold-cache disk paths
-/// still saturate cores.
+/// Counting semaphore bounding how many background jobs run at once.
+/// Without it a 50-image Process All spawns 50 threads each holding
+/// ~50–80 MB at 4 K, a multi-GB transient. Threads still spawn at once and
+/// park on `acquire`; the cap is `available_parallelism()` so cold-cache
+/// disk paths still saturate cores.
 pub struct DecodeSlots {
     state: Mutex<usize>,
     cv: Condvar,
@@ -68,6 +118,15 @@ impl DecodeSlots {
         *s -= 1;
         DecodeSlotGuard { sem: self.clone() }
     }
+
+    /// Run `work` on a thread of its own once a slot is free.
+    pub fn spawn(self: &Arc<Self>, work: impl FnOnce() + Send + 'static) {
+        let slots = Arc::clone(self);
+        std::thread::spawn(move || {
+            let _slot = slots.acquire();
+            work();
+        });
+    }
 }
 
 pub struct DecodeSlotGuard {
@@ -82,53 +141,71 @@ impl Drop for DecodeSlotGuard {
     }
 }
 
-/// Owned handles to the texture-prep channel + decode slots, bundled so
-/// `PrunrApp::spawn_tex_prep` takes one parameter instead of two. The
-/// `Clone` derive is shallow (Sender is Clone, Arc is Clone) and cheap.
+/// The texture-prep channel and decode slots; cheap to clone.
 #[derive(Clone)]
 pub struct TexPrepHandles {
-    pub tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
+    pub(crate) tx: mpsc::Sender<TexPrepMsg>,
     pub slots: Arc<DecodeSlots>,
+}
+
+/// A thumbnail built off the UI thread: its RGBA pixels and size, or
+/// `None` when the image could not be read for one.
+pub struct ThumbMsg {
+    pub item_id: u64,
+    pub image: Option<(u32, u32, Vec<u8>)>,
+}
+
+/// What a backdrop build sends back.
+pub(crate) enum BackdropBuilt {
+    /// The picture (`None`: none could be made), and what it was made of
+    /// when it follows the cut-out.
+    Picture(Option<crate::gui::image_texture::PreparedImage>, Option<crate::gui::item::BackdropMade>),
+    /// The cut-out is the one the shown backdrop was made of: it stays.
+    Same,
 }
 
 /// Bundles all background thread communication channels.
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
-    pub file_load_tx: mpsc::Sender<(std::path::PathBuf, String)>,
-    pub file_load_rx: mpsc::Receiver<(std::path::PathBuf, String)>,
-    /// Thumbnail generation results
-    pub thumb_tx: mpsc::Sender<(u64, u32, u32, Vec<u8>)>,
-    pub thumb_rx: mpsc::Receiver<(u64, u32, u32, Vec<u8>)>,
+    pub(crate) file_load_tx: mpsc::Sender<FileLoad>,
+    pub(crate) file_load_rx: mpsc::Receiver<FileLoad>,
+    pub thumb_tx: mpsc::Sender<ThumbMsg>,
+    pub thumb_rx: mpsc::Receiver<ThumbMsg>,
     /// Pre-decoded source images for instant canvas switching
     pub decode_tx: mpsc::Sender<DecodeResult>,
     pub decode_rx: mpsc::Receiver<DecodeResult>,
-    /// Save completion notifications
-    pub save_done_tx: mpsc::Sender<String>,
-    pub save_done_rx: mpsc::Receiver<String>,
+    /// A finished save.
+    pub(crate) save_done_tx: mpsc::Sender<SaveDone>,
+    pub(crate) save_done_rx: mpsc::Receiver<SaveDone>,
+    /// A model or runtime removed off the UI thread: its toast text. The
+    /// installed set is read again when it lands.
+    pub(crate) removed_tx: mpsc::Sender<Result<String, String>>,
+    pub(crate) removed_rx: mpsc::Receiver<Result<String, String>>,
+    /// A copy's image made off the UI thread (`None`: it could not be
+    /// read), with the note to show once copied.
+    pub copy_ready_tx: mpsc::Sender<(Option<Arc<image::RgbaImage>>, Option<String>)>,
+    pub copy_ready_rx: mpsc::Receiver<(Option<Arc<image::RgbaImage>>, Option<String>)>,
+    /// Selection Delete / Cut / Copy made off the UI thread.
+    pub(crate) selection_edit_tx: mpsc::Sender<SelectionEditDone>,
+    pub(crate) selection_edit_rx: mpsc::Receiver<SelectionEditDone>,
     /// Pre-built ColorImages ready for GPU upload.
-    pub tex_prep_tx: mpsc::Sender<(u64, String, egui::ColorImage, TexTarget)>,
-    pub tex_prep_rx: mpsc::Receiver<(u64, String, egui::ColorImage, TexTarget)>,
-    /// Filter-only (model=None) Process results — keeps the UI thread free
-    /// while load + decode + `apply_fill_style` runs per item.
+    pub(crate) tex_prep_tx: mpsc::Sender<TexPrepMsg>,
+    pub(crate) tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
+    /// Prepared textures uploading a few tiles per frame, with what each
+    /// lands on.
+    pub(crate) uploads: crate::gui::image_texture::Uploads<TexLanding>,
+    /// Filter-only (model=None) Process results.
     pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
     pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
-    /// Off-thread RGBA decode + ColorImage build for a per-item bg
-    /// image. Drain calls `ctx.load_texture` with the bg-specific
-    /// options (Linear filter + Repeat wrap for `BgImageFit::Tile`).
-    /// Without this the `to_rgba8()` clone (~32 MB on a 4K bg) +
-    /// `ctx.load_texture` ran inline in `views/canvas.rs::render` on
-    /// the first frame after every bg-image pick.
-    pub bg_tex_prep_tx: mpsc::Sender<(u64, u64, Option<egui::ColorImage>)>,
-    pub bg_tex_prep_rx: mpsc::Receiver<(u64, u64, Option<egui::ColorImage>)>,
+    /// A per-item bg image decoded and built off-thread; its `to_rgba8()`
+    /// copy (~32 MB on a 4K bg) stays off the UI thread.
+    pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, BackdropBuilt)>,
+    pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, BackdropBuilt)>,
     pub bg_image_tx: mpsc::Sender<BgImageLoad>,
     pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
-    /// Bounds simultaneous decode/thumbnail/filter threads to
-    /// `available_parallelism()`. Threads spawn immediately but park here
-    /// until a slot opens, capping transient RAM at N × per-thread peak.
     pub decode_slots: Arc<DecodeSlots>,
     /// Selection texture built off-thread whenever the selected item's
-    /// texture is missing. Drained via ctx.load_texture (allowed —
-    /// drain_background_channels runs in logic(), not a render closure).
+    /// texture is missing.
     pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
     pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
 }
@@ -138,13 +215,19 @@ pub struct BackgroundIO {
 pub enum TexTarget {
     Source,
     /// A result from a discrete change: it reveals over the held image.
-    Result,
+    /// Each result texture carries the item's request number: only the
+    /// newest asked for lands, as preps finish in any order.
+    Result(u64),
     /// A live re-cut during a slider drag: swaps in at once.
-    LiveResult,
+    LiveResult(u64),
+    /// A drag's quick frame of this generation: shown over the image, not
+    /// the result.
+    QuickFrame(u64),
+    /// The unprocessed photo's look (restored faces), shown in its place.
+    PhotoLook,
 }
 
 impl BackgroundIO {
-    /// Clone the (tx, slots) pair as one handle bundle for spawn paths.
     pub fn tex_prep_handles(&self) -> TexPrepHandles {
         TexPrepHandles {
             tx: self.tex_prep_tx.clone(),
@@ -161,10 +244,13 @@ impl Default for BackgroundIO {
 
 impl BackgroundIO {
     pub fn new() -> Self {
+        let (removed_tx, removed_rx) = mpsc::channel();
         let (file_load_tx, file_load_rx) = mpsc::channel();
         let (thumb_tx, thumb_rx) = mpsc::channel();
         let (decode_tx, decode_rx) = mpsc::channel();
         let (save_done_tx, save_done_rx) = mpsc::channel();
+        let (copy_ready_tx, copy_ready_rx) = mpsc::channel();
+        let (selection_edit_tx, selection_edit_rx) = mpsc::channel();
         let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
         let (filter_only_tx, filter_only_rx) = mpsc::channel();
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
@@ -174,11 +260,15 @@ impl BackgroundIO {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
+            removed_tx, removed_rx,
             file_load_tx, file_load_rx,
             thumb_tx, thumb_rx,
             decode_tx, decode_rx,
             save_done_tx, save_done_rx,
+            copy_ready_tx, copy_ready_rx,
+            selection_edit_tx, selection_edit_rx,
             tex_prep_tx, tex_prep_rx,
+            uploads: Default::default(),
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             bg_image_tx, bg_image_rx,
@@ -189,10 +279,9 @@ impl BackgroundIO {
 
     /// Spawn an off-thread job to build the selection texture for a mask.
     ///
-    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K) plus,
-    /// with feather > 0, the bbox-sized guided-filter scratch documented on
-    /// `feather_edges`. The result carries its key; the drain installs it
-    /// only while the item's mask still matches.
+    /// Peak RAM on the worker: the ColorImage (4 B/px, ~33 MB at 4K). The
+    /// result carries its key; the drain installs it only while the item's
+    /// mask still matches.
     ///
     /// With `base` (the plane the item's texture shows, and its hash)
     /// the result is a patch of the changed region instead of a full
@@ -202,23 +291,25 @@ impl BackgroundIO {
         item_id: u64,
         mask: Arc<prunr_core::selection::MaskArtifact>,
         key: SelectionTextureKey,
-        source: Option<Arc<image::RgbaImage>>,
         base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>,
         ctx: egui::Context,
     ) {
         let texture_tx = self.selection_texture_tx.clone();
         rayon::spawn(move || {
             let style = key.1;
-            let patch = base.and_then(|(base_hash, base)| {
-                let (pos, image) = build_selection_patch(&base, &mask, style)?;
-                Some(SelectionImage::Patch { base_hash, pos, image })
-            });
-            let image = patch.unwrap_or_else(|| {
-                let feathered = style.feather(&mask, source.as_deref());
-                let shown = feathered.as_ref().unwrap_or(&mask);
-                SelectionImage::Full { image: build_selection_image(shown, style), feathered }
-            });
-            let _ = texture_tx.send(SelectionTextureResult { item_id, image, key });
+            let patch_from = |base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>, plane: &prunr_core::selection::MaskArtifact| {
+                base.and_then(|(base_hash, base)| {
+                    let (pos, image) = build_selection_patch(&base, plane, style)?;
+                    Some(SelectionImage::Patch { base_hash, pos, image })
+                })
+            };
+            // An eraser's region reaches beyond the painted cells: its
+            // overlay is drawn from the reach, and patched from the last
+            // reach rather than from the paint.
+            let shown = style.shown_region(&mask).unwrap_or(mask);
+            let image = patch_from(base, &shown)
+                .unwrap_or_else(|| SelectionImage::Full { image: prepared(build_selection_image(&shown, style)) });
+            let _ = texture_tx.send(SelectionTextureResult { item_id, image, key, shown });
             // Some compositors drop thread-initiated wake-ups while the
             // window is idle; the pending key's poll in `logic()` is the
             // fallback.
@@ -230,14 +321,35 @@ impl BackgroundIO {
 /// Narrowest outline, in screen points, the overlay draws at any zoom.
 const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
 
+/// A selection Delete / Cut / Copy made off the UI thread: the copy for
+/// the clipboard and the cut image, for the item at the timeline version
+/// it started from.
+pub(crate) struct SelectionEditDone {
+    pub(crate) item_id: u64,
+    pub(crate) version: u64,
+    pub(crate) copy: Option<(image::RgbaImage, crate::gui::system_bridge::CopyNote)>,
+    pub(crate) cut: Option<image::RgbaImage>,
+}
+
 /// What a selection texture bakes in; the overlay is a single textured
 /// quad drawn untinted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SelectionStyle {
     pub(crate) fill_opacity: f32,
+    /// Drawn in Erase's warm red: on a cut-out, the brush erases.
+    pub(crate) erase: bool,
     /// Outline width in image pixels; 0 draws no outline.
     pub(crate) outline_thickness: f32,
-    pub(crate) edge_feather_px: u32,
+    /// Under an eraser, the overlay shows the region the erase will
+    /// touch: the painted one grown, plus its blend band.
+    pub(crate) fill: Option<FillRegionPx>,
+}
+
+/// An eraser's Expand region and Feather, in image pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FillRegionPx {
+    pub(crate) grow: f32,
+    pub(crate) blend: f32,
 }
 
 impl SelectionStyle {
@@ -247,31 +359,32 @@ impl SelectionStyle {
     pub(crate) fn from_settings(s: &super::settings::Settings) -> Self {
         Self {
             fill_opacity: s.selection_fill,
+            erase: s.brush_erases(),
             outline_thickness: if s.selection_outline { Self::OUTLINE_PX } else { 0.0 },
-            edge_feather_px: s.brush.edge_feather.round().max(0.0) as u32,
+            fill: s.model.is_inpaint().then_some(FillRegionPx { grow: s.brush.inpaint_grow, blend: s.brush.inpaint_feather }),
         }
     }
 
-    /// The default outline and no feather, with `fill_opacity`.
+    /// The style as `mask` is drawn in: an eraser's Expand and Feather of
+    /// now shape only a region no eraser stroke drew, so without one the
+    /// overlay does not depend on them, nor rebuild as they move.
+    pub(crate) fn for_plane(self, mask: &prunr_core::selection::MaskArtifact) -> Self {
+        let fill = self.fill.map(|f| if mask.has_unlayered_selection() { f } else { FillRegionPx { grow: 0.0, blend: 0.0 } });
+        Self { fill, ..self }
+    }
+
+    /// Under an eraser, the plane the overlay draws for `mask`: what the
+    /// erase will touch, each eraser stroke as it fills and any other
+    /// selected region with the Expand and Feather set now. `None` shows
+    /// `mask` as it is.
+    pub(crate) fn shown_region(&self, mask: &prunr_core::selection::MaskArtifact) -> Option<Arc<prunr_core::selection::MaskArtifact>> {
+        self.fill.map(|f| Arc::new(prunr_core::inpaint_blend::eraser_preview(mask, f.grow, f.blend)))
+    }
+
+    /// The default outline, with `fill_opacity`.
     #[cfg(test)]
     pub(crate) fn with_fill(fill_opacity: f32) -> Self {
-        Self { fill_opacity, outline_thickness: Self::OUTLINE_PX, edge_feather_px: 0 }
-    }
-
-    /// The feathered selection, or `None` when this style shows `mask` as
-    /// it is (no feather, or no photo to feather against). The texture
-    /// build, the re-cut and Delete / Copy / Cut all go through here.
-    pub(crate) fn feather(
-        &self,
-        mask: &prunr_core::selection::MaskArtifact,
-        source: Option<&image::RgbaImage>,
-    ) -> Option<std::sync::Arc<prunr_core::selection::MaskArtifact>> {
-        match (self.edge_feather_px, source) {
-            (0, _) | (_, None) => None,
-            (px, Some(src)) => Some(std::sync::Arc::new(
-                prunr_core::selection::refine::feather_edges(mask, src, px),
-            )),
-        }
+        Self { fill_opacity, erase: false, outline_thickness: Self::OUTLINE_PX, fill: None }
     }
 
     /// The style as drawn at `zoom` (screen points per image pixel): an
@@ -304,16 +417,21 @@ impl SelectionStyle {
     }
 }
 
-/// ACCENT-tinted image: each cell at the fill alpha scaled by its
-/// coverage, so a feathered edge or a faint stroke shows as such, and
-/// the outline band stamped over it.
+/// An overlay cut into tiles on the thread that built it.
+fn prepared(image: egui::ColorImage) -> crate::gui::image_texture::PreparedImage {
+    crate::gui::image_texture::PreparedImage::from_color_image(image)
+}
+
+/// ACCENT-tinted image (Erase's red when `style.erase`): each cell at the
+/// fill alpha scaled by its coverage, so a feathered edge or a faint
+/// stroke shows as such, and the outline band stamped over it.
 pub(crate) fn build_selection_image(
     mask: &prunr_core::selection::MaskArtifact,
     style: SelectionStyle,
 ) -> egui::ColorImage {
     use prunr_core::selection::MaskArtifact;
     let (w, h) = (mask.width as usize, mask.height as usize);
-    let accent = super::theme::ACCENT;
+    let accent = super::theme::mark_color(style.erase);
     let paint = |a: u8| egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), a);
     let fill_alpha = SelectionStyle::alpha(style.fill_opacity) as f32;
     // A cell's colour depends only on its value: one per value.
@@ -372,6 +490,74 @@ mod tests {
     use super::*;
     use prunr_core::selection::{MaskArtifact, FULL};
 
+    /// Under an eraser the overlay shows the erase's reach, and the
+    /// region knobs are part of its key, so a change redraws it.
+    #[test]
+    fn an_erasers_region_knobs_shape_the_overlay() {
+        use crate::gui::settings::{Settings, SettingsModel};
+        let mut s = Settings { model: SettingsModel::BiRefNetLite, ..Default::default() };
+        assert_eq!(SelectionStyle::from_settings(&s).fill, None, "a cut-out shows the paint as it is");
+        s.model = SettingsModel::Inpaint;
+        let style = SelectionStyle::from_settings(&s);
+        assert_eq!(style.fill, Some(FillRegionPx { grow: s.brush.inpaint_grow, blend: s.brush.inpaint_feather }));
+        s.brush.inpaint_grow += 3.0;
+        assert_ne!(SelectionStyle::from_settings(&s), style, "a knob change is a new key");
+
+        let mut cells = vec![0i8; 9 * 9];
+        cells[4 * 9 + 4] = FULL;
+        let painted = MaskArtifact::from_cells(9, 9, cells);
+        let reach = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..style }.shown_region(&painted).expect("an eraser shows the reach");
+        assert_eq!(reach.cells()[4 * 9 + 3], FULL, "the overlay shows the grown region");
+        assert!(SelectionStyle::with_fill(0.5).shown_region(&painted).is_none());
+    }
+
+    /// An eraser's Expand and Feather of now shape only a region no eraser
+    /// stroke drew: an overlay of eraser strokes alone keys the same at
+    /// any of them, so it is not rebuilt as they move.
+    #[test]
+    fn an_overlay_of_eraser_strokes_alone_ignores_the_expand_and_feather_set_now() {
+        let style = |grow, blend| SelectionStyle { fill: Some(FillRegionPx { grow, blend }), ..SelectionStyle::with_fill(0.3) };
+        let mut cells = vec![0i8; 9 * 9];
+        cells[4 * 9 + 4] = FULL;
+        let picked = MaskArtifact::from_cells(9, 9, cells);
+        let stroke = prunr_core::inpaint_blend::eraser_stroke(&picked, prunr_core::selection::BrushMode::Add, 1.0, 2).into_selection();
+        assert_eq!(style(2.0, 4.0).for_plane(&stroke), style(6.0, 9.0).for_plane(&stroke), "eraser strokes alone");
+        assert_ne!(style(2.0, 4.0).for_plane(&picked), style(6.0, 9.0).for_plane(&picked), "a region no eraser stroke drew");
+    }
+
+    /// An eraser's overlay is drawn from the reach and a stroke patches it
+    /// from the last reach: the patch over the first build equals a fresh
+    /// build of the new reach.
+    #[test]
+    fn an_erasers_overlay_patches_from_its_last_reach() {
+        let style = SelectionStyle { fill: Some(FillRegionPx { grow: 1.0, blend: 0.0 }), ..SelectionStyle::with_fill(0.5) };
+        let painted = |cells: &[usize]| {
+            let mut v = vec![0i8; 16 * 16];
+            for &c in cells { v[c] = FULL; }
+            Arc::new(MaskArtifact::from_cells(16, 16, v))
+        };
+        let (a, b) = (painted(&[5 * 16 + 5]), painted(&[5 * 16 + 5, 9 * 16 + 9]));
+        let io = BackgroundIO::new();
+        let ctx = egui::Context::default();
+        let wait = std::time::Duration::from_secs(10);
+        io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, ctx.clone());
+        let first = io.selection_texture_rx.recv_timeout(wait).expect("the first build");
+        let SelectionImage::Full { .. } = first.image else { panic!("a first build is whole") };
+        let full_a = build_selection_image(&first.shown, style);
+        assert_eq!(first.shown.cells(), style.shown_region(&a).expect("an eraser").cells(), "the texture remembers the reach it drew");
+        io.request_selection_visualization(1, Arc::clone(&b), (2, style), Some((1, Arc::clone(&first.shown))), ctx);
+        let second = io.selection_texture_rx.recv_timeout(wait).expect("the second build");
+        let SelectionImage::Patch { base_hash: 1, pos, image: patch } = second.image else { panic!("a stroke patches the last reach") };
+        let mut pasted = full_a;
+        for (row, chunk) in patch.pixels.chunks(patch.width()).enumerate() {
+            let start = (pos[1] + row) * 16 + pos[0];
+            pasted.pixels[start..start + patch.width()].copy_from_slice(chunk);
+        }
+        let fresh = build_selection_image(&style.shown_region(&b).expect("an eraser"), style);
+        assert_eq!(pasted.pixels, fresh.pixels);
+        assert_eq!(second.shown.cells(), style.shown_region(&b).expect("an eraser").cells());
+    }
+
     fn centre_block() -> MaskArtifact {
         let mut data = vec![0i8; 64];
         for y in 2..6usize {
@@ -397,6 +583,30 @@ mod tests {
         let (full, faint, none) = (img.pixels[0].a(), img.pixels[1].a(), img.pixels[2].a());
         assert!(faint > 0 && faint < full, "a quarter-coverage stroke shows, fainter ({faint} vs {full})");
         assert_eq!(none, 0);
+    }
+
+    /// On a cut-out, a selection while the switch is on Erase is drawn in
+    /// Erase's warm red; otherwise in the accent.
+    #[test]
+    fn an_erasing_brush_marks_in_warm_red() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::settings::{Settings, SettingsModel};
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let mask = MaskArtifact::from_cells(1, 1, vec![FULL]);
+        let tint = |model, action| {
+            let mut s = Settings { model, ..Settings::default() };
+            s.brush.cutout_action = action;
+            let style = SelectionStyle { outline_thickness: 0.0, ..SelectionStyle::from_settings(&s) };
+            build_selection_image(&mask, style).pixels[0].to_srgba_unmultiplied()
+        };
+        // Premultiplied storage rounds each channel by a step or two.
+        let near = |got: [u8; 4], want: egui::Color32| {
+            got[..3].iter().zip([want.r(), want.g(), want.b()]).all(|(&g, w)| g.abs_diff(w) <= 3)
+        };
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Erase), crate::gui::theme::ERASE));
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Restore), crate::gui::theme::ACCENT));
+        assert!(near(tint(SettingsModel::BiRefNetLite, CutoutAction::Select), crate::gui::theme::ACCENT));
+        assert!(near(tint(SettingsModel::Inpaint, CutoutAction::Erase), crate::gui::theme::ACCENT), "a region for the eraser is not an erase");
     }
 
     /// At fit zoom on a big image a 2 px outline is half a screen pixel and

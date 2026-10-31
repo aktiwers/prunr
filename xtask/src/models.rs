@@ -1,11 +1,6 @@
-//! Model URL + SHA256 manifest. Lives in its own file so the release
-//! workflow can hash *just this file* for the model cache key —
-//! formerly the key included all of `xtask/src/main.rs`, so any edit
-//! to argument parsing or the install-runtime command invalidated the
-//! ~700 MB models cache and forced a full re-fetch on every CI run.
-//!
-//! Bumping a SHA256 / URL here busts the cache; touching `main.rs`
-//! does not.
+//! Model URL + SHA256 manifest. Its own file because the release
+//! workflow hashes just this file for the ~700 MB models cache key:
+//! editing `main.rs` must not force a re-fetch.
 
 pub(crate) struct ModelSpec {
     /// Registry id; OnDemand mirroring uses the filename from
@@ -38,30 +33,31 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx",
         sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
     },
-    // DexiNed is exported from PyTorch weights via scripts/export_dexined.py
-    // and hosted on prunr's own releases (separate tag from app versions).
+    // TEED (MIT, Xavier Soria Poma) exported from the BIPED checkpoint and
+    // hosted on prunr's own releases (separate tag from app versions).
     ModelSpec {
-        id: prunr_models::ModelId::DexiNed,
-        name: "dexined.onnx",
-        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/dexined.onnx",
-        sha256: "cba9193b1e3fbcb5bd196001a9aae13bafaa309442f6cb074330c426cc61ec5a",
+        id: prunr_models::ModelId::Teed,
+        name: "teed.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/teed.onnx",
+        sha256: "8aab32bf7b9da0a4f03108c7f5dd9b9799e22601f212249659ea3ab1d59a5a1a",
     },
-    // LaMa for the Eraser tool. OnDemand: distributed via Model Store at
-    // runtime. Dev-mode uses `models/lama_fp32.onnx`; this xtask also
-    // mirrors it to the user data dir so the dev workflow exercises the
-    // same code path as production.
+    // YuNet (MIT, OpenCV Zoo), pinned to the zoo commit it was taken from.
+    ModelSpec {
+        id: prunr_models::ModelId::YuNet,
+        name: "face_detection_yunet_2026may.onnx",
+        url: "https://github.com/opencv/opencv_zoo/raw/26cc381e4d2594bb9f47a26eb8fd96c94a13660d/models/face_detection_yunet/face_detection_yunet_2026may.onnx",
+        sha256: "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+    },
+    // OnDemand: also mirrored to the user data dir so dev runs take the
+    // production path.
     ModelSpec {
         id: prunr_models::ModelId::LaMaFp32,
         name: "lama_fp32.onnx",
         url: "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
         sha256: "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6",
     },
-    // MI-GAN + Big-LaMa: xtask fetches the already-published artefacts
-    // from prunr's own GitHub release rather than rebuilding from source
-    // each time — the export scripts (`scripts/export_migan.py` /
-    // `scripts/export_big_lama.py`) need a Python env that the Rust dev
-    // workflow doesn't otherwise require. To regenerate from source,
-    // run the export script directly and re-upload via gh release.
+    // MI-GAN + Big-LaMa: fetched from prunr's release, since their export
+    // scripts need a Python env the Rust workflow doesn't otherwise have.
     ModelSpec {
         id: prunr_models::ModelId::Migan,
         name: "migan.onnx",
@@ -74,11 +70,8 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.1.onnx",
         sha256: "c9660fc4aea2e62ffbaf3932024c1f4ce29f360e464fc71e1b708f1ad3bfea2e",
     },
-    // RRDB upscale models. xtask fetches only the fp32 main file; the
-    // registry's `OnDemand.fp16` companion is downloaded at runtime by
-    // DownloadManager, not at build/dev-fetch time. Filenames use the
-    // capitalized human-facing form from the GitHub release artefacts
-    // (matching `load_variant`'s per-model stems).
+    // RRDB upscale models: only the fp32 main file; the fp16 companion
+    // downloads at runtime.
     ModelSpec {
         id: prunr_models::ModelId::RealEsrganX4Plus,
         name: "RealESRGAN_x4plus.onnx",
@@ -103,34 +96,39 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4x-NMKD-Superscale.onnx",
         sha256: "6b790a203b341d2db71735040f4f1b26c2bdc5440fdc850e217c2234cd996618",
     },
-    // Phhofm's official Nomos8k release IS fp16 (single file, no fp32
-    // sibling) — `UpscaleModelKnobs::is_fp16: true` drives runtime
-    // dispatch. Filename is `4xNomos8kSCHAT-L.onnx` with no `_fp16`
-    // suffix because the upstream artefact doesn't carry one.
+    ModelSpec {
+        id: prunr_models::ModelId::DdcolorTiny,
+        name: "ddcolor_paper_tiny.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/ddcolor_paper_tiny.onnx",
+        sha256: "5b4396ff19dbc9729a39fbebd6d7857dee6ff58a35d8820467efa168ecf7b17b",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::DepthAnythingV2Small,
+        name: "depth_anything_v2_small.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/depth_anything_v2_small.onnx",
+        sha256: "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+    },
+    // Phhofm's release is fp16 already, without an `_fp16` suffix.
     ModelSpec {
         id: prunr_models::ModelId::Nomos8kSchatL,
         name: "4xNomos8kSCHAT-L.onnx",
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/4xNomos8kSCHAT-L.onnx",
         sha256: "919dff28836ff10fef2d5462e5b82c951211abf24f05196b0a6e2c24f20ed1de",
     },
-    // SAM 2 Hiera Small — bundled (MultiPartBundled) so each file ships
-    // as a zstd-compressed `include_bytes!` blob in the release binary.
-    // Two rows share the same ModelId because the model is a single
-    // logical entry with two parts; `ondemand_target` returns None for
-    // MultiPartBundled, so xtask fetches + compresses but does not mirror
-    // to the user data dir. URLs are HuggingFace upstream (vietanhdev's
-    // ONNX exports of Meta's SAM 2 Hiera Small).
+    // SAM 2.1 Hiera Small, bundled: two rows (encoder, decoder) share one
+    // ModelId. Exported from Meta's checkpoint with vietanhdev/samexporter
+    // (opset 17).
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.encoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.encoder.onnx",
-        sha256: "f6a7c74dee5b2e71cce3f0475b778f0f28fa3e6c3646c79027302123d2197f40",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.encoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.encoder.onnx",
+        sha256: "d15d9f152326e95f788a6122343b1f055cbae4b689dba041a90548782dbdd4e2",
     },
     ModelSpec {
-        id: prunr_models::ModelId::Sam2HieraSmall,
-        name: "sam2_hiera_small.decoder.onnx",
-        url: "https://huggingface.co/vietanhdev/segment-anything-2-onnx-models/resolve/main/sam2_hiera_small.decoder.onnx",
-        sha256: "e07f799d2afe8640ef21f47096ad154d9289bb53041191499ebbea8933ef047b",
+        id: prunr_models::ModelId::Sam21HieraSmall,
+        name: "sam2.1_hiera_small.decoder.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/sam2.1_hiera_small.decoder.onnx",
+        sha256: "f059fb650ec6cd7c512f9fa59bcd76469cb24359969ad3898dfd85a81e13d92e",
     },
 ];
 
@@ -180,6 +178,19 @@ mod tests {
                      xtask/src/models.rs or document why this id is dev-mode-only.",
                 );
             }
+        }
+    }
+
+    /// xtask mirrors no downloaded bundle, so a row for one fetches a file
+    /// nothing reads: what a model that moved to parts leaves behind.
+    #[test]
+    fn no_xtask_row_is_for_a_downloaded_bundle() {
+        for spec in MODELS {
+            assert!(
+                !prunr_models::descriptor(spec.id).is_some_and(|d| matches!(d.source, ModelSource::MultiPartOnDemand { .. })),
+                "xtask row {} is for {:?}, a downloaded bundle",
+                spec.name, spec.id,
+            );
         }
     }
 }

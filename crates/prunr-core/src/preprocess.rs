@@ -18,15 +18,16 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     match model {
         ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img),
         ModelKind::BiRefNetLite => preprocess_birefnet(img),
-        // Upscale models run through a separate tiled RGB pipeline; they
-        // never enter the segmentation preprocess path.
         ModelKind::RealEsrganX4Plus
         | ModelKind::Nomos8kSchatL
         | ModelKind::RealEsrganX2Plus
         | ModelKind::FourXNmkdSiaxCx
-        | ModelKind::FourXNmkdSuperscale => {
+        | ModelKind::FourXNmkdSuperscale
+        | ModelKind::FourXNomos2RealPlksr => {
             unreachable!("upscale models are dispatched via upscale_rgba, not the seg pipeline")
         }
+        ModelKind::DdcolorTiny => unreachable!("the colorizer runs through colorize_plane, not the seg pipeline"),
+        ModelKind::DepthAnythingV2Small => unreachable!("depth runs through depth::estimate_depth, not the seg pipeline"),
     }
 }
 
@@ -38,15 +39,9 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let scale: [f32; 3] = std::array::from_fn(|c| inv_div / IMAGENET_STD[c]);
     let bias: [f32; 3] = std::array::from_fn(|c| IMAGENET_MEAN[c] / IMAGENET_STD[c]);
 
-    // `Array4::zeros` writes 12 MB at BiRefNet 1024² before the loop
-    // overwrites every element. `uninit` skips the zero-fill — saves
-    // ~3 ms of memory bandwidth per dispatch (~3% of the 100 ms live
-    // preview budget at 1024²). Loop body is interleaved (one source
-    // pixel → three plane writes per iter) so `raw[base..base+3]` is
-    // read once while it's still hot in L1; the previously-attempted
-    // split-pass form did 3× source traversal for no vectorization
-    // gain (stride-3 u8→f32 gather defeats LLVM's loop vectorizer
-    // either way — verified with `--emit=asm`).
+    // `uninit` skips a 12 MB zero-fill at 1024² (~3 ms per dispatch).
+    // Interleaved writes read each source pixel once; a split-pass form
+    // tripled source reads and still did not vectorize.
     let mut out: Array4<MaybeUninit<f32>> = Array4::uninit((1, 3, s, s));
     let plane_size = s * s;
     // invariant: `out` is a freshly allocated `Array4` (standard layout, contiguous).
@@ -65,10 +60,7 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
 
 fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
     let resized = resize_rgb_lanczos3(img, REMBG_SIZE, REMBG_SIZE);
-    // Auto-vectorizable max over the flat RGB byte buffer — faster than the
-    // previous `.pixels().flat_map(...).map(|v| v as f32).fold(f32::max)`
-    // chain because u8::max is branchless and the slice is contiguous.
-    // Clamp to 1e-6 so to_nchw doesn't divide by zero on an all-black image.
+    // Clamp to 1e-6 so an all-black image doesn't divide by zero.
     let max_u8 = resized.as_raw().iter().copied().max().unwrap_or(0);
     let max_val = (max_u8 as f32).max(1e-6_f32);
     to_nchw(&resized, REMBG_SIZE, max_val)
@@ -92,52 +84,21 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
+    /// Silueta takes 320², BiRefNet 1024²; values are finite and in the
+    /// normalized range, black included (max_val clamps to 1e-6, not 0),
+    /// and channel 0 is red.
     #[test]
-    fn test_preprocess_output_shape() {
-        let img = solid_rgb_image(128, 64, 32, 640, 480);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        assert_eq!(tensor.shape(), &[1, 3, 320, 320]);
-    }
-
-    #[test]
-    fn test_preprocess_birefnet_shape() {
-        let img = solid_rgb_image(128, 64, 32, 640, 480);
-        let tensor = preprocess(&img, ModelKind::BiRefNetLite);
-        assert_eq!(tensor.shape(), &[1, 3, 1024, 1024]);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "BiRefNet tensor contains NaN/Inf: {val}");
+    fn test_preprocess_shape_range_and_channel_order() {
+        let silueta = preprocess(&solid_rgb_image(128, 64, 32, 640, 480), ModelKind::Silueta);
+        assert_eq!(silueta.shape(), &[1, 3, 320, 320]);
+        let birefnet = preprocess(&solid_rgb_image(128, 64, 32, 640, 480), ModelKind::BiRefNetLite);
+        assert_eq!(birefnet.shape(), &[1, 3, 1024, 1024]);
+        assert!(birefnet.iter().all(|v| v.is_finite()), "BiRefNet tensor contains NaN/Inf");
+        for (r, g, b) in [(100, 150, 200), (0, 0, 0)] {
+            let tensor = preprocess(&solid_rgb_image(r, g, b, 32, 32), ModelKind::Silueta);
+            assert!(tensor.iter().all(|&v| v.is_finite() && v > -5.0 && v < 5.0), "({r}, {g}, {b})");
         }
-    }
-
-    #[test]
-    fn test_preprocess_values_normalized() {
-        let img = solid_rgb_image(100, 150, 200, 320, 320);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "Tensor contains NaN or Inf: {val}");
-            assert!(val > -5.0 && val < 5.0, "Value out of expected range: {val}");
-        }
-    }
-
-    #[test]
-    fn test_preprocess_channel_order() {
-        // Solid red image: R=255, G=0, B=0
-        // After normalization, channel 0 (R) should be much larger than channels 1,2
-        let img = solid_rgb_image(255, 0, 0, 64, 64);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        let r_center = tensor[[0, 0, 160, 160]];
-        let g_center = tensor[[0, 1, 160, 160]];
-        assert!(r_center > g_center, "Channel 0 (R) should be normalized higher than channel 1 (G) for red image");
-    }
-
-    #[test]
-    fn test_preprocess_black_image_no_nan() {
-        // All-black image: max_val = 1e-6 (clamped), pixel/max_val = 0.0
-        // Result = (0.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c] — all finite
-        let img = solid_rgb_image(0, 0, 0, 32, 32);
-        let tensor = preprocess(&img, ModelKind::Silueta);
-        for &val in tensor.iter() {
-            assert!(val.is_finite(), "Black image produced NaN or Inf: {val}");
-        }
+        let red = preprocess(&solid_rgb_image(255, 0, 0, 64, 64), ModelKind::Silueta);
+        assert!(red[[0, 0, 160, 160]] > red[[0, 1, 160, 160]], "channel 0 is R");
     }
 }

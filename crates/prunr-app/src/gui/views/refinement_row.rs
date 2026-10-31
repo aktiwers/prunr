@@ -1,4 +1,4 @@
-//! The Refine group for the upscale row: six knobs, before- and
+//! The Refine group for the upscale row: four knobs, before- and
 //! after-upscale, in processing order.
 //!
 //! Mutations land on `item_settings` directly; the recipe diff at the
@@ -10,7 +10,6 @@ use egui_material_icons::icons::ICON_TUNE;
 use super::chip::{self, Field, GroupChip};
 use super::{differs, fmt, hint};
 use crate::gui::item_settings::ItemSettings;
-use crate::gui::theme;
 
 /// The refinement knobs, in processing order. The recipe diff picks
 /// up every change, so none needs a catalog knob.
@@ -20,6 +19,8 @@ const REFINE_FIELDS: &[Field<ItemSettings>] = &[
     Field { knob: None, differs: |s, d| differs(s.ai_blend, d.ai_blend), reset: |s, d| s.ai_blend = d.ai_blend },
     Field { knob: None, differs: |s, d| s.color_match != d.color_match, reset: |s, d| s.color_match = d.color_match },
 ];
+
+const PANEL_WIDTH: f32 = 400.0;
 
 pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
     let d = ItemSettings::default();
@@ -32,26 +33,37 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings) {
         summary: &summary,
         tooltip: "Clean the photo before upscaling and tune the result after.",
         tuned: tuned > 0,
-        width: theme::POPOVER_WIDTH,
+        width: PANEL_WIDTH,
         live: true,
     };
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            chip::reset_fields(REFINE_FIELDS, s, &d);
+    chip::strip_chip(ui, group, "All refine settings", chip::PanelHeader::RESET, |ui, part| match part {
+        chip::Part::Quick => {
+            sharpen(ui, s);
+            ai_blend(ui, s);
+            chip::inline_switch(ui, "Color match", &mut s.color_match);
         }
-        hint(ui, "Before upscaling. Requires reprocessing.");
-        chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));
-        hint(ui, "Smooth grain and speckles first, so the upscaler does not sharpen them.");
-        ui.add_space(theme::SPACE_SM);
-        ui.separator();
-        hint(ui, "After upscaling.");
-        chip::slider_row_f32(ui, "Sharpen", &mut s.sharpen, -1.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::signed_plain(v, 2)));
-        hint(ui, "Negative softens, positive sharpens.");
-        ui.add_space(theme::SPACE_XS);
-        chip::slider_row_f32(ui, "AI blend", &mut s.ai_blend, 0.0..=1.0, false, fmt::percent);
-        hint(ui, "Below 100% mixes the plain enlargement back in to soften a plastic look.");
-        ui.add_space(theme::SPACE_XS);
-        chip::toggle_row(ui, "Color match", &mut s.color_match);
-        hint(ui, "Match the result's color balance to the original photo.");
+        chip::Part::Full { reset } => {
+            if reset {
+                chip::reset_fields(REFINE_FIELDS, s, &d);
+            }
+            chip::panel_section(ui, "Before upscaling", Some("Requires reprocessing."));
+            chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));
+            hint(ui, "Smooth grain and speckles first, so the upscaler does not sharpen them.");
+            chip::panel_section(ui, "After upscaling", None);
+            sharpen(ui, s);
+            hint(ui, "Negative softens, positive sharpens.");
+            ai_blend(ui, s);
+            hint(ui, "Below 100% mixes the plain enlargement back in to soften a plastic look.");
+            chip::toggle_row(ui, "Color match", &mut s.color_match);
+            hint(ui, "Match the result's color balance to the original photo.");
+        }
     });
+}
+
+fn sharpen(ui: &mut Ui, s: &mut ItemSettings) {
+    chip::slider_row_f32(ui, "Sharpen", &mut s.sharpen, -1.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::signed_plain(v, 2)));
+}
+
+fn ai_blend(ui: &mut Ui, s: &mut ItemSettings) {
+    chip::slider_row_f32(ui, "AI blend", &mut s.ai_blend, 0.0..=1.0, false, fmt::percent);
 }

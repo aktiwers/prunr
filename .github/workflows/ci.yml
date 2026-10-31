@@ -70,8 +70,11 @@ jobs:
 
       - name: Restore model cache
         id: cache-models
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
+          # The .zst files are the same bytes on every OS: one platform's
+          # download serves the rest.
+          enableCrossOsArchive: true
           # Cache only the bundled .zst files — the raw .onnx are
           # ~2× larger and never read at build time. Halves cache
           # upload/restore time and keeps us further from the 10 GB
@@ -84,7 +87,8 @@ jobs:
 
       - name: Fetch models (cache miss)
         if: steps.cache-models.outputs.cache-hit != 'true'
-        timeout-minutes: 20
+        # The Windows runners download slowest; 20 min was not enough there.
+        timeout-minutes: 40
         run: cargo xtask fetch-models
 
       - name: Compress models to .zst (if needed)
@@ -97,13 +101,24 @@ jobs:
             fi
           done
 
+      # Saved here, not when the job ends: a cache saved only by a job that
+      # passes is never saved by one failing later, which then misses (and
+      # downloads everything) on every run.
+      - name: Save model cache
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          enableCrossOsArchive: true
+          path: models/*.zst
+          key: ${{ steps.cache-models.outputs.cache-primary-key }}
+
       # --workspace is required because `default-members` in the root
       # Cargo.toml excludes xtask (see comment there). Without --workspace,
       # plain `cargo build` would skip xtask and leave it un-compile-checked.
       - name: Build
         run: cargo build --workspace --target ${{ matrix.target }}
 
-      # Phase 20-05: install the ORT runtime on Linux x86_64 so the
+      # Install the ORT runtime on Linux x86_64 so the
       # `golden_e2e` integration test (and `reference_test` family)
       # exercises real Silueta inference instead of soft-skipping.
       # Other platforms: tests soft-skip when no runtime is found —
@@ -120,7 +135,18 @@ jobs:
       - name: Install ORT runtime (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu' && steps.cache-ci-runtime.outputs.cache-hit != 'true'
         timeout-minutes: 15
-        run: cargo xtask install-runtime onnxruntime 1.24.1
+        run: cargo xtask install-runtime onnxruntime 1.30.0
+
+      # The runtime the macOS release ships must load under our ort
+      # version, carry CoreML and run a model. It is staged, not put in
+      # the runtime store, so the inference tests keep soft-skipping here
+      # until CoreML in a runner VM is known to work.
+      - name: Smoke-test the shipped runtime (macOS arm64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        timeout-minutes: 15
+        run: |
+          cargo xtask install-runtime onnxruntime 1.30.0 --stage-to runtime-stage
+          cargo xtask probe-load-dynamic runtime-stage/libonnxruntime.dylib --require-ep CoreMLExecutionProvider
 
       # Linux has a runtime installed above, so a suite that soft-skips
       # there means the install or cache broke — fail instead of passing.

@@ -4,27 +4,46 @@ use egui_material_icons::icons::*;
 use crate::gui::theme;
 use super::{kv_row, section_heading};
 
+/// Room kept under the scrolling page for the "Press F2 to close" line.
+const FOOTER_HEIGHT: f32 = 28.0;
+
+#[derive(Clone, Copy)]
+enum CliTab { QuickStart, Sketch, Mask, Eraser, Upscale, Advanced }
+
+impl CliTab {
+    const ALL: [Self; 6] = [Self::QuickStart, Self::Sketch, Self::Mask, Self::Eraser, Self::Upscale, Self::Advanced];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::QuickStart => "Quick start",
+            Self::Sketch => "Sketch",
+            Self::Mask => "Mask",
+            Self::Eraser => "Eraser",
+            Self::Upscale => "Upscale",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
 /// Returns true if the modal should close.
 pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toasts) -> bool {
-    theme::standard_modal_window(
+    theme::bare_modal_window(
         ctx, "cli_help", "Command-line reference",
-        [theme::SETTINGS_DIALOG_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
-        |ui| {
+        [theme::STANDARD_MODAL_WIDTH, theme::CLI_HELP_DIALOG_HEIGHT],
+        |ui| super::chip::modal_page(ui, "Command-line reference", "", |ui| {
             theme::apply_modal_visuals(ui);
 
-            // Tab state
-            let tab_id = egui::Id::new("cli_help_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
-
-            super::chip::tab_strip(ui, &["Quick start", "Sketch", "Mask", "Eraser", "Advanced"], &mut tab);
+            let labels = CliTab::ALL.map(CliTab::label);
+            let picked = super::chip::remembered_tab_strip(ui, egui::Id::new("cli_help_tab"), &labels);
+            let tab = CliTab::ALL.get(picked).copied().unwrap_or(CliTab::QuickStart);
             ui.separator();
             ui.add_space(theme::SPACE_SM);
 
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
-
+            // A short window: the page scrolls above its footer line.
+            let page_height = (ui.available_height() - FOOTER_HEIGHT).max(0.0);
+            egui::ScrollArea::vertical().max_height(page_height).auto_shrink([false, false]).show(ui, |ui| {
             match tab {
-                // ── Quick Start ──
-                0 => {
+                CliTab::QuickStart => {
                     section_heading(ui, "Quick start");
                     example_row(ui, toasts, "prunr photo.jpg",
                         "Remove background, save as photo.prunr.png");
@@ -34,18 +53,18 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Process all JPEGs into a folder");
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Common Options");
+                    section_heading(ui, "Common options");
 
                     egui::Grid::new("cli_opts_grid")
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "-o <path>", "Where to save (file or folder)");
-                            opt_row(ui, "-m <model>", "silueta, u2net, or birefnet-lite");
-                            opt_row(ui, "-j 4", "Process 4 images at once");
-                            opt_row(ui, "-f", "Overwrite existing files");
-                            opt_row(ui, "-q", "Silent mode (errors only)");
-                            opt_row(ui, "--cpu", "Force CPU inference (skip GPU)");
+                            opt_row(ui, "--output, -o <path>", "Where to save (file or folder)");
+                            opt_row(ui, "--model, -m <model>", "silueta, u2net, or birefnet-lite");
+                            opt_row(ui, "--jobs, -j 4", "Process 4 images at once");
+                            opt_row(ui, "--force, -f", "Overwrite existing files");
+                            opt_row(ui, "--quiet, -q", "Silent mode (errors only)");
+                            opt_row(ui, "--cpu", "Run every model on the CPU");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -58,9 +77,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "White background instead of transparent");
                 }
 
-                // ── Lines ──
-                1 => {
-                    section_heading(ui, "Line Extraction");
+                CliTab::Sketch => {
+                    section_heading(ui, "Line extraction");
                     hint(ui, "Trace edges and outlines with the line-detection model.");
                     hint(ui, "Great for logos, graffiti, and illustrations.");
 
@@ -71,18 +89,21 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--lines", "Extract lines only (skip BG removal)");
-                            opt_row(ui, "--lines-after-bg", "Remove BG first, then extract lines");
+                            opt_row(ui, "--lines", "Extract lines only (skip background removal)");
+                            opt_row(ui, "--lines-after-bg", "Remove the background first, then extract lines");
                             opt_row(ui, "--line-detail <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
                             opt_row(ui, "--line-width <px>", "Line width, 0\u{2013}20 px (default 0)");
                             opt_row(ui, "--line-composition <mode>", "With --lines-after-bg: lines-only / subject-filled / engraving / ghost");
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
-                            opt_row(ui, "--line-scale <scale>", "Output scale: fine / balanced / bold / fused (default)");
+                            opt_row(ui, "--line-scale <scale>", "Line scale: fine / bold / fused (default)");
+                            opt_row(ui, "--line-fade <0-100>", "Lines lighten with distance (needs the depth model)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
                             opt_row(ui, "--bg-image <path>", "Fill background with an image");
                             opt_row(ui, "--bg-image-fit <fit>", "cover (default) / contain / tile");
                             opt_row(ui, "--effect <name>", "Restyle the subject's colors: sepia, invert, pixelate, halftone, duotone\u{2026}");
-                            opt_row(ui, "--bg-effect <effect>", "Blurred or black-and-white photo behind: blur, blur:N (1\u{2013}64), bw");
+                            opt_row(ui, "--outline <px[:hex]>", "Sticker outline around the subject, e.g. 8 or 8:000000");
+                            opt_row(ui, "--shadow <kind>", "Shadow under the subject: soft or drop");
+                            opt_row(ui, "--bg-effect <effect>", "Photo behind: blur, blur:N (1\u{2013}64), lens, lens:N (0\u{2013}100, needs the depth model), bw");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -101,9 +122,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Bold, abstracted outlines");
                 }
 
-                // ── Mask ──
-                2 => {
-                    section_heading(ui, "Mask Tuning");
+                CliTab::Mask => {
+                    section_heading(ui, "Mask tuning");
                     hint(ui, "Fine-tune how the background removal mask is generated.");
                     hint(ui, "These flags work with all models.");
 
@@ -119,11 +139,13 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--contrast <n>",
                                 "Edge contrast 0\u{2013}1, 1 is a hard edge (default 0)");
                             opt_row(ui, "--edge-shift <n>",
-                                "Grow (+) or shrink (\u{2212}) the edge, in px");
+                                "Grow (+) or shrink (\u{2212}) the edge, up to 20 px");
                             opt_row(ui, "--refine-edges",
                                 "Guided filter for fine edge detail");
                             opt_row(ui, "--edge-width <n>",
                                 "How far refinement looks from the edge, in px (default 8)");
+                            opt_row(ui, "--refine-guide <g>",
+                                "What refinement follows: brightness (default) or color");
                             opt_row(ui, "--feather <n>",
                                 "Soften the edge by n px; fractions allowed");
                         });
@@ -137,12 +159,11 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                     example_row(ui, toasts, "prunr --refine-edges photo.jpg",
                         "Sharpen mask around hair and leaves");
                     example_row(ui, toasts, "prunr --edge-shift -3 product.jpg",
-                        "Trim 3px fringe around subject");
+                        "Trim a 3 px fringe around the subject");
                 }
 
-                // ── Eraser ──
-                3 => {
-                    section_heading(ui, "Object Removal (Eraser)");
+                CliTab::Eraser => {
+                    section_heading(ui, "Object removal (eraser)");
                     hint(ui, "Paint over an unwanted object and let the eraser fill it in.");
                     hint(ui, "Pass a binary mask (white = remove here, black = keep).");
 
@@ -155,6 +176,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--inpaint", "Switch to Eraser mode");
                             opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
+                            opt_row(ui, "--fill-scale <scale>", "auto, full, half or quarter: large areas fill more convincingly smaller (default auto)");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -165,8 +187,61 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Custom output path");
                 }
 
-                // ── Advanced ──
-                4 => {
+                CliTab::Upscale => {
+                    section_heading(ui, "Upscale");
+                    hint(ui, "Enlarge a photo with an upscale model, refine it, and restore faces.");
+                    hint(ui, "Models download in the app's Model Store.");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Flags");
+
+                    egui::Grid::new("cli_upscale_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--upscale <model>", "realesrgan, nomos, siax or superscale: switch to Upscale mode");
+                            opt_row(ui, "--scale <2|3|4>", "How much larger (default 4)");
+                            opt_row(ui, "--denoise <0-1>", "Denoise before the model (default 0)");
+                            opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens (default 0)");
+                            opt_row(ui, "--ai-blend <0-1>", "1 keeps the model's output, 0 the plain enlargement (default 1)");
+                            opt_row(ui, "--color-match", "Match the upscale's colors to the original");
+                            opt_row(ui, "--restore-faces <model>", "gfpgan or restoreformer: redraw soft faces after the upscale");
+                            opt_row(ui, "--face-strength <0-100>", "Up to 50 adds detail over the photo's shading (default 50)");
+                        });
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Examples");
+                    example_row(ui, toasts, "prunr --upscale realesrgan photo.jpg",
+                        "Enlarge 4\u{00d7}, save photo_x4.png");
+                    example_row(ui, toasts, "prunr --upscale realesrgan --scale 2 --restore-faces gfpgan portrait.jpg",
+                        "Enlarge 2\u{00d7} and restore the faces");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Colorize");
+                    egui::Grid::new("cli_colorize_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--colorize", "Color a black-and-white photo with DDColor");
+                            opt_row(ui, "--color-strength <0-1.5>", "0 is black and white, 1 the model's colors (default 1)");
+                        });
+                    example_row(ui, toasts, "prunr --colorize old_photo.jpg",
+                        "Color it, save old_photo_color.png");
+
+                    ui.add_space(theme::SPACE_MD);
+                    section_heading(ui, "Depth");
+                    egui::Grid::new("cli_depth_grid")
+                        .num_columns(2)
+                        .spacing([theme::SPACE_LG, theme::SPACE_SM])
+                        .show(ui, |ui| {
+                            opt_row(ui, "--depth-map", "Also save {stem}-depth.png: 16-bit gray, white = near");
+                            opt_row(ui, "--depth-only", "With --depth-map: save only the depth maps");
+                        });
+                    example_row(ui, toasts, "prunr --depth-map --depth-only landscape.jpg",
+                        "Save landscape-depth.png only");
+                }
+
+                CliTab::Advanced => {
                     section_heading(ui, "Models");
 
                     egui::Grid::new("cli_models_grid")
@@ -179,50 +254,54 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         });
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Large Image Handling");
+                    section_heading(ui, "Large images");
 
                     egui::Grid::new("cli_large_grid")
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--large-image downscale", "Auto-shrink to 4096px (default)");
-                            opt_row(ui, "--large-image process", "Process at full resolution");
+                            opt_row(ui, "--large-image process", "Keep photos over 8000 px at full size (default)");
+                            opt_row(ui, "--large-image downscale", "Shrink photos over 8000 px to 4096 px first");
                         });
 
                     ui.add_space(theme::SPACE_MD);
-                    section_heading(ui, "Diagnostics & Workflow");
+                    section_heading(ui, "Diagnostics and workflow");
 
                     egui::Grid::new("cli_diag_grid")
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
+                            opt_row(ui, "--open <path>", "Start the app with this image loaded");
+                            opt_row(ui, "--doctor", "Print hardware, runtime, model and path facts, then exit");
+                            opt_row(ui, "--clear-ep-cache", "Forget which accelerators failed which models (after a driver update)");
                             opt_row(ui, "--debug", "Verbose tracing (use when reporting bugs)");
+                            opt_row(ui, "bench", "Time each model on the CPU and the GPU, check they agree, write prunr-bench.md");
                         });
 
                     ui.add_space(theme::SPACE_MD);
                     section_heading(ui, "Examples");
                     example_row(ui, toasts, "prunr -m birefnet-lite portrait.jpg",
                         "Best detail for hair, leaves, fine edges");
-                    example_row(ui, toasts, "prunr --large-image process poster.png",
-                        "Full-resolution processing for large images");
+                    example_row(ui, toasts, "prunr --large-image downscale poster.png",
+                        "A faster, smaller result for a very large image");
                     example_row(ui, toasts, "prunr -q photo.jpg -o output.png",
                         "Quiet mode for scripting");
                     example_row(ui, toasts, "prunr --debug photo.jpg 2> prunr.log",
                         "Capture diagnostic log for bug reports");
+                    example_row(ui, toasts, "prunr bench --models silueta,migan --runs 5",
+                        "Check two models on the GPU against the CPU");
                 }
-
-                _ => {}
             }
+            });
 
-            // Footer
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.label(
-                    RichText::new("Press F2 to close")
-                        .size(theme::FONT_SIZE_MONO)
+                    RichText::new(format!("Press {} to close", super::shortcuts::keys(ui.ctx(), super::shortcuts::Action::CliHelp)))
+                        .size(theme::FONT_SIZE_SECONDARY)
                         .color(theme::TEXT_HINT),
                 );
             });
-        },
+        }),
     )
 }
 
@@ -233,7 +312,7 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
         ui.label(
             RichText::new(cmd)
                 .monospace()
-                .size(theme::FONT_SIZE_MONO)
+                .size(theme::FONT_SIZE_SECONDARY)
                 .color(theme::TEXT_PRIMARY),
         );
         let flash_id = egui::Id::new(("copy_flash", cmd));
@@ -245,7 +324,7 @@ fn example_row(ui: &mut egui::Ui, toasts: &mut crate::gui::toasts::Toasts, cmd: 
             ICON_CONTENT_COPY.codepoint
         };
         let copy = ui.add(
-            egui::Button::new(RichText::new(icon_text).size(12.0).color(icon_color))
+            egui::Button::new(RichText::new(icon_text).size(theme::FONT_SIZE_SECONDARY).color(icon_color))
                 .frame(false)
                 .min_size(egui::vec2(18.0, 18.0)),
         );

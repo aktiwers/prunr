@@ -16,7 +16,7 @@ pub enum BrushShape {
 }
 
 /// Stamp parameters shared by every paint primitive.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stamp {
     /// 0.0 = full smoothstep falloff, 1.0 = hard edges.
     pub hardness: f32,
@@ -46,6 +46,10 @@ where
     let w_i = target.width as i32;
     let h_i = target.height as i32;
     let inner = outer * stamp.hardness.clamp(0.0, 1.0);
+    // A falloff narrower than a pixel steps at the pixel grid; one pixel
+    // wide and centred on the edge, it shades each pixel the edge cuts by
+    // about how much of it the stamp covers, and keeps the stamp's area.
+    let (inner, outer) = if outer - inner < 1.0 { ((outer - 0.5).max(0.0), outer + 0.5) } else { (inner, outer) };
     let span = (outer - inner).max(1e-6);
     let sign = f32::from(stamp.mode.sign());
     let strength = stamp.strength.clamp(0.0, 1.0);
@@ -169,6 +173,23 @@ mod tests {
         );
     }
 
+    /// A hard brush's edge is shaded by how much of each pixel it covers,
+    /// not stepped: the inside stays full, the outside untouched.
+    #[test]
+    fn a_hard_brush_has_a_smooth_edge() {
+        let mut c = MaskArtifact::new_empty(32, 32);
+        paint_circle(&mut c, 16.0, 16.0, 10.0, add(1.0, 1.0));
+        let g = c.cells();
+        assert_eq!(g[16 * 32 + 16], 127);
+        assert_eq!(g[16 * 32 + 22], 127, "well inside");
+        assert_eq!(g[16 * 32 + 28], 0, "outside");
+        let shaded = g.iter().filter(|&&v| v > 0 && v < 127).count();
+        assert!(shaded > 40, "the rim is shaded, {shaded} pixels");
+        let coverage: f32 = g.iter().map(|&v| f32::from(v) / 127.0).sum();
+        let area = std::f32::consts::PI * 100.0;
+        assert!((coverage - area).abs() < area * 0.05, "keeps the disc's area: {coverage} against {area}");
+    }
+
     #[test]
     fn paint_circle_subtract_writes_negative() {
         let mut c = MaskArtifact::new_empty(8, 8);
@@ -187,18 +208,15 @@ mod tests {
         assert_eq!(after_second, 127, "second weaker stroke must not lower the strong stamp");
     }
 
+    /// No radius, no strength, or a stamp wholly off the plane paints
+    /// nothing, and off the plane does not panic.
     #[test]
-    fn paint_circle_zero_radius_no_op() {
-        let mut c = MaskArtifact::new_empty(4, 4);
-        paint_circle(&mut c, 2.0, 2.0, 0.0, add(1.0, 1.0));
-        assert!(c.cells().iter().all(|&v| v == 0));
-    }
-
-    #[test]
-    fn paint_circle_zero_strength_no_op() {
-        let mut c = MaskArtifact::new_empty(8, 8);
-        paint_circle(&mut c, 4.0, 4.0, 3.0, add(1.0, 0.0));
-        assert!(c.cells().iter().all(|&v| v == 0), "strength = 0 produces no stamp");
+    fn paint_circle_with_nothing_to_paint_is_a_no_op() {
+        for (x, y, radius, strength) in [(2.0, 2.0, 0.0, 1.0), (2.0, 2.0, 3.0, 0.0), (-10.0, -10.0, 5.0, 1.0), (100.0, 100.0, 5.0, 1.0)] {
+            let mut c = MaskArtifact::new_empty(4, 4);
+            paint_circle(&mut c, x, y, radius, add(1.0, strength));
+            assert!(c.cells().iter().all(|&v| v == 0), "({x}, {y}) r{radius} s{strength}");
+        }
     }
 
     #[test]
@@ -216,14 +234,6 @@ mod tests {
             "half strength should land near 64, got {}",
             center_half
         );
-    }
-
-    #[test]
-    fn paint_circle_outside_bounds_no_panic() {
-        let mut c = MaskArtifact::new_empty(4, 4);
-        paint_circle(&mut c, -10.0, -10.0, 5.0, add(1.0, 1.0));
-        paint_circle(&mut c, 100.0, 100.0, 5.0, add(1.0, 1.0));
-        assert!(c.cells().iter().all(|&v| v == 0));
     }
 
     #[test]

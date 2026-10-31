@@ -3,11 +3,14 @@
 //! `skip_if_no_ort` — suites that build sessions skip when no runtime is
 //! installed (`ORT_DYLIB_PATH` or the Runtime Store), unless
 //! `PRUNR_REQUIRE_ORT=1` turns the skip into a failure (CI).
+//! `PRUNR_CUDA_ADDON` names the CUDA add-on's library, for a runtime with
+//! no CUDA of its own.
 
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
-use image::{ImageBuffer, Rgba, RgbaImage};
-use std::env;
+use image::{GrayImage, ImageBuffer, Luma, Rgba, RgbaImage};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Returns Ok(()) when ORT is loaded and ready for `OrtEngine::new_*`.
 pub fn ensure_ort_initialized() -> Result<(), String> {
@@ -17,21 +20,87 @@ pub fn ensure_ort_initialized() -> Result<(), String> {
 /// Returns `true` when ORT couldn't be initialised, after printing a
 /// `[label] SKIP:` line. Caller pattern: `if skip_if_no_ort("foo") { return; }`.
 pub fn skip_if_no_ort(label: &str) -> bool {
-    if let Err(msg) = ensure_ort_initialized() {
-        if env::var_os("PRUNR_REQUIRE_ORT").is_some_and(|v| v == "1") {
-            panic!("[{label}] PRUNR_REQUIRE_ORT=1 but no runtime: {msg}");
+    let Err(msg) = prunr_core::ort_runtime::runtime_for_tests() else {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(addon) = std::env::var_os("PRUNR_CUDA_ADDON") {
+            prunr_core::ort_runtime::use_addon(prunr_core::ort_runtime::Addon::Cuda, addon.into());
         }
-        eprintln!("[{label}] SKIP: {msg}");
-        return true;
+        return false;
+    };
+    eprintln!("[{label}] SKIP: {msg}");
+    true
+}
+
+/// Returns `true` when the OnDemand model `id` isn't installed, after
+/// printing a `[label] SKIP:` line.
+pub fn skip_if_model_missing(label: &str, id: prunr_models::ModelId) -> bool {
+    if prunr_models::is_available(id) {
+        return false;
     }
-    false
+    eprintln!("[{label}] SKIP: {id:?} is not installed");
+    true
+}
+
+// ---------- golden harness driver (shared by both golden tiers) ----------
+
+fn list_fixture_dirs(root: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .map(|it| {
+            it.filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fixture dirs under the committed root, then the local root, sorted.
+/// Panics naming both roots when there are none.
+pub fn golden_fixtures(tier: &str, committed_root: &Path, local_root: &Path) -> Vec<PathBuf> {
+    let mut fixtures = list_fixture_dirs(committed_root);
+    if local_root.is_dir() {
+        fixtures.extend(list_fixture_dirs(local_root));
+    }
+    fixtures.sort();
+
+    if fixtures.is_empty() {
+        panic!(
+            "no {tier} fixtures under {} or {}.\n\
+             Run with BOOTSTRAP_GOLDEN=1 to generate canary fixtures.",
+            committed_root.display(),
+            local_root.display(),
+        );
+    }
+    fixtures
+}
+
+/// Runs every fixture, then panics listing each `[id] error` together.
+pub fn assert_golden_fixtures(
+    tier: &str,
+    fixtures: &[PathBuf],
+    mut run: impl FnMut(&Path) -> Result<(), String>,
+) {
+    let failures: Vec<String> = fixtures
+        .iter()
+        .filter_map(|fixture| {
+            run(fixture).err().map(|e| {
+                // read_dir entries always have a final component
+                let id = fixture.file_name().unwrap().to_string_lossy();
+                format!("[{id}] {e}")
+            })
+        })
+        .collect();
+
+    if !failures.is_empty() {
+        panic!("{tier} golden mismatches:\n{}", failures.join("\n"));
+    }
 }
 
 // ---------- synthetic fixture catalog (shared by both golden harnesses) ----------
 
-/// Spec for one synthetic fixture. Each id maps to a past-bug category from
-/// `.planning/phases/20-golden-image-suite/PLAN.md`. The draw fn paints into
-/// a pre-allocated RGBA buffer (zero-init = transparent black).
+/// Spec for one synthetic fixture. Each id maps to a category of past bug.
+/// The draw fn paints into a pre-allocated RGBA buffer (zero-init =
+/// transparent black).
 pub struct SyntheticSpec {
     pub id: &'static str,
     pub width: u32,
@@ -153,6 +222,25 @@ pub fn draw_circle_filled(img: &mut RgbaImage, cx: i32, cy: i32, r: i32, color: 
     }
 }
 
+/// `w`×`h` inpaint mask: 255 inside the `rw`×`rh` rect at (`x`, `y`),
+/// 0 elsewhere. The rect is clipped to the image.
+pub fn rect_mask(w: u32, h: u32, x: u32, y: u32, rw: u32, rh: u32) -> GrayImage {
+    GrayImage::from_fn(w, h, |px, py| {
+        let inside = (x..x + rw).contains(&px) && (y..y + rh).contains(&py);
+        Luma([if inside { 255 } else { 0 }])
+    })
+}
+
+/// Pixels inside the `rw`×`rh` rect at (`x`, `y`) that differ between `a`
+/// and `b`. The rect is clipped to `a`.
+pub fn changed_in(a: &RgbaImage, b: &RgbaImage, x: u32, y: u32, rw: u32, rh: u32) -> u32 {
+    let (xe, ye) = ((x + rw).min(a.width()), (y + rh).min(a.height()));
+    (y..ye)
+        .flat_map(|py| (x..xe).map(move |px| (px, py)))
+        .filter(|&(px, py)| a.get_pixel(px, py) != b.get_pixel(px, py))
+        .count() as u32
+}
+
 /// Helper for synthetic source generation: bootstrap an `RgbaImage` of the
 /// given dimensions, paint it via the spec's `draw_source`, and return.
 pub fn render_synthetic_source(spec: &SyntheticSpec) -> RgbaImage {
@@ -173,4 +261,22 @@ pub fn multi_subject_canary() -> image::DynamicImage {
         draw_source: draw_multi_subject,
     };
     image::DynamicImage::ImageRgba8(render_synthetic_source(&spec))
+}
+
+/// CPU Silueta session, the segmentation engine the feature tests run.
+pub fn silueta_engine() -> prunr_core::OrtEngine {
+    prunr_core::OrtEngine::new_cpu_only(prunr_core::ModelKind::Silueta, 1)
+        .expect("OrtEngine::new_cpu_only(Silueta)")
+}
+
+/// The canary cut out with default mask settings.
+pub fn canary_cutout(engine: &prunr_core::OrtEngine) -> RgbaImage {
+    prunr_core::process_image_from_decoded(
+        &multi_subject_canary(),
+        engine,
+        &prunr_core::MaskSettings::default(),
+        &prunr_core::Progress::none(),
+    )
+    .expect("seg pipeline on the canary")
+    .rgba_image
 }

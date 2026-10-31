@@ -14,22 +14,30 @@ pub enum RuntimePromptAction {
 }
 
 /// Returns `None` while the modal is open with no user response yet.
-pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<RuntimePromptAction> {
+/// `here`: what is on disk already, so CUDA's download is smaller.
+/// `update`: an earlier Prunr's install of `rt` is
+/// in use, which this one replaces.
+pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId, here: crate::runtime_install::OnDisk, update: bool) -> Option<RuntimePromptAction> {
     let mut result: Option<RuntimePromptAction> = None;
+    let (title, body, install) = if update {
+        ("An update is available", rt.update_prompt_body(here), rt.update_button_label())
+    } else {
+        ("Faster processing is available", rt.first_launch_prompt_body(here), rt.install_button_label())
+    };
 
     let backdrop_closed = theme::standard_modal_window(
-        ctx, "runtime_prompt", "Faster processing is available",
-        [theme::SETTINGS_DIALOG_WIDTH, 280.0],
+        ctx, "runtime_prompt", title,
+        [theme::STANDARD_MODAL_WIDTH, 280.0],
         |ui| {
             ui.label(
-                RichText::new(rt.first_launch_prompt_body())
+                RichText::new(body)
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_PRIMARY),
             );
             ui.add_space(theme::SPACE_XS);
             ui.label(
-                RichText::new("You can install it later from Settings → Hardware.")
-                    .size(theme::FONT_SIZE_MONO)
+                RichText::new("You can install it later from Settings › Hardware.")
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
             ui.add_space(theme::SPACE_MD);
@@ -42,7 +50,7 @@ pub fn render_runtime_prompt(ctx: &egui::Context, rt: RuntimeId) -> Option<Runti
                     result = Some(RuntimePromptAction::OpenSettings);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if button(ui, ButtonKind::Primary, rt.install_button_label()).clicked() {
+                    if button(ui, ButtonKind::Primary, install).clicked() {
                         result = Some(RuntimePromptAction::Install);
                     }
                 });

@@ -48,8 +48,11 @@ use prunr_core::{
     process_image_from_decoded, MaskSettings, ModelKind, OrtEngine,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::{Path, PathBuf}};
-use test_common::{ensure_ort_initialized, render_synthetic_source, synthetic_specs};
+use std::{env, fs, path::Path};
+use test_common::{
+    assert_golden_fixtures, golden_fixtures, render_synthetic_source, skip_if_no_ort,
+    synthetic_specs,
+};
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/e2e";
 const FIXTURE_ROOT_LOCAL: &str = "tests/golden_data_local/e2e";
@@ -67,8 +70,7 @@ struct Recipe {
 
 #[test]
 fn golden_e2e() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[golden_e2e] SKIP: {msg}");
+    if skip_if_no_ort("golden_e2e") {
         return;
     }
 
@@ -85,21 +87,7 @@ fn golden_e2e() {
         bootstrap_recipes_for_local(&local_root);
     }
 
-    let mut fixtures = Vec::new();
-    fixtures.extend(list_fixtures(&committed_root));
-    if local_root.is_dir() {
-        fixtures.extend(list_fixtures(&local_root));
-    }
-    fixtures.sort();
-
-    if fixtures.is_empty() {
-        panic!(
-            "no e2e fixtures under {} or {}.\n\
-             Run with BOOTSTRAP_GOLDEN=1 to generate canary fixtures.",
-            committed_root.display(),
-            local_root.display(),
-        );
-    }
+    let fixtures = golden_fixtures("e2e", &committed_root, &local_root);
 
     // One engine for all Silueta fixtures; reuse to amortize the ~1s
     // session-init across iterations. Fixtures with a different model in
@@ -107,28 +95,7 @@ fn golden_e2e() {
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta) failed");
 
-    let mut failures = Vec::new();
-    for fixture in &fixtures {
-        if let Err(e) = run_fixture(fixture, &engine, update) {
-            let id = fixture.file_name().unwrap().to_string_lossy().into_owned();
-            failures.push(format!("[{id}] {e}"));
-        }
-    }
-
-    if !failures.is_empty() {
-        panic!("e2e golden mismatches:\n{}", failures.join("\n"));
-    }
-}
-
-fn list_fixtures(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
-        .map(|it| {
-            it.filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default()
+    assert_golden_fixtures("e2e", &fixtures, |f| run_fixture(f, &engine, update));
 }
 
 fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), String> {
@@ -232,8 +199,8 @@ fn compare_pixels(actual: &RgbaImage, expected: &RgbaImage) -> Result<(), String
 // ---------- bootstrap: committed synthetic fixtures ----------
 
 /// Generate committed fixture inputs procedurally. Idempotent — skips fixtures
-/// whose `source.png` already exists. Each fixture targets a specific past-bug
-/// category from `.planning/phases/20-golden-image-suite/PLAN.md`.
+/// whose `source.png` already exists. Each fixture targets a specific category
+/// of past bug.
 fn bootstrap_committed(root: &Path) {
     bootstrap_circle_silueta_e2e(root);
     bootstrap_synthetic_e2e_fixtures(root);

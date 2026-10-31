@@ -1078,16 +1078,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "concat-idents"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f76990911f2267d837d9d0ad060aa63aaad170af40904b29461734c339030d4d"
-dependencies = [
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1555,17 +1545,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_animation"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd9bc6d586df44e01b90715eec1eb8d73a61c3c3f554edffb01eb0894a8107ef"
-dependencies = [
- "egui",
- "hello_egui_utils",
- "simple-easing",
-]
-
-[[package]]
 name = "egui_extras"
 version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1873,6 +1852,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1892,6 +1881,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -2533,16 +2523,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hello_egui_utils"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c34bfd8bff6f6df43b0b73ed7949a7aff0c98c2c1bd4c2f2771f5f2f6d98ced0"
-dependencies = [
- "concat-idents",
- "egui",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3009,6 +2989,12 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"
@@ -3940,9 +3926,9 @@ dependencies = [
 
 [[package]]
 name = "ort"
-version = "2.0.0-rc.13"
+version = "2.0.0-rc.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
+checksum = "37c87aa7a90b7ff3e0fe36cccd475df8d67f15f07f4d6c370c4b38464232813c"
 dependencies = [
  "half",
  "libloading 0.9.0",
@@ -3954,9 +3940,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.13"
+version = "2.0.0-rc.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
+checksum = "8d22b0417f1838db5a3ac0b3f98dfe39f6fb73624aa0a27c6bbb5040b9c7db2b"
 
 [[package]]
 name = "os_pipe"
@@ -4431,24 +4417,27 @@ dependencies = [
  "arboard",
  "bincode",
  "bytemuck",
- "bytes",
  "clap",
  "dirs",
  "drag",
  "eframe",
  "egui",
  "egui-notify",
- "egui_animation",
  "egui_extras",
  "egui_kittest",
  "egui_material_icons",
  "hex",
  "image",
  "indicatif",
+ "libc",
  "memory-stats",
  "ndarray",
  "num_cpus",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "ort",
+ "pollster",
  "proptest",
  "prunr-core",
  "prunr-models",
@@ -4462,6 +4451,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
  "winresource",
  "zip",
@@ -4474,13 +4464,19 @@ version = "0.4.8"
 dependencies = [
  "criterion",
  "dirs",
+ "dunce",
  "fast_image_resize",
  "half",
  "image",
  "instant-clip-tokenizer",
+ "jpeg-decoder",
+ "libc",
+ "libloading 0.9.0",
  "ndarray",
  "num_cpus",
  "ort",
+ "png 0.18.1",
+ "prunr-core",
  "prunr-models",
  "rand 0.9.2",
  "rand_chacha",
@@ -4494,6 +4490,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4510,11 +4507,14 @@ dependencies = [
 name = "prunr-runtime-install"
 version = "0.4.8"
 dependencies = [
- "bytes",
+ "flate2",
  "hex",
+ "libc",
  "reqwest",
  "serde_json",
  "sha2",
+ "tar",
+ "tempfile",
  "tracing",
  "zip",
 ]
@@ -5319,12 +5319,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "simple-easing"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c82d449ab1bccfeec125893c6875008206f038d4eb8a09e1e10caf86f44d574e"
-
-[[package]]
 name = "simplecss"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5570,6 +5564,16 @@ dependencies = [
  "pkg-config",
  "toml 0.8.2",
  "version-compare",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
@@ -7367,7 +7371,6 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs",
  "hex",
  "image",
  "ndarray",
@@ -7377,7 +7380,6 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sha2",
- "zip",
  "zstd",
 ]
 
@@ -7603,6 +7605,12 @@ dependencies = [
  "thiserror 2.0.18",
  "zopfli",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

@@ -14,7 +14,7 @@
 //! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
@@ -27,22 +27,34 @@ pub enum ProgressKind {
     Inpaint,
     /// Super-resolution upscale (Real-ESRGAN, HAT-L).
     Upscale,
+    /// Colorize: one model run.
+    Colorize,
+    /// Restore faces: stops after the face it is on.
+    Faces,
+    /// Measuring a photo's depth: under a second, not cancellable.
+    Depth,
 }
 
 /// What Cancel stops. An eraser run needs the item it runs on; without
 /// one the click does nothing rather than stop another item's stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTarget {
-    InpaintForItem(u64),
+    /// The erase run the capsule shows, and the images queued after it.
+    Inpaint,
     Upscale,
+    Colorize,
     SegBatchAndReset,
+    Faces,
 }
 
-pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -> Option<CancelTarget> {
+pub fn cancel_target_for(kind: ProgressKind) -> Option<CancelTarget> {
     match kind {
-        ProgressKind::Inpaint => active_inpaint_item.map(CancelTarget::InpaintForItem),
+        ProgressKind::Inpaint => Some(CancelTarget::Inpaint),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
+        ProgressKind::Colorize => Some(CancelTarget::Colorize),
         ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
+        ProgressKind::Faces => Some(CancelTarget::Faces),
+        ProgressKind::Depth => None,
     }
 }
 
@@ -51,9 +63,8 @@ pub fn cancel_target_for(kind: ProgressKind, active_inpaint_item: Option<u64>) -
 #[derive(Debug, Clone)]
 pub struct DispatchProgress {
     pub kind: ProgressKind,
-    /// Per-stroke / per-batch unit when applicable. `None` for
-    /// non-tiled dispatches (Seg, Upscale today). `Some((current, total))`
-    /// for SD strokes split into multiple 512² patches.
+    /// Per-batch / per-stroke unit: images of a batch or queue, crops of
+    /// an SD stroke; `None` when the run counts one level only.
     pub outer: Option<(u32, u32)>,
     /// Step counter inside the current outer unit. `(0, 0)` means
     /// "indeterminate" — widgets render the spinner-only form.
@@ -68,8 +79,15 @@ pub struct DispatchProgress {
     /// The tile map: where the work happens, and how far each tile is.
     pub tiles: Arc<[prunr_core::TileRect]>,
     pub tile_states: Arc<Vec<TileState>>,
+    /// Cells an earlier layout of this run finished (an erase fills
+    /// region by region): they stay done.
+    pub finished: Arc<[prunr_core::TileRect]>,
     /// When work started moving and how far along it was then.
     pub pace: Option<(Instant, f32)>,
+    /// The image a one-image run works on (an upscale, an erase, a face
+    /// search); `None` for a batch. Its tile map belongs over that image
+    /// only.
+    pub on: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,8 +120,21 @@ impl DispatchProgress {
             inner_unit: None,
             tiles: Arc::new([]),
             tile_states: Arc::default(),
+            finished: Arc::new([]),
             pace: None,
+            on: None,
         }
+    }
+
+    /// This progress as a run on the image `item_id`.
+    pub fn on(self, item_id: u64) -> Self {
+        Self { on: Some(item_id), ..self }
+    }
+
+    /// Whether this progress belongs over the image `shown`: a batch's
+    /// does everywhere, a one-image run's only over its own image.
+    pub fn is_over(&self, shown: Option<u64>) -> bool {
+        self.on.is_none() || self.on == shown
     }
 
     /// Fold one pipeline report into the snapshot the widgets draw.
@@ -122,11 +153,17 @@ impl DispatchProgress {
             }
             &ProgressUpdate::Inner { done, total, unit } => self.set_inner(done, total, unit, now),
             ProgressUpdate::Tiles(rects) => {
+                // A run that re-lays one layout pass after pass adds no
+                // second copy of a cell; the map draws every kept cell per frame.
+                let fresh = self.tiles.iter().zip(self.tile_states.iter())
+                    .filter(|&(c, s)| *s == TileState::Done && !self.finished.contains(c))
+                    .map(|(c, _)| *c);
+                self.finished = self.finished.iter().copied().chain(fresh).collect();
                 self.tiles = rects.as_slice().into();
                 self.tile_states = Arc::new(vec![TileState::Waiting; rects.len()]);
             }
-            // Where the subject is: drawn on the image, not counted.
-            ProgressUpdate::Subject(_) => {}
+            // Pictures for the image, not counted.
+            ProgressUpdate::Subject(_) | ProgressUpdate::Faces(_) | ProgressUpdate::TilePreview(_) => {}
             &ProgressUpdate::Tile { index, done } => {
                 if let Some(state) = Arc::make_mut(&mut self.tile_states).get_mut(index as usize) {
                     *state = if done { TileState::Done } else { TileState::Running };
@@ -216,7 +253,7 @@ impl DispatchProgress {
         let parts: Vec<String> = outer.into_iter().chain(inner)
             .map(|(unit, n, total)| format!("{} {n} of {total}", unit.noun(1)))
             .collect();
-        (!parts.is_empty()).then(|| capitalise_first(&parts.join(" \u{b7} ")))
+        (!parts.is_empty()).then(|| crate::gui::views::fmt::capitalized(&parts.join(" \u{b7} ")))
     }
 
     /// Fraction in `0.0..=1.0` for the progress-bar fill. `None` when
@@ -230,11 +267,9 @@ impl DispatchProgress {
     }
 }
 
-/// Shared slot the dispatcher writes and the widgets read. `None` when
-/// no dispatch is in flight. `Arc<Mutex<…>>` over atomics because the
-/// payload includes a heap `Cow` for `step_label`; writes are
-/// step-frequency (≤ a few Hz), reads are render-frequency (60 Hz),
-/// and the lock is held for microseconds — contention is invisible.
+/// Shared slot the dispatcher writes and the widgets read; `None` when no
+/// dispatch is in flight. A Mutex rather than atomics because the payload
+/// holds a heap `Cow`; the lock is held for microseconds.
 #[derive(Debug, Clone, Default)]
 pub struct DispatchProgressSlot {
     inner: Arc<Mutex<Option<DispatchProgress>>>,
@@ -252,7 +287,8 @@ pub struct RunSink {
 }
 
 impl RunSink {
-    fn current(&self) -> bool {
+    /// The slot still shows this run.
+    pub(crate) fn current(&self) -> bool {
         self.slot.run.load(Ordering::Acquire) == self.run
     }
 
@@ -301,52 +337,53 @@ impl DispatchProgressSlot {
         RunSink { slot: self.clone(), run }
     }
 
-    /// A progress handle for a run starting now, with its cancel flag.
-    pub fn progress_for(&self, initial: DispatchProgress, cancel: Arc<AtomicBool>) -> (prunr_core::Progress, RunSink) {
-        let sink = self.begin(initial);
-        (prunr_core::Progress::new(Arc::new(sink.clone())).with_cancel(cancel), sink)
+    /// `begin`, unless a run already shows: a run that cannot be cancelled
+    /// must not hide one that can. Checked and taken under one lock.
+    pub fn begin_if_idle(&self, initial: DispatchProgress) -> Option<RunSink> {
+        let mut shown = self.lock();
+        if shown.is_some() {
+            return None;
+        }
+        let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
+        *shown = Some(initial);
+        Some(RunSink { slot: self.clone(), run })
     }
 
-    /// Replace the active progress snapshot. Pass `None` to clear when
-    /// the dispatch finishes (success, cancel, or error).
+    /// `None` clears it when the dispatch finishes.
     pub fn set(&self, progress: Option<DispatchProgress>) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = progress;
+        *self.lock() = progress;
     }
 
     pub fn update(&self, f: impl FnOnce(&mut Option<DispatchProgress>)) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&mut guard);
+        f(&mut self.lock());
     }
 
-    /// Snapshot the current progress for a widget. `None` when no
-    /// dispatch is in flight.
+    /// `None` when no dispatch is in flight.
     pub fn read(&self) -> Option<DispatchProgress> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.clone()
+        self.lock().clone()
     }
-}
 
-fn capitalise_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DispatchProgress>> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A batch's progress shows over any image; a one-image run's only
+    /// over its own, so switching images mid-run does not draw the run's
+    /// tiles over the new one.
+    #[test]
+    fn a_runs_progress_shows_over_its_own_image_only() {
+        let batch = DispatchProgress::new(ProgressKind::Seg, "x");
+        assert!(batch.is_over(Some(1)) && batch.is_over(Some(2)) && batch.is_over(None));
+        let run = DispatchProgress::new(ProgressKind::Upscale, "x").on(1);
+        assert!(run.is_over(Some(1)));
+        assert!(!run.is_over(Some(2)), "another image is shown");
+        assert!(!run.is_over(None), "nothing is shown");
+    }
 
     fn upscale(inner: (u32, u32)) -> DispatchProgress {
         DispatchProgress { inner, ..DispatchProgress::new(ProgressKind::Upscale, "Upscaling") }
@@ -426,6 +463,20 @@ mod tests {
             "zero outer_total is invalid input — must not divide by zero");
     }
 
+    /// A run that asks only when the slot is idle never takes it from the
+    /// run showing, and shows once that run ends.
+    #[test]
+    fn begin_if_idle_leaves_a_showing_run_alone() {
+        let slot = DispatchProgressSlot::new();
+        let shown = slot.begin(upscale((1, 4)));
+        assert!(slot.begin_if_idle(upscale((2, 9))).is_none(), "a run is showing");
+        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((1, 4)), "the showing run keeps the slot");
+        shown.end();
+        let idle = slot.begin_if_idle(upscale((2, 9))).expect("the slot is idle");
+        assert!(idle.current(), "the new run is the one shown");
+        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((2, 9)));
+    }
+
     #[test]
     fn slot_set_and_read_round_trips() {
         let slot = DispatchProgressSlot::new();
@@ -466,8 +517,29 @@ mod tests {
         assert_eq!(*p.tile_states, [TileState::Running, TileState::Waiting]);
         p.apply(&ProgressUpdate::Tile { index: 0, done: true });
         assert_eq!(*p.tile_states, [TileState::Done, TileState::Waiting]);
-        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.5)]));
         assert_eq!(*p.tile_states, [TileState::Waiting], "a new layout starts over");
+        assert_eq!(*p.finished, [half(0.0)], "what the last one finished stays done");
+        p.apply(&ProgressUpdate::Tile { index: 0, done: true });
+        p.apply(&ProgressUpdate::Tiles(vec![half(0.0)]));
+        assert_eq!(*p.finished, [half(0.0), half(0.5)]);
+    }
+
+    /// A layout laid again for each pass of a run keeps one copy of each
+    /// finished cell, however many passes.
+    #[test]
+    fn a_relaid_layout_keeps_one_copy_of_each_cell() {
+        use prunr_core::{ProgressUpdate, TileRect};
+        let mut p = upscale((0, 0));
+        let layout = vec![TileRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 }, TileRect { x: 0.5, y: 0.0, w: 0.5, h: 1.0 }];
+        for _ in 0..30 {
+            p.apply(&ProgressUpdate::Tiles(layout.clone()));
+            for index in 0..2 {
+                p.apply(&ProgressUpdate::Tile { index, done: true });
+            }
+        }
+        p.apply(&ProgressUpdate::Tiles(layout.clone()));
+        assert_eq!(*p.finished, *layout);
     }
 
     #[test]
@@ -499,10 +571,21 @@ mod tests {
         assert_eq!(at(0, 10, 20), None, "nothing done, nothing to go on");
     }
 
+    /// Each run's Cancel stops that run. A face search and an erase run
+    /// once had a Cancel that did nothing; Seg must reset the batch, not
+    /// cancel an erase. A depth run is too short to cancel.
     #[test]
-    fn cancel_target_eraser_needs_active_item() {
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, Some(42)), Some(CancelTarget::InpaintForItem(42)));
-        assert_eq!(cancel_target_for(ProgressKind::Inpaint, None), None, "another item's stroke is not ours to stop");
+    fn each_run_kind_cancels_its_own_run() {
+        for (kind, target) in [
+            (ProgressKind::Seg, Some(CancelTarget::SegBatchAndReset)),
+            (ProgressKind::Inpaint, Some(CancelTarget::Inpaint)),
+            (ProgressKind::Upscale, Some(CancelTarget::Upscale)),
+            (ProgressKind::Colorize, Some(CancelTarget::Colorize)),
+            (ProgressKind::Faces, Some(CancelTarget::Faces)),
+            (ProgressKind::Depth, None),
+        ] {
+            assert_eq!(cancel_target_for(kind), target, "{kind:?}");
+        }
     }
 
     /// A run that was replaced, or has ended, can still have a report in
@@ -536,34 +619,4 @@ mod tests {
         assert!(p.cancelling, "a late step must not hide the cancel");
     }
 
-    #[test]
-    fn cancel_target_upscale_ignores_item() {
-        // Upscale is single-flight on the Processor; the item handle
-        // is irrelevant — there's only one upscale to cancel.
-        assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, None),
-            Some(CancelTarget::Upscale),
-        );
-        assert_eq!(
-            cancel_target_for(ProgressKind::Upscale, Some(99)),
-            Some(CancelTarget::Upscale),
-        );
-    }
-
-    #[test]
-    fn cancel_target_seg_routes_to_batch_reset() {
-        // Seg Cancel → batch cancel, not an inpaint cancel.
-        // A future refactor that maps
-        // ProgressKind::Seg → cancel_all_inpaints() (the wrong call)
-        // fails this assertion before users see a dropped click.
-        assert_eq!(
-            cancel_target_for(ProgressKind::Seg, None),
-            Some(CancelTarget::SegBatchAndReset),
-        );
-        assert_eq!(
-            cancel_target_for(ProgressKind::Seg, Some(1)),
-            Some(CancelTarget::SegBatchAndReset),
-            "seg routes to batch reset regardless of selection",
-        );
-    }
 }

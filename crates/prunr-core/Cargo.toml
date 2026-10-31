@@ -13,12 +13,28 @@ dev-models = ["prunr-models/dev-models"]
 # CUDA execution provider (requires CUDA toolkit at link time)
 cuda = []
 
+# Constructors other crates' tests use to stand in for a model's output.
+test-utils = []
+
 [dependencies]
 prunr-models = { path = "../prunr-models" }
 thiserror = { workspace = true }
 ort = { workspace = true }
+# ort's own loader version: ort cannot load a second runtime after a
+# failed load, so each candidate is checked with this first.
+libloading = "0.9"
 ndarray = { workspace = true }
 image = { workspace = true }
+# image's JPEG decoder cannot decode at a reduced size; thumbnails use
+# this one's 1/8 DCT scaling. No rayon: its threads would share the pool
+# the previews render on.
+jpeg-decoder = { version = "0.3.2", default-features = false }
+# image's PNG encoder compresses through zlib-rs: a saved 20 MP cut-out
+# at level 4 takes 0.54 s instead of miniz_oxide's 0.86 s, 5% smaller.
+# The feature switches flate2 to zlib-rs for every crate in the build
+# (runtime and model archives, SVGZ, TIFF), and only while this `png`
+# is the one `image` uses.
+png = { version = "0.18", features = ["zlib-rs"] }
 resvg = { workspace = true }
 rayon = { workspace = true }
 num_cpus = "1"
@@ -33,9 +49,25 @@ rand_distr = { workspace = true }
 half = { workspace = true }
 instant-clip-tokenizer = "0.1"
 sysinfo = { workspace = true }
+dunce = { workspace = true }
+
+# glibc's malloc_trim, to hand a dropped session's heap back.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
+# macOS's own memory pressure level.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+# Graphics memory on Windows: DXGI's budget for this process and what it
+# holds, which counts CUDA's allocations under WDDM too.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
+# The integration tests in tests/ record progress with RecordingSink.
+prunr-core = { path = ".", features = ["test-utils"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 # criterion: microbench harness for the perf-sensitive kernels in this

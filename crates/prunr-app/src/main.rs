@@ -18,40 +18,57 @@ fn attach_parent_console() {
 }
 
 fn main() {
+    // First, while the process has one thread: ONNX Runtime reads it as it
+    // loads, in this process and in the workers that inherit it.
+    let (name, value) = prunr_models::ORT_TELEMETRY_OFF;
+    // SAFETY: single-threaded at this point in main.
+    unsafe { std::env::set_var(name, value); }
     let cli = Cli::parse();
 
-    // `--debug` propagates to subprocess workers via two env vars, set BEFORE
-    // `init_tracing` reads them. Workers inherit the parent env at spawn.
-    //   RUST_LOG=prunr=debug  → filter level
-    //   PRUNR_DEBUG_LOG=<path> → also tee tracing to a file (bulletproof on
-    //                            Windows where AttachConsole + GUI-subsystem
-    //                            subprocess stderr is unreliable).
-    if cli.debug {
+    // `--debug` reaches subprocess workers through env vars they inherit,
+    // set BEFORE `init_tracing` reads them. PRUNR_DEBUG_LOG tees to a file:
+    // on Windows a GUI-subsystem worker's stderr is unreliable.
+    // The bench's report carries every provider failure; the warnings
+    // the ladder logs for them would bury its progress lines.
+    let level = if cli.debug { Some("prunr=debug") } else { cli.command.is_some().then_some("prunr=error") };
+    if let Some(level) = level.filter(|_| std::env::var_os("RUST_LOG").is_none()) {
         // SAFETY: single-threaded at this point in main.
-        if std::env::var_os("RUST_LOG").is_none() {
-            unsafe { std::env::set_var("RUST_LOG", "prunr=debug"); }
-        }
-        if std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
-            let log_path = std::env::temp_dir().join("prunr-debug.log");
-            unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
-        }
+        unsafe { std::env::set_var("RUST_LOG", level); }
+    }
+    if cli.debug && std::env::var_os("PRUNR_DEBUG_LOG").is_none() {
+        let log_path = std::env::temp_dir().join("prunr-debug.log");
+        // SAFETY: single-threaded at this point in main.
+        unsafe { std::env::set_var("PRUNR_DEBUG_LOG", &log_path); }
     }
 
     // Attach the parent console BEFORE init_tracing so the stderr writer
-    // captures a valid handle. The previous order inverted these, causing
-    // parent stderr to work by luck and worker stderr (via Stdio::inherit)
-    // to silently drop on Windows windows_subsystem=windows builds.
+    // captures a valid handle; otherwise worker stderr (via
+    // Stdio::inherit) silently drops on windows_subsystem=windows builds.
     #[cfg(windows)]
-    if cli.debug || !cli.inputs.is_empty() {
+    if cli.writes_to_terminal() {
         attach_parent_console();
     }
 
     init_tracing();
 
+    // Before anything is loaded: a worker of another version stops, and
+    // the app asks to be restarted.
+    if cli.worker && cli.worker_of.as_deref() != Some(prunr_app::subprocess::protocol::WORKER_VERSION) {
+        tracing::error!(parent = ?cli.worker_of, own = prunr_app::subprocess::protocol::WORKER_VERSION, "worker started by another version of the app");
+        std::process::exit(prunr_app::subprocess::protocol::WORKER_OF_ANOTHER_VERSION);
+    }
+
     if cli.doctor {
         cli::run_doctor();
         std::process::exit(0);
     }
+
+    prunr_core::ep_compat::set_drivers(prunr_app::hardware::driver_identity());
+    // Workers skip a marked add-on too, and leave its removal to the app.
+    if !cli.worker {
+        prunr_app::runtime_install::finish_uninstalls();
+    }
+    prunr_app::runtime_install::use_installed_addons();
 
     if cli.clear_ep_cache {
         let n = prunr_core::ep_compat::clear();
@@ -60,28 +77,31 @@ fn main() {
     }
 
     if let Err(e) = prunr_core::ort_runtime::ensure_initialized() {
-        tracing::error!(%e, "ORT runtime init failed");
-        std::process::exit(2);
+        fail_to_start(&cli, "Prunr could not load its AI engine. Installing Prunr again restores it.", &e, 2);
     }
 
     if cli.worker {
         worker_process::run_worker();
     }
 
-    // `--open <path>` forces GUI mode regardless of input args. Plumbed
-    // via env var so gui::run() and PrunrApp::new don't need a parameter
-    // shuffle just for this opt-in flag.
-    if let Some(path) = cli.open.as_ref() {
-        if let Some(s) = path.to_str() {
-            // Safety: the binary is single-threaded at this point — the
-            // worker subprocess is a separate process, ORT init does not
-            // spawn user-visible threads, and `gui::run` is reached
-            // immediately after this block.
-            unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
+    std::thread::spawn(|| {
+        prunr_core::cache::remove_retired_roots();
+        let bytes = prunr_models::remove_retired_files();
+        if bytes > 0 {
+            tracing::info!(bytes, "removed model files an earlier version downloaded");
         }
-    } else if !cli.inputs.is_empty() {
-        let exit_code = cli::run_remove(&cli);
-        std::process::exit(exit_code);
+    });
+
+    if let Some(cli::Command::Bench(args)) = &cli.command {
+        std::process::exit(cli::run_bench(args));
+    }
+
+    if !cli.opens_the_window() {
+        std::process::exit(cli::run_remove(&cli));
+    }
+    if let Some(s) = cli.open.as_ref().and_then(|path| path.to_str()) {
+        // SAFETY: single-threaded at this point in main.
+        unsafe { std::env::set_var("PRUNR_OPEN_FILE", s); }
     }
 
     if cli.debug {
@@ -89,9 +109,23 @@ fn main() {
         tracing::info!(log_file = %log, "debug mode — tracing at prunr=debug, tee to file");
     }
     if let Err(e) = gui::run() {
-        tracing::error!(%e, "GUI launch failed");
-        std::process::exit(1);
+        fail_to_start(&cli, "Prunr could not open its window. Updating the graphics driver may help.", &e.to_string(), 1);
     }
+}
+
+/// Exits with `code`, after a dialog when the run opens the window:
+/// there is no terminal to read the log in.
+fn fail_to_start(cli: &Cli, what: &str, detail: &str, code: i32) -> ! {
+    tracing::error!(%detail, what, "could not start");
+    if cli.opens_the_window() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Prunr could not start")
+            .set_description(format!("{what}\n\nDetails: {detail}"))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+    std::process::exit(code);
 }
 
 /// Initialize the global tracing subscriber.

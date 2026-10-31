@@ -1,9 +1,5 @@
-//! Magic Brush coordinator. Owns the tool-active flag, the encoder-pending
-//! flag, and the in-progress stroke point buffer for SAM decoder prompts.
-//!
-//! Does NOT own the selection mask (lives on BatchItem) or the encoder
-//! embedding cache (also BatchItem). This struct is purely transient UI
-//! state — active tool + "preparing..." spinner gate + stroke buffer.
+//! Transient Magic Brush UI state. The selection mask and the encoder
+//! embedding live on BatchItem, not here.
 
 use std::time::{Duration, Instant};
 
@@ -14,27 +10,42 @@ use super::brush_state::Trail;
 /// cannot be cancelled).
 pub(crate) const ENCODE_SETTLE: Duration = Duration::from_millis(250);
 
-/// Magic Brush tool coordinator.
+/// A Depth pick made before the image's depth map was there; it runs
+/// when the map lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PendingDepthClick {
+    pub(crate) item_id: u64,
+    /// The click in source pixels.
+    pub(crate) at: (f32, f32),
+    pub(crate) dims: (u32, u32),
+    pub(crate) mode: prunr_core::selection::BrushMode,
+}
+
+/// A Magic Brush click or stroke made before its image was encoded: it
+/// runs when the embedding lands, unless another image comes on screen
+/// first.
+pub(crate) struct PendingSamPick {
+    pub(crate) item_id: u64,
+    pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
+    pub(crate) mode: prunr_core::selection::BrushMode,
+}
+
 #[derive(Default)]
 pub(crate) struct MagicBrushState {
     active: bool,
-    /// A re-threshold is on the pool; the next Confidence value waits for
-    /// its result so a drag never queues more than one.
-    pub(crate) rethreshold_in_flight: bool,
-    /// True while Processor::dispatch_sam_encoder is in flight for the
-    /// current item. Set on dispatch, cleared by pump_sam_encoder_results
-    /// when the embedding lands.
+    /// On at least once this session: from then on the shown image is
+    /// encoded ahead, so the tool is ready whenever it comes back on.
+    used: bool,
+    pub(crate) pending_depth_click: Option<PendingDepthClick>,
+    /// In the order they were made, all on the shown image.
+    pub(crate) pending_sam_picks: Vec<PendingSamPick>,
+    /// An encode is in flight for the current item; cleared when its
+    /// embedding lands.
     encoder_pending: bool,
-    /// Points collected during an in-progress drag stroke, in SOURCE-IMAGE
-    /// pixel coordinates. Populated while the user drags with Magic Brush
-    /// active; dispatched on mouse-up via build_stroke_prompt.
+    /// The in-progress drag stroke in SOURCE-IMAGE pixels.
     pub(crate) active_stroke: Vec<(f32, f32)>,
-    /// The in-progress trail in SCREEN coordinates, cleared at the same
-    /// lifecycle points as `active_stroke`. Distinct buffer because the
-    /// SAM prompt path needs source-pixel points but the visual layer
-    /// needs zoom-aware screen pixels — keeping the transform out of the
-    /// dispatch path means a pan / zoom mid-stroke doesn't corrupt the
-    /// SAM points.
+    /// The same stroke in SCREEN pixels, kept apart so a pan / zoom
+    /// mid-stroke doesn't corrupt the SAM points.
     pub(crate) active_trail: Trail,
     /// The image on screen and since when, and the one before it.
     shown: Option<(u64, Instant)>,
@@ -47,6 +58,7 @@ impl MagicBrushState {
     /// Activate Magic Brush. Returns true if the active state changed
     /// (caller may need to dispatch encoder).
     pub fn activate(&mut self) -> bool {
+        self.used = true;
         if !self.active {
             self.active = true;
             true
@@ -57,8 +69,12 @@ impl MagicBrushState {
     /// result lands, so no second encode of the same image starts.
     pub fn deactivate(&mut self) {
         self.active = false;
+        self.pending_depth_click = None;
+        self.pending_sam_picks.clear();
         self.clear_stroke();
     }
+
+    pub(crate) fn used(&self) -> bool { self.used }
 
     pub fn has_pending_encoder(&self) -> bool { self.encoder_pending }
 
@@ -76,6 +92,10 @@ impl MagicBrushState {
         if id != self.shown.map(|(shown, _)| shown) {
             self.previous = self.shown.map(|(shown, _)| shown);
             self.shown = id.map(|id| (id, now));
+            // A held click is for the image it was made on; it would land
+            // on that image off screen.
+            self.pending_sam_picks.retain(|p| Some(p.item_id) == id);
+            self.pending_depth_click.take_if(|c| Some(c.item_id) != id);
         }
     }
 
@@ -98,9 +118,8 @@ impl MagicBrushState {
         ENCODE_SETTLE.checked_sub(now.saturating_duration_since(since)).filter(|d| !d.is_zero())
     }
 
-    /// Clear both the source-coords stroke and the screen-coords trail.
-    /// One method keeps the two buffers locked together — a clear of one
-    /// without the other would leave a ghost trail or a stuck dispatch.
+    /// Clearing one buffer without the other leaves a ghost trail or a
+    /// stuck dispatch.
     pub(crate) fn clear_stroke(&mut self) {
         self.active_stroke.clear();
         self.active_trail.clear();

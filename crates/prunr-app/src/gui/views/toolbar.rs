@@ -3,12 +3,9 @@ use egui_material_icons::icons::*;
 
 use crate::gui::app::PrunrApp;
 use crate::gui::batch_manager::ProcessButtonLabel;
-use crate::gui::item::BatchStatus;
-use crate::gui::state::AppState;
 use crate::gui::theme;
 
-use super::adjustments_toolbar::ModelStoreRequest;
-use super::chip::{picker_row, popover_header, popup_for, tooltip, with_fill};
+use super::chip::{popover_header, popup_for, tooltip, with_fill};
 use super::shortcuts::{keys, Action};
 
 /// Row-1 icon button: taller than a chip, filled like one.
@@ -21,27 +18,73 @@ fn icon_button(ui: &mut egui::Ui, icon: &'static str) -> egui::Response {
     with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(btn))
 }
 
+const FORMAT_CHOICES: [super::chip::Choice<prunr_core::ExportFormat>; 3] = [
+    super::chip::Choice { value: prunr_core::ExportFormat::Png, name: prunr_core::ExportFormat::Png.label(), description: "Lossless, keeps transparency", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Jpeg, name: prunr_core::ExportFormat::Jpeg.label(), description: "Small files; transparency becomes white", enabled: true },
+    super::chip::Choice { value: prunr_core::ExportFormat::Webp, name: prunr_core::ExportFormat::Webp.label(), description: "Lossless, keeps transparency, smaller than PNG", enabled: true },
+];
+
+/// The arrow beside Save: the file format, and Separate layers for a
+/// cut-out. A pick is saved as the setting at once.
+fn render_save_options(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    let resp = tooltip(icon_button(ui, ICON_EXPAND_MORE.codepoint), "Save options", "File format, separate layers and the depth map.", None);
+    let id = egui::Id::new("save_options");
+    let mut changed = false;
+    let mut depth_turned_on = false;
+    popup_for(ui, id, &resp, |ui| {
+        popover_header(ui, "Save options", None);
+        let refusals = FORMAT_CHOICES.map(|c| app.batch.save_refusal(c.value));
+        let mut choices = FORMAT_CHOICES;
+        for (choice, why) in choices.iter_mut().zip(&refusals) {
+            choice.enabled = why.is_none();
+        }
+        changed |= super::chip::choice_row(ui, "Format", &choices, &mut app.settings.export_format);
+        for why in refusals.iter().flatten() {
+            super::hint(ui, why);
+        }
+        if app.offers_layers() {
+            ui.add_space(theme::SPACE_SM);
+            changed |= ui.checkbox(&mut app.settings.export_split_layers, "Separate layers").changed();
+            super::hint(ui, "Subject, lines and mask as separate PNG files.");
+        }
+        ui.add_space(theme::SPACE_SM);
+        if ui.checkbox(&mut app.settings.export_depth_map, "Depth map").changed() {
+            changed = true;
+            depth_turned_on = app.settings.export_depth_map;
+        }
+        super::hint(ui, "Also saves each image's depth as a 16-bit gray PNG, white = near.");
+    });
+    if changed {
+        app.settings.save();
+    }
+    if depth_turned_on {
+        app.offer_depth_model(ui.ctx());
+    }
+}
+
 pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
         ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
 
-        let can_save_copy = app.batch.app_state() == AppState::Done;
-        let has_selected = app.batch.has_any_selected();
+        let any_ticked = app.batch.any_ticked();
 
-        // ── Left: Open ──
         let open_btn = egui::Button::new(
             RichText::new(format!("{}  Open", ICON_FOLDER_OPEN.codepoint)).color(theme::TEXT_PRIMARY),
         )
         .corner_radius(theme::BUTTON_ROUNDING)
         .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
         if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(open_btn)), "Open", "Open one or more images.", Some(Action::Open)).clicked() {
-            app.pending_open_dialog = true;
+            app.handle_open_dialog();
+        }
+
+        if tooltip(icon_button(ui, ICON_STOREFRONT.codepoint), "Model Store", "Get more models: erasers, upscalers, faces and more.", None).clicked() {
+            app.open_model_store(super::adjustments_toolbar::ModelStoreRequest { filter: None }, ui.ctx());
         }
 
         if tooltip(icon_button(ui, ICON_SETTINGS.codepoint), "Settings", "Hardware, performance and behavior.", Some(Action::Settings)).clicked() {
             if app.show_settings {
-                app.close_settings(ui.ctx());
+                app.close_settings();
             } else {
                 app.open_settings();
             }
@@ -50,7 +93,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let help_resp = tooltip(
             icon_button(ui, ICON_HELP.codepoint),
             "Help",
-            "Shortcuts, the command-line reference, the pipelines and the Model Store.",
+            "Shortcuts, the command-line reference and the pipelines.",
             None,
         );
         let help_id = egui::Id::new("help_menu");
@@ -63,24 +106,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             ];
             let mut chosen = false;
             for (label, action) in entries {
-                if picker_row(ui, false, label, &keys(ui.ctx(), action)).clicked() {
-                    if let Some(open) = app.help_modal_mut(action) {
-                        *open = true;
-                    }
+                if super::chip::menu_row(ui, label, &keys(ui.ctx(), action)).clicked() {
+                    app.perform(action, &ui.ctx().clone());
                     chosen = true;
                 }
-            }
-            if picker_row(ui, false, "Model Store", "Download and manage models").clicked() {
-                app.model_store = Some(ModelStoreRequest::default());
-                chosen = true;
             }
             if chosen {
                 egui::Popup::close_id(ui.ctx(), help_id);
             }
         });
-
-        // Model, groups and presets live on the adjustments toolbar; this
-        // row stays minimal: Open, Settings, Help, and the action cluster.
 
         if !app.batch.items.is_empty() {
             let can_undo = app.batch.any_target_can(|i| i.timeline.can_undo());
@@ -97,9 +131,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
             }
         }
 
-        // ── Right group: action buttons ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if has_selected {
+            if any_ticked {
                 let remove_sel_btn = egui::Button::new(
                     RichText::new(format!("{}  Remove selected", ICON_DELETE.codepoint)).color(Color32::WHITE),
                 )
@@ -109,11 +142,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 }
             }
 
-            let has_saveable_selected = has_selected
-                && app.batch.items.iter().any(|i| i.selected && i.status == BatchStatus::Done);
-            let show_save = can_save_copy || has_saveable_selected;
-            if show_save {
-                let (save_title, save_label) = if has_selected {
+            if app.can_save_intent() {
+                render_save_options(ui, app);
+                let (save_title, save_label) = if any_ticked {
                     ("Save selected", format!("{}  Save selected", ICON_SAVE.codepoint))
                 } else {
                     ("Save", format!("{}  Save", ICON_SAVE.codepoint))
@@ -122,19 +153,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     RichText::new(save_label).color(theme::TEXT_PRIMARY),
                 )
                 .corner_radius(theme::BUTTON_ROUNDING);
-                if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(save_btn)), save_title, "Save the result as PNG.", Some(Action::Save)).clicked() {
+                if tooltip(with_fill(ui, theme::BG_SECONDARY, |ui| ui.add(save_btn)), save_title, "Save the result. The arrow beside it picks the format.", Some(Action::Save)).clicked() {
                     app.handle_save_selected();
                 }
             }
 
 
-            let is_batch_processing = app.batch.status_counts().processing > 0;
-            let selected_processing = app.batch.items.iter()
-                .any(|i| i.selected && i.status == BatchStatus::Processing);
+            let is_batch_processing = app.batch.any_awaiting_cut();
+            let ticked_processing = app.batch.ticked_awaiting_cut().next().is_some();
 
             if is_batch_processing {
-                let partial = selected_processing;
-                let cancel_label = if partial { "Cancel Selected" } else { "Cancel All" };
+                let partial = ticked_processing;
+                let cancel_label = if partial { "Cancel selected" } else { "Cancel all" };
                 let cancel_btn = egui::Button::new(
                     RichText::new(format!("{}  {cancel_label}", ICON_CANCEL.codepoint)).color(Color32::WHITE),
                 )
@@ -146,30 +176,22 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     ("Cancel all", "Stop all processing.")
                 };
                 if tooltip(with_fill(ui, theme::DESTRUCTIVE, |ui| ui.add(cancel_btn)), title, body, Some(Action::Cancel)).clicked() {
-                    if partial {
-                        app.handle_cancel_selected();
-                    } else {
-                        app.handle_cancel_all_and_reset();
-                    }
+                    app.handle_cancel_cuts();
                 }
             }
 
             // Process button — always visible; routing and gating live in
-            // `handle_process_intent` / `can_process_intent`.
+            // `handle_process_intent` / `process_refusal`.
             {
                 let inpaint_mode = app.settings.model.is_inpaint();
                 let label = app.batch.process_button_label();
-                let has_processable = app.can_process_intent();
+                let refusal = app.process_refusal();
+                let has_processable = refusal.is_none();
 
-                let (label_text, is_all) = if inpaint_mode {
-                    ("Process".to_string(), false)
-                } else {
-                    match label {
-                        ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
-                        ProcessButtonLabel::ProcessSelected(1) => ("Process 1 selected".to_string(), false),
-                        ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
-                        ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
-                    }
+                let (label_text, is_all) = match label {
+                    ProcessButtonLabel::ProcessViewed => ("Process".to_string(), false),
+                    ProcessButtonLabel::ProcessSelected(n) => (format!("Process {n} selected"), false),
+                    ProcessButtonLabel::ProcessAll(n) => (format!("Process all ({n})"), true),
                 };
 
                 let text_color = if has_processable {
@@ -190,11 +212,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                     .corner_radius(theme::BUTTON_ROUNDING)
                     .min_size(egui::vec2(0.0, theme::BTN_HEIGHT));
 
-                let body: std::borrow::Cow<'static, str> = if inpaint_mode {
-                    if has_processable {
-                        "Run the eraser again over the painted region with the current settings.".into()
-                    } else {
-                        "Paint a region first; Process then runs the eraser over it.".into()
+                let body: std::borrow::Cow<'static, str> = if let Some(why) = refusal {
+                    why.into()
+                } else if inpaint_mode {
+                    match label {
+                        ProcessButtonLabel::ProcessSelected(n) | ProcessButtonLabel::ProcessAll(n) if n > 1 => {
+                            format!("Run the eraser over the painted regions of the {n} selected images.").into()
+                        }
+                        _ => "Run the eraser again over the painted region with the current settings.".into(),
                     }
                 } else {
                     match label {
