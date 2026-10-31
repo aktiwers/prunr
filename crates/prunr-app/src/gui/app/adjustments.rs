@@ -34,8 +34,8 @@ impl PrunrApp {
         let change = adjustments_panel(panel_frame)
             .show_inside(ui, |ui| adjustments_toolbar::render_model_only(ui, &mut self.settings, installed))
             .inner;
-        if change.model_changed {
-            self.on_model_changed();
+        if let Some(from) = change.model_switched_from {
+            self.on_model_changed(from);
         }
         if let Some(req) = change.open_model_store {
             self.open_model_store(req, ui.ctx());
@@ -105,7 +105,7 @@ impl PrunrApp {
                     ui,
                     &mut item.settings,
                     settings_ref,
-                    crate::gui::views::preset_dropdown::PresetUi { applied: &mut item.applied_preset, save_dialog: &mut self.save_preset },
+                    crate::gui::views::preset_dropdown::PresetUi { applied: &mut item.applied_preset, changes: &item.preset_changes, save_dialog: &mut self.save_preset },
                     brush_state_ref,
                     state,
                 );
@@ -126,6 +126,9 @@ impl PrunrApp {
 
         if toolbar_change.preset_applied {
             let item = &mut self.batch.items[idx];
+            // Applied or just saved: nothing is changed from it yet.
+            item.preset_changes = crate::gui::preset_changes::Changes::new(item.settings);
+            self.settings.brush_changes = crate::gui::preset_changes::Changes::new(self.settings.brush.clone());
             let shown = item.timeline.current();
             if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
                 item.commit(StepKind::Preset);
@@ -134,8 +137,8 @@ impl PrunrApp {
             // persisted path map (or clear) so the recipe diff holds.
             self.reconcile_bg_image_after_preset(idx);
         }
-        if toolbar_change.model_changed {
-            self.on_model_changed();
+        if let Some(from) = toolbar_change.model_switched_from {
+            self.on_model_changed(from);
         }
         if toolbar_change.brush_settings_committed || toolbar_change.faces.outline {
             self.settings.save();
@@ -166,6 +169,13 @@ impl PrunrApp {
             }
         }
 
+        let face = settings_before.faces.model;
+        let item = &mut self.batch.items[idx];
+        if item.settings.faces.model != face {
+            // Another face restorer: its own settings, unless changed.
+            let model = self.settings.model;
+            item.take_preset_for(model, face, model, self.settings.preset(&item.applied_preset));
+        }
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
         if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {
             self.batch.items[idx].commit(StepKind::Adjust);
@@ -402,5 +412,92 @@ mod release_tests {
             item.cached_edge_tensors = crate::gui::tests::fixtures::edge_lines(held, spare);
             assert_eq!(app.resolve_auto_dispatch(0, &change), want, "{line_mode:?} holding {held:?}, spare {spare:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod preset_switch_tests {
+    use super::PrunrApp;
+    use crate::gui::item_settings::{FaceModel, ItemSettings};
+    use crate::gui::settings::SettingsModel;
+    use crate::gui::tests::fixtures::push_test_item;
+    use crate::gui::timeline::StepKind;
+    use crate::gui::views::adjustments_toolbar::ToolbarChange;
+
+    fn app_with_presets() -> PrunrApp {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        for (name, gamma) in [("Soft", 0.8), ("Hard", 1.6)] {
+            let json = serde_json::json!({ "format_version": 2, "models": {
+                "Silueta": { "item_settings": { "gamma": gamma } },
+                "FaceRestoreFormerPp": { "item_settings": { "faces.strength_pct": 35 } }
+            } });
+            app.settings.presets.insert(name.into(), serde_json::from_value(json).unwrap());
+        }
+        for (id, name) in [(1, "Soft"), (2, "Hard")] {
+            push_test_item(&mut app, id).applied_preset = name.into();
+        }
+        app.batch.select_item(0);
+        app
+    }
+
+    fn switch_to(app: &mut PrunrApp, model: SettingsModel) {
+        let from = app.settings.model;
+        app.settings.model = model;
+        let before = app.batch.items[0].settings;
+        let change = ToolbarChange { model_switched_from: Some(from), commit: true, ..Default::default() };
+        app.apply_toolbar_change(&egui::Context::default(), change, before);
+    }
+
+    /// A model switch: every image keeps what was changed since its preset
+    /// and takes the rest of the new model's settings from its own preset;
+    /// on the shown one it is a step undo takes back.
+    #[test]
+    fn a_model_switch_takes_each_images_own_preset() {
+        let mut app = app_with_presets();
+        app.batch.items[0].settings.contrast = 1.3;
+        app.batch.items[0].commit(StepKind::Adjust);
+        // Long enough ago that the switch is a step of its own.
+        app.batch.items[0].timeline.current_mut().at -= std::time::Duration::from_secs(10);
+        switch_to(&mut app, SettingsModel::Silueta);
+        let shown = app.batch.items[0].settings;
+        assert_eq!((shown.gamma, shown.contrast), (0.8, 1.3), "Soft's Silueta gamma; the change stays");
+        assert_eq!(app.batch.items[1].settings.gamma, 1.6, "the other image's own preset");
+
+        app.batch.items[0].undo_step().unwrap();
+        let shown = app.batch.items[0].settings;
+        assert_eq!((shown.gamma, shown.contrast), (ItemSettings::default().gamma, 1.3));
+        switch_to(&mut app, SettingsModel::Silueta);
+        assert_eq!(app.batch.items[0].settings.contrast, 1.3, "undo brought back what was changed");
+    }
+
+    /// Applying a preset starts its changes afresh: a later switch takes
+    /// the new model's settings from it again.
+    #[test]
+    fn applying_a_preset_starts_its_changes_afresh() {
+        let mut app = app_with_presets();
+        app.batch.items[0].settings.gamma = 1.4;
+        switch_to(&mut app, SettingsModel::Silueta);
+        assert_eq!(app.batch.items[0].settings.gamma, 1.4, "changed, so it stays");
+
+        let before = app.batch.items[0].settings;
+        let item = &mut app.batch.items[0];
+        app.settings.apply_preset("Soft", &mut item.settings);
+        item.applied_preset = "Soft".into();
+        let applied = ToolbarChange { preset_applied: true, ..Default::default() };
+        app.apply_toolbar_change(&egui::Context::default(), applied, before);
+        switch_to(&mut app, SettingsModel::BiRefNetLite);
+        switch_to(&mut app, SettingsModel::Silueta);
+        assert_eq!(app.batch.items[0].settings.gamma, 0.8, "Soft's again");
+    }
+
+    /// Picking the other face restorer takes its settings from the preset.
+    #[test]
+    fn another_face_restorer_takes_its_settings_from_the_preset() {
+        let mut app = app_with_presets();
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.faces.model = FaceModel::RestoreFormerPp;
+        app.apply_toolbar_change(&egui::Context::default(), ToolbarChange::default(), before);
+        assert_eq!(app.batch.items[0].settings.faces.strength_pct, 35);
     }
 }

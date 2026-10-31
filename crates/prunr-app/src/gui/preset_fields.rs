@@ -13,6 +13,7 @@ use prunr_models::ModelId;
 
 use super::item_settings::FaceModel;
 use super::knob_catalog::{shows, Surface};
+use super::presets::{model_id_key, preset_key};
 use super::settings::SettingsModel;
 
 /// The models that run inside the picked one and keep their own settings.
@@ -57,6 +58,10 @@ fn brush_fields(surface: Surface) -> &'static [&'static str] {
     }
 }
 
+/// The brush settings the Stable Diffusion eraser keeps in its entry's
+/// `sd` part.
+const SD_PART: &[&str] = &["sd_prompt", "sd_negative_prompt", "sd_guidance_scale", "sd_scheduler", "sd_steps", "sd_seed", "sd_use_taesd"];
+
 /// The settings a model's preset entry holds.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Fields {
@@ -64,6 +69,14 @@ pub(crate) struct Fields {
     pub brush: Vec<&'static str>,
     /// The entry carries an `sd` part: the Stable Diffusion eraser's.
     pub sd: bool,
+}
+
+impl Fields {
+    /// The brush settings the entry sets, those of its `sd` part included.
+    pub(crate) fn brush_and_sd(&self) -> Vec<&'static str> {
+        let sd = if self.sd { SD_PART } else { &[] };
+        self.brush.iter().chain(sd).copied().collect()
+    }
 }
 
 /// The settings of the picked model's own panels.
@@ -112,15 +125,19 @@ pub(crate) fn helpers_of(model: SettingsModel, face: FaceModel) -> Vec<ModelId> 
     .collect()
 }
 
+/// The entries `model` reads, by key, with `face` the restorer it has
+/// chosen: its own, then those of the helper models that run inside it.
+pub(crate) fn entries_of(model: SettingsModel, face: FaceModel) -> Vec<(String, Fields)> {
+    std::iter::once((preset_key(model), of(model)))
+        .chain(helpers_of(model, face).into_iter().map(|helper| (model_id_key(helper), of_helper(helper))))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gui::brush_state::BrushSettings;
     use crate::gui::item_settings::ItemSettings;
-
-    /// The brush settings the Stable Diffusion eraser keeps in its entry's
-    /// `sd` part instead.
-    const SD_PART: &[&str] = &["sd_prompt", "sd_negative_prompt", "sd_guidance_scale", "sd_scheduler", "sd_steps", "sd_seed", "sd_use_taesd"];
 
     /// A struct's settings by name, a group split into its own (`faces`).
     fn names<T: serde::Serialize>(value: &T, split: &[&str]) -> Vec<String> {

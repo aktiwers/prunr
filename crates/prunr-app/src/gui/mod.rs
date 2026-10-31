@@ -7,6 +7,7 @@ pub mod processor;
 pub mod state;
 pub mod settings;
 pub mod item_settings;
+pub mod preset_changes;
 pub mod preset_fields;
 pub mod presets;
 pub mod presets_fs;

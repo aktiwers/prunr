@@ -92,7 +92,10 @@ pub struct Settings {
     pub active_backend: String,
     #[serde(default)]
     pub brush: BrushSettings,
-
+    /// What was changed in `brush` since a preset set it, per model; kept,
+    /// so a restart does not count those changes as untouched.
+    #[serde(default)]
+    pub(crate) brush_changes: super::preset_changes::Changes<BrushSettings>,
 
     /// Hotkey overrides by action name ("Undo"), chords in the form
     /// "Mod+Shift+Z". Only the actions the user changed; an empty list
@@ -392,14 +395,15 @@ impl Settings {
         self.brush = resolved.brush;
     }
 
-    /// Take the new model's tuning from the active preset after the model
-    /// dropdown flips: the fill's Sharpen and scale and the Stable
-    /// Diffusion settings. What the user set for the brush (size, hardness,
-    /// opacity, mode, Expand region, Feather, the selection look, Magic
-    /// Brush) stays.
-    pub(crate) fn on_model_change_resolve_brush(&mut self) {
-        let resolved = self.resolve_active_preset(None).brush;
-        self.brush.take_model_tuning_from(&resolved);
+    /// After a switch from `from`: the brush settings changed since a
+    /// preset set them stay, the rest take the new model's from preset
+    /// `name`.
+    pub(crate) fn switch_brush_model(&mut self, from: SettingsModel, name: &str) {
+        // A face restorer has no brush settings: which one runs does not matter.
+        self.brush_changes.note(&self.brush, &super::preset_fields::entries_of(from, Default::default()));
+        let brush = super::presets::take_untouched_brush(self.preset(name), self.model, self.brush.clone(), &self.brush_changes);
+        self.brush_changes.rebase(&brush);
+        self.brush = brush;
     }
 
     /// Switch the eraser to `scheduler`'s steps and guidance from the
@@ -750,6 +754,7 @@ impl Default for Settings {
             processor: ComputeMode::Auto,
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
+            brush_changes: Default::default(),
             sd_memory: SdMemoryGuard::Balanced,
             hotkeys: BTreeMap::new(),
             keep_sd_loaded: false,
@@ -1118,25 +1123,33 @@ mod tests {
         }
     }
 
+    /// A switch keeps what the user changed and takes the rest of the new
+    /// model's from the preset.
     #[test]
-    fn a_model_switch_takes_the_models_tuning_and_keeps_the_users_brush() {
+    fn a_model_switch_keeps_the_brush_changes_and_takes_the_rest() {
+        use super::super::presets::prunr_view;
         let mut s = Settings::default();
-        s.model = SettingsModel::Silueta;
+        s.model = SettingsModel::BigInpaint;
         s.presets.insert("Foo".to_string(), preset(serde_json::json!({ "format_version": 2, "models": {
-            "LaMaFp32": { "brush": { "inpaint_sharpen": 0.3, "inpaint_fill_scale": "Full" } }
+            "LaMaFp32": { "brush": { "inpaint_sharpen": 0.3, "inpaint_fill_scale": "Full", "inpaint_grow": 20.0 } }
         } })));
-        s.default_preset = "Foo".to_string();
+        let mut item = ItemSettings::default();
+        s.apply_preset("Foo", &mut item);
+        s.brush_changes = super::super::preset_changes::Changes::new(s.brush.clone());
         s.brush.radius = 33.0;
-        s.brush.hardness = 0.2;
         s.brush.inpaint_feather = 30.0;
-        s.brush.inpaint_grow = 14.0;
+        s.brush.inpaint_sharpen = 0.9;
 
         s.model = SettingsModel::Inpaint;
-        s.on_model_change_resolve_brush();
-        assert_eq!((s.brush.radius, s.brush.hardness), (33.0, 0.2), "what the user set for the brush survives a model switch");
-        assert_eq!((s.brush.inpaint_grow, s.brush.inpaint_feather), (14.0, 30.0), "so do the region knobs on the brush strips");
-        assert_eq!(s.brush.inpaint_sharpen, 0.3, "the new model's tuning comes from the preset");
-        assert_eq!(s.brush.inpaint_fill_scale, prunr_core::inpaint::FillScale::Full);
+        s.switch_brush_model(SettingsModel::BigInpaint, "Foo");
+        assert_eq!((s.brush.radius, s.brush.inpaint_feather, s.brush.inpaint_sharpen), (33.0, 30.0, 0.9), "what the user changed stays");
+        assert_eq!(s.brush.inpaint_fill_scale, prunr_core::inpaint::FillScale::Full, "the rest is the new model's from the preset");
+        assert_eq!(s.brush.inpaint_grow, 20.0);
+
+        s.model = SettingsModel::BigInpaint;
+        s.switch_brush_model(SettingsModel::Inpaint, "Foo");
+        assert_eq!(s.brush.inpaint_grow, prunr_view(SettingsModel::BigInpaint, None).brush.inpaint_grow, "a model the preset has no entry for takes Prunr's");
+        assert_eq!(s.brush.inpaint_sharpen, 0.9, "a change stays across every switch");
     }
 
     /// Without the Fast download, Fast's few steps would run on the full

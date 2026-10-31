@@ -33,9 +33,9 @@ pub struct ToolbarChange {
     /// Any chip signalled a committed value (slider released, toggle
     /// flipped, color picked). Flushes pending debounced previews.
     pub commit: bool,
-    /// The model dropdown flipped — triggers settings save + toast. Does
-    /// not auto-reprocess; user must click Process.
-    pub model_changed: bool,
+    /// The model dropdown flipped, from this model: triggers settings
+    /// save + toast. Does not auto-reprocess; user must click Process.
+    pub model_switched_from: Option<SettingsModel>,
     /// A preset was applied; the app records it as an undo step.
     /// The dispatcher resolves subprocess vs skip from the recipe diff.
     pub preset_applied: bool,
@@ -1217,7 +1217,7 @@ fn role_caption(role: crate::gui::knob_catalog::ModelRole) -> &'static str {
 }
 
 /// Leftmost on the toolbar: the model picker. Edits `app_settings.model` directly and
-/// sets `change.model_changed` + `commit` when the selection flips.
+/// sets `change.model_switched_from` + `commit` when the selection flips.
 pub(super) fn render_model_dropdown(
     ui: &mut Ui,
     app_settings: &mut Settings,
@@ -1329,7 +1329,7 @@ pub(super) fn render_model_dropdown(
         if app_settings.parallel_jobs > max {
             app_settings.parallel_jobs = max;
         }
-        change.model_changed = true;
+        change.model_switched_from = Some(prev_model);
         // Not the Model knob's cache impact: the old model's cut-out stays
         // on screen and the brushes correct it from its segmentation. The
         // next Process drops that once it runs the new model.

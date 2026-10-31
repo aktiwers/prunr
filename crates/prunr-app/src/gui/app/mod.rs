@@ -172,8 +172,8 @@ pub struct PrunrApp {
     /// The control socket, when `PRUNR_CONTROL_PORT` is set.
     pub(crate) automation: Option<super::automation::Automation>,
 
-    /// The Save-preset dialog's name field; `Some` while the dialog is up.
-    pub(crate) save_preset: Option<String>,
+    /// The Save-preset dialog; `Some` while it is up.
+    pub(crate) save_preset: Option<super::views::preset_dropdown::SaveDialog>,
     /// When a pending settings save falls due (see `save_settings_soon`).
     settings_save_due: Option<std::time::Instant>,
 }
@@ -1368,11 +1368,19 @@ impl eframe::App for PrunrApp {
 }
 
 impl PrunrApp {
-    /// What a model switch does whatever images are loaded: fit lines and
-    /// brushes to the model, drop runs and cached sessions of the old one.
-    fn on_model_changed(&mut self) {
-        self.batch.fit_line_modes_to(self.settings.model);
-        self.settings.on_model_change_resolve_brush();
+    /// What a switch from model `from` does whatever images are loaded:
+    /// each image and the brush keep what was changed and take the rest
+    /// from their preset, the brushes fit the model, and runs and cached
+    /// sessions of the old one drop.
+    fn on_model_changed(&mut self, from: super::settings::SettingsModel) {
+        self.batch.switch_model(from, &self.settings);
+        for idx in 0..self.batch.items.len() {
+            self.reconcile_bg_image_after_preset(idx);
+        }
+        // The brush is the app's, not an image's: the shown image's preset
+        // is the one in front of the user.
+        let preset = self.batch.selected_item().map_or_else(|| self.settings.default_preset.clone(), |i| i.applied_preset.clone());
+        self.settings.switch_brush_model(from, &preset);
         self.fit_brush_models_to_model();
         // A run of the old model would land on the wrong selection.
         self.processor.cancel_runs();

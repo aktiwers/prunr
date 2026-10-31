@@ -561,7 +561,23 @@ fn the_save_preset_dialog_takes_a_name_typed_at_once() {
     assert!(!egui::Popup::is_any_open(&h.ctx), "opening the dialog closed the popover");
     h.event(egui::Event::Text("Mine".into()));
     settle(&mut h);
-    assert_eq!(h.state().save_preset.as_deref(), Some("Mine"), "the typing went into the name");
+    assert_eq!(h.state().save_preset.as_ref().map(|d| d.name.as_str()), Some("Mine"), "the typing went into the name");
+}
+
+/// The save dialog lists, ticked, the models whose settings it saves:
+/// the one a setting was changed on.
+#[test]
+fn the_save_preset_dialog_lists_the_changed_model() {
+    let mut h = loaded_with(|app| {
+        app.settings.model = crate::gui::settings::SettingsModel::BiRefNetLite;
+        app.batch.items[0].settings.gamma = 1.4;
+    });
+    click(&mut h, "Preset");
+    click(&mut h, "Save current as…");
+    let rows: Vec<(String, bool)> = h.state().save_preset.as_ref().map_or_else(Vec::new, |d| d.models.iter().map(|m| (m.key.clone(), m.ticked)).collect());
+    assert_eq!(rows, [("BiRefNetLite".to_string(), true)]);
+    click(&mut h, "BiRefNet");
+    assert!(h.state().save_preset.as_ref().is_some_and(|d| !d.models[0].ticked), "a click unticks it");
 }
 
 /// One click beside stacked modals closes one, the topmost, as one

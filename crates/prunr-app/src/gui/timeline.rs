@@ -20,6 +20,7 @@ use prunr_core::selection::MaskArtifact;
 use super::brush_state::{StrokeDrawn, Tool};
 use super::item::Engine;
 use super::item_settings::ItemSettings;
+use super::preset_changes::Changes;
 
 /// Steps kept per image; the oldest go first.
 pub(crate) const TIMELINE_DEPTH: usize = 64;
@@ -326,6 +327,7 @@ pub(crate) struct DocState {
     pub(crate) edits: Option<StoredSelection>,
     pub(crate) settings: ItemSettings,
     pub(crate) applied_preset: String,
+    pub(crate) preset_changes: Changes<ItemSettings>,
     /// The run that made this step's image; `None` for the original and
     /// for edits made by hand.
     pub(crate) origin: Option<Origin>,
@@ -402,6 +404,7 @@ impl DocState {
             edits: None,
             settings,
             applied_preset,
+            preset_changes: Changes::new(settings),
             origin: None,
             faced: false,
             at: Instant::now(),
@@ -671,6 +674,7 @@ mod tests {
             edits: None,
             settings: super::super::item_settings::item_with_gamma(gamma),
             applied_preset: String::new(),
+            preset_changes: Changes::default(),
             origin: None,
             faced: false,
             at: Instant::now(),
