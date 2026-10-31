@@ -8,7 +8,7 @@ use egui_material_icons::icons::*;
 
 use crate::gui::item_settings::ItemSettings;
 use crate::gui::preset_changes::Changes;
-use crate::gui::presets::{draft, entry_name, Entry, Shown};
+use crate::gui::presets::{draft, entry_name, Entry, PresetFile, Shown};
 use crate::gui::settings::{PRUNR_PRESET, Settings};
 use crate::gui::theme;
 use crate::gui::views::chip::{button, ButtonKind};
@@ -105,6 +105,14 @@ impl SaveDialog {
     /// The ticked models' entries.
     fn ticked(&self) -> impl Iterator<Item = (String, Entry)> + '_ {
         self.models.iter().filter(|row| row.ticked).map(|row| (row.key.clone(), row.entry.clone()))
+    }
+
+    /// The file a save as `name` writes: the ticked models over the preset
+    /// of that name when there is one, whose other models keep their
+    /// entries.
+    fn file_for(&self, settings: &Settings, name: &str) -> PresetFile {
+        let base = settings.presets.get(name).map_or_else(PresetFile::default, |preset| preset.file().clone());
+        base.with_entries(self.ticked())
     }
 }
 
@@ -222,7 +230,11 @@ pub(crate) fn render(
                     );
                 });
                 if let Some(covers) = settings.presets.get(&name).map(|p| p.covers()).filter(|c| !c.is_empty()) {
-                    ui.label(RichText::new(covers).color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                    ui.horizontal(|ui| {
+                        // Under the name, which sits inside its row's padding.
+                        ui.add_space(ui.spacing().button_padding.x);
+                        ui.label(RichText::new(covers).color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                    });
                 }
             }
 
@@ -341,7 +353,6 @@ pub(crate) fn render(
         });
         cancel |= backdrop_closed;
 
-        let is_overwrite = overwrite_target.is_some();
         // Resolve the target name: overwrite button wins, else a valid typed
         // name on commit. Saving the current settings AS a preset makes that
         // preset the now-applied one — label reads "Name ✓" after.
@@ -350,11 +361,8 @@ pub(crate) fn render(
                 .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
         });
         if let Some(name) = target_name {
-            // An overwrite merges into the preset as loaded: the models not
-            // ticked keep their entries. The store keeps what is written,
-            // for the preset button's mark.
-            let base = settings.presets.get(&name).filter(|_| is_overwrite).map_or_else(Default::default, |p| p.file().clone());
-            let file = base.with_entries(dialog.ticked());
+            // The store keeps what is written, for the preset button's mark.
+            let file = dialog.file_for(settings, &name);
             crate::gui::presets_fs::queue_save(&name, &file);
             settings.presets.insert(name.clone(), file.into());
 
@@ -431,6 +439,24 @@ mod tests {
             label.ends_with(ICON_EDIT.codepoint),
             "brush-only diff must trigger the modified indicator: {label}",
         );
+    }
+
+    /// Saving under an existing preset's name, typed or picked, merges
+    /// into it: the models the save does not hold keep their entries.
+    #[test]
+    fn saving_under_a_presets_name_keeps_its_other_models() {
+        use crate::gui::presets::Preset;
+        let mut s = Settings::default();
+        let portrait: Preset = serde_json::from_str(r#"{ "format_version": 2, "models": {
+            "Silueta": { "item_settings": { "gamma": 1.5 } },
+            "FourXNomos2RealPlksr": { "item_settings": { "sharpen": 0.4 } }
+        } }"#).unwrap();
+        s.presets.insert("Portrait".into(), portrait);
+        let entry: Entry = serde_json::from_str(r#"{ "item_settings": { "gamma": 1.2 } }"#).unwrap();
+        let dialog = SaveDialog { name: "Portrait".into(), models: vec![ModelRow { key: "BiRefNetLite".into(), name: "BiRefNet".into(), entry, ticked: true }] };
+        let mut keys: Vec<String> = dialog.file_for(&s, "Portrait").models.into_keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["BiRefNetLite", "FourXNomos2RealPlksr", "Silueta"]);
     }
 
     /// Prunr first, then the user's presets by name ignoring case

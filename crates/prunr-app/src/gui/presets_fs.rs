@@ -588,8 +588,10 @@ mod tests {
         file.models.get(&super::super::presets::preset_key(super::super::settings::DEFAULT_MODEL))
     }
 
+    /// A v1 file keeps what differs from Prunr's, under every model that
+    /// shows it.
     #[test]
-    fn migrate_v1_wraps_what_differs_under_the_default_model() {
+    fn migrate_v1_keeps_what_differs_under_every_model() {
         let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 2.0, "edge_thickness": 5, "definitely_not_a_real_field": 42 })).expect("migrates");
         assert_eq!(migrated.format_version, 2);
         let entry = default_entry(&migrated).expect("default model entry");
@@ -626,11 +628,17 @@ mod tests {
     // it was. Tests use `save_at` so they don't write to the user's
     // presets folder.
 
-    /// A save as the app makes it: the preset as loaded, the model in use
-    /// set from the current settings, written whole.
+    /// A save as the app makes it after applying the preset at `path` and
+    /// setting `item` and `brush` on `model`: the draft's rows, all ticked,
+    /// over the preset as loaded.
     fn save_at(path: &std::path::Path, model: super::super::settings::SettingsModel, item: &ItemSettings, brush: &super::super::brush_state::BrushSettings) -> std::io::Result<()> {
+        use super::super::preset_changes::Changes;
+        use super::super::presets::{draft, Shown};
         let existing = read_preset(path).unwrap_or_default();
-        write_preset(path, &existing.with_settings(model, item, brush))
+        let started = Preset::from(existing.clone());
+        let (item_changes, brush_changes) = (Changes::new(started.item_settings(model)), Changes::new(started.brush(model, None).clone()));
+        let shown = Shown { model, item, brush, item_changes: &item_changes, brush_changes: &brush_changes };
+        write_preset(path, &existing.with_entries(draft(&started, &shown)))
     }
 
     #[test]

@@ -73,7 +73,7 @@ pub struct Cli {
 
     /// Refine mask edges using guided filter for better detail on hair,
     /// leaves, etc. `--refine-edges=false` turns a preset's off.
-    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
     pub refine_edges: Option<bool>,
 
     /// How far from the edge --refine-edges looks, in pixels.
@@ -227,7 +227,7 @@ pub struct Cli {
 
     /// Match the upscale's colours to the original. `--color-match=false`
     /// turns a preset's off.
-    #[arg(long, requires = "upscale", num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    #[arg(long, requires = "upscale", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_name = "BOOL")]
     pub color_match: Option<bool>,
 
     /// Restore faces with this model after the upscale (downloaded in the
@@ -665,7 +665,8 @@ impl Cli {
     /// over them; why not, when the preset or a colour cannot be read.
     fn run_settings(&self) -> Result<RunSettings, String> {
         use prunr_core::{BgEffect, OutputScale};
-        let (mut s, mut brush) = crate::gui::presets::command_line_settings(self.preset.as_deref(), self.settings_model())?;
+        let faces = self.restore_faces.map(CliFaceModel::face_model);
+        let (mut s, mut brush) = crate::gui::presets::command_line_settings(self.preset.as_deref(), self.settings_model(), faces)?;
         lay(&mut s.gamma, self.gamma);
         lay(&mut s.contrast, self.contrast);
         lay(&mut s.edge_shift, self.edge_shift.map(MaskSettings::edge_shift_for_grow));
@@ -705,9 +706,6 @@ impl Cli {
         lay(&mut s.sharpen, self.sharpen.map(|v| v.clamp(-1.0, 1.0)));
         lay(&mut s.ai_blend, self.ai_blend.map(|v| v.clamp(0.0, 1.0)));
         lay(&mut s.color_match, self.color_match);
-        if let Some(model) = self.restore_faces {
-            (s.faces.on, s.faces.model) = (true, model.face_model());
-        }
         lay(&mut s.faces.strength_pct, self.face_strength);
         if let Some(strength) = self.color_strength {
             s.set_color_strength(strength.clamp(0.0, prunr_core::colorize::STRENGTH_MAX));
@@ -1813,7 +1811,7 @@ mod tests {
             (&["--inpaint", "--mask", "m.png"][..], SettingsModel::Inpaint),
         ] {
             let run = cli(args).run_settings().unwrap();
-            assert_eq!((run.item, run.brush), command_line_settings(None, model).unwrap(), "{args:?}");
+            assert_eq!((run.item, run.brush), command_line_settings(None, model, None).unwrap(), "{args:?}");
         }
         let eraser = cli(&["--inpaint", "--mask", "m.png"]).run_settings().unwrap().brush;
         assert_eq!(eraser.inpaint_sharpen, 0.6);
@@ -1836,6 +1834,34 @@ mod tests {
         let red = settings(&["--preset", preset, "--bg-color", "ff0000"]);
         assert_eq!(red.backdrop(), crate::gui::item_settings::Backdrop::Color([255, 0, 0]));
         assert_eq!(settings(&["-m", "silueta", "--preset", preset]).gamma, 1.0, "the preset has no entry for Silueta");
+    }
+
+    /// An on/off flag followed by an input still takes the input as one:
+    /// `--refine-edges photo.jpg` worked before the flags took values.
+    #[test]
+    fn an_on_off_flag_does_not_swallow_the_input_after_it() {
+        let cli = super::Cli::try_parse_from(["prunr", "--refine-edges", "photo.jpg"]).expect("parses");
+        assert_eq!((cli.refine_edges, cli.inputs.len()), (Some(true), 1));
+        let cli = super::Cli::try_parse_from(["prunr", "--upscale", "nomos", "--color-match", "in.jpg"]).expect("parses");
+        assert_eq!((cli.color_match, cli.inputs.len()), (Some(true), 1));
+        assert_eq!(super::Cli::parse_from(["prunr", "--refine-edges=false", "a.png"]).refine_edges, Some(false));
+    }
+
+    /// `--restore-faces` runs the restorer with its own settings from the
+    /// preset, as picking it in the app does.
+    #[test]
+    fn a_face_restorer_takes_its_own_settings_from_the_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("faces.json");
+        std::fs::write(&file, r#"{ "format_version": 2, "models": {
+            "FaceGfpgan": { "item_settings": { "faces.strength_pct": 70 } },
+            "FaceRestoreFormerPp": { "item_settings": { "faces.strength_pct": 35 } }
+        } }"#).unwrap();
+        let preset = file.to_str().unwrap();
+        let faces = |restorer: &str| settings(&["--upscale", "nomos", "--preset", preset, "--restore-faces", restorer]).faces;
+        assert_eq!((faces("restoreformer").on, faces("restoreformer").strength_pct), (true, 35));
+        assert_eq!(faces("gfpgan").strength_pct, 70);
+        assert_eq!(settings(&["--upscale", "nomos", "--preset", preset, "--restore-faces", "gfpgan", "--face-strength", "20"]).faces.strength_pct, 20, "a flag still wins");
     }
 
     #[test]
@@ -2158,7 +2184,7 @@ mod tests {
         let m = settings(&["--feather", "1.5", "--edge-width", "12"]).mask_settings();
         assert_eq!((m.feather, m.guided_radius), (1.5, 12));
         let d = settings(&[]).mask_settings();
-        let prunr = command_line_settings(None, SettingsModel::BiRefNetLite).unwrap().0.mask_settings();
+        let prunr = command_line_settings(None, SettingsModel::BiRefNetLite, None).unwrap().0.mask_settings();
         assert_eq!((d.feather, d.guided_radius), (prunr.feather, prunr.guided_radius));
     }
 }

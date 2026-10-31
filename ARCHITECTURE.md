@@ -264,7 +264,7 @@ A preset is one JSON file in the platform config dir (`prunr/presets/`); the fol
 |--------|--------------|
 | Apply, Reset | The preset's settings for the model in use; every panel's Reset goes to the default preset's |
 | Change a setting | Noted per image under the model in use (`gui::preset_changes`); the brush's in the settings file |
-| Switch model or face restorer | Changed settings stay; the rest take the new model's from the image's own preset |
+| Switch model or face restorer | Changed settings stay; the rest take the new model's from the image's own preset. An eraser's fill tuning (Sharpen, fill scale, edge colour, the SD settings) is always its own: one tuned for another eraser would lower its fill |
 | Save | The model in use as shown, plus each other changed or started-from model; the dialog lists them to untick |
 | Open the list | The folder is read again off the UI thread, behind any queued save (`gui::preset_store`) |
 | Import, drop a `.json`, Export | Files copied in under a free name, or written out; JSON that names no setting is refused |
