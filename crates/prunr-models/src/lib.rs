@@ -1843,7 +1843,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places {
             cuda: Place::There(Speed::on(47.0, 1080.0, "RTX 3060, ORT 1.30, input 518 px on the short side, 2026-10-30")),
-            directml: Place::There(Speed::on(65.56, 531.0, "RTX 3060, Windows ML 1.30, 2026-10-26")),
+            directml: Place::There(Speed::on(367.0, 1130.0, "RTX 3060, Windows ML 1.30, input 518 px on the short side, 2026-10-31")),
             coreml: Place::There(Speed::on(231.0, 644.0, "MacBook Air M1 16 GB, ORT 1.30, input 518 px on the short side, 2026-10-30")),
             openvino: Place::There(Speed::on(382.0, 487.0, "i7-6700, OpenVINO 1.24.1 on the processor, 2026-10-25")),
             openvino_gpu: Place::Cpu(Why::Slower("0.65x: 770 ms against the CPU's 497 ms (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
@@ -1855,7 +1855,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             cpu: Cost::measured(600, 0, "i5-11600KF, input 1036×518, 2026-10-31"),
             mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
             cuda: Priced::Same(Cost::measured(1_000, 900, "RTX 3060 12 GB, i5-11600KF, input 1036×518, 2026-10-31")),
-            directml: Priced::Same(Cost::estimate(500, 650, "measured 400 + 500 at 518 px on the long side (RTX 3060, Windows ML 1.30, 2026-10-28), grown as CUDA's grew to 1036×518")),
+            directml: Priced::Same(Cost::measured(350, 1_100, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, input 1036×518, 2026-10-31")),
             coreml: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
             openvino: Priced::Unmeasured,
             migraphx: Priced::Unmeasured,
