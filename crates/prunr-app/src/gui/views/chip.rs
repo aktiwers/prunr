@@ -62,15 +62,39 @@ pub(super) fn with_fill<R>(ui: &mut Ui, base: Color32, body: impl FnOnce(&mut Ui
 
 /// `accent` draws an accent border (the non-default value indicator).
 pub(super) fn chip_button(ui: &mut Ui, icon: &str, value: &str, accent: bool) -> Response {
-    let text = if compact(ui) { icon.to_owned() } else { format!("{icon}  {value}") };
-    chip_face(ui, text, accent)
+    let full = format!("{icon}  {value}");
+    if compact(ui) {
+        note_words_hidden(ui, icon, &full);
+        chip_face(ui, icon.to_owned(), accent)
+    } else {
+        chip_face(ui, full, accent)
+    }
 }
 
 /// A chip that opens a menu: the face ends in a chevron.
 pub(super) fn menu_chip_button(ui: &mut Ui, icon: &str, value: &str) -> Response {
     let chevron = ICON_EXPAND_MORE.codepoint;
-    let text = if compact(ui) { format!("{icon} {chevron}") } else { format!("{icon}  {value}  {chevron}") };
-    chip_face(ui, text, false)
+    let full = format!("{icon}  {value}  {chevron}");
+    if compact(ui) {
+        let shown = format!("{icon} {chevron}");
+        note_words_hidden(ui, &shown, &full);
+        chip_face(ui, shown, false)
+    } else {
+        chip_face(ui, full, false)
+    }
+}
+
+const WORDS_HIDDEN: &str = "chip_words_hidden";
+
+/// While a chip shows its icon only, how much wider its words would make
+/// it, summed over the chips of a `TrimmedRow` slot: the row reads it to
+/// know when they fit again, as the words may have changed meanwhile.
+fn note_words_hidden(ui: &Ui, shown: &str, full: &str) {
+    let width = |text: &str| ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(theme::FONT_SIZE_BODY), theme::TEXT_PRIMARY).size().x;
+    let extra = width(full) - width(shown);
+    let id = egui::Id::new(WORDS_HIDDEN);
+    let sum = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    ui.data_mut(|d| d.insert_temp(id, sum + extra));
 }
 
 const COMPACT: &str = "chip_compact";
@@ -81,16 +105,38 @@ const COMPACT: &str = "chip_compact";
 /// decides from them.
 pub(super) struct TrimmedRow {
     id: egui::Id,
-    last: Vec<ChipWidth>,
-    now: Vec<ChipWidth>,
-    /// The chips showing their icon only, by key.
-    trimmed: Vec<&'static str>,
+    last: RowWidths,
+    now: RowWidths,
+    /// How many of `last`'s chips, from the right, show their icon only.
+    trimmed: usize,
+}
+
+/// The most chips a `TrimmedRow` measures; the toolbar has a dozen.
+const ROW_CHIPS: usize = 16;
+
+/// A row's chip widths in a fixed array, so a frame allocates nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowWidths {
+    chips: [ChipWidth; ROW_CHIPS],
+    len: usize,
+}
+
+impl Default for RowWidths {
+    fn default() -> Self {
+        Self { chips: [ChipWidth { key: "", words: 0.0, icon: 0.0 }; ROW_CHIPS], len: 0 }
+    }
+}
+
+impl RowWidths {
+    fn as_slice(&self) -> &[ChipWidth] {
+        &self.chips[..self.len]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ChipWidth {
     key: &'static str,
-    /// With its words; 0 until laid out so.
+    /// With its words; 0 until known.
     words: f32,
     /// Its icon only; 0 until laid out so.
     icon: f32,
@@ -102,27 +148,39 @@ const ICON_CHIP_GUESS: f32 = theme::CHIP_HEIGHT + 4.0;
 impl TrimmedRow {
     /// The row `id`, given `room` for its chips.
     pub(super) fn begin(ui: &Ui, id: egui::Id, room: f32) -> Self {
-        let last: Vec<ChipWidth> = ui.data(|d| d.get_temp(id)).unwrap_or_default();
-        let n = trimmed_count(&last, ui.spacing().item_spacing.x, room);
-        let trimmed = last[last.len() - n..].iter().map(|c| c.key).collect();
-        Self { id, last, now: Vec::new(), trimmed }
+        let last: RowWidths = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        let trimmed = trimmed_count(last.as_slice(), ui.spacing().item_spacing.x, room);
+        Self { id, last, now: RowWidths::default(), trimmed }
     }
 
     /// One chip of the row, `key` naming it from frame to frame.
     pub(super) fn chip<R>(&mut self, ui: &mut Ui, key: &'static str, body: impl FnOnce(&mut Ui) -> R) -> R {
-        let iconic = self.trimmed.contains(&key);
+        let last = self.last.as_slice();
+        let iconic = last.iter().position(|c| c.key == key).is_some_and(|i| i >= last.len() - self.trimmed);
+        let hidden_id = egui::Id::new(WORDS_HIDDEN);
+        ui.data_mut(|d| d.insert_temp(hidden_id, 0.0f32));
         let r = ui.scope(|ui| compact_chips(ui, iconic, body));
         let width = r.response.rect.width();
-        let was = self.last.iter().find(|c| c.key == key).copied().unwrap_or(ChipWidth { key, words: 0.0, icon: 0.0 });
-        self.now.push(if iconic { ChipWidth { icon: width, ..was } } else { ChipWidth { words: width, ..was } });
+        let was = last.iter().find(|c| c.key == key).copied().unwrap_or(ChipWidth { key, words: 0.0, icon: 0.0 });
+        let measured = if iconic {
+            let hidden: f32 = ui.data(|d| d.get_temp(hidden_id)).unwrap_or(0.0);
+            ChipWidth { key, words: width + hidden, icon: width }
+        } else {
+            ChipWidth { words: width, ..was }
+        };
+        if self.now.len < ROW_CHIPS {
+            self.now.chips[self.now.len] = measured;
+            self.now.len += 1;
+        }
         r.inner
     }
 
     /// Keep this frame's widths for the next; another frame follows when
     /// they changed, so the row settles at once.
     pub(super) fn finish(self, ui: &Ui) {
-        let settled = self.now.len() == self.last.len()
-            && self.now.iter().zip(&self.last).all(|(a, b)| a.key == b.key && (a.words - b.words).abs() <= 0.5 && (a.icon - b.icon).abs() <= 0.5);
+        let (now, last) = (self.now.as_slice(), self.last.as_slice());
+        let settled = now.len() == last.len()
+            && now.iter().zip(last).all(|(a, b)| a.key == b.key && (a.words - b.words).abs() <= 0.5 && (a.icon - b.icon).abs() <= 0.5);
         if !settled {
             ui.data_mut(|d| d.insert_temp(self.id, self.now));
             ui.ctx().request_repaint();
@@ -1257,8 +1315,10 @@ pub(super) fn gated<R>(ui: &mut Ui, reason: Option<&str>, body: impl FnOnce(&mut
         body(ui)
     });
     if let Some(reason) = reason {
-        explain_on_click(ui, &r.response, reason);
-        r.response.on_disabled_hover_text(reason);
+        // The click's own tooltip already says it: the hover one would stack.
+        if !explain_on_click(ui, &r.response, reason) {
+            r.response.on_disabled_hover_text(reason);
+        }
     }
     r.inner
 }
@@ -1272,18 +1332,20 @@ const WHY_SECS: f64 = 4.0;
 
 /// A click on a disabled control shows why at once, for `WHY_SECS`: the
 /// hover tooltip waits for the pointer to rest, which on a TV it rarely
-/// does.
-fn explain_on_click(ui: &Ui, resp: &Response, reason: &str) {
+/// does. True while it shows.
+fn explain_on_click(ui: &Ui, resp: &Response, reason: &str) -> bool {
     let until_id = resp.id.with("why_until");
     let now = ui.input(|i| i.time);
     if resp.contains_pointer() && ui.input(|i| i.pointer.primary_clicked()) {
         ui.data_mut(|d| d.insert_temp(until_id, now + WHY_SECS));
     }
     let until = ui.data(|d| d.get_temp::<f64>(until_id)).unwrap_or(0.0);
-    if now < until {
+    let showing = now < until;
+    if showing {
         resp.show_tooltip_text(reason);
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now));
     }
+    showing
 }
 
 /// A panel's section heading: a small capitals caption, and
