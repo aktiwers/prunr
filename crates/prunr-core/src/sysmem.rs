@@ -20,18 +20,60 @@ pub fn available_ram_bytes() -> Option<u64> {
 }
 
 /// Free memory a run may still take before the computer runs out: RAM
-/// available now plus free swap. A model run pushed into swap is slower,
-/// not stopped; `None` when the system reports no memory.
+/// available now plus free swap, zram's at what compression frees. A
+/// model run pushed into swap is slower, not stopped; `None` when the
+/// system reports no memory.
 pub fn free_ram_and_swap_bytes() -> Option<u64> {
     free_ram_then_swap_bytes().map(|(ram, swap)| ram + swap)
 }
 
-/// Free swap alone; reading it on Windows walks the process table.
+/// Free swap alone, as `swap_room` counts it; reading it on Windows walks
+/// the process table.
 pub fn free_swap_bytes() -> u64 {
-    with_system(|sys| {
+    swap_room(with_system(|sys| {
         sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_swap());
         sys.free_swap()
-    })
+    }))
+}
+
+/// The room `free_swap` makes: less the RAM a Linux zram device would take
+/// to hold its free space, as zram keeps its pages in RAM, compressed.
+/// Elsewhere (no /proc/swaps) all of it.
+fn swap_room(free_swap: u64) -> u64 {
+    let Ok(swaps) = std::fs::read_to_string("/proc/swaps") else { return free_swap };
+    let ratio = |device: &str| std::fs::read_to_string(format!("/sys/block/{device}/mm_stat")).ok().and_then(|stat| zram_ratio(&stat));
+    free_swap.saturating_sub(zram_held(&swaps, ratio))
+}
+
+/// zram's compression assumed before a device holds any pages.
+const ZRAM_RATIO_UNKNOWN: f64 = 2.0;
+/// The most zram's compression is counted at: zero-filled pages take no
+/// memory, so a device holding few pages can report far more than the
+/// pages a run pushes out will compress to.
+const ZRAM_RATIO_MAX: f64 = 4.0;
+
+/// The RAM the zram devices `swaps` (/proc/swaps) lists would take to
+/// hold their free space: free over `ratio_of` the device's compression.
+fn zram_held(swaps: &str, ratio_of: impl Fn(&str) -> Option<f64>) -> u64 {
+    swaps
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let device = fields.next()?.strip_prefix("/dev/").filter(|d| d.starts_with("zram"))?;
+            let (size_kb, used_kb) = (fields.nth(1)?.parse::<u64>().ok()?, fields.next()?.parse::<u64>().ok()?);
+            let ratio = ratio_of(device).unwrap_or(ZRAM_RATIO_UNKNOWN).clamp(1.0, ZRAM_RATIO_MAX);
+            Some((size_kb.saturating_sub(used_kb) as f64 * 1024.0 / ratio) as u64)
+        })
+        .sum()
+}
+
+/// A zram device's compression from its `mm_stat`: the data it holds
+/// over the memory it takes; `None` while it holds none.
+fn zram_ratio(mm_stat: &str) -> Option<f64> {
+    let mut fields = mm_stat.split_whitespace().map(|field| field.parse::<u64>().ok());
+    let (held, _compressed, taken) = (fields.next()??, fields.next()??, fields.next()??);
+    (held > 0 && taken > 0).then(|| held as f64 / taken as f64)
 }
 
 /// `free_ram_and_swap_bytes` in its two parts: RAM available, then free
@@ -59,16 +101,17 @@ pub fn room_for_buffers_bytes() -> Option<u64> {
     reported_available(available, total).map(|available| available + free_swap)
 }
 
-/// Available memory, total memory and, with `swap`, free swap (else 0),
-/// from one reading. Swap is read only when asked: on Windows it walks
-/// the process table, and the run watchdogs read memory several times a
-/// second.
+/// Available memory, total memory and, with `swap`, free swap as
+/// `swap_room` counts it (else 0), from one reading. Swap is read only
+/// when asked: on Windows it walks the process table, and the run
+/// watchdogs read memory several times a second.
 fn memory_now(swap: bool) -> (u64, u64, u64) {
-    with_system(|sys| {
+    let (available, total, free_swap) = with_system(|sys| {
         let ram = sysinfo::MemoryRefreshKind::nothing().with_ram();
         sys.refresh_memory_specifics(if swap { ram.with_swap() } else { ram });
         (available_of(sys), sys.total_memory(), if swap { sys.free_swap() } else { 0 })
-    })
+    });
+    (available, total, if swap { swap_room(free_swap) } else { 0 })
 }
 
 /// On macOS all memory less what is used (apps, wired, compressed), as
@@ -190,5 +233,21 @@ mod tests {
         assert_eq!(reported_available(4, 16), Some(4));
         assert_eq!(reported_available(0, 16), Some(0));
         assert_eq!(reported_available(0, 0), None);
+    }
+
+    /// zram keeps its pages in RAM, so its free space counts at what
+    /// compression frees; disk swap counts in full.
+    #[test]
+    fn zram_counts_at_what_compression_frees() {
+        let swaps = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
+            /dev/nvme0n1p4                          partition\t974844\t\t902212\t\t-2\n\
+            /dev/zram0                              partition\t16269400\t6480352\t\t5\n";
+        let free_zram: u64 = (16_269_400 - 6_480_352) * 1024;
+        assert_eq!(zram_held(swaps, |device| (device == "zram0").then_some(2.5)), (free_zram as f64 / 2.5) as u64);
+        assert_eq!(zram_held(swaps, |_| None), free_zram / 2, "2:1 before it holds any");
+        assert_eq!(zram_held(swaps, |_| Some(50.0)), free_zram / 4, "a few zero pages make it no better than 4:1");
+        assert_eq!(zram_held("Filename Type Size Used Priority\n/swap.img file 4194300 1794304 -1\n", |_| Some(3.0)), 0, "disk swap counts in full");
+        assert_eq!(zram_ratio("6420135936 2656512693 2711789568 0 2843983872 20630 49390 174730 236841"), Some(6_420_135_936.0 / 2_711_789_568.0));
+        assert_eq!(zram_ratio("0 0 0 0 0 0 0 0 0"), None);
     }
 }
