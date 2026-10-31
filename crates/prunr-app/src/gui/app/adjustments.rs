@@ -182,7 +182,9 @@ impl PrunrApp {
         if item.settings.faces.model != face {
             // Another face restorer: its own settings, unless changed.
             let model = self.settings.model;
-            item.switch_to(model, face, model, self.settings.preset(&item.applied_preset));
+            if item.switch_to(model, face, model, self.settings.preset(&item.applied_preset)) {
+                self.reconcile_bg_images([idx]);
+            }
         }
         self.batch.items[idx].apply_cache_impact(toolbar_change.cache_impact);
         if !toolbar_change.preset_applied && self.batch.items[idx].settings != settings_before {
@@ -534,5 +536,20 @@ mod preset_switch_tests {
         app.batch.items[0].settings.faces.model = FaceModel::RestoreFormerPp;
         app.apply_toolbar_change(&egui::Context::default(), ToolbarChange::default(), before);
         assert_eq!(app.batch.items[0].settings.faces.strength_pct, 35);
+    }
+
+    /// Another face restorer keeps the picture in step with the hash the
+    /// switch takes from the preset, as a model switch does: one the
+    /// preset names since it was applied, not on disk here, is dropped.
+    #[test]
+    fn another_face_restorer_keeps_the_picture_in_step() {
+        let mut app = app_with_presets();
+        let json = serde_json::json!({ "format_version": 2, "models": { "BiRefNetLite": { "item_settings": { "bg_image_hash": 12345 } } } });
+        app.settings.presets.insert("Shared".into(), serde_json::from_value(json).unwrap());
+        app.batch.items[0].applied_preset = "Shared".into();
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.faces.model = FaceModel::RestoreFormerPp;
+        app.apply_toolbar_change(&egui::Context::default(), ToolbarChange::default(), before);
+        assert!(app.batch.items[0].settings.bg_image_hash.is_none(), "the picture is dropped");
     }
 }
