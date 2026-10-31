@@ -692,13 +692,9 @@ impl BatchManager {
     pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
         let Some(source) = self.items.get(from) else { return };
         let (settings, bg_image) = (source.settings, source.bg_image.clone());
-        // The preset they came from goes with them, so a later model switch
-        // treats every image of the run alike.
         let (preset, changes) = (source.applied_preset.clone(), source.preset_changes.clone());
         for item in self.in_set(ids) {
-            item.adopt_settings(settings, bg_image.clone());
-            item.applied_preset.clone_from(&preset);
-            item.preset_changes.clone_from(&changes);
+            item.adopt_settings(settings, bg_image.clone(), &preset, &changes);
         }
     }
 
@@ -722,22 +718,10 @@ impl BatchManager {
     /// keeps the settings it changed and takes the rest from its preset.
     /// Returns the images whose background picture changed with it.
     pub fn switch_model(&mut self, from: super::settings::SettingsModel, settings: &super::settings::Settings) -> Vec<usize> {
-        let to = settings.model;
-        // What the switch gives depends on the preset and face restorer
-        // alone, so a batch on one preset works it out once.
-        let mut values: Vec<(&super::presets::Preset, super::item_settings::FaceModel, serde_json::Map<String, serde_json::Value>)> = Vec::new();
         let mut pictures_changed = Vec::new();
         for (idx, item) in self.items.iter_mut().enumerate() {
-            let picture = item.settings.bg_image_hash;
-            item.leave_model(from, item.settings.faces.model);
             let preset = settings.preset(&item.applied_preset);
-            let face = preset.face_after(to, &item.settings, &item.preset_changes);
-            let at = values.iter().position(|(p, f, _)| std::ptr::eq(*p, preset) && *f == face).unwrap_or_else(|| {
-                values.push((preset, face, preset.switch_values(to, face)));
-                values.len() - 1
-            });
-            item.take_untouched(&values[at].2, to);
-            if item.settings.bg_image_hash != picture {
+            if item.switch_to(from, item.settings.faces.model, settings.model, preset) {
                 pictures_changed.push(idx);
             }
         }

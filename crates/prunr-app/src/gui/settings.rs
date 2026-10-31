@@ -255,7 +255,7 @@ impl Settings {
         // saved is where they start, or every setting apart from the
         // code's default would count as one.
         if value.get("brush_changes").is_none() {
-            settings.brush_changes = super::preset_changes::Changes::new(settings.brush.clone());
+            settings.restart_brush_changes();
         }
 
         // v1 per-image fields become a "Previous defaults" preset; new
@@ -278,21 +278,16 @@ impl Settings {
     /// The defaults with every saved setting in `value` that reads laid
     /// over them, and the names of those that did not.
     fn merge_readable(value: &serde_json::Value) -> (Self, Vec<String>) {
-        let (Ok(mut merged), Some(saved)) = (serde_json::to_value(Self::default()), value.as_object()) else {
-            return (Self::default(), Vec::new());
-        };
-        let mut reset = Vec::new();
-        for (key, setting) in saved {
-            let before = std::mem::replace(&mut merged[key.as_str()], setting.clone());
-            if serde_json::from_value::<Self>(merged.clone()).is_err() {
-                merged[key.as_str()] = before;
-                reset.push(key.clone());
-            }
-        }
-        (serde_json::from_value(merged).unwrap_or_default(), reset)
+        value.as_object().map_or_else(|| (Self::default(), Vec::new()), |saved| super::presets::lay_readable(Self::default(), saved))
     }
 
     /// Best-effort, off the UI thread, after every earlier save.
+    /// Nothing changed on the brush from here: a preset was applied, or
+    /// the brush was read without changes kept over it.
+    pub(crate) fn restart_brush_changes(&mut self) {
+        self.brush_changes = super::preset_changes::Changes::new(self.brush.clone());
+    }
+
     pub fn save(&self) {
         let Some(path) = Self::config_path() else { return };
         match serde_json::to_string_pretty(self) {
@@ -486,7 +481,7 @@ impl Settings {
             ..Self::default()
         };
         self.brush = self.resolve_active_preset(None).brush;
-        self.brush_changes = super::preset_changes::Changes::new(self.brush.clone());
+        self.restart_brush_changes();
         self.parallel_jobs = self.default_jobs();
     }
 }

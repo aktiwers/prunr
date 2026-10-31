@@ -128,7 +128,7 @@ impl PrunrApp {
             let item = &mut self.batch.items[idx];
             // Applied or just saved: nothing is changed from it yet.
             item.preset_changes = crate::gui::preset_changes::Changes::new(item.settings);
-            self.settings.brush_changes = crate::gui::preset_changes::Changes::new(self.settings.brush.clone());
+            self.settings.restart_brush_changes();
             let shown = item.timeline.current();
             if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
                 item.commit(StepKind::Preset);

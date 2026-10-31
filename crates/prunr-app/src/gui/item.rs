@@ -3159,33 +3159,34 @@ impl BatchItem {
         }
     }
 
-    /// Note what was changed on model `from`, which ran face restorer
-    /// `face`, before it is left.
-    pub(crate) fn leave_model(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel) {
-        self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
-    }
-
     /// Leave model `from`, which ran face restorer `face`, for `to` on
-    /// `preset`: what was changed stays, the rest takes `to`'s settings.
-    pub(crate) fn switch_to(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel, to: super::settings::SettingsModel, preset: &super::presets::Preset) {
-        self.leave_model(from, face);
+    /// `preset`: what was changed since the preset was applied stays, the
+    /// rest takes `to`'s settings. True when that names another background
+    /// picture, which the caller loads.
+    pub(crate) fn switch_to(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel, to: super::settings::SettingsModel, preset: &super::presets::Preset) -> bool {
+        let picture = self.settings.bg_image_hash;
+        self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
         let values = preset.values_after_switch(to, &self.settings, &self.preset_changes);
-        self.take_untouched(&values, to);
-    }
-
-    /// Arrive on model `to`: each setting not changed since the preset was
-    /// applied takes its value from `values`.
-    pub(crate) fn take_untouched(&mut self, values: &serde_json::Map<String, serde_json::Value>, to: super::settings::SettingsModel) {
-        self.settings = super::presets::take(self.settings, values, &self.preset_changes);
+        self.settings = super::presets::take(self.settings, &values, &self.preset_changes);
         self.fit_line_mode_to(to);
         self.preset_changes.rebase(&self.settings);
+        self.settings.bg_image_hash != picture
     }
 
-    /// Take another image's settings and its background picture together,
-    /// keeping the picture in step with the settings' reference to it.
-    pub(crate) fn adopt_settings(&mut self, settings: super::item_settings::ItemSettings, bg_image: Option<Arc<BgImage>>) {
+    /// Take another image's settings, the preset they came from and its
+    /// background picture together, keeping the picture in step with the
+    /// settings' reference to it and a later model switch alike for both.
+    pub(crate) fn adopt_settings(
+        &mut self,
+        settings: super::item_settings::ItemSettings,
+        bg_image: Option<Arc<BgImage>>,
+        applied_preset: &str,
+        preset_changes: &super::preset_changes::Changes<super::item_settings::ItemSettings>,
+    ) {
         self.settings = settings;
         self.bg_image = bg_image;
+        applied_preset.clone_into(&mut self.applied_preset);
+        self.preset_changes.clone_from(preset_changes);
     }
 
     pub(crate) fn clear_bg_image(&mut self) {

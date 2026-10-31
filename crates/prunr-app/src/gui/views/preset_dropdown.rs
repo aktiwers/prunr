@@ -111,8 +111,7 @@ impl SaveDialog {
     /// of that name when there is one, whose other models keep their
     /// entries.
     fn file_for(&self, settings: &Settings, name: &str) -> PresetFile {
-        let base = settings.presets.get(name).map_or_else(PresetFile::default, |preset| preset.file().clone());
-        base.with_entries(self.ticked())
+        settings.preset(name).file().clone().with_entries(self.ticked())
     }
 }
 

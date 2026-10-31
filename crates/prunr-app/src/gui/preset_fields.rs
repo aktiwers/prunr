@@ -94,9 +94,13 @@ fn brush_fields(surface: Surface) -> &'static [&'static str] {
 const SD_PART: &[&str] = &["sd_prompt", "sd_negative_prompt", "sd_guidance_scale", "sd_scheduler", "sd_steps", "sd_seed", "sd_use_taesd"];
 
 /// Whether a surface's brush settings tune an eraser's fill rather than
-/// the brush.
+/// the brush. Every surface is named, so a new one is decided here.
 fn tunes_the_fill(surface: Surface) -> bool {
-    matches!(surface, Surface::FillChips | Surface::SdChips | Surface::RoremChips)
+    match surface {
+        Surface::FillChips | Surface::SdChips | Surface::RoremChips => true,
+        Surface::Brushes | Surface::SelectionStrokes | Surface::FillRegionKnobs | Surface::Mask | Surface::Lines | Surface::Effect
+        | Surface::Decoration | Surface::Background | Surface::Upscale | Surface::Colorize | Surface::Faces | Surface::Depth => false,
+    }
 }
 
 /// The brush settings that tune `model`'s fill, its SD part's included.
@@ -104,13 +108,8 @@ fn tunes_the_fill(surface: Surface) -> bool {
 /// for one eraser lowers another's fill (Sharpen crunches a generated
 /// one).
 pub(crate) fn fill_tuning_of(model: SettingsModel) -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = Surface::ALL.into_iter().filter(|&s| tunes_the_fill(s) && shows(model, s)).flat_map(brush_fields).copied().collect();
-    if shows(model, Surface::SdChips) {
-        names.extend(SD_PART);
-    }
-    names.sort_unstable();
-    names.dedup();
-    names
+    let sd = if shows(model, Surface::SdChips) { SD_PART } else { &[] };
+    Surface::ALL.into_iter().filter(|&s| tunes_the_fill(s) && shows(model, s)).flat_map(brush_fields).chain(sd).copied().collect()
 }
 
 /// The settings a model's preset entry holds.

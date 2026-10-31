@@ -588,10 +588,9 @@ impl PrunrApp {
         }
     }
 
-    /// Reconcile `BatchItem.bg_image` with `settings.bg_image_hash` for
-    /// each image in `indices`, after a preset apply, a model switch, an
-    /// undo or a Background Reset, which set the hash but not the picture.
-    /// One toast however many name a picture not on disk.
+    /// Bring `BatchItem.bg_image` in step with `settings.bg_image_hash`
+    /// for each image in `indices`, whose hash was set without its
+    /// picture. One toast however many name a picture not on disk.
     fn reconcile_bg_images(&mut self, indices: impl IntoIterator<Item = usize>) {
         let mut missing = false;
         for idx in indices {
