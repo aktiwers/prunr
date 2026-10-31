@@ -22,6 +22,7 @@ use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
 use prunr_app::gui::settings::LineMode;
 
 const SEG_ENGINE_MISSING: &str = "segmentation engine not initialized";
+const STROKES_UNREADABLE: &str = "The strokes on the cut-out could not be read";
 
 /// Weighted memory semaphore for processing.
 /// Instead of a binary lock, this tracks "pixel units" (1 unit = 1M pixels).
@@ -395,7 +396,8 @@ pub fn run_worker() -> ! {
                 on_screen.set(screen);
                 tracing::info!(?line_mode, ?shown, ?screen, "worker: run settings replaced");
             }
-            SubprocessCommand::ProcessImage { item_id, image_path, chain_input } => {
+            SubprocessCommand::ProcessImage { item_id, image_path, chain_input, correction } => {
+                let strokes = correction.map(|file| file.0);
                 let built = (|| -> Result<(), String> {
                     // A model built here (a compile can run minutes) says so
                     // as it goes, or the parent's hang watchdog kills it.
@@ -419,6 +421,7 @@ pub fn run_worker() -> ! {
                 if let Err(error) = built {
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     cleanup_image_inputs(&ipc_dir, &image_path, chain_input.as_ref().map(|c| c.path.as_path()));
+                    cleanup_ipc_temps(&ipc_dir, strokes.as_deref().as_slice());
                     continue;
                 }
                 let engine = if !engines.is_empty() {
@@ -451,7 +454,10 @@ pub fn run_worker() -> ! {
                         let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
                         Some(image::DynamicImage::ImageRgba8(rgba))
                     });
-                    let cleanup_inputs = || cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
+                    let cleanup_inputs = || {
+                        cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
+                        cleanup_ipc_temps(&ipc, strokes.as_deref().as_slice());
+                    };
                     // An early exit: report the error, drop the inputs, leave the in-flight count.
                     let fail = |error: String| {
                         let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
@@ -549,6 +555,10 @@ pub fn run_worker() -> ! {
                                     }
                                 };
                                 let original = &decoded;
+                                let Ok(correction) = strokes.as_deref().map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or(())).transpose() else {
+                                    fail(STROKES_UNREADABLE.into());
+                                    return;
+                                };
                                 let look = look.as_ref().and_then(Look::engine);
                                 prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
                                     progress.step(prunr_core::Step::RefiningEdges);
@@ -557,7 +567,7 @@ pub fn run_worker() -> ! {
                                     let active_provider = ir.active_provider.clone();
                                     let subject = prunr_core::cut_for_lines(
                                         &ir.tensor_data, th, tw, original,
-                                        &prunr_core::PostprocessOpts::new(&mask, model),
+                                        &prunr_core::PostprocessOpts::new(&mask, model).with_correction(correction.as_ref()),
                                     )?;
                                     // Seg tensor captured → Tier 2 mask reruns work in
                                     // SubjectOutline; Off ↔ SubjectOutline can reuse it.
@@ -799,7 +809,7 @@ pub fn run_worker() -> ! {
 
                         let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
                         let correction = strokes.as_deref()
-                            .map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or("The strokes on the cut-out could not be read"))
+                            .map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or(STROKES_UNREADABLE))
                             .transpose()?;
 
                         progress.step(prunr_core::Step::RefiningEdges);

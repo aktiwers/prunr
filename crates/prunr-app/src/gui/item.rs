@@ -2724,10 +2724,14 @@ impl BatchItem {
     }
 
     /// What a full run on this image sends: its file and the pixels the
-    /// run starts from, read where the run is sent. The image shows as
-    /// processing once it is sent (`mark_running`).
-    pub(crate) fn full_run_work(&self) -> super::worker::WorkItem {
-        super::worker::WorkItem { id: self.id, run: self.job_run().unwrap_or_default(), source: self.source.clone(), image: self.job_run_image() }
+    /// run starts from, read where the run is sent, and the strokes
+    /// `action` applies when it traces lines on a cut of the photo. The
+    /// image shows as processing once it is sent (`mark_running`).
+    pub(crate) fn full_run_work(&mut self, action: CutoutAction) -> super::worker::WorkItem {
+        let image = self.job_run_image();
+        let traces_cut = image.is_none() && self.settings.line_mode == prunr_core::LineMode::SubjectOutline;
+        let correction = if traces_cut { self.cut_with_strokes(action) } else { None };
+        super::worker::WorkItem { id: self.id, run: self.job_run().unwrap_or_default(), source: self.source.clone(), image, correction }
     }
 
     /// Drop whatever caches a `CacheImpact` says are stale.
@@ -3846,6 +3850,39 @@ mod tests {
         assert!(item.lines_traced_on_another_cut(CutoutAction::Select), "the selection taken off the cut-out");
     }
 
+    /// A Process that traces lines on a cut of the photo carries the
+    /// strokes, so its lines land traced on them; one without lines on
+    /// the subject, or one that starts from an earlier result (cut from
+    /// that image, not the segmentation), carries none.
+    #[test]
+    fn a_process_tracing_the_cut_out_carries_the_strokes() {
+        use crate::gui::tests::fixtures::edge_lines;
+        use prunr_core::{LineMode, ModelKind::Silueta, selection::{MaskArtifact, FULL}};
+        let run = |line_mode: LineMode, on_an_earlier_result: bool| {
+            let mut item = fixture_item(1);
+            item.settings.line_mode = line_mode;
+            if on_an_earlier_result {
+                item.result_rgba = Some(Arc::new(image::RgbaImage::new(1, 1)));
+                item.commit(StepKind::Edit);
+            }
+            assert!(item.commit_selection_mask(Arc::new(MaskArtifact::from_cells(1, 1, vec![FULL])), StepKind::Stroke));
+            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
+            let carried = item.full_run_work(CutoutAction::Restore).correction.is_some();
+            (item, carried)
+        };
+        assert!(!run(LineMode::Off, false).1, "no lines");
+        assert!(!run(LineMode::EdgesOnly, false).1, "lines over the whole photo");
+        assert!(!run(LineMode::SubjectOutline, true).1, "a cut of an earlier result");
+
+        let (mut item, carried) = run(LineMode::SubjectOutline, false);
+        assert!(carried, "lines on the subject");
+        let recipe = item.settings.current_recipe(Silueta);
+        let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+        item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, edge_lines(&prunr_core::EdgeScale::ALL, None), recipe);
+        item.finish_job();
+        assert!(!item.lines_traced_on_another_cut(CutoutAction::Restore), "traced on the strokes");
+    }
+
     /// Each kind of settings change asks for the run it needs: none for a
     /// backdrop or Refine change, the mask side from the cached tensor,
     /// the lines onto it, or everything — and everything when there is no
@@ -4254,7 +4291,7 @@ mod tests {
         let mut item = fixture_item(1);
         item.source = ImageSource::file(PathBuf::from("/nonexistent/photo.png"));
         item.start_job(Some(StepKind::Process), Engine::Segment);
-        let work = item.full_run_work();
+        let work = item.full_run_work(CutoutAction::Restore);
         assert_eq!(work.id, 1);
         assert!(item.awaits_cut() && !item.is_cutting() && item.failure.is_none(), "{:?}", item.status());
     }

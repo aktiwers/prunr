@@ -2267,8 +2267,8 @@ mod timeline_contract_tests {
         }
         let mut ctrl = AdmissionController::with_budget(1);
         ctrl.enqueue([(1, 1), (2, 2)].map(|(item_id, total)| ImageMemCost { item_id, total }).into());
-        let batch_items = &app.batch;
-        let (first, rx) = app.processor.open_admission(ctrl, |id| batch_items.find_by_id(id).map(crate::gui::item::BatchItem::full_run_work));
+        let (batch_items, action) = (&mut app.batch, app.settings.brush.cutout_action);
+        let (first, rx) = app.processor.open_admission(ctrl, |id| batch_items.find_by_id_mut(id).map(|item| item.full_run_work(action)));
         assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1]);
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
         let batch = app.processor.track_dispatch(recipe, [(1, app.batch.items[0].job_run().unwrap_or_default())]);
@@ -2484,7 +2484,7 @@ mod timeline_contract_tests {
         push_test_item(&mut app, 2);
         let mut ctrl = AdmissionController::with_budget(1);
         ctrl.enqueue(vec![ImageMemCost { item_id: 1, total: 1 }, ImageMemCost { item_id: 2, total: 1 }]);
-        let work = |id| crate::gui::worker::WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None };
+        let work = |id| crate::gui::worker::WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None, correction: None };
         let (first, rx) = app.processor.open_admission(ctrl, |id| Some(work(id)));
         assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1], "one fits");
         let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);

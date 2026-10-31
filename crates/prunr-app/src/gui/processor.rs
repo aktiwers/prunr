@@ -2722,7 +2722,7 @@ mod tests {
     }
 
     fn test_work(id: u64) -> WorkItem {
-        WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None }
+        WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None, correction: None }
     }
 
     #[test]

@@ -379,11 +379,11 @@ impl PrunrApp {
         let first_look = self.processor.first_look.get().is_some_and(|id| tier1_ids.contains(&id));
         let mut ctrl = crate::gui::memory::AdmissionController::new(model, jobs, self.settings.cpu_only(), first_look);
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
-        let batch = &mut self.batch;
+        let (batch, action) = (&mut self.batch, self.settings.brush.cutout_action);
         let (initial_items, additional_items_rx) =
             self.processor.open_admission(ctrl, |id| batch.find_by_id_mut(id).map(|item| {
                 item.mark_running();
-                item.full_run_work()
+                item.full_run_work(action)
             }));
 
         if initial_items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() {
@@ -403,7 +403,7 @@ impl PrunrApp {
         model: prunr_core::ModelKind,
         jobs: usize,
     ) {
-        let items = self.batch.full_run_work(tier1_ids);
+        let items = self.batch.full_run_work(tier1_ids, self.settings.brush.cutout_action);
 
         if items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() { return; }
 
@@ -483,8 +483,8 @@ impl PrunrApp {
     /// fitting items; once admission is through, the re-runs it held back
     /// go.
     pub(super) fn admission_release_and_admit(&mut self, completed_id: u64) {
-        let batch = &self.batch;
-        let admitted = self.processor.release_and_admit(completed_id, |id| batch.find_by_id(id).map(BatchItem::full_run_work));
+        let (batch, action) = (&mut self.batch, self.settings.brush.cutout_action);
+        let admitted = self.processor.release_and_admit(completed_id, |id| batch.find_by_id_mut(id).map(|item| item.full_run_work(action)));
         for (id, _) in admitted.sent {
             if let Some(item) = self.batch.find_by_id_mut(id) {
                 item.mark_running();

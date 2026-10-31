@@ -127,6 +127,10 @@ pub enum SubprocessCommand {
         image_path: std::path::PathBuf,
         /// For a run that starts from an earlier result: path to temp file with its RGBA + dimensions.
         chain_input: Option<ChainInput>,
+        /// The strokes on the cut-out, for lines traced on the subject:
+        /// it is cut with them.
+        #[serde(default)]
+        correction: Option<PlaneFile>,
     },
     /// Tier 2: Re-run postprocess from a cached tensor (skip inference).
     /// The parent sends the raw tensor + original image via temp files.
@@ -774,7 +778,7 @@ mod tests {
                 line_fade_pct: 0,
                 edge_scales: InferredScales::Drawn,
             },
-            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: Some(ChainInput { path: path(), width: 2, height: 2 }) },
+            SubprocessCommand::ProcessImage { item_id: 1, image_path: path(), chain_input: Some(ChainInput { path: path(), width: 2, height: 2 }), correction: Some(PlaneFile(path())) },
             SubprocessCommand::RePostProcess {
                 item_id: 1,
                 tensor_path: path(),
@@ -895,11 +899,13 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }),
+            correction: None,
         });
         roundtrip(&SubprocessCommand::ProcessImage {
             item_id: 8,
             image_path: PathBuf::from("/tmp/img2.png"),
             chain_input: None,
+            correction: Some(PlaneFile(PathBuf::from("/tmp/correction.raw"))),
         });
     }
 

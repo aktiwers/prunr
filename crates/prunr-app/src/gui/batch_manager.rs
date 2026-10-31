@@ -808,11 +808,12 @@ impl BatchManager {
             .collect()
     }
 
-    /// The work for full runs on the images in `ids`, in batch order.
-    pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>) -> Vec<WorkItem> {
+    /// The work for full runs on the images in `ids`, in batch order,
+    /// with the strokes `action` applies.
+    pub(crate) fn full_run_work(&mut self, ids: &HashSet<u64>, action: CutoutAction) -> Vec<WorkItem> {
         self.in_set(ids).map(|item| {
             item.mark_running();
-            item.full_run_work()
+            item.full_run_work(action)
         }).collect()
     }
 
