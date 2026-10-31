@@ -1050,7 +1050,7 @@ pub(crate) struct Unpacked {
 }
 
 /// Runs on a rayon worker. Honours `refine_edges`: the guided filter adds
-/// ~50-150 ms per tick at 4K (about 5× that following color), but without
+/// ~50-150 ms per tick at 4K (2-4× that following color), but without
 /// it the refine knobs would do nothing in live preview.
 fn run_preview(mut inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
     if cancel.load(Ordering::Acquire) { return RunOutput::default(); }

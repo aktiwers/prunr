@@ -114,16 +114,21 @@ pub fn guided_filter_alpha(
 }
 
 /// Rows per band of `guided_filter_alpha_colour`: the planes held at
-/// once are a band's, not the photo's.
-const COLOUR_BAND_ROWS: usize = 128;
+/// once are a band's, not the photo's. On a 24 MP photo 512 rows took
+/// 38-55 % less time than 128, whose margins were recomputed more often,
+/// for at most 350 MB.
+const COLOUR_BAND_ROWS: usize = 512;
 
 /// `guided_filter_alpha` following the photo's colour, not only its
 /// brightness (He et al.'s colour guide: a 3 × 3 covariance per pixel), so
 /// an edge between two colours of the same brightness is kept too.
 ///
 /// Peak working set besides the output mask (w·h bytes): 19 f32 planes
-/// of w × (`COLOUR_BAND_ROWS` + 4·radius) rows: 73 MB for a 6000 px wide
-/// photo at radius 8.
+/// of w × (`COLOUR_BAND_ROWS` + 4·radius) rows, at most the photo's:
+///
+/// | 6000 px wide | radius 8 | radius 32 | radius 64 |
+/// |--------------|----------|-----------|-----------|
+/// | 4000 px tall | 248 MB   | 292 MB    | 350 MB    |
 pub fn guided_filter_alpha_colour(guide: &RgbaImage, mask: &GrayImage, radius: u32, epsilon: f32) -> GrayImage {
     colour_guided_in_bands(guide, mask, radius, epsilon, COLOUR_BAND_ROWS)
 }
