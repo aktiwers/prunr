@@ -91,7 +91,7 @@ fn background_answer_loads_the_picture_for_the_image_that_asked() {
     let load = app.batch.bg_io.bg_image_rx.recv_timeout(LANDS_WITHIN).expect("background load");
     assert_eq!(load.item_id, 1);
     assert_eq!(load.path, picked);
-    assert!(load.picked);
+    assert_eq!(load.fills, None, "picked, not one settings name");
 }
 
 #[test]

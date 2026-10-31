@@ -540,7 +540,7 @@ impl PrunrApp {
 
     fn on_background_picked(&mut self, item_id: u64, path: PathBuf) {
         if self.batch.find_by_id(item_id).is_some() {
-            self.batch.request_bg_image(item_id, path, true);
+            self.batch.request_bg_image(item_id, path, None);
         }
     }
 
@@ -567,8 +567,7 @@ impl PrunrApp {
     }
 
     /// A background picture finished loading. A picked one replaces the
-    /// background as one undo step; a preset's fills in the picture its
-    /// settings name, if they still do.
+    /// background as one undo step; one settings name fills it in.
     pub(crate) fn land_bg_image(&mut self, load: super::background_io::BgImageLoad) {
         use super::batch_manager::BgLanded;
         match self.batch.land_bg_image(load) {
@@ -588,42 +587,13 @@ impl PrunrApp {
         }
     }
 
-    /// Bring `BatchItem.bg_image` in step with `settings.bg_image_hash`
-    /// for each image in `indices`, whose hash was set without its
-    /// picture. One toast however many name a picture not on disk.
-    fn reconcile_bg_images(&mut self, indices: impl IntoIterator<Item = usize>) {
-        let mut missing = false;
-        for idx in indices {
-            missing |= self.reconcile_bg_image(idx);
-        }
-        if missing {
+    /// Every image's background picture in step with the one its settings
+    /// name, whatever set them: a preset, a model switch, an undo, an
+    /// import. One toast however many name a picture with no file here.
+    pub(crate) fn keep_bg_images_in_step(&mut self) {
+        if self.batch.keep_bg_images_in_step(&self.settings.bg_image_paths) {
             self.toasts.info("Preset references a background image we don't have on disk.");
         }
-    }
-
-    /// Load the picture the hash names from the path it was saved with, or
-    /// drop the hash; true when that path is not known.
-    fn reconcile_bg_image(&mut self, idx: usize) -> bool {
-        let Some(item) = self.batch.items.get_mut(idx) else { return false };
-        let want = item.settings.bg_image_hash;
-        let have = item.bg_image.as_ref().map(|b| b.hash);
-        if want.map(|nz| nz.get()) == have { return false; }
-        let Some(want_hash) = want else {
-            item.clear_bg_image();
-            return false;
-        };
-        let want_hash_u64 = want_hash.get();
-        let path = self.settings.bg_image_paths.get(&want_hash_u64).cloned();
-        let Some(path) = path else {
-            // Hash isn't in our path map (preset shared from another user,
-            // or the path entry was wiped). Drop both bytes and hash so the
-            // recipe diff stays consistent.
-            item.clear_bg_image();
-            return true;
-        };
-        let id = item.id;
-        self.batch.request_bg_image(id, path, false);
-        false
     }
 
     /// Process / Reprocess: routes between upscale, inpaint (eraser models)
@@ -800,7 +770,6 @@ impl PrunrApp {
         let mut lost = false;
         for &id in ids {
             let Some(idx) = self.batch.index_of(id) else { continue };
-            let preset_before = self.batch.items[idx].settings.bg_image_hash;
             // A run belongs to the state being left, but strokes painted
             // while it runs keep it.
             if !keeps_run(&self.batch.items[idx]) {
@@ -814,9 +783,6 @@ impl PrunrApp {
                     continue;
                 }
             };
-            if self.batch.items[idx].settings.bg_image_hash != preset_before {
-                self.reconcile_bg_images([idx]);
-            }
             // The step's image shows its selection as the switch stood
             // then; the switch may have moved since. Lines kept from other
             // strokes would be drawn over it: its own image has its own.
@@ -1392,8 +1358,7 @@ impl PrunrApp {
     /// from their preset, the brushes fit the model, and runs and cached
     /// sessions of the old one drop.
     fn on_model_changed(&mut self, from: super::settings::SettingsModel) {
-        let pictures_changed = self.batch.switch_model(from, &self.settings);
-        self.reconcile_bg_images(pictures_changed);
+        self.batch.switch_model(from, &self.settings);
         // The brush is the app's, not an image's: the shown image's preset
         // is the one in front of the user.
         let preset = self.batch.selected_item().map_or_else(|| self.settings.default_preset.clone(), |i| i.applied_preset.clone());

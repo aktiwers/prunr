@@ -3161,16 +3161,13 @@ impl BatchItem {
 
     /// Leave model `from`, which ran face restorer `face`, for `to` on
     /// `preset`: what was changed since the preset was applied stays, the
-    /// rest takes `to`'s settings. True when that names another background
-    /// picture, which the caller loads.
-    pub(crate) fn switch_to(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel, to: super::settings::SettingsModel, preset: &super::presets::Preset) -> bool {
-        let picture = self.settings.bg_image_hash;
+    /// rest takes `to`'s settings.
+    pub(crate) fn switch_to(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel, to: super::settings::SettingsModel, preset: &super::presets::Preset) {
         self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
         let values = preset.values_after_switch(to, &self.settings, &self.preset_changes);
         self.settings = super::presets::take(self.settings, &values, &self.preset_changes);
         self.fit_line_mode_to(to);
         self.preset_changes.rebase(&self.settings);
-        self.settings.bg_image_hash != picture
     }
 
     /// Take another image's settings, the preset they came from and its
@@ -3184,13 +3181,19 @@ impl BatchItem {
         preset_changes: &super::preset_changes::Changes<super::item_settings::ItemSettings>,
     ) {
         self.settings = settings;
-        self.bg_image = bg_image;
+        super::reclaim::later(std::mem::replace(&mut self.bg_image, bg_image));
         applied_preset.clone_into(&mut self.applied_preset);
         self.preset_changes.clone_from(preset_changes);
     }
 
+    /// Show `picture`, the one the settings name, shared with the images
+    /// that hold it.
+    pub(crate) fn hold_bg_image(&mut self, picture: Arc<BgImage>) {
+        super::reclaim::later(self.bg_image.replace(picture));
+    }
+
     pub(crate) fn clear_bg_image(&mut self) {
-        self.bg_image = None;
+        super::reclaim::later(self.bg_image.take());
         self.settings.bg_image_hash = None;
     }
 

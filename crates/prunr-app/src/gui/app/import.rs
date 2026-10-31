@@ -273,4 +273,22 @@ mod tests {
         assert_eq!((name.as_str(), len, dims), ("image", png.len(), Some((3, 2))));
         assert!(matches!(landed.remove(0), super::FileLoad::Image { dims: None, .. }), "junk has no header");
     }
+
+    /// A new image takes its default preset's background picture: the
+    /// picture loads for it, as for an image the preset is applied to.
+    #[test]
+    fn a_new_image_takes_its_default_presets_picture() {
+        use crate::gui::settings::SettingsModel;
+        let mut app = super::PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let json = serde_json::json!({ "format_version": 2, "models": { "Silueta": { "item_settings": { "bg_image_hash": 4242 } } } });
+        app.settings.presets.insert("Beach".into(), serde_json::from_value(json).unwrap());
+        app.settings.default_preset = "Beach".into();
+        app.settings.bg_image_paths.insert(4242, "/nowhere/beach.png".into());
+        app.push_new_item(super::ImageSource::Bytes(std::sync::Arc::new(Vec::new())), (1, 1), "a.png".into());
+        assert_eq!(app.batch.items[0].settings.bg_image_hash.map(std::num::NonZeroU64::get), Some(4242));
+        app.keep_bg_images_in_step();
+        let load = app.batch.bg_io.bg_image_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("its picture loads");
+        assert_eq!(load.fills, Some(4242));
+    }
 }

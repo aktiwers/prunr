@@ -11,7 +11,8 @@
 //! - Undo — each item's own `timeline`
 //! - Drag-out lifecycle — `DragExportState`
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::brush_state::CutoutAction;
@@ -82,6 +83,9 @@ pub(crate) struct BatchManager {
     demoting: Arc<std::sync::atomic::AtomicBool>,
     /// Selection edits made off the UI thread, in order per image.
     pub(crate) selection_queue: super::selection_queue::SelectionQueue,
+    /// The pictures loading for the images whose settings name them, by
+    /// hash: one load each, however many images name it.
+    bg_loads: HashSet<u64>,
 }
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -171,6 +175,7 @@ impl BatchManager {
             last_history_sweep: std::time::Instant::now(),
             demoting: Arc::default(),
             selection_queue: super::selection_queue::SelectionQueue::new(),
+            bg_loads: HashSet::new(),
         }
     }
 
@@ -452,37 +457,81 @@ impl BatchManager {
     }
 
     /// A background picture finished loading. A picked one replaces the
-    /// background as one undo step; a preset's fills in the picture its
-    /// settings name, if they still do; a preset's that failed is dropped.
+    /// background as one undo step. One loaded for the picture settings
+    /// name fills it in on every image that names it; when it fails, or
+    /// its file holds another picture now, they drop the name.
     pub(crate) fn land_bg_image(&mut self, load: super::background_io::BgImageLoad) -> BgLanded {
-        let super::background_io::BgImageLoad { item_id, path, picked, result } = load;
+        let super::background_io::BgImageLoad { item_id, path, fills, result } = load;
+        let Some(wanted) = fills else { return self.land_picked_bg_image(item_id, path, result) };
+        self.bg_loads.remove(&wanted);
+        let result = result.and_then(|(img, hash)| if hash == wanted { Ok(img) } else { Err("its file holds another picture now".to_string()) });
+        let waiting = |item: &BatchItem| {
+            item.settings.bg_image_hash.map(std::num::NonZeroU64::get) == Some(wanted) && item.bg_image.as_ref().map(|b| b.hash) != Some(wanted)
+        };
+        match result {
+            Ok(img) => {
+                let picture = Arc::new(super::item::BgImage { source_path: Some(path), image: Arc::new(img), hash: wanted });
+                for item in self.items.iter_mut().filter(|item| waiting(item)) {
+                    item.hold_bg_image(Arc::clone(&picture));
+                }
+                BgLanded::Filled
+            }
+            Err(error) => {
+                for item in self.items.iter_mut().filter(|item| waiting(item)) {
+                    item.clear_bg_image();
+                }
+                BgLanded::Failed { picked: false, error }
+            }
+        }
+    }
+
+    fn land_picked_bg_image(&mut self, item_id: u64, path: PathBuf, result: Result<(image::DynamicImage, u64), String>) -> BgLanded {
         let Some(item) = self.find_by_id_mut(item_id) else { return BgLanded::Gone };
         match result {
-            Ok((img, hash)) if picked => {
+            Ok((img, hash)) => {
                 item.settings.bg = None;
                 item.settings.bg_effect = prunr_core::BgEffect::None;
                 item.set_bg_image_hashed(img, Some(path.clone()), hash);
                 item.commit(super::timeline::StepKind::Adjust);
                 BgLanded::Picked { hash, path }
             }
-            Ok((img, hash)) => {
-                if item.settings.bg_image_hash.map(|h| h.get()) == Some(hash) {
-                    item.set_bg_image_hashed(img, Some(path), hash);
-                }
-                BgLanded::Filled
-            }
-            Err(error) => {
-                if !picked {
-                    item.clear_bg_image();
-                }
-                BgLanded::Failed { picked, error }
-            }
+            Err(error) => BgLanded::Failed { picked: true, error },
         }
     }
 
-    /// Load and hash a background picture off the UI thread; it lands on
-    /// `bg_io.bg_image_rx`.
-    pub(crate) fn request_bg_image(&self, item_id: u64, path: std::path::PathBuf, picked: bool) {
+    /// Bring each image's background picture in step with the one its
+    /// settings name: drop one they no longer name, share one another
+    /// image holds, else load it from the file `paths` names, once however
+    /// many images name it. True when some name a picture with no known
+    /// file: they drop the name.
+    pub(crate) fn keep_bg_images_in_step(&mut self, paths: &HashMap<u64, PathBuf>) -> bool {
+        let mut unknown = false;
+        for idx in 0..self.items.len() {
+            let item = &self.items[idx];
+            let want = item.settings.bg_image_hash.map(std::num::NonZeroU64::get);
+            if want == item.bg_image.as_ref().map(|b| b.hash) || want.is_some_and(|hash| self.bg_loads.contains(&hash)) {
+                continue;
+            }
+            let Some(want) = want else {
+                self.items[idx].clear_bg_image();
+                continue;
+            };
+            if let Some(held) = self.items.iter().find_map(|other| other.bg_image.as_ref().filter(|b| b.hash == want)).cloned() {
+                self.items[idx].hold_bg_image(held);
+            } else if let Some(path) = paths.get(&want) {
+                self.bg_loads.insert(want);
+                self.request_bg_image(self.items[idx].id, path.clone(), Some(want));
+            } else {
+                self.items[idx].clear_bg_image();
+                unknown = true;
+            }
+        }
+        unknown
+    }
+
+    /// Load and hash a background picture off the UI thread, picked by
+    /// the user or one that `fills` names; it lands on `bg_io.bg_image_rx`.
+    pub(crate) fn request_bg_image(&self, item_id: u64, path: PathBuf, fills: Option<u64>) {
         let tx = self.bg_io.bg_image_tx.clone();
         self.bg_io.decode_slots.spawn(move || {
             let result = prunr_core::load_image_from_path(&path)
@@ -491,7 +540,7 @@ impl BatchManager {
                     (img, hash)
                 })
                 .map_err(|e| e.to_string());
-            let _ = tx.send(super::background_io::BgImageLoad { item_id, path, picked, result });
+            let _ = tx.send(super::background_io::BgImageLoad { item_id, path, fills, result });
         });
     }
 
@@ -716,16 +765,11 @@ impl BatchManager {
 
     /// A switch from model `from` to the one in `settings`: every image
     /// keeps the settings it changed and takes the rest from its preset.
-    /// Returns the images whose background picture changed with it.
-    pub fn switch_model(&mut self, from: super::settings::SettingsModel, settings: &super::settings::Settings) -> Vec<usize> {
-        let mut pictures_changed = Vec::new();
-        for (idx, item) in self.items.iter_mut().enumerate() {
+    pub fn switch_model(&mut self, from: super::settings::SettingsModel, settings: &super::settings::Settings) {
+        for item in &mut self.items {
             let preset = settings.preset(&item.applied_preset);
-            if item.switch_to(from, item.settings.faces.model, settings.model, preset) {
-                pictures_changed.push(idx);
-            }
+            item.switch_to(from, item.settings.faces.model, settings.model, preset);
         }
-        pictures_changed
     }
 }
 
@@ -1311,15 +1355,70 @@ mod tests {
     }
 
     /// A background picture loads off the UI thread with its content hash.
+    fn naming_picture(id: u64, hash: u64) -> BatchItem {
+        let mut item = item_with_cache(id, 0);
+        item.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
+        item
+    }
+
+    /// Every image whose settings name a picture shows it from one load,
+    /// however many name it; once all show it, nothing more is loaded.
+    #[test]
+    fn one_load_fills_every_image_that_names_a_picture() {
+        let mut bm = fixture();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("bg.png");
+        std::fs::write(&path, one_pixel_png()).unwrap();
+        let hash = crate::gui::item::bg_image_content_hash(&prunr_core::load_image_from_path(&path).unwrap());
+        bm.items.extend((1..=3).map(|id| naming_picture(id, hash)));
+        let paths = HashMap::from([(hash, path)]);
+        assert!(!bm.keep_bg_images_in_step(&paths));
+        assert!(!bm.keep_bg_images_in_step(&paths), "loading: not asked again");
+        let load = bm.bg_io.bg_image_rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
+        assert!(bm.bg_io.bg_image_rx.recv_timeout(Duration::from_millis(200)).is_err(), "one load");
+        bm.land_bg_image(load);
+        let first = bm.items[0].bg_image.clone().expect("filled");
+        assert!(bm.items.iter().all(|item| item.bg_image.as_ref().is_some_and(|b| Arc::ptr_eq(b, &first))), "one picture, shared");
+        bm.keep_bg_images_in_step(&paths);
+        assert!(bm.bg_io.bg_image_rx.recv_timeout(Duration::from_millis(200)).is_err(), "in step: nothing to load");
+    }
+
+    /// A picture with no known file is dropped from every image that
+    /// names it, and told once.
+    #[test]
+    fn a_picture_with_no_known_file_is_dropped_and_told_once() {
+        let mut bm = fixture();
+        bm.items.extend((1..=2).map(|id| naming_picture(id, 12_345)));
+        assert!(bm.keep_bg_images_in_step(&HashMap::new()));
+        assert!(bm.items.iter().all(|item| item.settings.bg_image_hash.is_none()));
+        assert!(!bm.keep_bg_images_in_step(&HashMap::new()), "told once");
+    }
+
+    /// A load that fails, or whose file holds another picture now, drops
+    /// the name from every image waiting for it, so none asks again.
+    #[test]
+    fn a_fill_that_fails_drops_the_name_from_every_image_waiting() {
+        use crate::gui::background_io::BgImageLoad;
+        for result in [Err("unreadable".to_string()), Ok((image::DynamicImage::new_rgba8(1, 1), 99))] {
+            let mut bm = fixture();
+            bm.items.extend((1..=2).map(|id| naming_picture(id, 42)));
+            let paths = HashMap::from([(42, PathBuf::from("/nowhere/bg.png"))]);
+            bm.keep_bg_images_in_step(&paths);
+            bm.land_bg_image(BgImageLoad { item_id: 1, path: "/nowhere/bg.png".into(), fills: Some(42), result });
+            assert!(bm.items.iter().all(|item| item.settings.bg_image_hash.is_none()));
+            assert!(bm.bg_loads.is_empty());
+        }
+    }
+
     #[test]
     fn a_background_picture_loads_with_its_hash() {
         let bm = fixture();
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("bg.png");
         std::fs::write(&path, one_pixel_png()).unwrap();
-        bm.request_bg_image(5, path.clone(), true);
+        bm.request_bg_image(5, path.clone(), None);
         let load = bm.bg_io.bg_image_rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
-        assert_eq!((load.item_id, load.picked, load.path), (5, true, path));
+        assert_eq!((load.item_id, load.fills, load.path), (5, None, path));
         let (img, hash) = load.result.expect("decodes");
         assert_eq!(hash, crate::gui::item::bg_image_content_hash(&img));
     }

@@ -1049,6 +1049,7 @@ impl PrunrApp {
             landed = true;
             ctx.request_repaint();
         }
+        self.keep_bg_images_in_step();
 
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
@@ -1606,20 +1607,20 @@ mod timeline_contract_tests {
         use crate::gui::background_io::BgImageLoad;
         let mut app = app_with_processed_item(SettingsModel::Silueta);
         app.batch.items[0].settings.bg = Some([9, 9, 9, 255]);
-        let load = |picked, result| BgImageLoad { item_id: 1, path: "bg.png".into(), picked, result };
+        let load = |fills, result| BgImageLoad { item_id: 1, path: "bg.png".into(), fills, result };
 
         let steps = app.batch.items[0].timeline.undo_steps();
-        app.land_bg_image(load(true, Err("unreadable".into())));
+        app.land_bg_image(load(None, Err("unreadable".into())));
         assert_eq!(app.batch.items[0].settings.bg, Some([9, 9, 9, 255]), "a failed pick keeps the colour");
         assert_eq!(app.batch.items[0].timeline.undo_steps(), steps);
 
-        app.land_bg_image(load(true, Ok((image::DynamicImage::new_rgba8(2, 2), 42))));
+        app.land_bg_image(load(None, Ok((image::DynamicImage::new_rgba8(2, 2), 42))));
         let item = &app.batch.items[0];
         assert_eq!(item.settings.backdrop(), crate::gui::item_settings::Backdrop::Image(std::num::NonZeroU64::new(42).unwrap()));
         assert_eq!(item.settings.bg, None, "the picture replaces the colour");
         assert_eq!(item.timeline.undo_steps(), steps + 1, "as one step");
 
-        app.land_bg_image(load(false, Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
+        app.land_bg_image(load(Some(77), Ok((image::DynamicImage::new_rgba8(3, 3), 77))));
         assert_eq!(app.batch.items[0].bg_image.as_ref().map(|b| b.hash), Some(42), "a picture no setting names is dropped");
     }
 
