@@ -1,73 +1,282 @@
-//! v2 preset schema: per-model item and brush knobs, plus for SD models
-//! an `SdPreset` of per-scheduler bundles. v1 files migrate in at load.
+//! Presets: per model, the settings a preset sets. Prunr's own preset
+//! (`presets/Prunr.json`, built in) holds every model's defaults; a saved
+//! preset keeps, per model, only the settings that differ from Prunr's,
+//! so the rest follow Prunr's and improve with it. A model a preset has no
+//! entry for takes Prunr's settings. v1 files migrate in at load.
 //!
-//! Every new field MUST deserialize from default (`#[serde(default)]`);
-//! the tripwire tests enforce it. `models` is keyed by the `ModelId`
-//! Debug name, not `ModelId`, so a file from a newer binary with models
-//! this one doesn't know still loads; unknown keys are skipped at lookup.
+//! Old files MUST keep loading: every struct reads missing fields from
+//! default and ignores unknown ones (the tripwire tests). `models` is keyed
+//! by name, not `ModelId`, so a file from a newer Prunr with models this
+//! one doesn't know still loads and keeps them.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use prunr_models::ModelId;
 
 use super::brush_state::{BrushSettings, SdScheduler};
 use super::item_settings::ItemSettings;
+use super::settings::SettingsModel;
 
 pub(crate) const PRESET_FORMAT_VERSION: u32 = 2;
 
-/// The `PresetFile.models` key; the same Debug-name format as
+/// A model's name in a preset's `models`, and in
 /// `Settings.accepted_licenses`.
 pub(crate) fn model_id_key(id: ModelId) -> String {
     format!("{id:?}")
 }
 
-/// Inverse of `model_id_key`. Returns `None` for unknown keys —
-/// future-binary entries the receiver doesn't know about round-trip
-/// in the JSON but resolve to nothing at lookup time.
-#[cfg(test)]
-fn model_id_from_key(s: &str) -> Option<ModelId> {
-    ModelId::ALL.iter().copied().find(|id| format!("{id:?}") == s)
+/// The `models` key of "No model", which has no `ModelId`.
+pub(crate) const NO_MODEL_KEY: &str = "NoModel";
+
+/// The `models` key `model`'s entry is filed under.
+pub(crate) fn preset_key(model: SettingsModel) -> String {
+    model.to_model_id().map_or_else(|| NO_MODEL_KEY.to_string(), model_id_key)
 }
 
+/// The model filed under `key`; `None` for one this Prunr does not know.
+fn model_of_key(key: &str) -> Option<SettingsModel> {
+    SettingsModel::ALL.into_iter().find(|&m| preset_key(m) == key)
+}
+
+/// The settings of the `sd` part, by name.
+const SD_FIELDS: &[&str] = &["prompt", "negative_prompt", "use_taesd", "seed", "active_scheduler", "schedulers"];
+
+/// One model's settings as a file lists them, by name: only those the
+/// preset sets.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Entry {
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub item_settings: Map<String, Value>,
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub brush: Map<String, Value>,
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    pub sd: Map<String, Value>,
+}
+
+impl Entry {
+    fn is_empty(&self) -> bool {
+        self.item_settings.is_empty() && self.brush.is_empty() && self.sd.is_empty()
+    }
+}
+
+/// A preset as its file keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct PresetFile {
     pub format_version: u32,
-    pub models: HashMap<String, ModelPreset>,
+    pub models: HashMap<String, Entry>,
 }
 
 impl Default for PresetFile {
     fn default() -> Self {
-        Self {
-            format_version: PRESET_FORMAT_VERSION,
-            models: HashMap::new(),
-        }
+        Self { format_version: PRESET_FORMAT_VERSION, models: HashMap::new() }
     }
 }
 
 impl PresetFile {
-    pub(crate) fn single(model: ModelId, preset: ModelPreset) -> Self {
-        Self {
-            format_version: PRESET_FORMAT_VERSION,
-            models: HashMap::from([(model_id_key(model), preset)]),
-        }
+    /// A preset of image settings alone, filed under the default model: a
+    /// v1 file, which predates models in presets.
+    pub(crate) fn of_item_settings(item_settings: ItemSettings) -> Self {
+        let model = super::settings::DEFAULT_MODEL;
+        Self::default().with_settings(model, &item_settings, &prunr_model(model).brush)
     }
 
-    /// A preset of image settings alone, filed under the default model.
-    pub(crate) fn of_item_settings(item_settings: ItemSettings) -> Self {
-        Self::single(super::settings::DEFAULT_PRESET_MODEL, ModelPreset { item_settings, ..Default::default() })
+    /// The file with `model`'s entry set from the current settings, `item`
+    /// and `brush`: those of its settings that differ from Prunr's. The SD
+    /// part keeps the bundles of the qualities not in use. A model with
+    /// nothing apart from Prunr's has no entry.
+    pub(crate) fn with_settings(mut self, model: SettingsModel, item: &ItemSettings, brush: &BrushSettings) -> Self {
+        let key = preset_key(model);
+        let mut sd = prunr_model(model).sd.as_ref().map(|prunr| {
+            let kept = self.models.get(&key).map_or(Map::new(), |entry| entry.sd.clone());
+            overlay(prunr.clone(), &kept)
+        });
+        if let Some(sd) = &mut sd {
+            take_sd_from_brush(sd, brush);
+        }
+        let entry = differences(model, item, brush, sd.as_ref());
+        if entry.is_empty() {
+            self.models.remove(&key);
+        } else {
+            self.models.insert(key, entry);
+        }
+        self.format_version = PRESET_FORMAT_VERSION;
+        self
+    }
+
+    /// The file as it is kept: each model's entry trimmed to its settings
+    /// that differ from Prunr's (a file an earlier Prunr saved whole, or
+    /// one written by hand); a model this Prunr does not know is kept as it
+    /// is, for the Prunr that does.
+    pub(crate) fn trimmed(mut self) -> Self {
+        self.models.retain(|key, entry| match model_of_key(key) {
+            Some(model) => {
+                let view = ModelView::of(model, entry);
+                *entry = differences(model, &view.item_settings, &view.brush, view.sd.as_ref());
+                !entry.is_empty()
+            }
+            None => true,
+        });
+        self
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct ModelPreset {
-    pub item_settings: ItemSettings,
-    pub brush: BrushSettings,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sd: Option<SdPreset>,
+/// The settings of `model`'s that differ from Prunr's, by name.
+fn differences(model: SettingsModel, item: &ItemSettings, brush: &BrushSettings, sd: Option<&SdPreset>) -> Entry {
+    let fields = super::preset_fields::of(model);
+    let prunr = prunr_model(model);
+    Entry {
+        item_settings: differing(item, &prunr.item_settings, &fields.item),
+        brush: differing(brush, &prunr.brush, &fields.brush),
+        sd: sd.zip(prunr.sd.as_ref()).map_or(Map::new(), |(sd, base)| differing(sd, base, SD_FIELDS)),
+    }
+}
+
+/// `value`'s `fields` that differ from `base`'s. A field written only
+/// when set (an `Option`) is written as null when `value` leaves it out.
+fn differing<T: Serialize>(value: &T, base: &T, fields: &[&str]) -> Map<String, Value> {
+    let (value, base) = (serde_json::to_value(value).unwrap_or_default(), serde_json::to_value(base).unwrap_or_default());
+    fields
+        .iter()
+        .filter_map(|&field| {
+            let own = value.get(field).cloned().unwrap_or(Value::Null);
+            (own != base.get(field).cloned().unwrap_or(Value::Null)).then(|| (field.to_string(), own))
+        })
+        .collect()
+}
+
+/// `base` with `over`'s settings laid on it, by name. A preset whose
+/// settings do not read leaves `base` as it is.
+fn overlay<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> T {
+    if over.is_empty() {
+        return base;
+    }
+    let mut value = serde_json::to_value(&base).unwrap_or_default();
+    if let Some(fields) = value.as_object_mut() {
+        fields.extend(over.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    serde_json::from_value(value).unwrap_or_else(|err| {
+        tracing::warn!(%err, "preset settings that do not read were left out");
+        base
+    })
+}
+
+/// One model's settings, resolved: its brush before a quality's steps and
+/// guidance are laid on it, and the Stable Diffusion eraser's SD part.
+#[derive(Debug, Clone, PartialEq)]
+struct ModelView {
+    item_settings: ItemSettings,
+    brush: BrushSettings,
+    sd: Option<SdPreset>,
+}
+
+impl ModelView {
+    /// `entry`'s settings over Prunr's for `model`.
+    fn of(model: SettingsModel, entry: &Entry) -> Self {
+        let prunr = prunr_model(model);
+        Self {
+            item_settings: overlay(prunr.item_settings, &entry.item_settings),
+            brush: overlay(prunr.brush.clone(), &entry.brush),
+            sd: prunr.sd.clone().map(|sd| overlay(sd, &entry.sd)),
+        }
+    }
+
+    /// `scheduler`: `None` uses the SD part's own quality; `Some`
+    /// overrides it, so a quality picked in the session doesn't rewrite
+    /// the preset.
+    fn resolve(&self, scheduler: Option<SdScheduler>) -> ResolvedView {
+        let mut brush = self.brush.clone();
+        if let Some(sd) = &self.sd {
+            apply_sd_to_brush(&mut brush, sd, scheduler);
+        }
+        ResolvedView { item_settings: self.item_settings, brush }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PrunrFile {
+    models: HashMap<String, Entry>,
+}
+
+/// Prunr's settings for every model, in `SettingsModel::ALL` order: its
+/// built-in file over the code's own defaults, read once.
+fn prunr_models() -> &'static [ModelView] {
+    static MODELS: std::sync::OnceLock<Vec<ModelView>> = std::sync::OnceLock::new();
+    MODELS.get_or_init(|| {
+        // A test reads the file and resolves every model from it.
+        let file: PrunrFile = serde_json::from_str(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads");
+        SettingsModel::ALL
+            .into_iter()
+            .map(|model| {
+                let entry = file.models.get(&preset_key(model)).cloned().unwrap_or_default();
+                ModelView {
+                    item_settings: overlay(ItemSettings::default(), &entry.item_settings),
+                    brush: overlay(BrushSettings::default(), &entry.brush),
+                    sd: (!entry.sd.is_empty()).then(|| overlay(SdPreset::default(), &entry.sd)),
+                }
+            })
+            .collect()
+    })
+}
+
+fn model_index(model: SettingsModel) -> usize {
+    // Every model is in ALL: `SettingsModel::ALL` lists them all.
+    SettingsModel::ALL.iter().position(|&m| m == model).unwrap_or(0)
+}
+
+fn prunr_model(model: SettingsModel) -> &'static ModelView {
+    &prunr_models()[model_index(model)]
+}
+
+/// Prunr's settings for `model`, resolved for `scheduler` (`None`: its
+/// own quality).
+pub(crate) fn prunr_view(model: SettingsModel, scheduler: Option<SdScheduler>) -> ResolvedView {
+    prunr_model(model).resolve(scheduler)
+}
+
+/// Prunr's image settings for `model`, without cloning its brush.
+pub(crate) fn prunr_item_settings(model: SettingsModel) -> ItemSettings {
+    prunr_model(model).item_settings
+}
+
+/// A preset as the app holds it: its file, and each model's settings
+/// resolved once, as the toolbar reads them every frame.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "PresetFile")]
+pub(crate) struct Preset {
+    file: PresetFile,
+    /// Per model in `SettingsModel::ALL` order; `None` without an entry.
+    views: Vec<Option<ModelView>>,
+}
+
+impl From<PresetFile> for Preset {
+    fn from(file: PresetFile) -> Self {
+        let views = SettingsModel::ALL
+            .into_iter()
+            .map(|model| file.models.get(&preset_key(model)).map(|entry| ModelView::of(model, entry)))
+            .collect();
+        Self { file, views }
+    }
+}
+
+impl Preset {
+    pub(crate) fn file(&self) -> &PresetFile {
+        &self.file
+    }
+
+    /// The preset's settings for `model`, Prunr's where it has none.
+    pub(crate) fn resolve(&self, model: SettingsModel, scheduler: Option<SdScheduler>) -> ResolvedView {
+        self.views[model_index(model)].as_ref().map_or_else(|| prunr_view(model, scheduler), |view| view.resolve(scheduler))
+    }
+
+    /// `resolve`'s image settings, without cloning a brush.
+    pub(crate) fn item_settings(&self, model: SettingsModel) -> ItemSettings {
+        self.views[model_index(model)].as_ref().map_or_else(|| prunr_item_settings(model), |view| view.item_settings)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,8 +320,7 @@ impl Default for SdSchedulerBundle {
 }
 
 impl SdSchedulerBundle {
-    /// Factory tuning for a quality — Prunr's floor when an active
-    /// preset omits a `schedulers[S]` entry.
+    /// A quality's steps and guidance when an SD part has no bundle for it.
     pub fn default_for(scheduler: SdScheduler) -> Self {
         match scheduler {
             SdScheduler::Lcm => Self { steps: 8, guidance_scale: 1.5 },
@@ -121,25 +329,17 @@ impl SdSchedulerBundle {
     }
 }
 
-/// Resolved view of `(file, model, scheduler)` — the values the GUI
-/// applies right now.
+/// A preset's settings for a model and quality: the values the GUI
+/// applies.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedView {
     pub item_settings: ItemSettings,
     pub brush: BrushSettings,
 }
 
-fn apply_sd_to_brush(
-    brush: &mut BrushSettings,
-    sd: &SdPreset,
-    scheduler: Option<SdScheduler>,
-) {
+fn apply_sd_to_brush(brush: &mut BrushSettings, sd: &SdPreset, scheduler: Option<SdScheduler>) {
     let chosen = scheduler.unwrap_or(sd.active_scheduler);
-    let bundle = sd
-        .schedulers
-        .get(&chosen)
-        .copied()
-        .unwrap_or_else(|| SdSchedulerBundle::default_for(chosen));
+    let bundle = sd.schedulers.get(&chosen).copied().unwrap_or_else(|| SdSchedulerBundle::default_for(chosen));
     brush.sd_scheduler = chosen;
     brush.sd_steps = bundle.steps;
     brush.sd_guidance_scale = bundle.guidance_scale;
@@ -149,482 +349,239 @@ fn apply_sd_to_brush(
     brush.sd_use_taesd = sd.use_taesd;
 }
 
-/// `scheduler`: `None` uses the preset's `active_scheduler` (SD models
-/// only); `Some` overrides it, so an in-session scheduler change doesn't
-/// rewrite the preset on disk.
-pub(crate) fn resolve_preset_for_model(
-    file: &PresetFile,
-    model: ModelId,
-    scheduler: Option<SdScheduler>,
-) -> ResolvedView {
-    let mp = entry_for(file, model);
-
-    let item_settings = mp.map(|m| m.item_settings).unwrap_or_default();
-    let mut brush = mp.map_or_else(|| BrushSettings::floor_for(model), |m| m.brush.clone());
-
-    if model.is_sd_family() {
-        let sd_default = SdPreset::default();
-        let sd = mp.and_then(|m| m.sd.as_ref()).unwrap_or(&sd_default);
-        apply_sd_to_brush(&mut brush, sd, scheduler);
-    }
-
-    ResolvedView { item_settings, brush }
-}
-
-/// The background-removal models, in the order a preset's entry for one
-/// stands in for another.
-const CUTOUT_MODELS: [ModelId; 3] = [ModelId::BiRefNetLite, ModelId::Silueta, ModelId::U2net];
-
-/// `file`'s entry for `model`. The mask knobs mean the same on every
-/// background-removal model, so one without an entry of its own uses
-/// another's.
-pub(crate) fn entry_for(file: &PresetFile, model: ModelId) -> Option<&ModelPreset> {
-    file.models.get(&model_id_key(model)).or_else(|| {
-        CUTOUT_MODELS.contains(&model)
-            .then(|| CUTOUT_MODELS.iter().find_map(|m| file.models.get(&model_id_key(*m))))
-            .flatten()
-    })
-}
-
-/// The `SdPreset` a save of `brush` under `model` stores beside the brush.
-/// Non-SD models get none: their SD fields stay on the brush as session
-/// state.
-pub(crate) fn sd_preset_for_save(brush: &BrushSettings, model: ModelId) -> Option<SdPreset> {
-    if !model.is_sd_family() {
-        return None;
-    }
-    Some(SdPreset {
-        prompt: brush.sd_prompt.clone(),
-        negative_prompt: brush.sd_negative_prompt.clone(),
-        use_taesd: brush.sd_use_taesd,
-        seed: brush.sd_seed,
-        active_scheduler: brush.sd_scheduler,
-        schedulers: HashMap::from([(
-            brush.sd_scheduler,
-            SdSchedulerBundle { steps: brush.sd_steps, guidance_scale: brush.sd_guidance_scale },
-        )]),
-    })
-}
-
-/// Apply-time fuse: produce a unified `BrushSettings` from a stored
-/// `ModelPreset`. `scheduler = Some(_)` overrides `sd.active_scheduler`
-/// so an in-session scheduler swap can pick a different bundle without
-/// mutating the preset.
-#[cfg(test)]
-pub(super) fn fuse_brush_for_apply(
-    mp: &ModelPreset,
-    scheduler: Option<SdScheduler>,
-) -> BrushSettings {
-    let mut brush = mp.brush.clone();
-    if let Some(sd) = mp.sd.as_ref() {
-        apply_sd_to_brush(&mut brush, sd, scheduler);
-    }
-    brush
+/// `sd` with the brush's prompt, seed, decoder and quality, and that
+/// quality's steps and guidance; the other qualities' bundles stay.
+fn take_sd_from_brush(sd: &mut SdPreset, brush: &BrushSettings) {
+    sd.prompt = brush.sd_prompt.clone();
+    sd.negative_prompt = brush.sd_negative_prompt.clone();
+    sd.use_taesd = brush.sd_use_taesd;
+    sd.seed = brush.sd_seed;
+    sd.active_scheduler = brush.sd_scheduler;
+    sd.schedulers.insert(brush.sd_scheduler, SdSchedulerBundle { steps: brush.sd_steps, guidance_scale: brush.sd_guidance_scale });
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
+    /// Prunr's file has an entry for every model, listing exactly the
+    /// settings that model shows, each one readable: a new model or a new
+    /// setting has to be given its default there.
     #[test]
-    fn presets_file_default_is_empty_models_map() {
-        let f = PresetFile::default();
-        assert_eq!(f.format_version, 2);
-        assert!(f.models.is_empty());
+    fn prunr_holds_every_models_settings() {
+        fn keys(map: &Map<String, Value>) -> Vec<&str> {
+            let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            keys
+        }
+        fn sorted(mut fields: Vec<&'static str>) -> Vec<&'static str> {
+            fields.sort_unstable();
+            fields
+        }
+        fn reads<T: Serialize + serde::de::DeserializeOwned>(base: T, over: &Map<String, Value>) -> Result<T, serde_json::Error> {
+            let mut value = serde_json::to_value(base)?;
+            value.as_object_mut().expect("a struct").extend(over.clone());
+            serde_json::from_value(value)
+        }
+        let file: PrunrFile = serde_json::from_str(include_str!("../../presets/Prunr.json")).expect("Prunr.json reads");
+        for model in SettingsModel::ALL {
+            let entry = file.models.get(&preset_key(model)).unwrap_or_else(|| panic!("{model:?} has no entry in Prunr.json"));
+            let fields = super::super::preset_fields::of(model);
+            assert_eq!(keys(&entry.item_settings), sorted(fields.item), "{model:?} image settings");
+            assert_eq!(keys(&entry.brush), sorted(fields.brush), "{model:?} brush settings");
+            assert_eq!(!entry.sd.is_empty(), fields.sd, "{model:?} SD part");
+            reads(ItemSettings::default(), &entry.item_settings).unwrap_or_else(|e| panic!("{model:?} image settings: {e}"));
+            reads(BrushSettings::default(), &entry.brush).unwrap_or_else(|e| panic!("{model:?} brush settings: {e}"));
+            reads(SdPreset::default(), &entry.sd).unwrap_or_else(|e| panic!("{model:?} SD part: {e}"));
+        }
+        assert_eq!(file.models.len(), SettingsModel::ALL.len(), "an entry for a model the app does not offer");
     }
 
+    /// Moving the defaults into Prunr's file changed nothing: every model
+    /// resolves as the code's defaults did (one set of image settings,
+    /// Sharpen 0 on the generative erasers, the factory quality bundles).
     #[test]
-    fn sd_scheduler_bundle_default_for_lcm_is_fast() {
-        let b = SdSchedulerBundle::default_for(SdScheduler::Lcm);
-        assert_eq!(b.steps, 8);
-        assert!((b.guidance_scale - 1.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn sd_scheduler_bundle_default_for_dpmpp_is_quality() {
-        let b = SdSchedulerBundle::default_for(SdScheduler::DpmPlusPlus2MKarras);
-        assert_eq!(b.steps, 25);
-        assert!((b.guidance_scale - 4.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn presets_loads_unknown_fields_modelpreset() {
-        let json = r#"{ "made_up_field": 42, "another_future_field": "hello" }"#;
-        let parsed: ModelPreset = serde_json::from_str(json)
-            .expect("ModelPreset must default every missing field and ignore unknown ones — no #[serde(deny_unknown_fields)]");
-        assert_eq!(parsed, ModelPreset::default());
-    }
-
-    #[test]
-    fn presets_loads_unknown_fields_sdpreset() {
-        let json = r#"{ "future_field": true, "another": [1, 2, 3] }"#;
-        let parsed: SdPreset = serde_json::from_str(json)
-            .expect("SdPreset must default every missing field and ignore unknown ones");
-        assert_eq!(parsed, SdPreset::default());
-    }
-
-    #[test]
-    fn presets_loads_unknown_fields_sdschedulerbundle() {
-        let json = r#"{ "tomorrows_field": 1.5 }"#;
-        let parsed: SdSchedulerBundle = serde_json::from_str(json)
-            .expect("SdSchedulerBundle must default every missing field and ignore unknown ones");
-        assert_eq!(parsed, SdSchedulerBundle::default());
-    }
-
-    #[test]
-    fn presets_loads_empty_object_as_defaults_presetfile() {
-        let parsed: PresetFile = serde_json::from_str("{}")
-            .expect("PresetFile must deserialize from `{}`");
-        assert_eq!(parsed, PresetFile::default());
-    }
-
-    #[test]
-    fn presets_loads_unknown_fields_presetfile() {
-        let json = r#"{ "format_version": 2, "models": {}, "extra_top_level": "ignored" }"#;
-        let parsed: PresetFile = serde_json::from_str(json)
-            .expect("PresetFile must ignore unknown top-level fields");
-        assert_eq!(parsed.format_version, 2);
-        assert!(parsed.models.is_empty());
-    }
-
-    #[test]
-    fn preset_file_round_trips_with_one_model_entry() {
-        let mut sd = SdPreset::default();
-        sd.active_scheduler = SdScheduler::Lcm;
-        sd.schedulers.insert(
-            SdScheduler::Lcm,
-            SdSchedulerBundle::default_for(SdScheduler::Lcm),
-        );
-        let model_preset = ModelPreset {
-            sd: Some(sd),
-            ..ModelPreset::default()
-        };
-        let mut original = PresetFile::default();
-        original
-            .models
-            .insert(model_id_key(ModelId::SdV15InpaintFp16), model_preset);
-
-        let json = serde_json::to_string(&original).expect("serialize");
-        let restored: PresetFile = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, original);
-    }
-
-    #[test]
-    fn preset_file_serializes_modelid_as_debug_name() {
-        let mut f = PresetFile::default();
-        f.models.insert(
-            model_id_key(ModelId::SdV15InpaintFp16),
-            ModelPreset::default(),
-        );
-        let json = serde_json::to_string(&f).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse back");
-        let models = value["models"].as_object().expect("models is object");
-        assert!(
-            models.contains_key("SdV15InpaintFp16"),
-            "models key must be the ModelId Debug name; got keys {:?}",
-            models.keys().collect::<Vec<_>>(),
-        );
-    }
-
-    #[test]
-    fn sd_preset_skip_serializing_none_omits_use_taesd_field() {
-        let sd = SdPreset {
-            use_taesd: None,
-            seed: None,
-            ..SdPreset::default()
-        };
-        let json = serde_json::to_string(&sd).expect("serialize");
-        assert!(
-            !json.contains("\"use_taesd\""),
-            "use_taesd: None must be skipped in JSON; got {json}",
-        );
-        assert!(
-            !json.contains("\"seed\""),
-            "seed: None must be skipped in JSON; got {json}",
-        );
-    }
-
-    #[test]
-    fn model_id_key_round_trips_via_from_key() {
-        for &id in ModelId::ALL {
-            let key = model_id_key(id);
-            assert_eq!(
-                model_id_from_key(&key),
-                Some(id),
-                "round-trip failed for {id:?}",
-            );
+    fn moving_the_defaults_into_prunr_changed_nothing() {
+        for model in SettingsModel::ALL {
+            let generated = model.to_model_id().is_some_and(|id| id.is_sd_family());
+            let schedulers: &[Option<SdScheduler>] = if model == SettingsModel::SdInpaint {
+                &[None, Some(SdScheduler::Lcm), Some(SdScheduler::DpmPlusPlus2MKarras)]
+            } else {
+                &[None]
+            };
+            for &scheduler in schedulers {
+                let mut brush = BrushSettings { inpaint_sharpen: if generated { 0.0 } else { 0.6 }, ..BrushSettings::default() };
+                if model == SettingsModel::SdInpaint {
+                    apply_sd_to_brush(&mut brush, &SdPreset::default(), scheduler);
+                }
+                let view = prunr_view(model, scheduler);
+                assert_eq!(view.item_settings, ItemSettings::default(), "{model:?}");
+                assert_eq!(view.brush, brush, "{model:?} {scheduler:?}");
+            }
         }
     }
 
-    #[test]
-    fn model_id_from_key_returns_none_for_unknown() {
-        assert_eq!(model_id_from_key("FutureModel"), None);
-        assert_eq!(model_id_from_key("not a real key"), None);
-        assert_eq!(model_id_from_key(""), None);
+    fn file(json: &str) -> PresetFile {
+        serde_json::from_str(json).expect("a preset file")
     }
 
-    fn brush_with(radius: f32) -> BrushSettings {
-        BrushSettings { radius, ..BrushSettings::default() }
+    /// A saved preset keeps, per model, only what differs from Prunr's:
+    /// the rest follows Prunr's, and a model with nothing changed has no
+    /// entry.
+    #[test]
+    fn a_preset_keeps_only_what_differs_from_prunr() {
+        let model = SettingsModel::BiRefNetLite;
+        let item = ItemSettings { gamma: 1.5, line_mode: prunr_core::LineMode::SubjectOutline, ..prunr_item_settings(model) };
+        let brush = BrushSettings { radius: 40.0, ..prunr_view(model, None).brush };
+        let saved = serde_json::to_value(PresetFile::default().with_settings(model, &item, &brush)).unwrap();
+        assert_eq!(
+            saved["models"],
+            serde_json::json!({ "BiRefNetLite": { "item_settings": { "gamma": 1.5, "line_mode": "SubjectOutline" }, "brush": { "radius": 40.0 } } }),
+        );
+        let unchanged = PresetFile::default().with_settings(model, &prunr_item_settings(model), &prunr_view(model, None).brush);
+        assert!(unchanged.models.is_empty(), "nothing apart from Prunr's");
     }
 
+    /// A model the preset has no entry for takes Prunr's settings, never
+    /// another model's; a setting an entry leaves out takes Prunr's.
     #[test]
-    fn resolve_missing_model_falls_back_to_prunr() {
-        let file = PresetFile::default();
-        let r = resolve_preset_for_model(&file, ModelId::U2net, None);
-        assert_eq!(r.item_settings, ItemSettings::default());
-        assert_eq!(r.brush, BrushSettings::default());
+    fn what_a_preset_does_not_set_is_prunrs() {
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": { "BiRefNetLite": { "item_settings": { "gamma": 2.5 } } } }"#));
+        let birefnet = preset.resolve(SettingsModel::BiRefNetLite, None);
+        assert_eq!(birefnet.item_settings, ItemSettings { gamma: 2.5, ..prunr_item_settings(SettingsModel::BiRefNetLite) });
+        for other in [SettingsModel::U2net, SettingsModel::Silueta, SettingsModel::None, SettingsModel::Nomos2Upscale] {
+            assert_eq!(preset.resolve(other, None), prunr_view(other, None), "{other:?}");
+        }
     }
 
+    /// No model files under its own key.
     #[test]
-    fn resolve_missing_field_falls_back_per_field() {
-        let json = r#"{
+    fn no_model_has_its_own_entry() {
+        let item = ItemSettings { line_mode: prunr_core::LineMode::EdgesOnly, ..prunr_item_settings(SettingsModel::None) };
+        let saved = PresetFile::default().with_settings(SettingsModel::None, &item, &prunr_view(SettingsModel::None, None).brush);
+        assert!(saved.models.contains_key(NO_MODEL_KEY));
+        assert_eq!(Preset::from(saved).item_settings(SettingsModel::None).line_mode, prunr_core::LineMode::EdgesOnly);
+    }
+
+    /// A file an earlier Prunr saved whole loads as what differs from
+    /// Prunr's, with the settings the model does not show dropped; a model
+    /// this Prunr does not know is kept as it is.
+    #[test]
+    fn an_old_whole_file_is_trimmed_to_what_differs() {
+        let whole = serde_json::to_value(ItemSettings { gamma: 1.5, sharpen: 0.7, ..ItemSettings::default() }).unwrap();
+        let old = file(&serde_json::json!({
             "format_version": 2,
             "models": {
-                "Silueta": { "item_settings": { "gamma": 2.5 } }
+                "Silueta": { "item_settings": whole, "brush": serde_json::to_value(BrushSettings::default()).unwrap() },
+                "FutureModel": { "item_settings": { "gamma": 9.0 } },
             }
-        }"#;
-        let file: PresetFile = serde_json::from_str(json).expect("parse");
-
-        let r = resolve_preset_for_model(&file, ModelId::Silueta, None);
-        assert!((r.item_settings.gamma - 2.5).abs() < f32::EPSILON);
-        assert_eq!(r.item_settings.contrast, ItemSettings::default().contrast);
-        assert_eq!(r.brush, BrushSettings::default());
+        }).to_string());
+        let trimmed = old.trimmed();
+        assert_eq!(trimmed.models["Silueta"], Entry { item_settings: serde_json::from_str(r#"{ "gamma": 1.5 }"#).unwrap(), ..Entry::default() });
+        assert_eq!(trimmed.models["FutureModel"].item_settings["gamma"], 9.0, "kept for a Prunr that knows it");
     }
 
-    /// SD draws its own detail; the eraser's sharpening starts off there,
-    /// and on for the other erasers.
+    /// Saving into a preset sets the model in use and keeps the others'
+    /// entries, and the SD part keeps the bundles of the other qualities.
+    #[test]
+    fn saving_into_a_preset_keeps_the_rest() {
+        let existing = file(r#"{ "format_version": 2, "models": {
+            "LaMaFp32": { "brush": { "inpaint_grow": 6.0 } },
+            "SdV15InpaintFp16": { "sd": { "prompt": "old", "schedulers": { "Lcm": { "steps": 4, "guidance_scale": 1.0 } } } }
+        } }"#);
+        let sd = SettingsModel::SdInpaint;
+        let brush = BrushSettings {
+            sd_prompt: "new".into(),
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            sd_steps: 30,
+            sd_guidance_scale: 5.0,
+            ..prunr_view(sd, None).brush
+        };
+        let saved = Preset::from(existing.clone().with_settings(sd, &prunr_item_settings(sd), &brush));
+        assert_eq!(saved.file().models["LaMaFp32"], existing.models["LaMaFp32"], "another model's entry stays");
+        let quality = saved.resolve(sd, Some(SdScheduler::DpmPlusPlus2MKarras)).brush;
+        assert_eq!((quality.sd_prompt.as_str(), quality.sd_steps, quality.sd_guidance_scale), ("new", 30, 5.0));
+        let fast = saved.resolve(sd, Some(SdScheduler::Lcm)).brush;
+        assert_eq!((fast.sd_steps, fast.sd_guidance_scale), (4, 1.0), "the other quality's bundle stays");
+        assert_eq!(saved.resolve(sd, None).brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras, "saved with the quality in use");
+    }
+
+    /// A Stable Diffusion part resolves its quality's bundle, the
+    /// factory's for a quality it has none for, and Prunr's when the entry
+    /// has no SD part.
+    #[test]
+    fn the_sd_part_resolves_per_quality() {
+        let sd = SettingsModel::SdInpaint;
+        let preset = Preset::from(file(r#"{ "format_version": 2, "models": { "SdV15InpaintFp16": {
+            "sd": { "active_scheduler": "DpmPlusPlus2MKarras", "schedulers": { "DpmPlusPlus2MKarras": { "steps": 20, "guidance_scale": 7.5 } } }
+        } } }"#));
+        let own = preset.resolve(sd, None).brush;
+        assert_eq!((own.sd_scheduler, own.sd_steps, own.sd_guidance_scale), (SdScheduler::DpmPlusPlus2MKarras, 20, 7.5));
+        let fast = preset.resolve(sd, Some(SdScheduler::Lcm)).brush;
+        assert_eq!((fast.sd_steps, fast.sd_guidance_scale), (8, 1.5), "the factory bundle for the quality it lacks");
+        let brush_only = Preset::from(file(r#"{ "format_version": 2, "models": { "SdV15InpaintFp16": { "brush": { "radius": 50.0 } } } }"#));
+        assert_eq!(brush_only.resolve(sd, None).brush, BrushSettings { radius: 50.0, ..prunr_view(sd, None).brush });
+    }
+
+    /// RORem takes no prompt or quality: its seed and steps are brush
+    /// settings, and it never gets an SD part.
+    #[test]
+    fn rorem_keeps_its_own_settings_and_no_sd_part() {
+        let rorem = SettingsModel::RoremInpaint;
+        let brush = BrushSettings { rorem_steps: 6, sd_seed: Some(7), sd_prompt: "ignored".into(), ..prunr_view(rorem, None).brush };
+        let saved = PresetFile::default().with_settings(rorem, &prunr_item_settings(rorem), &brush);
+        let entry = &saved.models["RoremFp16"];
+        assert!(entry.sd.is_empty() && !entry.brush.contains_key("sd_prompt"));
+        assert_eq!((entry.brush["rorem_steps"].as_u64(), entry.brush["sd_seed"].as_u64()), (Some(6), Some(7)));
+    }
+
+    /// The generative erasers start with Sharpen off (they draw their own
+    /// detail); the others with it on.
     #[test]
     fn sd_erasers_start_with_sharpen_off() {
-        let file = PresetFile::default();
-        for model in [ModelId::SdV15InpaintFp16, ModelId::SdV15LcmInpaintFp16] {
-            assert_eq!(resolve_preset_for_model(&file, model, None).brush.inpaint_sharpen, 0.0, "{model:?}");
+        for model in [SettingsModel::SdInpaint, SettingsModel::RoremInpaint] {
+            assert_eq!(prunr_view(model, None).brush.inpaint_sharpen, 0.0, "{model:?}");
         }
-        let lama = resolve_preset_for_model(&file, ModelId::LaMaFp32, None).brush.inpaint_sharpen;
-        assert_eq!(lama, BrushSettings::default().inpaint_sharpen);
+        assert_eq!(prunr_view(SettingsModel::Inpaint, None).brush.inpaint_sharpen, 0.6);
     }
 
     #[test]
-    fn resolve_sd_full_bundle_uses_bundle_values() {
-        let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
-            steps: 4,
-            guidance_scale: 1.0,
-        });
-        let sd = SdPreset {
-            active_scheduler: SdScheduler::Lcm,
-            schedulers,
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
-
-        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Lcm));
-        assert_eq!(r.brush.sd_steps, 4);
-        assert!((r.brush.sd_guidance_scale - 1.0).abs() < f32::EPSILON);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::Lcm);
+    fn sd_scheduler_bundle_default_for_each_quality() {
+        assert_eq!(SdSchedulerBundle::default_for(SdScheduler::Lcm), SdSchedulerBundle { steps: 8, guidance_scale: 1.5 });
+        assert_eq!(SdSchedulerBundle::default_for(SdScheduler::DpmPlusPlus2MKarras), SdSchedulerBundle { steps: 25, guidance_scale: 4.0 });
     }
 
+    /// Old and newer files load: missing fields read as default, unknown
+    /// ones are ignored, in every struct a preset file holds.
     #[test]
-    fn resolve_sd_missing_bundle_uses_default_for_scheduler() {
-        let sd = SdPreset {
-            active_scheduler: SdScheduler::Lcm,
-            schedulers: HashMap::new(),
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
-
-        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::DpmPlusPlus2MKarras));
-        let ddim = SdSchedulerBundle::default_for(SdScheduler::DpmPlusPlus2MKarras);
-        assert_eq!(r.brush.sd_steps, ddim.steps);
-        assert!((r.brush.sd_guidance_scale - ddim.guidance_scale).abs() < f32::EPSILON);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
+    fn a_preset_file_loads_with_fields_missing_or_unknown() {
+        assert_eq!(file("{}"), PresetFile::default());
+        assert_eq!(file(r#"{ "format_version": 2, "models": {}, "extra": "ignored" }"#), PresetFile::default());
+        let entry: Entry = serde_json::from_str(r#"{ "made_up_field": 42 }"#).unwrap();
+        assert_eq!(entry, Entry::default());
+        let sd: SdPreset = serde_json::from_str(r#"{ "future_field": true }"#).unwrap();
+        assert_eq!(sd, SdPreset::default());
+        let bundle: SdSchedulerBundle = serde_json::from_str(r#"{ "tomorrows_field": 1.5 }"#).unwrap();
+        assert_eq!(bundle, SdSchedulerBundle::default());
     }
 
+    /// A preset saved before the upscale settings existed loads them as
+    /// Prunr's.
     #[test]
-    fn resolve_sd_no_sd_entry_uses_prunr_sdpreset() {
-        let mp = ModelPreset { sd: None, ..ModelPreset::default() };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
-
-        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, Some(SdScheduler::Lcm));
-        let lcm = SdSchedulerBundle::default_for(SdScheduler::Lcm);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::Lcm);
-        assert_eq!(r.brush.sd_steps, lcm.steps);
-        assert!((r.brush.sd_guidance_scale - lcm.guidance_scale).abs() < f32::EPSILON);
+    fn an_old_preset_without_upscale_keys_loads_prunrs() {
+        let old = Preset::from(file(r#"{ "format_version": 2, "models": { "Nomos8kSchatL": { "item_settings": { "gamma": 1.5 } } } }"#).trimmed());
+        assert_eq!(old.item_settings(SettingsModel::Nomos8kUpscale), prunr_item_settings(SettingsModel::Nomos8kUpscale), "gamma is not an upscaler setting");
     }
 
+    /// A saved preset round-trips through its file: key by model name, the
+    /// SD part's empty fields left out.
     #[test]
-    fn resolve_non_sd_model_ignores_scheduler() {
-        let mp = ModelPreset {
-            brush: brush_with(80.0),
-            ..ModelPreset::default()
-        };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Silueta), mp.clone());
-
-        let r = resolve_preset_for_model(&file, ModelId::Silueta, Some(SdScheduler::Lcm));
-        assert_eq!(r.brush, mp.brush);
-    }
-
-    #[test]
-    fn resolve_sd_uses_active_scheduler_when_caller_passes_none() {
-        let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
-            steps: 20,
-            guidance_scale: 7.5,
-        });
-        let sd = SdPreset {
-            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
-            schedulers,
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset { sd: Some(sd), ..ModelPreset::default() };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), mp);
-
-        let r = resolve_preset_for_model(&file, ModelId::SdV15InpaintFp16, None);
-        assert_eq!(r.brush.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-        assert_eq!(r.brush.sd_steps, 20);
-        assert!((r.brush.sd_guidance_scale - 7.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn sd_preset_for_save_non_sd_model_is_none() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "carry-over".into();
-        brush.sd_steps = 12;
-
-        assert!(sd_preset_for_save(&brush, ModelId::Silueta).is_none());
-    }
-
-    #[test]
-    fn sd_preset_for_save_sd_model_extracts_sd_fields() {
-        let brush = BrushSettings {
-            sd_prompt: "hello".into(),
-            sd_negative_prompt: "world".into(),
-            sd_steps: 12,
-            sd_guidance_scale: 6.5,
-            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
-            sd_seed: Some(7),
-            sd_use_taesd: Some(true),
-            ..BrushSettings::default()
-        };
-
-        let sd = sd_preset_for_save(&brush, ModelId::SdV15InpaintFp16).expect("SD model produces an SdPreset");
-        assert_eq!(sd.prompt, "hello");
-        assert_eq!(sd.negative_prompt, "world");
-        assert_eq!(sd.use_taesd, Some(true));
-        assert_eq!(sd.seed, Some(7));
-        assert_eq!(sd.active_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-
-        let bundle = sd.schedulers.get(&SdScheduler::DpmPlusPlus2MKarras).copied().expect("Quality bundle");
-        assert_eq!(bundle.steps, 12);
-        assert!((bundle.guidance_scale - 6.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn fuse_brush_for_apply_uses_sd_bundle_values() {
-        let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
-            steps: 30,
-            guidance_scale: 6.0,
-        });
-        let sd = SdPreset {
-            prompt: "x".into(),
-            negative_prompt: "y".into(),
-            active_scheduler: SdScheduler::DpmPlusPlus2MKarras,
-            schedulers,
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset {
-            brush: brush_with(80.0),
-            sd: Some(sd),
-            ..ModelPreset::default()
-        };
-
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::DpmPlusPlus2MKarras));
-        assert!((fused.radius - 80.0).abs() < f32::EPSILON);
-        assert_eq!(fused.sd_steps, 30);
-        assert!((fused.sd_guidance_scale - 6.0).abs() < f32::EPSILON);
-        assert_eq!(fused.sd_prompt, "x");
-        assert_eq!(fused.sd_negative_prompt, "y");
-        assert_eq!(fused.sd_scheduler, SdScheduler::DpmPlusPlus2MKarras);
-    }
-
-    #[test]
-    fn fuse_brush_for_apply_no_sd_entry_uses_brush_sd_fields() {
-        let mut brush = BrushSettings::default();
-        brush.sd_prompt = "kept".into();
-        brush.sd_steps = 11;
-        let mp = ModelPreset { brush: brush.clone(), sd: None, ..ModelPreset::default() };
-
-        let fused = fuse_brush_for_apply(&mp, Some(SdScheduler::DpmPlusPlus2MKarras));
-        assert_eq!(fused, brush);
-    }
-
-    #[test]
-    fn forward_compat_unknown_modelid_entry_loads_silently() {
-        // A preset built on a future binary may carry a ModelId variant
-        // this binary doesn't know. The String-keyed `models` map round-
-        // trips the unknown entry; resolver lookup ignores it because
-        // `model_id_from_key` returns None.
-        let json = r#"{"format_version":2,"models":{"FutureModel":{},"Silueta":{}}}"#;
-        let file: PresetFile = serde_json::from_str(json)
-            .expect("unknown ModelId entries must not break parsing");
-        assert!(file.models.contains_key("Silueta"));
-        assert!(file.models.contains_key("FutureModel"));
-        assert_eq!(model_id_from_key("FutureModel"), None);
-        let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
-        assert_eq!(resolved.item_settings, ItemSettings::default());
-    }
-
-    #[test]
-    fn roundtrip_with_output_scale_via_model_preset() {
-        let item = ItemSettings {
-            output_scale: prunr_core::OutputScale::X2,
-            ..ItemSettings::default()
-        };
-        let mp = ModelPreset { item_settings: item, ..ModelPreset::default() };
-        let mut file = PresetFile::default();
-        file.models.insert(model_id_key(ModelId::Nomos8kSchatL), mp);
-
-        let json = serde_json::to_string(&file).expect("serialize");
-        let restored: PresetFile = serde_json::from_str(&json).expect("deserialize");
-
-        let resolved = resolve_preset_for_model(&restored, ModelId::Nomos8kSchatL, None);
-        assert_eq!(resolved.item_settings.output_scale, prunr_core::OutputScale::X2);
-    }
-
-    #[test]
-    fn forward_compat_old_preset_without_upscale_keys() {
-        let json = r#"{
-            "format_version": 2,
-            "models": {
-                "Silueta": {
-                    "item_settings": {
-                        "gamma": 1.5,
-                        "threshold": null,
-                        "edge_shift": 0.0,
-                        "refine_edges": false,
-                        "guided_radius": 8,
-                        "guided_epsilon": 0.0001,
-                        "feather": 0.0,
-                        "line_mode": "Off",
-                        "line_strength": 0.5,
-                        "solid_line_color": null,
-                        "edge_thickness": 0,
-                        "bg": null
-                    }
-                }
-            }
-        }"#;
-        let file: PresetFile = serde_json::from_str(json).expect("deserialize");
-        let resolved = resolve_preset_for_model(&file, ModelId::Silueta, None);
-        assert_eq!(resolved.item_settings.output_scale, prunr_core::OutputScale::X4);
-        assert!((resolved.item_settings.gamma - 1.5).abs() < f32::EPSILON);
+    fn a_saved_preset_round_trips_through_json() {
+        let sd = SettingsModel::SdInpaint;
+        let brush = BrushSettings { sd_seed: Some(3), ..prunr_view(sd, None).brush };
+        let saved = PresetFile::default().with_settings(sd, &prunr_item_settings(sd), &brush);
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains("\"SdV15InpaintFp16\"") && !json.contains("use_taesd"), "{json}");
+        assert_eq!(file(&json), saved);
     }
 }

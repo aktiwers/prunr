@@ -1,0 +1,410 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "brush": {
+        "cutout_action": "Restore",
+        "edge_feather": 0.0,
+        "hardness": 0.7,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle",
+        "strength": 1.0
+      },
+      "item_settings": {
+        "bg": null,
+        "bg_effect": "none",
+        "bg_image_fit": "cover",
+        "bg_image_hash": null,
+        "compose_mode": "lines_only",
+        "contrast": 0.0,
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 0.0,
+          "shadow": "off",
+          "shadow_blur": 24.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.55
+        },
+        "edge_scale": "Fused",
+        "edge_shift": 0.0,
+        "edge_thickness": 0,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "feather": 0.0,
+        "fill_style": "none",
+        "gamma": 1.0,
+        "guided_epsilon": 0.0001,
+        "guided_radius": 8,
+        "input_transform": "none",
+        "line_fade_pct": 0,
+        "line_mode": "Off",
+        "line_strength": 0.5,
+        "line_style": "solid",
+        "refine_edges": false,
+        "refine_guide": "brightness",
+        "solid_line_color": null
+      }
+    },
+    "BigLaMa": {
+      "brush": {
+        "inpaint_edge_color": null,
+        "inpaint_feather": 4.0,
+        "inpaint_fill_scale": "Auto",
+        "inpaint_grow": 2.0,
+        "inpaint_sharpen": 0.6,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle"
+      }
+    },
+    "DdcolorTiny": {
+      "item_settings": {
+        "color_strength_pct": 100
+      }
+    },
+    "FourXNmkdSiaxCx": {
+      "item_settings": {
+        "ai_blend": 1.0,
+        "color_match": false,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "output_scale": "X4",
+        "pre_denoise": 0.0,
+        "sharpen": 0.0
+      }
+    },
+    "FourXNmkdSuperscale": {
+      "item_settings": {
+        "ai_blend": 1.0,
+        "color_match": false,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "output_scale": "X4",
+        "pre_denoise": 0.0,
+        "sharpen": 0.0
+      }
+    },
+    "FourXNomos2RealPlksr": {
+      "item_settings": {
+        "ai_blend": 1.0,
+        "color_match": false,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "output_scale": "X4",
+        "pre_denoise": 0.0,
+        "sharpen": 0.0
+      }
+    },
+    "LaMaFp32": {
+      "brush": {
+        "inpaint_edge_color": null,
+        "inpaint_feather": 4.0,
+        "inpaint_fill_scale": "Auto",
+        "inpaint_grow": 2.0,
+        "inpaint_sharpen": 0.6,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle"
+      }
+    },
+    "Migan": {
+      "brush": {
+        "inpaint_edge_color": null,
+        "inpaint_feather": 4.0,
+        "inpaint_fill_scale": "Auto",
+        "inpaint_grow": 2.0,
+        "inpaint_sharpen": 0.6,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle"
+      }
+    },
+    "NoModel": {
+      "brush": {
+        "cutout_action": "Restore",
+        "edge_feather": 0.0,
+        "hardness": 0.7,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle",
+        "strength": 1.0
+      },
+      "item_settings": {
+        "bg": null,
+        "bg_effect": "none",
+        "bg_image_fit": "cover",
+        "bg_image_hash": null,
+        "compose_mode": "lines_only",
+        "depth": {
+          "aerial_pct": 0,
+          "blur": "off",
+          "blur_pct": 0,
+          "focus": null,
+          "fog_pct": 0
+        },
+        "edge_scale": "Fused",
+        "edge_thickness": 0,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "fill_style": "none",
+        "input_transform": "none",
+        "line_fade_pct": 0,
+        "line_mode": "Off",
+        "line_strength": 0.5,
+        "line_style": "solid",
+        "solid_line_color": null
+      }
+    },
+    "Nomos8kSchatL": {
+      "item_settings": {
+        "ai_blend": 1.0,
+        "color_match": false,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "output_scale": "X4",
+        "pre_denoise": 0.0,
+        "sharpen": 0.0
+      }
+    },
+    "RealEsrganX4Plus": {
+      "item_settings": {
+        "ai_blend": 1.0,
+        "color_match": false,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "output_scale": "X4",
+        "pre_denoise": 0.0,
+        "sharpen": 0.0
+      }
+    },
+    "RoremFp16": {
+      "brush": {
+        "inpaint_edge_color": null,
+        "inpaint_feather": 4.0,
+        "inpaint_fill_scale": "Auto",
+        "inpaint_grow": 2.0,
+        "inpaint_sharpen": 0.0,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "rorem_steps": 4,
+        "sd_seed": null,
+        "sd_soft_edge": true,
+        "shape": "Circle"
+      }
+    },
+    "SdV15InpaintFp16": {
+      "brush": {
+        "inpaint_edge_color": null,
+        "inpaint_feather": 4.0,
+        "inpaint_fill_scale": "Auto",
+        "inpaint_grow": 2.0,
+        "inpaint_sharpen": 0.0,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "sd_sampler": null,
+        "sd_soft_edge": true,
+        "sd_strength": 1.0,
+        "shape": "Circle"
+      },
+      "sd": {
+        "active_scheduler": "Lcm",
+        "negative_prompt": "text, letters, words, watermark, signature, logo, blurry, distorted, low quality, oversaturated, jpeg artifacts",
+        "prompt": "",
+        "schedulers": {
+          "DpmPlusPlus2MKarras": {
+            "guidance_scale": 4.0,
+            "steps": 25
+          },
+          "Lcm": {
+            "guidance_scale": 1.5,
+            "steps": 8
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "brush": {
+        "cutout_action": "Restore",
+        "edge_feather": 0.0,
+        "hardness": 0.7,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle",
+        "strength": 1.0
+      },
+      "item_settings": {
+        "bg": null,
+        "bg_effect": "none",
+        "bg_image_fit": "cover",
+        "bg_image_hash": null,
+        "compose_mode": "lines_only",
+        "contrast": 0.0,
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 0.0,
+          "shadow": "off",
+          "shadow_blur": 24.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.55
+        },
+        "edge_scale": "Fused",
+        "edge_shift": 0.0,
+        "edge_thickness": 0,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "feather": 0.0,
+        "fill_style": "none",
+        "gamma": 1.0,
+        "guided_epsilon": 0.0001,
+        "guided_radius": 8,
+        "input_transform": "none",
+        "line_fade_pct": 0,
+        "line_mode": "Off",
+        "line_strength": 0.5,
+        "line_style": "solid",
+        "refine_edges": false,
+        "refine_guide": "brightness",
+        "solid_line_color": null
+      }
+    },
+    "U2net": {
+      "brush": {
+        "cutout_action": "Restore",
+        "edge_feather": 0.0,
+        "hardness": 0.7,
+        "magic_confidence_threshold": 0.5,
+        "magic_depth": false,
+        "magic_depth_range": 0.08,
+        "magic_remove_specks": true,
+        "mode": "Add",
+        "radius": 24.0,
+        "shape": "Circle",
+        "strength": 1.0
+      },
+      "item_settings": {
+        "bg": null,
+        "bg_effect": "none",
+        "bg_image_fit": "cover",
+        "bg_image_hash": null,
+        "compose_mode": "lines_only",
+        "contrast": 0.0,
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 0.0,
+          "shadow": "off",
+          "shadow_blur": 24.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.55
+        },
+        "edge_scale": "Fused",
+        "edge_shift": 0.0,
+        "edge_thickness": 0,
+        "faces": {
+          "hair": false,
+          "largest_only": false,
+          "model": "Gfpgan",
+          "on": false,
+          "strength_pct": 50
+        },
+        "feather": 0.0,
+        "fill_style": "none",
+        "gamma": 1.0,
+        "guided_epsilon": 0.0001,
+        "guided_radius": 8,
+        "input_transform": "none",
+        "line_fade_pct": 0,
+        "line_mode": "Off",
+        "line_strength": 0.5,
+        "line_style": "solid",
+        "refine_edges": false,
+        "refine_guide": "brightness",
+        "solid_line_color": null
+      }
+    }
+  }
+}
