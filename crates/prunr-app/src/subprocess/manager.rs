@@ -48,6 +48,13 @@ impl std::fmt::Display for SendError {
 }
 
 /// The strokes `item_id`'s run cuts the subject with, in a temp file.
+/// Remove `item_id`'s temp files of `kinds`, written for a send that failed.
+fn remove_inputs(item_id: u64, kinds: &[super::protocol::IpcKind]) {
+    for kind in kinds {
+        let _ = std::fs::remove_file(kind.path_for(ipc_temp_dir(), item_id));
+    }
+}
+
 fn write_correction(item_id: u64, plane: Option<&prunr_core::selection::MaskArtifact>) -> Result<Option<PlaneFile>, String> {
     plane.map(|plane| {
         let path = super::protocol::IpcKind::Correction.path_for(ipc_temp_dir(), item_id);
@@ -280,6 +287,22 @@ impl SubprocessManager {
         chain_input: Option<(&image::RgbaImage, u32, u32)>,
         correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), String> {
+        let sent = self.write_and_send_image(item_id, image_bytes, chain_input, correction);
+        // Nothing will read what was written: up to a photo, its start
+        // image and its strokes plane, in a RAM-backed folder.
+        if sent.is_err() {
+            remove_inputs(item_id, &[super::protocol::IpcKind::Input, super::protocol::IpcKind::Chain, super::protocol::IpcKind::Correction]);
+        }
+        sent
+    }
+
+    fn write_and_send_image(
+        &mut self,
+        item_id: u64,
+        image_bytes: &[u8],
+        chain_input: Option<(&image::RgbaImage, u32, u32)>,
+        correction: Option<&prunr_core::selection::MaskArtifact>,
+    ) -> Result<(), String> {
         let image_path = super::protocol::IpcKind::Input.path_for(ipc_temp_dir(), item_id);
         std::fs::write(&image_path, image_bytes)
             .map_err(|e| format!("Failed to write input temp file: {e}"))?;
@@ -366,7 +389,7 @@ impl SubprocessManager {
         correction: Option<&prunr_core::selection::MaskArtifact>,
     ) -> Result<(), SendError> {
         let correction = write_correction(item_id, correction).map_err(SendError::Other)?;
-        self.send_with_tensor_and_image(
+        let sent = self.send_with_tensor_and_image(
             item_id,
             tensor,
             super::protocol::IpcKind::Seg,
@@ -382,7 +405,11 @@ impl SubprocessManager {
                 mask,
                 correction,
             },
-        )
+        );
+        if sent.is_err() {
+            remove_inputs(item_id, &[super::protocol::IpcKind::Correction, super::protocol::IpcKind::Seg, super::protocol::IpcKind::Input]);
+        }
+        sent
     }
 
     /// Send a Tier 2 re-postprocess command (skip inference, reuse cached tensor).
