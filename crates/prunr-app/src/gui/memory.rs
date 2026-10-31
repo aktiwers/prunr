@@ -235,7 +235,8 @@ impl CutoutEngines {
 }
 
 /// The most jobs up to `max_jobs` that `fits`, fewer jobs before the
-/// first look is dropped; the shortfall with it when none fits either way.
+/// first look is dropped; when none fits either way, the shortfall of one
+/// job without it, the smallest run tried.
 fn plan_with(
     max_jobs: usize,
     first_look: bool,
@@ -243,7 +244,7 @@ fn plan_with(
 ) -> Result<CutoutPlan, prunr_core::memory::Short> {
     let with = |look| most_jobs(max_jobs, |jobs| fits(jobs, look)).map(|jobs| CutoutPlan { jobs, first_look: look });
     match with(first_look) {
-        Err(short) if first_look => with(false).map_err(|_| short),
+        Err(_) if first_look => with(false),
         planned => planned,
     }
 }
@@ -357,6 +358,15 @@ mod tests {
         assert_eq!(plan_with(4, true, room(2, false)), Ok(plan(2, false)), "then no first look");
         assert_eq!(plan_with(4, false, room(1, true)), Ok(plan(1, false)));
         assert_eq!(plan_with(4, true, room(0, true)), Err(short));
+    }
+
+    /// A refusal tells what the run refused needs: one job without the
+    /// first look, the smallest it would have tried.
+    #[test]
+    fn a_refusal_tells_the_need_without_the_first_look() {
+        let short = |need_mb| prunr_core::memory::Short::Ram { need_mb, kept_mb: 1_024, free_mb: 7_900 };
+        let none_fits = |_jobs: usize, look: bool| Err(short(if look { 8_200 } else { 7_500 }));
+        assert_eq!(plan_with(4, true, none_fits), Err(short(7_500)));
     }
 
     #[test]
