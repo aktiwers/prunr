@@ -76,7 +76,10 @@ prunr -j 4 *.jpg -o out/                     # 4 parallel jobs
 prunr --lines logo.png                       # line extraction only
 prunr --inpaint photo.jpg --mask m.png       # erase area defined by mask
 prunr photo.jpg --bg-image studio.jpg        # bake a chosen image as the new background
+prunr --preset Portrait *.jpg -o out/        # the settings of a preset from the app
 ```
+
+Every setting flag starts from Prunr's own settings for the model, or from `--preset`'s (a name from the app's Presets menu, or a preset file); a flag you give overrides it.
 
 Common flags:
 
@@ -84,30 +87,31 @@ Common flags:
 |------|-------------|
 | `-o, --output <PATH>` | Output file or directory |
 | `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net` |
+| `--preset <NAME\|FILE>` | Start from a preset; the flags below override it |
 | `-j, --jobs <N>` | Images at once (default: as the app: half the cores, 2 on a graphics card, fewer when memory is short) |
 | `-f, --force` | Overwrite existing output |
 | `--cpu` | Force CPU inference |
-| `--gamma <N>` | Removal strength (default: 1.0) |
+| `--gamma <N>` | Removal strength; above 1 removes more |
 | `--contrast <N>` | Edge contrast (0.0–1.0); 1 is a hard edge |
 | `--edge-shift <N>` | Grow (positive) or shrink (negative) the cut-out by N pixels, up to 20 |
-| `--edge-width <N>` | How far `--refine-edges` looks from the edge, in pixels (default 8) |
+| `--edge-width <N>` | How far `--refine-edges` looks from the edge, in pixels |
 | `--feather <N>` | Soften the edge by N pixels; fractions allowed |
-| `--refine-edges` | Guided filter for fine detail (hair, leaves) |
+| `--refine-edges[=false]` | Guided filter for fine detail (hair, leaves) |
 | `--lines` | Extract lines/edges only |
 | `--lines-after-bg` | Remove the background, then draw lines on the result |
-| `--line-detail <N>` | How much detail becomes lines, 0.0–1.0 (default 0.5); `--line-strength` still works |
+| `--line-detail <N>` | How much detail becomes lines, 0.0–1.0; `--line-strength` still works |
 | `--line-width <N>` | Line width in pixels, 0–20 |
 | `--line-composition <M>` | With `--lines-after-bg`: `lines-only`, `subject-filled`, `engraving`, `ghost` |
-| `--line-scale <S>` | `fine`, `bold`, `fused` (default) |
+| `--line-scale <S>` | `fine`, `bold`, `fused` |
 | `--line-color <HEX>` | Paint all lines one colour |
 | `--large-image <P>` | Images above 8000 px: `process` (default, keep the original size) or `downscale` (to 4096 px) |
 | `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
 | `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
-| `--bg-image-fit <MODE>` | `cover` (default), `contain`, `stretch`, `tile`, `center` |
+| `--bg-image-fit <MODE>` | `cover`, `contain`, `tile` |
 | `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
-| `--fill-scale <S>` | Eraser: `auto` (default), `full`, `half`, `quarter` — large areas fill more convincingly smaller |
+| `--fill-scale <S>` | Eraser: `auto`, `full`, `half`, `quarter` — large areas fill more convincingly smaller |
 | `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `nomos2`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
-| `--scale <2\|3\|4>` | Upscale: how much larger (default 4) |
+| `--scale <2\|3\|4>` | Upscale: how much larger |
 | `--denoise`, `--sharpen`, `--ai-blend`, `--color-match` | Upscale: the Refine knobs |
 | `--restore-faces <MODEL>`, `--face-strength <0-100>` | Redraw soft faces with `gfpgan` or `restoreformer` |
 | `--colorize`, `--color-strength <0-1.5>` | Colorize mode: colour a black-and-white photo with DDColor; saves `{stem}_color.png` |

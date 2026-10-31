@@ -61,6 +61,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--output, -o <path>", "Where to save (file or folder)");
                             opt_row(ui, "--model, -m <model>", "silueta, u2net, or birefnet-lite");
+                            opt_row(ui, "--preset <name|file>", "Start from a preset; flags you give override it");
                             opt_row(ui, "--jobs, -j 4", "Process 4 images at once");
                             opt_row(ui, "--force, -f", "Overwrite existing files");
                             opt_row(ui, "--quiet, -q", "Silent mode (errors only)");
@@ -75,6 +76,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Fast batch: 8 parallel, overwrite allowed");
                     example_row(ui, toasts, "prunr photo.jpg --bg-color ffffff",
                         "White background instead of transparent");
+                    example_row(ui, toasts, "prunr --preset Portrait photo.jpg",
+                        "The settings of your preset Portrait");
                 }
 
                 CliTab::Sketch => {
@@ -91,15 +94,15 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--lines", "Extract lines only (skip background removal)");
                             opt_row(ui, "--lines-after-bg", "Remove the background first, then extract lines");
-                            opt_row(ui, "--line-detail <n>", "Detail level, 0.0\u{2013}1.0 (default 0.5)");
-                            opt_row(ui, "--line-width <px>", "Line width, 0\u{2013}20 px (default 0)");
+                            opt_row(ui, "--line-detail <n>", "Detail level, 0.0\u{2013}1.0");
+                            opt_row(ui, "--line-width <px>", "Line width, 0\u{2013}20 px");
                             opt_row(ui, "--line-composition <mode>", "With --lines-after-bg: lines-only / subject-filled / engraving / ghost");
                             opt_row(ui, "--line-color <hex>", "Solid color for lines (e.g. 000000)");
-                            opt_row(ui, "--line-scale <scale>", "Line scale: fine / bold / fused (default)");
+                            opt_row(ui, "--line-scale <scale>", "Line scale: fine / bold / fused");
                             opt_row(ui, "--line-fade <0-100>", "Lines lighten with distance (needs the depth model)");
                             opt_row(ui, "--bg-color <hex>", "Fill background with color (e.g. ffffff)");
                             opt_row(ui, "--bg-image <path>", "Fill background with an image");
-                            opt_row(ui, "--bg-image-fit <fit>", "cover (default) / contain / tile");
+                            opt_row(ui, "--bg-image-fit <fit>", "cover / contain / tile");
                             opt_row(ui, "--effect <name>", "Restyle the subject's colors: sepia, invert, pixelate, halftone, duotone\u{2026}");
                             opt_row(ui, "--outline <px[:hex]>", "Sticker outline around the subject, e.g. 8 or 8:000000");
                             opt_row(ui, "--shadow <kind>", "Shadow under the subject: soft or drop");
@@ -135,17 +138,17 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--gamma <n>",
-                                "Removal strength (default 1.0, >1 aggressive)");
+                                "Removal strength; above 1 removes more");
                             opt_row(ui, "--contrast <n>",
-                                "Edge contrast 0\u{2013}1, 1 is a hard edge (default 0)");
+                                "Edge contrast 0\u{2013}1, 1 is a hard edge");
                             opt_row(ui, "--edge-shift <n>",
                                 "Grow (+) or shrink (\u{2212}) the edge, up to 20 px");
                             opt_row(ui, "--refine-edges",
                                 "Guided filter for fine edge detail");
                             opt_row(ui, "--edge-width <n>",
-                                "How far refinement looks from the edge, in px (default 8)");
+                                "How far refinement looks from the edge, in px");
                             opt_row(ui, "--refine-guide <g>",
-                                "What refinement follows: brightness (default) or color");
+                                "What refinement follows: brightness or color");
                             opt_row(ui, "--feather <n>",
                                 "Soften the edge by n px; fractions allowed");
                         });
@@ -176,7 +179,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .show(ui, |ui| {
                             opt_row(ui, "--inpaint", "Switch to Eraser mode");
                             opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
-                            opt_row(ui, "--fill-scale <scale>", "auto, full, half or quarter: large areas fill more convincingly smaller (default auto)");
+                            opt_row(ui, "--fill-scale <scale>", "auto, full, half or quarter: large areas fill more convincingly smaller");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -200,13 +203,13 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--upscale <model>", "realesrgan, nomos, siax or superscale: switch to Upscale mode");
-                            opt_row(ui, "--scale <2|3|4>", "How much larger (default 4)");
-                            opt_row(ui, "--denoise <0-1>", "Denoise before the model (default 0)");
-                            opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens (default 0)");
-                            opt_row(ui, "--ai-blend <0-1>", "1 keeps the model's output, 0 the plain enlargement (default 1)");
+                            opt_row(ui, "--scale <2|3|4>", "How much larger");
+                            opt_row(ui, "--denoise <0-1>", "Denoise before the model");
+                            opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens");
+                            opt_row(ui, "--ai-blend <0-1>", "1 keeps the model's output, 0 the plain enlargement");
                             opt_row(ui, "--color-match", "Match the upscale's colors to the original");
                             opt_row(ui, "--restore-faces <model>", "gfpgan or restoreformer: redraw soft faces after the upscale");
-                            opt_row(ui, "--face-strength <0-100>", "Up to 50 adds detail over the photo's shading (default 50)");
+                            opt_row(ui, "--face-strength <0-100>", "Up to 50 adds detail over the photo's shading");
                         });
 
                     ui.add_space(theme::SPACE_MD);
@@ -223,7 +226,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--colorize", "Color a black-and-white photo with DDColor");
-                            opt_row(ui, "--color-strength <0-1.5>", "0 is black and white, 1 the model's colors (default 1)");
+                            opt_row(ui, "--color-strength <0-1.5>", "0 is black and white, 1 the model's colors");
                         });
                     example_row(ui, toasts, "prunr --colorize old_photo.jpg",
                         "Color it, save old_photo_color.png");
