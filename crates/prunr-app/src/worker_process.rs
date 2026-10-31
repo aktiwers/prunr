@@ -419,9 +419,9 @@ pub fn run_worker() -> ! {
                     Ok(())
                 })();
                 if let Err(error) = built {
-                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     cleanup_image_inputs(&ipc_dir, &image_path, chain_input.as_ref().map(|c| c.path.as_path()));
                     cleanup_ipc_temps(&ipc_dir, strokes.as_deref().as_slice());
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     continue;
                 }
                 let engine = if !engines.is_empty() {
@@ -458,10 +458,12 @@ pub fn run_worker() -> ! {
                         cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
                         cleanup_ipc_temps(&ipc, strokes.as_deref().as_slice());
                     };
-                    // An early exit: report the error, drop the inputs, leave the in-flight count.
+                    // An early exit: drop the inputs, report the error, leave the in-flight count.
+                    // Inputs go before the answer: the parent may write the
+                    // next run's under the same names as soon as it has it.
                     let fail = |error: String| {
-                        let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                         cleanup_inputs();
+                        let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                     };
 
@@ -678,11 +680,11 @@ pub fn run_worker() -> ! {
                         }
                         Err(e) => SubprocessEvent::ImageError { item_id, error: e.to_string() },
                     };
+                    cleanup_inputs();
                     prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
 
                     send_rss(&evt_tx);
 
-                    cleanup_inputs();
                     if let Some(token) = spare_token {
                         drop(sem_guard);
                         let skip = spare_skipped(&cancel, &stopping, &on_screen, item_id);
@@ -705,10 +707,10 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
                     if cancel.is_cancelled() {
+                        cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
-                        cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -729,13 +731,13 @@ pub fn run_worker() -> ! {
                         ).map_err(|e| e.to_string())
                     })();
 
-                    match tensor_result {
+                    let answered = match tensor_result {
                         Ok(rgba) => {
                             let (w, h) = (rgba.width(), rgba.height());
                             let result_path = IpcKind::Result.path_for(&ipc, item_id);
                             let written = write_result(&result_path, &rgba);
                             drop(rgba);
-                            let _ = evt_tx.send(match written {
+                            match written {
                                 Ok(()) => SubprocessEvent::ImageDone {
                                     item_id,
                                     result_path,
@@ -747,14 +749,13 @@ pub fn run_worker() -> ! {
                                     spare_scales: None,
                                 },
                                 Err(error) => SubprocessEvent::ImageError { item_id, error },
-                            });
+                            }
                         }
-                        Err(e) => {
-                            let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: e });
-                        }
-                    }
+                        Err(e) => SubprocessEvent::ImageError { item_id, error: e },
+                    };
 
                     cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
+                    let _ = evt_tx.send(answered);
 
                     send_rss(&evt_tx);
 
@@ -769,9 +770,9 @@ pub fn run_worker() -> ! {
             } => {
                 let strokes = correction.map(|file| file.0);
                 if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
-                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path]);
                     cleanup_image_inputs(&ipc_dir, photo.path(), strokes.as_deref());
+                    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
                     continue;
                 }
                 let evt_tx = evt_tx.clone();
@@ -787,11 +788,11 @@ pub fn run_worker() -> ! {
                 in_flight.fetch_add(1, Ordering::AcqRel);
                 pool.spawn(move || {
                     if cancel.is_cancelled() {
+                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
+                        cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
                         let _ = evt_tx.send(SubprocessEvent::ImageError {
                             item_id, error: CANCELLED_ERR_MSG.into(),
                         });
-                        cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
-                        cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
                         in_flight.fetch_sub(1, Ordering::AcqRel);
                         return;
                     }
@@ -863,8 +864,8 @@ pub fn run_worker() -> ! {
                             SubprocessEvent::ImageError { item_id, error: e }
                         }
                     };
-                    prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
                     cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
+                    prunr_app::subprocess::protocol::answer(&evt_tx, pulse, answered);
                     send_rss(&evt_tx);
                     if let Some(token) = spare_token {
                         drop(sem_guard);
