@@ -57,7 +57,10 @@ impl PrunrApp {
     pub(crate) fn recut_with_selection(&mut self, item_id: u64) {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         let item = &self.batch.items[idx];
-        if (item.selection_mask.is_some() || item.edits.is_some()) && item.shows_cutout() && self.settings.model.edits_cutout() {
+        // A run that cut with the strokes shown has drawn them already.
+        if (item.selection_mask.is_some() || item.edits.is_some()) && item.shows_cutout() && self.settings.model.edits_cutout()
+            && !item.cut_has_its_strokes(self.settings.brush.cutout_action)
+        {
             self.dispatch_brush_rerun(idx);
         }
     }
@@ -91,12 +94,18 @@ impl PrunrApp {
         if !self.batch.is_selected(item.id) {
             return false;
         }
-        if !item.lines_need_only_a_retrace(model, self.settings.brush.cutout_action) || !self.run_may_start(item) {
+        // Held for a batch still being admitted, the run would take the
+        // image shown when it goes, which may be another.
+        if !item.lines_need_only_a_retrace(model, self.settings.brush.cutout_action) || !self.run_may_start(item) || self.processor.admission_still_feeding() {
             return false;
         }
         let item_id = item.id;
         self.process_items(|item| item.id == item_id, None);
-        self.batch.items[idx].awaits_cut()
+        let item = &mut self.batch.items[idx];
+        if let Some(job) = item.job.as_mut() {
+            job.quiet = true;
+        }
+        item.awaits_cut()
     }
 
     /// Single-source-of-truth call for writing a new selection: persist the
@@ -463,7 +472,7 @@ impl PrunrApp {
         // The sessions stay warm and the selected image keeps its
         // embedding, so turning it back on is instant; background images
         // drop theirs on the next eviction pass.
-        self.magic_brush_state.deactivate();
+        self.set_tool(None);
     }
 
     /// The tool the canvas's left button belongs to.
@@ -504,7 +513,22 @@ impl PrunrApp {
                 self.magic_brush_state.activate();
             }
         }
+        if tool.is_some() {
+            self.stop_quiet_retrace();
+        }
         true
+    }
+
+    /// Picked up again: the lines run the brush's putting down started
+    /// would hold its next stroke back, so it stops; the lines follow the
+    /// next time the brush goes down.
+    fn stop_quiet_retrace(&mut self) {
+        let Some(item_id) = self.batch.selected_item().filter(|i| i.job.as_ref().is_some_and(|j| j.quiet)).map(|i| i.id) else { return };
+        self.cancel_runs_on(item_id);
+        if let Some(item) = self.batch.find_by_id_mut(item_id) {
+            item.abandon_job();
+        }
+        self.refresh_batch_progress_status();
     }
 
     /// The Depth chip's "Set focus": the next click on the image focuses
@@ -1043,6 +1067,21 @@ mod stroke_lines_tests {
         app.set_tool(Some(Tool::Paint));
         app.set_tool(None);
         assert_eq!(lines_runs(&rx), Vec::<bool>::new(), "picked up and put down without a stroke: nothing to trace");
+    }
+
+    /// Picking the brush up again stops the lines run its putting down
+    /// started: the next stroke paints at once.
+    #[test]
+    fn picking_up_the_brush_stops_its_lines_run() {
+        use crate::gui::brush_state::Tool;
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        app.set_tool(Some(Tool::Paint));
+        stroke(&mut app, FULL);
+        app.set_tool(None);
+        assert_eq!(lines_runs(&rx), vec![true]);
+        assert!(app.batch.items[0].job.as_ref().is_some_and(|j| j.quiet), "a run nobody asked for");
+        app.set_tool(Some(Tool::Paint));
+        assert!(app.batch.items[0].is_idle(), "the brush paints at once");
     }
 
     /// A stroke that lands while the lines run is under way starts no

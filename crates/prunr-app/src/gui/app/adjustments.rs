@@ -296,7 +296,8 @@ impl PrunrApp {
         }
         // A drag shows the lines where they were; its release traces them
         // on the new cut-out. The release frame itself changes no value.
-        if tc.commit && item.lines_traced_on_another_cut(self.settings.brush.cutout_action) {
+        // Strokes alone wait for the brush to be put down.
+        if tc.commit && item.lines_traced_on_another_mask() {
             dispatch = dispatch.max(knob_catalog::DispatchKind::SubprocessAddEdge);
         }
         dispatch
@@ -329,6 +330,27 @@ mod release_tests {
         let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..Default::default() };
         app.apply_toolbar_change(&egui::Context::default(), release, before);
         assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true));
+    }
+
+    /// Strokes the brush in hand painted wait for it to be put down: they
+    /// are no reason for another control's release to start a run (a
+    /// model switch would otherwise cut the new model unasked).
+    #[test]
+    fn strokes_waiting_for_the_brush_start_no_run_on_a_release() {
+        use crate::gui::knob_catalog::DispatchKind;
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = crate::gui::settings::SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
+        app.batch.select_item(0);
+        app.set_tool(Some(crate::gui::brush_state::Tool::Paint));
+        app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), crate::gui::timeline::StepKind::Stroke);
+        assert!(app.batch.items[0].lines_traced_on_another_cut(app.settings.brush.cutout_action), "the strokes wait");
+        let release = super::adjustments_toolbar::ToolbarChange { commit: true, ..Default::default() };
+        assert_ne!(app.resolve_auto_dispatch(0, &release), DispatchKind::SubprocessAddEdge);
     }
 
     /// A mask drag under lines on the cut-out previews them where they

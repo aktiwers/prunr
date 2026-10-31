@@ -39,11 +39,6 @@ impl PrunrApp {
                 // A failed decode is tried again on each visit: memory may
                 // have been short, or the file has come back.
                 self.batch.items[idx].decode_failed = false;
-                // Strokes painted on it with a brush still in hand when it
-                // was left: its lines follow them now.
-                if self.active_tool().is_none() && self.batch.items[idx].shows_cutout() {
-                    self.retrace_lines(idx);
-                }
             }
             self.show_original = false;
         }

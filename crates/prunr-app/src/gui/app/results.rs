@@ -729,7 +729,13 @@ impl PrunrApp {
             return;
         }
         if !item.job_is_current() {
-            self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
+            // Nobody asked for a quiet run: a later edit simply supersedes it.
+            if item.job.as_ref().is_some_and(|j| j.quiet) {
+                item.abandon_job();
+                self.refresh_batch_progress_status();
+            } else {
+                self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
+            }
             return;
         }
         let succeeded = result.is_ok();
@@ -825,7 +831,7 @@ impl PrunrApp {
         }
     }
 
-    fn refresh_batch_progress_status(&mut self) {
+    pub(super) fn refresh_batch_progress_status(&mut self) {
         let report = self.batch.progress();
         self.status.stage = report.stage;
         self.status.pct = report.pct;
@@ -2323,12 +2329,47 @@ mod timeline_contract_tests {
         assert_eq!(shown(&app), Some(0), "and the lines traced on it");
     }
 
-    /// Undo onto a live selection applies it again with the current
-    /// action. Under Subject outline the kept lines are then the undone
-    /// stroke's, so they are traced again on the restored cut-out, not
-    /// drawn where they were over it.
+    /// The lines run the brush's putting down started is superseded by a
+    /// later edit without a word: nobody asked for it, so no "run it
+    /// again".
     #[test]
-    fn undo_onto_a_live_selection_traces_the_lines_on_it() {
+    fn a_superseded_lines_run_goes_quietly() {
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::selection::{MaskArtifact, FULL};
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        app.set_tool(Some(crate::gui::brush_state::Tool::Paint));
+        app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), StepKind::Stroke);
+        app.set_tool(None);
+        let batch = rx.try_iter().find_map(|message| match message {
+            WorkerMessage::BatchProcess { batch, add_edge_items, .. } if !add_edge_items.is_empty() => Some(batch),
+            _ => None,
+        }).expect("the lines run");
+        let item = &mut app.batch.items[0];
+        item.settings.feather = 2.0;
+        item.commit(StepKind::Adjust);
+        let toasts = app.toasts.len_for_test();
+        let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(traced), None, crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None));
+        assert!(app.batch.items[0].is_idle(), "the image stops waiting");
+        assert_eq!(app.toasts.len_for_test(), toasts, "without a word");
+    }
+
+    /// Undo onto a live selection applies it again with the current
+    /// action, unless the kept lines were traced on other strokes: drawn
+    /// over the restored cut-out they would be the undone stroke's, and
+    /// its own stored image already has its own. No lines run either: the
+    /// brush's putting down or a Process traces them.
+    #[test]
+    fn undo_onto_a_live_selection_keeps_its_own_image() {
         use crate::gui::worker::WorkerMessage;
         use prunr_core::selection::{MaskArtifact, FULL};
         let ctx = egui::Context::default();
@@ -2347,14 +2388,14 @@ mod timeline_contract_tests {
         });
         for cells in [vec![FULL, 0, 0, 0], vec![FULL; 4]] {
             app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, cells), StepKind::Stroke);
-            let batch = lines_run(&rx).expect("each stroke traces the lines");
+            let batch = lines_run(&rx).expect("each stroke made without a brush traces the lines");
             let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
             app.on_batch_item_done(&ctx, batch, 1, Ok(traced), None, crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None));
         }
 
         app.handle_undo(&ctx);
         assert!(app.batch.items[0].selection_mask.is_some(), "the first stroke's selection is live");
-        assert!(lines_run(&rx).is_some(), "its lines are traced again, with it");
+        assert!(lines_run(&rx).is_none(), "an Undo starts no lines run");
         assert!(!app.processor.live_preview.works_on(1), "no render draws the undone stroke's lines over it");
     }
 

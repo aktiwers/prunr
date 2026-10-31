@@ -800,10 +800,13 @@ impl PrunrApp {
                 self.reconcile_bg_image_after_preset(idx);
             }
             // The step's image shows its selection as the switch stood
-            // then; the switch may have moved since.
+            // then; the switch may have moved since. Lines kept from other
+            // strokes would be drawn over it: its own image has its own.
             let item = &self.batch.items[idx];
-            if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) {
-                self.rerun_with_strokes(idx);
+            if item.selection_mask.is_some() && item.corrects_cutout(self.settings.model) && item.shows_cutout()
+                && !item.lines_traced_on_another_cut(self.settings.brush.cutout_action)
+            {
+                self.dispatch_brush_rerun(idx);
             }
             stepped.push(kind);
         }
