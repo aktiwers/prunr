@@ -16,8 +16,9 @@ const TILE_COLUMNS: usize = 6;
 /// Desaturate, Sepia, Duotone and Posterize.
 const QUICK: [usize; 5] = [0, 1, 3, 11, 5];
 
-/// Returns true when the effect or one of its knobs changed.
-pub(super) fn render(ui: &mut Ui, style: &mut SubjectEffect) -> bool {
+/// Returns true when the effect or one of its knobs changed. `default`:
+/// the default preset's.
+pub(super) fn render(ui: &mut Ui, style: &mut SubjectEffect, default: SubjectEffect) -> bool {
     let picked = variant_index(SubjectEffect::ALL, style);
     let group = chip::GroupChip {
         id_salt: "fill_style",
@@ -26,10 +27,12 @@ pub(super) fn render(ui: &mut Ui, style: &mut SubjectEffect) -> bool {
         summary: if matches!(style, SubjectEffect::None) { "" } else { style.name() },
         tooltip: "Restyle the subject's colors, or the whole photo with No model.",
         tuned: !matches!(style, SubjectEffect::None),
+        at_default: *style == default,
         width: PANEL_WIDTH,
         live: true,
     };
-    let header = chip::PanelHeader { note: style.name(), reset: "Back to own colors" };
+    let back = if default == SubjectEffect::None { "Back to own colors" } else { "Reset" };
+    let header = chip::PanelHeader { note: style.name(), reset: back };
     let mut changed = false;
     chip::strip_chip(ui, group, "All effects", header, |ui, part| match part {
         chip::Part::Quick => {
@@ -44,7 +47,7 @@ pub(super) fn render(ui: &mut Ui, style: &mut SubjectEffect) -> bool {
         }
         chip::Part::Full { reset } => {
             if reset {
-                *style = SubjectEffect::None;
+                *style = default;
                 changed = true;
             }
             egui::Grid::new("effect_tiles").spacing([6.0, 12.0]).show(ui, |ui| {

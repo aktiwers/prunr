@@ -8,7 +8,9 @@ use super::harness::{harness, loaded_with, settle, tree};
 use crate::gui::app::PrunrApp;
 use crate::gui::automation::checks::Violation;
 use crate::gui::automation::tree::readable_name;
+use crate::gui::brush_state::BrushSettings;
 use crate::gui::capability::ItemFacts;
+use crate::gui::item_settings::ItemSettings;
 use crate::gui::knob_catalog::{shows, surface_gate, GateContext, Surface};
 use crate::gui::settings::SettingsModel;
 use crate::gui::surface_catalog::{Kind, Start, Step, Visit, UNVISITED_MODALS, VISITS};
@@ -263,4 +265,68 @@ fn visit_ids_are_unique() {
     let before = ids.len();
     ids.dedup();
     assert_eq!(ids.len(), before, "two visits share an id");
+}
+
+/// One panel of `every_panel_reset_returns_to_the_default_preset`.
+struct PanelReset {
+    model: SettingsModel,
+    /// What the default preset sets off Prunr's, for the panel.
+    set: fn(&mut ItemSettings, &mut BrushSettings),
+    open: &'static [Step],
+    /// The panel's settings, as a comparable text.
+    part: fn(&ItemSettings, &BrushSettings) -> String,
+}
+
+/// Every panel's Reset puts back the default preset's settings, not the
+/// code's: each starts on Prunr's, the default preset sets it otherwise,
+/// and after Reset it reads the preset's.
+#[test]
+fn every_panel_reset_returns_to_the_default_preset() {
+    use crate::gui::presets::{prunr_view, PresetFile};
+    use SettingsModel as M;
+    use Step::{Click, Expand};
+    let panels = [
+        PanelReset { model: M::BiRefNetLite, set: |s, _| s.effect = prunr_core::SubjectEffect::ALL[1],
+            open: &[Click("Effect"), Expand("All effects"), Click("Reset")], part: |s, _| format!("{:?}", s.effect) },
+        PanelReset { model: M::BiRefNetLite, set: |s, _| s.decoration.outline_width = 6.0,
+            open: &[Click("Outline and shadow"), Expand("All outline and shadow settings"), Click("Reset")], part: |s, _| format!("{:?}", s.decoration) },
+        PanelReset { model: M::BiRefNetLite, set: |s, _| s.bg = Some([10, 20, 30, 255]),
+            open: &[Click("Background"), Expand("All background settings"), Click("Reset")], part: |s, _| format!("{:?}", s.backdrop()) },
+        PanelReset { model: M::BiRefNetLite, set: |s, _| s.faces.strength_pct = 80,
+            open: &[Click("Faces"), Expand("More face settings"), Click("Reset")], part: |s, _| format!("{:?}", s.faces) },
+        PanelReset { model: M::None, set: |s, _| s.depth.fog_pct = 30,
+            open: &[Click("Depth"), Expand("All depth settings"), Click("Reset")], part: |s, _| format!("{:?}", s.depth) },
+        PanelReset { model: M::Nomos2Upscale, set: |s, _| s.sharpen = 0.4,
+            open: &[Click("Refine"), Expand("All refine settings"), Click("Reset")], part: |s, _| format!("{:?}", s.sharpen) },
+        PanelReset { model: M::Nomos2Upscale, set: |s, _| s.output_scale = prunr_core::OutputScale::X2,
+            open: &[Click("Scale"), Click("Reset")], part: |s, _| format!("{:?}", s.output_scale) },
+        PanelReset { model: M::ColorizeDdcolor, set: |s, _| s.color_strength_pct = 120,
+            open: &[Click("Strength"), Click("Reset")], part: |s, _| format!("{:?}", s.color_strength_pct) },
+        PanelReset { model: M::Inpaint, set: |_, b| b.inpaint_sharpen = 0.2,
+            open: &[Click("Advanced"), Click("Reset")], part: |_, b| format!("{:?}", b.inpaint_sharpen) },
+        PanelReset { model: M::RoremInpaint, set: |_, b| b.rorem_steps = 2,
+            open: &[Click("Advanced"), Click("Reset")], part: |_, b| format!("{:?}", b.rorem_steps) },
+        PanelReset { model: M::SdInpaint, set: |_, b| b.sd_prompt = "a meadow".into(),
+            open: &[Click("Prompt"), Click("Reset")], part: |_, b| format!("{:?}", b.sd_prompt) },
+    ];
+    for panel in panels {
+        let view = prunr_view(panel.model, None);
+        let (mut look, mut brush) = (view.item_settings, view.brush.clone());
+        (panel.set)(&mut look, &mut brush);
+        let preset = PresetFile::default().with_settings(panel.model, &look, &brush);
+        let mut h = loaded_with(|app| {
+            app.settings.model = panel.model;
+            app.settings.presets.insert("Look".into(), preset.into());
+            app.settings.default_preset = "Look".into();
+            app.settings.brush = view.brush.clone();
+        });
+        let shown = |h: &Harness<'_, PrunrApp>| (panel.part)(&h.state().batch.items[0].settings, &h.state().settings.brush);
+        let before = shown(&h);
+        for &step in panel.open {
+            run(&mut h, step).unwrap_or_else(|err| panic!("{:?}: {err}", panel.model));
+        }
+        let after = shown(&h);
+        assert_ne!(before, after, "{:?} {:?}: Reset changed nothing", panel.model, panel.open);
+        assert_eq!(after, (panel.part)(&look, &brush), "{:?} {:?}: the default preset's", panel.model, panel.open);
+    }
 }

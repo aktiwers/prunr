@@ -1012,6 +1012,8 @@ pub(super) struct GroupChip<'a> {
     pub summary: &'a str,
     pub tooltip: &'a str,
     pub tuned: bool,
+    /// Its settings are the default preset's: Reset greys out.
+    pub at_default: bool,
     pub width: f32,
     /// Its knobs change the image live, so it is a flyout the canvas
     /// stays live under; otherwise a popover that closes on click outside.
@@ -1049,7 +1051,7 @@ pub(super) fn group_chip<R>(
         // otherwise stretch a flyout to the popup's default width.
         ui.set_width(g.width);
         ui.spacing_mut().slider_width = g.width - PANEL_VALUE_WIDTH;
-        let reset = popover_header(ui, g.label, Some(("Reset every setting in this group", !g.tuned)));
+        let reset = popover_header(ui, g.label, Some(("Back to your default preset", g.at_default)));
         out = Some(body(ui, reset));
     };
     if g.live {
@@ -1124,7 +1126,7 @@ pub(super) fn strip_chip_faced(ui: &mut Ui, g: GroupChip<'_>, face: &str, more: 
                 let width = (strip.response.rect.width() - frame.total_margin().sum().x).max(g.width);
                 frame.show(ui, |ui| {
                     ui.set_width(width);
-                    let reset = panel_header(ui, g.label, header, !g.tuned);
+                    let reset = panel_header(ui, g.label, header, g.at_default);
                     panel_rows(ui, |ui| body(ui, Part::Full { reset }));
                 });
             }

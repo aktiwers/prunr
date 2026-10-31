@@ -16,8 +16,9 @@ pub fn output_scale_label(s: OutputScale) -> &'static str {
 }
 
 /// Render the output-scale chip. Returns `true` if `value` changed.
-/// `output_dims` is the projected output size at the current scale.
-pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, output_dims: (u32, u32)) -> bool {
+/// `default` is the default preset's; `output_dims` the projected output
+/// size at the current scale.
+pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, default: OutputScale, output_dims: (u32, u32)) -> bool {
     let label = format!(
         "{} \u{00b7} {}\u{00d7}{}",
         output_scale_label(*value),
@@ -38,8 +39,9 @@ pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, out
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        if chip::popover_header(ui, "Scale", Some(("Back to 4\u{00d7}, the model's native size", *value == OutputScale::X4))) {
-            *value = OutputScale::X4;
+        let tip = if default == OutputScale::X4 { "Back to 4\u{00d7}, the model's native size" } else { "Back to your default preset" };
+        if chip::popover_header(ui, "Scale", Some((tip, *value == default))) {
+            *value = default;
             changed = true;
         }
         for option in [OutputScale::X2, OutputScale::X3, OutputScale::X4] {

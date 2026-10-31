@@ -374,6 +374,15 @@ impl Settings {
         }
     }
 
+    /// The Faces settings preset `name` gives the active model with face
+    /// restorer `face`: whether faces are on from the model's entry, the
+    /// rest from the restorer's.
+    pub(crate) fn preset_faces(&self, name: &str, face: super::item_settings::FaceModel) -> super::item_settings::FaceSettings {
+        let on = self.preset_values(name).faces.on;
+        let restorer = super::presets::helper_item_settings(self.preset(name), face.id()).faces;
+        super::item_settings::FaceSettings { on, model: face, ..restorer }
+    }
+
     /// The named preset; `None` for "Prunr" and a missing one.
     pub(crate) fn preset(&self, name: &str) -> Option<&super::presets::Preset> {
         (name != PRUNR_PRESET).then(|| self.presets.get(name)).flatten()
@@ -469,7 +478,8 @@ impl Settings {
     /// Reset every preference to its default, keeping what the user owns
     /// or agreed to: presets and the default one, licence acceptances,
     /// background pictures, the model in use and the OpenVINO prompt
-    /// snooze. `parallel_jobs` re-derives for the detected hardware.
+    /// snooze. The brush takes the default preset's settings for the
+    /// model; `parallel_jobs` re-derives for the detected hardware.
     pub fn reset_preserving_identity(&mut self) {
         let kept = std::mem::take(self);
         *self = Self {
@@ -483,6 +493,8 @@ impl Settings {
             runtime_prompt_snoozed_until: kept.runtime_prompt_snoozed_until,
             ..Self::default()
         };
+        self.brush = self.resolve_active_preset(None).brush;
+        self.brush_changes = super::preset_changes::Changes::new(self.brush.clone());
         self.parallel_jobs = self.default_jobs();
     }
 }
@@ -999,8 +1011,10 @@ mod tests {
         s.hotkeys.insert("undo".into(), vec!["Ctrl+U".into()]);
         s.processor = ComputeMode::CpuOnly;
         s.keep_sd_loaded = true;
+        s.brush.inpaint_sharpen = 0.9;
         s.reset_preserving_identity();
         assert_eq!(s.model, SettingsModel::SdInpaint);
+        assert_eq!(s.brush, s.resolve_active_preset(None).brush, "the brush is the default preset's for the model");
         assert_eq!(s.accepted_licenses, vec!["SdV15InpaintFp16".to_string()]);
         assert_eq!(s.bg_image_paths.get(&7), Some(&PathBuf::from("/pics/beach.jpg")));
         assert_eq!(s.runtime_prompt_snoozed_until.get("OpenVino"), Some(&99));

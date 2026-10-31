@@ -46,7 +46,7 @@ const BLUR_MODES: [chip::Choice<LensBlurMode>; 3] = [
 ];
 
 /// `picking` is true while the next click on the image sets the focus.
-pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking: bool) -> DepthChange {
+pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, default: &DepthLook, installed: bool, picking: bool) -> DepthChange {
     let mut change = DepthChange::default();
     let summary: std::borrow::Cow<'static, str> = if !installed {
         get_model::BADGE.into()
@@ -62,6 +62,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
         summary: &summary,
         tooltip: "Blur, haze and grade the photo by how far each part is.",
         tuned: look.is_active(),
+        at_default: look == default,
         width: PANEL_WIDTH,
         live: true,
     };
@@ -81,7 +82,7 @@ pub(crate) fn render(ui: &mut Ui, look: &mut DepthLook, installed: bool, picking
         }
         chip::Part::Full { reset } => {
             if reset {
-                *look = DepthLook::default();
+                *look = *default;
                 change.picked(true);
             }
             if !installed {
