@@ -172,63 +172,63 @@ pub(crate) fn render(
     };
     let gate = |surface| knob_catalog::surface_gate(surface, &gate_ctx);
 
-    // The row goes compact (chips show their icon only) when its full
-    // left cluster and its right cluster, both measured on earlier
-    // frames, would not fit side by side.
+    // The chips drop their words one at a time, from the right, when the
+    // row runs short beside its right cluster, measured on the last frame.
     let fit_id = egui::Id::new("toolbar_fit");
-    let (full_left, right) = ui.data(|d| d.get_temp::<(f32, f32)>(fit_id)).unwrap_or_default();
-    let compact = full_left + right + theme::SPACE_MD > ui.available_width();
-    ui.horizontal(|ui| chip::compact_chips(ui, compact, |ui| {
-        render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change);
+    let right: f32 = ui.data(|d| d.get_temp(fit_id)).unwrap_or_default();
+    let room = ui.available_width() - right - theme::SPACE_MD;
+    ui.horizontal(|ui| {
+        let mut row = chip::TrimmedRow::begin(ui, egui::Id::new("toolbar_chips"), room);
+        row.chip(ui, "model", |ui| render_model_dropdown(ui, app_settings, state.processing, mask_active, state.installed, &mut change));
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, gate(Surface::Upscale));
+            row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, state.source_dims, gate(Surface::Upscale)));
         }
         if shows(model, Surface::Colorize) {
-            chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings));
+            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings)));
         }
-        if shows(model, Surface::SdChips) && super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed) {
+        if shows(model, Surface::SdChips) && row.chip(ui, "sd", |ui| super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed)) {
             change.brush_settings_committed = true;
         }
-        if shows(model, Surface::RoremChips) && super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed) {
+        if shows(model, Surface::RoremChips) && row.chip(ui, "rorem", |ui| super::eraser_chip::render_rorem(ui, &mut app_settings.brush, state.shown_seed)) {
             change.brush_settings_committed = true;
         }
-        if shows(model, Surface::FillChips) && super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush) {
+        if shows(model, Surface::FillChips) && row.chip(ui, "fill", |ui| super::eraser_chip::render_fill_advanced(ui, &mut app_settings.brush)) {
             change.brush_settings_committed = true;
         }
         if shows(model, Surface::Mask) {
-            chip::gated(ui, gate(Surface::Mask), |ui| {
+            row.chip(ui, "mask", |ui| chip::gated(ui, gate(Surface::Mask), |ui| {
                 render_mask_group(ui, item_settings, &defaults, &mut change);
-            });
+            }));
         }
         if shows(model, Surface::Lines) {
-            chip::gated(ui, gate(Surface::Lines), |ui| {
+            row.chip(ui, "lines", |ui| chip::gated(ui, gate(Surface::Lines), |ui| {
                 render_lines_group(ui, item_settings, &defaults, model_uses_seg, &mut change);
-            });
+            }));
         }
         if shows(model, Surface::Effect) {
-            chip::gated(ui, gate(Surface::Effect), |ui| {
+            row.chip(ui, "effect", |ui| chip::gated(ui, gate(Surface::Effect), |ui| {
                 let changed = super::effect_chip::render(ui, &mut item_settings.effect);
                 aggregate_bool(changed, StaticKnob::SubjectEffect, &mut change);
-            });
+            }));
         }
         if shows(model, Surface::Faces) {
-            chip::gated(ui, gate(Surface::Faces), |ui| {
+            row.chip(ui, "faces", |ui| chip::gated(ui, gate(Surface::Faces), |ui| {
                 render_faces_chip(ui, item_settings, &mut app_settings.face_outlines, &state, &mut change);
-            });
+            }));
         }
         if shows(model, Surface::Depth) {
-            render_depth_chip(ui, item_settings, &state, &mut change);
+            row.chip(ui, "depth", |ui| render_depth_chip(ui, item_settings, &state, &mut change));
         }
         if shows(model, Surface::Decoration) {
-            chip::gated(ui, gate(Surface::Decoration), |ui| {
+            row.chip(ui, "decoration", |ui| chip::gated(ui, gate(Surface::Decoration), |ui| {
                 let changed = render_decoration_chip(ui, &mut item_settings.decoration);
                 aggregate_bool(changed, StaticKnob::Decoration, &mut change);
-            });
+            }));
         }
         if shows(model, Surface::Background) {
-            chip::gated(ui, gate(Surface::Background), |ui| {
+            row.chip(ui, "background", |ui| chip::gated(ui, gate(Surface::Background), |ui| {
                 let backdrop = item_settings.backdrop();
                 render_background_chip(ui, BgChipState {
                     backdrop,
@@ -238,10 +238,10 @@ pub(crate) fn render(
                     has_bg_image: state.has_bg_image,
                     bg_image_label: state.bg_image_label,
                 }, &mut change);
-            });
+            }));
         }
+        row.finish(ui);
 
-        let left = ui.min_rect().width();
         // Right-aligned cluster. Right-to-left layout fills from the right
         // edge: [Magic][Paint][tool chip][selection actions][Compare] | [Preset][Reset].
         // Never compact: its width must not depend on the mode it decides,
@@ -296,12 +296,11 @@ pub(crate) fn render(
                 }
             });
         })).response.rect;
-        let fit = (if compact { full_left } else { left }, right_rect.width());
-        if (fit.0 - full_left).abs() > 0.5 || (fit.1 - right).abs() > 0.5 {
-            ui.data_mut(|d| d.insert_temp(fit_id, fit));
+        if (right_rect.width() - right).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(fit_id, right_rect.width()));
             ui.ctx().request_repaint();
         }
-    }));
+    });
 
     // Line-mode transition: record the signal + cache impact (deterministic
     // in `(from, to)`). The dispatcher owns dispatch resolution — folding a

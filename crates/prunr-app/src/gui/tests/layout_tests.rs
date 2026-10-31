@@ -110,8 +110,8 @@ fn a_window_with_no_room_renders_with_a_brush_on() {
 }
 
 /// The toolbar's layout settles: at any width, with a selection and the
-/// brush on, the row decides once whether it is compact and stays so,
-/// frame after frame. A layout that measures itself into flipping
+/// brush on, the row decides once which chips drop their words and stays
+/// so, frame after frame. A layout that measures itself into flipping
 /// redraws the toolbar every frame, which flickers.
 #[test]
 fn the_toolbar_layout_settles_at_every_width() {
@@ -135,7 +135,7 @@ fn the_toolbar_layout_settles_at_every_width() {
         settle(&mut harness);
         click(&mut harness, "Paint Brush");
         harness.run_steps(6);
-        let fit = |h: &egui_kittest::Harness<'_, crate::gui::app::PrunrApp>| h.ctx.data(|d| d.get_temp::<(f32, f32)>(egui::Id::new("toolbar_fit")));
+        let fit = |h: &egui_kittest::Harness<'_, crate::gui::app::PrunrApp>| controls(h, |r| r[3] <= TOOLBAR_BOTTOM);
         let settled = fit(&harness);
         for _ in 0..6 {
             harness.run_steps(1);

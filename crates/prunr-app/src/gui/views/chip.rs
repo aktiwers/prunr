@@ -75,6 +75,74 @@ pub(super) fn menu_chip_button(ui: &mut Ui, icon: &str, value: &str) -> Response
 
 const COMPACT: &str = "chip_compact";
 
+/// A toolbar row whose chips drop their words one at a time, from the
+/// right, until the row fits its room. Each chip's width with and
+/// without its words is measured as it lays out, and the next frame
+/// decides from them.
+pub(super) struct TrimmedRow {
+    id: egui::Id,
+    last: Vec<ChipWidth>,
+    now: Vec<ChipWidth>,
+    /// The chips showing their icon only, by key.
+    trimmed: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChipWidth {
+    key: &'static str,
+    /// With its words; 0 until laid out so.
+    words: f32,
+    /// Its icon only; 0 until laid out so.
+    icon: f32,
+}
+
+/// An icon chip's width before one has been laid out.
+const ICON_CHIP_GUESS: f32 = theme::CHIP_HEIGHT + 4.0;
+
+impl TrimmedRow {
+    /// The row `id`, given `room` for its chips.
+    pub(super) fn begin(ui: &Ui, id: egui::Id, room: f32) -> Self {
+        let last: Vec<ChipWidth> = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        let n = trimmed_count(&last, ui.spacing().item_spacing.x, room);
+        let trimmed = last[last.len() - n..].iter().map(|c| c.key).collect();
+        Self { id, last, now: Vec::new(), trimmed }
+    }
+
+    /// One chip of the row, `key` naming it from frame to frame.
+    pub(super) fn chip<R>(&mut self, ui: &mut Ui, key: &'static str, body: impl FnOnce(&mut Ui) -> R) -> R {
+        let iconic = self.trimmed.contains(&key);
+        let r = ui.scope(|ui| compact_chips(ui, iconic, body));
+        let width = r.response.rect.width();
+        let was = self.last.iter().find(|c| c.key == key).copied().unwrap_or(ChipWidth { key, words: 0.0, icon: 0.0 });
+        self.now.push(if iconic { ChipWidth { icon: width, ..was } } else { ChipWidth { words: width, ..was } });
+        r.inner
+    }
+
+    /// Keep this frame's widths for the next; another frame follows when
+    /// they changed, so the row settles at once.
+    pub(super) fn finish(self, ui: &Ui) {
+        let settled = self.now.len() == self.last.len()
+            && self.now.iter().zip(&self.last).all(|(a, b)| a.key == b.key && (a.words - b.words).abs() <= 0.5 && (a.icon - b.icon).abs() <= 0.5);
+        if !settled {
+            ui.data_mut(|d| d.insert_temp(self.id, self.now));
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// How many chips, from the right, show their icon only so the row fits
+/// `room`: the fewest that do, or all of them.
+fn trimmed_count(chips: &[ChipWidth], spacing: f32, room: f32) -> usize {
+    let gaps = spacing * chips.len().saturating_sub(1) as f32;
+    let icon = |c: &ChipWidth| if c.icon > 0.0 { c.icon } else { ICON_CHIP_GUESS };
+    (0..=chips.len())
+        .find(|&n| {
+            let (kept, trimmed) = chips.split_at(chips.len() - n);
+            kept.iter().map(|c| c.words).sum::<f32>() + trimmed.iter().map(icon).sum::<f32>() + gaps <= room
+        })
+        .unwrap_or(chips.len())
+}
+
 /// Run `body` with its chips showing their icon only, when `on`: a
 /// toolbar row too narrow for their words. Tooltips and names stay.
 pub(super) fn compact_chips<R>(ui: &mut Ui, on: bool, body: impl FnOnce(&mut Ui) -> R) -> R {
@@ -1596,6 +1664,20 @@ pub(super) fn rgb_picker(ui: &mut Ui, rgb: &mut [u8; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tight row drops words from its right end, only as many chips as
+    /// it must, and all of them when nothing else fits.
+    #[test]
+    fn a_tight_row_drops_words_from_the_right() {
+        let chip = |key, words, icon| ChipWidth { key, words, icon };
+        let row = [chip("model", 100.0, 40.0), chip("mask", 110.0, 30.0), chip("sketch", 120.0, 30.0), chip("effect", 110.0, 30.0)];
+        assert_eq!(trimmed_count(&row, 8.0, 500.0), 0, "room for every word");
+        assert_eq!(trimmed_count(&row, 8.0, 400.0), 1, "the last chip only");
+        assert_eq!(trimmed_count(&row, 8.0, 300.0), 2);
+        assert_eq!(trimmed_count(&row, 8.0, 100.0), 4, "nothing fits: all icons");
+        let unlaid = [chip("model", 100.0, 0.0), chip("mask", 110.0, 0.0)];
+        assert_eq!(trimmed_count(&unlaid, 8.0, 100.0 + ICON_CHIP_GUESS + 8.0), 1, "an icon not laid out yet counts as a guess");
+    }
 
     /// With the app's pill padding the value box would stand taller than
     /// the slider and drag the painted handle off the rail.
