@@ -279,7 +279,13 @@ Timeline states carry their recipe, so undo also restores what the next Process 
 
 ### Admission and parallel jobs
 
-Budget = 85 % of available RAM − the model's CPU needs × engines (GPU pools cap at 2). Per-image cost (`2 × W × H × 4` + file + history residue) is pessimistic on purpose: undercounting OOMs long batches, overcounting only slows them. Best-fit admits the largest image that fits; with nothing in flight the smallest is forced in, so oversized images can't deadlock. Admission also pauses while the child's RSS exceeds 80 % of available RAM (resume at 70 % of that). `safe_max_jobs` (half of available RAM ÷ the CPU needs) caps the jobs slider, clamps on model switch and at batch start.
+Every model run leaves `memory::RAM_RESERVE_MB` (1.5 GB) of system RAM free for the rest of the computer: what the open apps need resident to stay responsive, which does not grow with the machine, so it is fixed rather than a share. `memory::fit` refuses a charge that would leave less, so every gate keeps it; the SD gate keeps the user's margin instead. A cut-out batch is checked before its worker runs (`gui::memory::cutout_fits`: the engines and the first-look model, a warm worker's RSS counted as its own) and refused with the lighter cut-out models that fit.
+
+Budget = 85 % of available RAM − the model's CPU needs × engines (GPU pools cap at 2). Per-image cost (`2 × W × H × 4` + file + history residue) is pessimistic on purpose: undercounting OOMs long batches, overcounting only slows them. Best-fit admits the largest image that fits; with nothing in flight the smallest is forced in, so oversized images can't deadlock (the engines were checked against the reserve already). Admission also pauses while the child's RSS exceeds 80 % of available RAM (resume at 70 % of that). `safe_max_jobs` (half of available RAM ÷ the CPU needs) caps the jobs slider, clamps on model switch and at batch start.
+
+### While a run runs
+
+A model's peak memory is fixed by its session and input size before it starts; nothing makes one run smaller by running slower, and an OS throttle without swap freezes the run instead (and on Ubuntu and Fedora gets systemd-oomd to kill another app). So a worker with work in flight (cut-out, SD eraser, the CLI's) is killed when free RAM falls below 1 GB (`batch_rules::stops_for_memory`), and its images fail saying why. On Linux each worker sets its `oom_score_adj` to 1000, so the kernel's OOM killer and earlyoom take it before the app or another program. In-process models (upscale, colorize, depth, faces, Magic Brush) are checked before they start only.
 
 ### Per-model working set
 

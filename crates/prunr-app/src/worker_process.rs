@@ -271,6 +271,15 @@ fn pixel_weight(dims: Option<(u32, u32)>) -> usize {
     }
 }
 
+/// Marks process `pid` as the first a memory killer takes (the kernel's,
+/// earlyoom, nohang): the highest `oom_score_adj`, which a process may set
+/// for itself without privilege. The worker holds the model, so it goes
+/// before the app or another program. systemd-oomd ranks cgroups instead.
+#[cfg(target_os = "linux")]
+fn mark_first_to_go(pid: u32) -> std::io::Result<()> {
+    std::fs::write(format!("/proc/{pid}/oom_score_adj"), "1000")
+}
+
 pub fn run_worker() -> ! {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -306,6 +315,10 @@ pub fn run_worker() -> ! {
         ?model, jobs, cpu_only, ?line_mode, inpaint_only,
         "worker: Init received, beginning init sequence",
     );
+    #[cfg(target_os = "linux")]
+    if let Err(err) = mark_first_to_go(std::process::id()) {
+        tracing::warn!(%err, "worker: could not mark itself first for a memory killer");
+    }
 
     // `detect_active_provider` probes OpenVINO, which has hung on some iGPU
     // setups; the timing log makes such a hang diagnosable.
@@ -1031,6 +1044,20 @@ impl Measured {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A memory killer takes the worker first, and the mark needs no
+    /// privilege: a process of the same user sets it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_is_the_first_a_memory_killer_takes() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("sleep runs");
+        let marked = mark_first_to_go(child.id());
+        let adj = std::fs::read_to_string(format!("/proc/{}/oom_score_adj", child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+        marked.expect("marked");
+        assert_eq!(adj.expect("readable").trim(), "1000");
+    }
 
     /// The writer ends once the last sender goes: one left behind made
     /// each clean exit hang on joining the writer.

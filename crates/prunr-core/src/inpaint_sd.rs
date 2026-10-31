@@ -2429,7 +2429,7 @@ pub(crate) fn check_ram_for(id: prunr_models::ModelId, tuning: &mut SdTuning) ->
 fn refusal(short: Short, margin_mb: u64) -> String {
     let gb = |mb: u64| mb as f64 / 1024.0;
     match short {
-        Short::Ram { need_mb, free_mb } => format!(
+        Short::Ram { need_mb, free_mb, .. } => format!(
             "This eraser needs {:.1} GB of free memory to load, {:.1} GB of it kept spare \
              for other apps; {:.1} GB is free. Close other apps, or {LIGHTER_ERASER_HINT}.",
             gb(need_mb), gb(margin_mb), gb(free_mb),
@@ -2444,21 +2444,22 @@ fn refusal(short: Short, margin_mb: u64) -> String {
 
 /// `check_ram_for` with the memory facts passed in. A model that also
 /// runs right on the CPU takes the CPU's rule when its card is short, as
-/// its parts then land there.
+/// its parts then land there. The headroom is the user's margin, in
+/// `stroke_need`, in place of the general reserve.
 fn fit_ram(id: prunr_models::ModelId, tuning: &mut SdTuning, room: Room, resident: bool, bundle: Charge) -> Result<(), Short> {
     let margin_mb = tuning.margin_mb;
     let need = |tall| stroke_need(id, margin_mb, resident, tall, bundle);
-    if let Err(short @ Short::Card { .. }) = crate::memory::fit(need(false), room) {
+    if let Err(short @ Short::Card { .. }) = crate::memory::fit_keeping(need(false), room, 0) {
         let on_cpu = prunr_models::descriptor(id).map(|d| Charge::of(&d.needs, crate::engine::CPU_NAME));
         return match on_cpu {
             Some(cpu) if sd_spec(id).cpu_output_correct => fit_ram(id, tuning, room, resident, cpu),
             _ => Err(short),
         };
     }
-    if tuning.tall_crop && crate::memory::fit(need(true), room).is_err() {
+    if tuning.tall_crop && crate::memory::fit_keeping(need(true), room, 0).is_err() {
         tuning.tall_crop = false;
     }
-    crate::memory::fit(need(false), room)
+    crate::memory::fit_keeping(need(false), room, 0)
 }
 
 // ── SD-1.5 noise schedule and samplers ──────────────────────────────────
@@ -3782,11 +3783,11 @@ mod tests {
         assert_eq!(fit(SdV15InpaintFp16, ram, Some(card + extra), false), Ok(true), "room for the tall crop on the card");
         assert_eq!(fit(SdV15InpaintFp16, ram, Some(card + extra - 1), false), Ok(false), "tiles when the card lacks the crop's extra");
         assert_eq!(fit(SdV15InpaintFp16, ram, Some(card - 1), false), Err(Short::Card { need_mb: card, free_mb: card - 1 }));
-        assert_eq!(fit(SdV15InpaintFp16, ram - 1, Some(card + extra), false), Err(Short::Ram { need_mb: ram, free_mb: ram - 1 }), "the host share and the headroom");
+        assert_eq!(fit(SdV15InpaintFp16, ram - 1, Some(card + extra), false), Err(Short::Ram { need_mb: ram, kept_mb: 0, free_mb: ram - 1 }), "the host share and the headroom");
         assert_eq!(fit(SdV15InpaintFp16, ram, None, false), Ok(true), "an unread card is trusted");
         assert_eq!(fit(SdV15InpaintFp16, m, Some(extra + reserve), true), Ok(true), "resident: the crop's extra and the headroom");
         let rorem_on_cpu = stroke_need(RoremFp16, m, false, false, on_cpu(RoremFp16)).ram_mb;
-        assert_eq!(fit(RoremFp16, rorem_on_cpu - 1, Some(0), false), Err(Short::Ram { need_mb: rorem_on_cpu, free_mb: rorem_on_cpu - 1 }), "RORem off the card takes the CPU's need");
+        assert_eq!(fit(RoremFp16, rorem_on_cpu - 1, Some(0), false), Err(Short::Ram { need_mb: rorem_on_cpu, kept_mb: 0, free_mb: rorem_on_cpu - 1 }), "RORem off the card takes the CPU's need");
         assert!(fit(RoremFp16, rorem_on_cpu, Some(0), false).is_ok());
     }
 
