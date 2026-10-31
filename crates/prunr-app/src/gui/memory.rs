@@ -164,6 +164,11 @@ pub fn cutout_watch_free() -> Option<u64> {
     FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::watchdog_free_bytes).flatten()
 }
 
+/// RAM available and free swap, where they bound a cut-out.
+fn free_bounding_a_cutout() -> Option<(u64, u64)> {
+    FREE_MEMORY_BOUNDS_A_CUTOUT.then(prunr_core::sysmem::free_ram_then_swap_bytes).flatten()
+}
+
 /// How a cut-out batch runs in the memory there is: how many jobs, and
 /// whether the first look loads beside them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,14 +209,27 @@ impl CutoutEngines {
     }
 
     /// How the batch runs in free RAM and swap with `STOP_BELOW_FREE_MB`
-    /// left over (`plan_with`); `Err`: one job alone does not fit, so the
-    /// run would only be stopped. Swap counts: a run pushed into it is
-    /// slower, not stopped. `held_mb`: what a warm worker already holds,
-    /// its own again for the run. No reading, or macOS, runs it all.
+    /// left over (`plan_in`); `Err`: one job alone does not fit, so the
+    /// run would only be stopped. `held_mb`: what a warm worker already
+    /// holds, its own again for the run. No reading, or macOS, runs it all.
     pub fn plan(self, held_mb: u64) -> Result<CutoutPlan, prunr_core::memory::Short> {
-        let free = FREE_MEMORY_BOUNDS_A_CUTOUT.then(prunr_core::sysmem::free_ram_and_swap_bytes).flatten();
-        let Some(free) = free else { return Ok(CutoutPlan { jobs: self.jobs, first_look: self.first_look }) };
+        self.plan_in(free_bounding_a_cutout(), held_mb)
+    }
+
+    /// `plan` in RAM alone, for engines loaded before any run asks for
+    /// them: an idle worker does not push other apps into swap.
+    pub fn plan_in_ram(self) -> Result<CutoutPlan, prunr_core::memory::Short> {
+        self.plan_in(free_bounding_a_cutout().map(|(ram, _)| (ram, 0)), 0)
+    }
+
+    /// `plan` with `free`, RAM available and free swap (`None`: runs it
+    /// all), by `plan_with`. One job counts swap: a run pushed into it is
+    /// slower, not stopped. More jobs count RAM alone: an engine in swap
+    /// adds no speed, and admission, which counts RAM, feeds it nothing.
+    fn plan_in(self, free: Option<(u64, u64)>, held_mb: u64) -> Result<CutoutPlan, prunr_core::memory::Short> {
+        let Some((ram, swap)) = free else { return Ok(CutoutPlan { jobs: self.jobs, first_look: self.first_look }) };
         plan_with(self.jobs, self.first_look, |jobs, first_look| {
+            let free = if jobs > 1 { ram } else { ram + swap };
             fits_beside_held(Self { jobs, first_look, ..self }.need_bytes() as u64, free, held_mb)
         })
     }
@@ -358,6 +376,23 @@ mod tests {
         assert_eq!(plan_with(4, true, room(2, false)), Ok(plan(2, false)), "then no first look");
         assert_eq!(plan_with(4, false, room(1, true)), Ok(plan(1, false)));
         assert_eq!(plan_with(4, true, room(0, true)), Err(short));
+    }
+
+    /// One job may run in swap, slower but not stopped; a second runs only
+    /// where its engine sits in RAM, as admission feeds it nothing else.
+    #[test]
+    fn only_one_job_runs_in_swap() {
+        use prunr_core::LineMode;
+        const MB: u64 = 1024 * 1024;
+        let two = CutoutEngines { model: ModelKind::Silueta, jobs: 2, cpu_only: true, first_look: false, line_mode: LineMode::Off, line_fade: false };
+        let need_mb = |jobs| CutoutEngines { jobs, ..two }.need_bytes() as u64 / MB + 1;
+        let kept = prunr_core::memory::STOP_BELOW_FREE_MB;
+        assert!(need_mb(2) > need_mb(1), "an engine per job on the CPU");
+        let plan = |ram_mb: u64, swap_mb: u64| two.plan_in(Some((ram_mb * MB, swap_mb * MB)), 0).map(|p| p.jobs);
+        assert_eq!(plan(need_mb(2) + kept, 0), Ok(2));
+        assert_eq!(plan(need_mb(1) + kept, need_mb(2)), Ok(1), "the second engine would sit in swap");
+        assert_eq!(plan(0, need_mb(1) + kept), Ok(1), "one job runs in swap");
+        assert!(plan(0, need_mb(1) + kept - 2).is_err());
     }
 
     /// A refusal tells what the run refused needs: one job without the
