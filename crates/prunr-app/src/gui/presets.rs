@@ -551,6 +551,10 @@ pub(crate) struct Preset {
     helpers: Vec<ItemSettings>,
     /// The models it has settings for, as the preset list names them.
     covers: String,
+    /// `switch_values` per model in `SettingsModel::ALL` order and face
+    /// restorer in `FaceModel::ALL` order, worked out on first need: a
+    /// model switch asks it for every image on the preset.
+    switch: Vec<OnceLock<Map<String, Value>>>,
 }
 
 impl From<PresetFile> for Preset {
@@ -564,7 +568,8 @@ impl From<PresetFile> for Preset {
         let mut keys: Vec<&str> = file.models.keys().map(String::as_str).collect();
         keys.sort_by_key(|key| (key_order(key), *key));
         let covers = keys.into_iter().map(entry_name).collect::<Vec<_>>().join(" \u{b7} ");
-        Self { file: Arc::new(file), views, helpers, covers }
+        let switch = std::iter::repeat_with(OnceLock::new).take(SettingsModel::ALL.len() * FaceModel::ALL.len()).collect();
+        Self { file: Arc::new(file), views, helpers, covers, switch }
     }
 }
 
@@ -625,21 +630,24 @@ impl Preset {
 
     /// What a switch to `model` gives an image with settings `item` and
     /// `changes`: `switch_values` for the face restorer it is left on.
-    pub(crate) fn values_after_switch(&self, model: SettingsModel, item: &ItemSettings, changes: &Changes<ItemSettings>) -> Map<String, Value> {
+    pub(crate) fn values_after_switch(&self, model: SettingsModel, item: &ItemSettings, changes: &Changes<ItemSettings>) -> &Map<String, Value> {
         self.switch_values(model, self.face_after(model, item, changes))
     }
 
     /// What a switch to `model` gives each image setting it may take, by
     /// name: the model's own, and those of the helpers it runs with face
     /// restorer `face`. The same for every image on this preset.
-    pub(crate) fn switch_values(&self, model: SettingsModel, face: FaceModel) -> Map<String, Value> {
-        let own = serde_json::to_value(self.item_settings(model)).unwrap_or_default();
-        let mut values = pick(&own, &super::preset_fields::of(model).item);
-        for helper in helpers_of(model, face) {
-            let theirs = serde_json::to_value(self.helper(helper.id)).unwrap_or_default();
-            values.extend(pick(&theirs, helper.item));
-        }
-        values
+    pub(crate) fn switch_values(&self, model: SettingsModel, face: FaceModel) -> &Map<String, Value> {
+        let face_at = FaceModel::ALL.iter().position(|&f| f == face).unwrap_or(0);
+        self.switch[model_index(model) * FaceModel::ALL.len() + face_at].get_or_init(|| {
+            let own = serde_json::to_value(self.item_settings(model)).unwrap_or_default();
+            let mut values = pick(&own, &super::preset_fields::of(model).item);
+            for helper in helpers_of(model, face) {
+                let theirs = serde_json::to_value(self.helper(helper.id)).unwrap_or_default();
+                values.extend(pick(&theirs, helper.item));
+            }
+            values
+        })
     }
 }
 
@@ -857,7 +865,7 @@ mod tests {
         let mut changes = Changes::new(item);
         item.contrast = 1.3;
         changes.note(&item, &entries_of(birefnet, item.faces.model));
-        let item = take(item, &preset.values_after_switch(silueta, &item, &changes), &changes);
+        let item = take(item, preset.values_after_switch(silueta, &item, &changes), &changes);
         assert_eq!(item.gamma, 0.8, "Silueta's own from the preset");
         assert_eq!(item.feather, prunr_item_settings(silueta).feather, "Prunr's where the preset has none for Silueta");
         assert_eq!(item.contrast, 1.3, "the change stays");
@@ -878,7 +886,7 @@ mod tests {
         item.faces.hair = hair;
         item.faces.model = FaceModel::RestoreFormerPp;
         changes.note(&item, &entries_of(model, FaceModel::Gfpgan));
-        let item = take(item, &preset.values_after_switch(model, &item, &changes), &changes);
+        let item = take(item, preset.values_after_switch(model, &item, &changes), &changes);
         assert_eq!((item.faces.model, item.faces.strength_pct), (FaceModel::RestoreFormerPp, 35));
         assert_eq!(item.faces.hair, hair, "a change stays");
     }
@@ -902,7 +910,7 @@ mod tests {
         let mut changes = Changes::new(item);
         item.gamma = 1.4;
         changes.note(&item, &entries_of(birefnet, item.faces.model));
-        let mut item = take(item, &started.values_after_switch(silueta, &item, &changes), &changes);
+        let mut item = take(item, started.values_after_switch(silueta, &item, &changes), &changes);
         changes.rebase(&item);
         item.contrast = 1.3;
 

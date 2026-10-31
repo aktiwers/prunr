@@ -3165,7 +3165,7 @@ impl BatchItem {
     pub(crate) fn switch_to(&mut self, from: super::settings::SettingsModel, face: super::item_settings::FaceModel, to: super::settings::SettingsModel, preset: &super::presets::Preset) {
         self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
         let values = preset.values_after_switch(to, &self.settings, &self.preset_changes);
-        self.settings = super::presets::take(self.settings, &values, &self.preset_changes);
+        self.settings = super::presets::take(self.settings, values, &self.preset_changes);
         self.fit_line_mode_to(to);
         self.preset_changes.rebase(&self.settings);
     }
