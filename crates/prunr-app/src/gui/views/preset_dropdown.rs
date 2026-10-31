@@ -264,22 +264,13 @@ pub(crate) fn render(
                 .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
         });
         if let Some(name) = target_name {
-            let model_id = settings.preset_model();
-            let mp = crate::gui::presets::ModelPreset {
-                item_settings: *current_item,
-                brush: settings.brush.clone(),
-                sd: crate::gui::presets::sd_preset_for_save(&settings.brush, model_id),
-            };
-
-            // An overwrite merges into the preset as loaded, so other-model
-            // entries and other-scheduler bundles stay intact; the store
-            // keeps what is written, for dirty-tracking.
-            let file = match settings.presets.get(&name).filter(|_| is_overwrite) {
-                Some(existing) => crate::gui::presets_fs::merged(existing.clone(), model_id, mp),
-                None => crate::gui::presets::PresetFile::single(model_id, mp),
-            };
+            // An overwrite merges into the preset as loaded, so other models'
+            // entries and other qualities' bundles stay; the store keeps what
+            // is written, for the preset button's mark.
+            let base = settings.presets.get(&name).filter(|_| is_overwrite).map_or_else(Default::default, |p| p.file().clone());
+            let file = base.with_settings(settings.model, current_item, &settings.brush);
             crate::gui::presets_fs::queue_save(&name, &file);
-            settings.presets.insert(name.clone(), file);
+            settings.presets.insert(name.clone(), file.into());
 
             applied = Some(name);
             cancel = true;
@@ -297,18 +288,12 @@ pub(crate) fn render(
 mod tests {
     use super::*;
     use crate::gui::item_settings::item_with_gamma;
-    use crate::gui::presets::{ModelPreset, PresetFile};
+    use crate::gui::presets::{Preset, PresetFile};
 
-    /// Wrap an `ItemSettings` into a v2 single-entry `PresetFile` keyed by
-    /// the active model — tests use this where `s.presets.insert` once
-    /// took a bare `ItemSettings`.
-    fn wrap(s: &Settings, item: ItemSettings) -> PresetFile {
-        let mid = s.model.to_model_id().expect("test settings have a model_id");
-        PresetFile::single(mid, ModelPreset {
-            item_settings: item,
-            brush: Default::default(),
-            sd: None,
-        })
+    /// A preset of `item` for the active model, saved as the app saves.
+    fn wrap(s: &Settings, item: ItemSettings) -> Preset {
+        let brush = crate::gui::presets::prunr_view(s.model, None).brush;
+        PresetFile::default().with_settings(s.model, &item, &brush).into()
     }
 
     #[test]
@@ -346,14 +331,9 @@ mod tests {
 
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
-        let mut preset_brush = BrushSettings::default();
-        preset_brush.radius = 80.0;
-        let mp = ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: preset_brush,
-            sd: None,
-        };
-        s.presets.insert("Foo".to_string(), PresetFile::single(prunr_models::ModelId::Silueta, mp));
+        let preset_brush = BrushSettings { radius: 80.0, ..crate::gui::presets::prunr_view(s.model, None).brush };
+        let foo = PresetFile::default().with_settings(s.model, &ItemSettings::default(), &preset_brush);
+        s.presets.insert("Foo".to_string(), foo.into());
 
         // ItemSettings still equals the preset's; only brush diverges.
         let current = ItemSettings::default();

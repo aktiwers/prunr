@@ -227,11 +227,6 @@ impl BrushSettings {
         self.sd_use_taesd_effective_with_avail(prunr_models::is_available(prunr_models::ModelId::TaesdFp16))
     }
 
-    /// The settings `model` starts from when no preset has an entry for it.
-    pub fn floor_for(model: prunr_models::ModelId) -> Self {
-        Self { inpaint_sharpen: default_sharpen(model.is_sd_family()), ..Self::default() }
-    }
-
     /// The mode a stroke paints with: Shift adds and Alt (or Ctrl)
     /// subtracts for the stroke's duration; otherwise it adds on a
     /// `cutout` (the switch there says what the selection does) and

@@ -61,7 +61,7 @@ pub struct Settings {
     /// each is its own shareable file; never written to settings.json.
     /// `default` lets old files that embedded presets still load.
     #[serde(default, skip_serializing)]
-    pub(crate) presets: HashMap<String, super::presets::PresetFile>,
+    pub(crate) presets: HashMap<String, super::presets::Preset>,
     /// Names (lowercased) of presets a newer Prunr saved: left out of
     /// `presets`, and never saved over.
     #[serde(skip)]
@@ -260,7 +260,7 @@ impl Settings {
             if legacy_item != ItemSettings::default() {
                 let file = super::presets::PresetFile::of_item_settings(legacy_item);
                 let _ = super::presets_fs::save(LEGACY_PRESET, &file);
-                settings.presets.insert(LEGACY_PRESET.to_string(), file);
+                settings.presets.insert(LEGACY_PRESET.to_string(), file.into());
             }
         }
         (settings, note)
@@ -351,13 +351,10 @@ impl Settings {
         super::memory::cap_jobs(self.model.to_model_kind(), base, self.cpu_only())
     }
 
-    /// A preset's image settings for the active model; factory values for
+    /// A preset's image settings for the active model; Prunr's for
     /// "Prunr", a missing preset or a missing entry. Cheap: no brush clone.
     pub fn preset_values(&self, name: &str) -> ItemSettings {
-        self.preset_file(name)
-            .and_then(|f| super::presets::entry_for(f, self.preset_model()))
-            .map(|mp| mp.item_settings)
-            .unwrap_or_default()
+        self.preset(name).map_or_else(|| super::presets::prunr_item_settings(self.model), |p| p.item_settings(self.model))
     }
 
     /// A preset's image and brush settings for the active model: what
@@ -368,19 +365,15 @@ impl Settings {
         name: &str,
         scheduler: Option<super::brush_state::SdScheduler>,
     ) -> super::presets::ResolvedView {
-        let empty = super::presets::PresetFile::default();
-        let file = self.preset_file(name).unwrap_or(&empty);
-        super::presets::resolve_preset_for_model(file, self.preset_model(), scheduler)
+        match self.preset(name) {
+            Some(preset) => preset.resolve(self.model, scheduler),
+            None => super::presets::prunr_view(self.model, scheduler),
+        }
     }
 
-    fn preset_file(&self, name: &str) -> Option<&super::presets::PresetFile> {
+    /// The named preset; `None` for "Prunr" and a missing one.
+    pub(crate) fn preset(&self, name: &str) -> Option<&super::presets::Preset> {
         (name != PRUNR_PRESET).then(|| self.presets.get(name)).flatten()
-    }
-
-    /// The model a preset entry is read for; No model reads the default
-    /// model's entry (its filters and lines are the same knobs).
-    pub(crate) fn preset_model(&self) -> prunr_models::ModelId {
-        self.model.to_model_id().unwrap_or(DEFAULT_PRESET_MODEL)
     }
 
     /// `scheduler`: as `resolve_preset_for_model`. Falls back to factory
@@ -728,13 +721,6 @@ fn is_accelerator(backend: &str) -> bool {
 /// The model a fresh install starts on.
 pub const DEFAULT_MODEL: SettingsModel = SettingsModel::BiRefNetLite;
 
-/// Where a preset is filed when no model is chosen (and where v1 files,
-/// which predate per-model presets, land).
-pub(crate) const DEFAULT_PRESET_MODEL: prunr_models::ModelId = match DEFAULT_MODEL.to_model_id() {
-    Some(id) => id,
-    None => panic!("DEFAULT_MODEL must be a registered model"),
-};
-
 /// The model every colorize run uses, in the app and the CLI.
 pub const COLORIZER: ModelKind = ModelKind::DdcolorTiny;
 
@@ -939,15 +925,15 @@ mod tests {
         assert_eq!(s.sd_memory, SdMemoryGuard::Balanced);
     }
 
-    /// Wrap an `ItemSettings` into a single-entry v2 `PresetFile` keyed
-    /// by the active model. Mirrors the runtime save flow's wrap step.
-    fn wrap_for_model(s: &Settings, item: ItemSettings) -> super::super::presets::PresetFile {
-        let mid = s.model.to_model_id().expect("test settings have a model_id");
-        super::super::presets::PresetFile::single(mid, super::super::presets::ModelPreset {
-            item_settings: item,
-            brush: Default::default(),
-            sd: None,
-        })
+    /// A preset of `item` for the active model, saved as the app saves.
+    fn preset_of_item(s: &Settings, item: ItemSettings) -> super::super::presets::Preset {
+        let brush = super::super::presets::prunr_view(s.model, None).brush;
+        super::super::presets::PresetFile::default().with_settings(s.model, &item, &brush).into()
+    }
+
+    /// A preset read from a file's JSON.
+    fn preset(json: serde_json::Value) -> super::super::presets::Preset {
+        serde_json::from_value::<super::super::presets::PresetFile>(json).expect("a preset file").into()
     }
 
     /// "Prunr", a missing preset, and a new item under "Prunr" all read
@@ -965,7 +951,7 @@ mod tests {
     #[test]
     fn item_defaults_for_new_item_uses_default_preset() {
         let mut s = Settings::default();
-        let portrait = wrap_for_model(&s, item_with_gamma(2.0));
+        let portrait = preset_of_item(&s, item_with_gamma(2.0));
         s.presets.insert("Portrait".to_string(), portrait);
         s.default_preset = "Portrait".to_string();
         assert_eq!(s.item_defaults_for_new_item().gamma, 2.0);
@@ -1113,79 +1099,44 @@ mod tests {
         assert!(!s.lcm_routing_active(prunr_models::ModelId::LaMaFp32));
     }
 
+    /// A preset applies to the models it has entries for; every other
+    /// model, another cut-out model too, takes Prunr's settings.
     #[test]
-    fn a_cutout_preset_is_shared_by_the_cutout_models_and_no_other() {
+    fn a_preset_applies_only_to_its_own_models() {
+        use super::super::presets::prunr_view;
         let mut s = Settings::default();
-        s.model = SettingsModel::U2net;
-        let mut brush = super::BrushSettings::default();
-        brush.radius = 80.0;
-        let mp = super::super::presets::ModelPreset {
-            item_settings: item_with_gamma(2.0),
-            brush,
-            sd: None,
-        };
-        let mut models = HashMap::new();
-        // Foo only has a Silueta entry; active model is U2net.
-        models.insert(super::super::presets::model_id_key(prunr_models::ModelId::Silueta), mp);
-        let file = super::super::presets::PresetFile {
-            format_version: super::super::presets::PRESET_FORMAT_VERSION,
-            models,
-        };
-        s.presets.insert("Foo".to_string(), file);
+        s.presets.insert("Foo".to_string(), preset(serde_json::json!({ "format_version": 2, "models": {
+            "Silueta": { "item_settings": { "gamma": 2.0 }, "brush": { "radius": 80.0 } }
+        } })));
         s.default_preset = "Foo".to_string();
-
         s.model = SettingsModel::Silueta;
         let r = s.resolve_active_preset(None);
         assert_eq!((r.item_settings.gamma, r.brush.radius), (2.0, 80.0), "Silueta reads its own entry");
-        s.model = SettingsModel::U2net;
-        let r = s.resolve_active_preset(None);
-        assert_eq!((r.item_settings.gamma, r.brush.radius), (2.0, 80.0), "U2net uses the Silueta entry");
-        s.model = SettingsModel::BigInpaint;
-        let r = s.resolve_active_preset(None);
-        assert_eq!(r.item_settings, ItemSettings::default(), "an eraser has no entry: factory values");
-        s.model = SettingsModel::None;
-        assert_eq!(s.preset_values("Foo").gamma, 2.0, "No model reads the default model's entry, which Silueta's stands in for");
+        for other in [SettingsModel::U2net, SettingsModel::BiRefNetLite, SettingsModel::None, SettingsModel::BigInpaint] {
+            s.model = other;
+            assert_eq!(s.resolve_active_preset(None), prunr_view(other, None), "{other:?} takes Prunr's");
+        }
     }
 
     #[test]
     fn a_model_switch_takes_the_models_tuning_and_keeps_the_users_brush() {
-        use crate::gui::brush_state::BrushSettings;
-        use super::super::presets::{model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION};
-
         let mut s = Settings::default();
         s.model = SettingsModel::Silueta;
-        let mut silueta_brush = BrushSettings::default();
-        silueta_brush.radius = 80.0;
-        let mut u2net_brush = BrushSettings::default();
-        u2net_brush.radius = 120.0;
-        u2net_brush.inpaint_feather = 9.0;
-        u2net_brush.inpaint_grow = 1.0;
-        u2net_brush.inpaint_sharpen = 0.0;
-        let mut models = HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::Silueta), ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: silueta_brush,
-            sd: None,
-        });
-        models.insert(model_id_key(prunr_models::ModelId::U2net), ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: u2net_brush,
-            sd: None,
-        });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        s.presets.insert("Foo".to_string(), file);
+        s.presets.insert("Foo".to_string(), preset(serde_json::json!({ "format_version": 2, "models": {
+            "LaMaFp32": { "brush": { "inpaint_sharpen": 0.3, "inpaint_fill_scale": "Full" } }
+        } })));
         s.default_preset = "Foo".to_string();
         s.brush.radius = 33.0;
         s.brush.hardness = 0.2;
         s.brush.inpaint_feather = 30.0;
         s.brush.inpaint_grow = 14.0;
-        s.brush.inpaint_sharpen = 0.6;
 
-        s.model = SettingsModel::U2net;
+        s.model = SettingsModel::Inpaint;
         s.on_model_change_resolve_brush();
         assert_eq!((s.brush.radius, s.brush.hardness), (33.0, 0.2), "what the user set for the brush survives a model switch");
         assert_eq!((s.brush.inpaint_grow, s.brush.inpaint_feather), (14.0, 30.0), "so do the region knobs on the brush strips");
-        assert_eq!(s.brush.inpaint_sharpen, 0.0, "the new model's tuning comes from the preset");
+        assert_eq!(s.brush.inpaint_sharpen, 0.3, "the new model's tuning comes from the preset");
+        assert_eq!(s.brush.inpaint_fill_scale, prunr_core::inpaint::FillScale::Full);
     }
 
     /// Without the Fast download, Fast's few steps would run on the full
@@ -1210,34 +1161,15 @@ mod tests {
     #[test]
     fn on_scheduler_change_resolve_sd_swaps_bundle() {
         use crate::gui::brush_state::SdScheduler;
-        use super::super::presets::{
-            model_id_key, ModelPreset, PresetFile, SdPreset, SdSchedulerBundle,
-            PRESET_FORMAT_VERSION,
-        };
 
         let mut s = Settings::default();
         s.model = SettingsModel::SdInpaint;
-        let mut schedulers = HashMap::new();
-        schedulers.insert(SdScheduler::Lcm, SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5,
-        });
-        schedulers.insert(SdScheduler::DpmPlusPlus2MKarras, SdSchedulerBundle {
-            steps: 25, guidance_scale: 6.0,
-        });
-        let sd = SdPreset {
-            active_scheduler: SdScheduler::Lcm,
-            schedulers,
-            ..SdPreset::default()
-        };
-        let mp = ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: super::BrushSettings::default(),
-            sd: Some(sd),
-        };
-        let mut models = HashMap::new();
-        models.insert(model_id_key(prunr_models::ModelId::SdV15InpaintFp16), mp);
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        s.presets.insert("Foo".to_string(), file);
+        s.presets.insert("Foo".to_string(), preset(serde_json::json!({ "format_version": 2, "models": {
+            "SdV15InpaintFp16": { "sd": { "active_scheduler": "Lcm", "schedulers": {
+                "Lcm": { "steps": 8, "guidance_scale": 1.5 },
+                "DpmPlusPlus2MKarras": { "steps": 25, "guidance_scale": 6.0 }
+            } } }
+        } })));
         s.default_preset = "Foo".to_string();
         s.brush.sd_scheduler = SdScheduler::Lcm;
         s.brush.sd_steps = 8;

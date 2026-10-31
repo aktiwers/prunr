@@ -2280,12 +2280,13 @@ mod sd_request_tests {
     /// colour starts off; the other erasers match along the edge.
     #[test]
     fn each_eraser_starts_with_its_edge_colour() {
+        use crate::gui::settings::SettingsModel as M;
         use prunr_core::inpaint_blend::EdgeColour;
-        use prunr_models::ModelId::*;
-        for (model, want) in [(SdV15InpaintFp16, EdgeColour::Off), (RoremFp16, EdgeColour::Off), (LaMaFp32, EdgeColour::AlongEdge), (BigLaMa, EdgeColour::AlongEdge), (Migan, EdgeColour::AlongEdge)] {
-            let floor = super::super::brush_state::BrushSettings::floor_for(model);
-            assert_eq!(floor.edge_colour(model.is_sd_family()), want, "{model:?}");
-            assert!(floor.sd_soft_edge, "{model:?}");
+        for (model, want) in [(M::SdInpaint, EdgeColour::Off), (M::RoremInpaint, EdgeColour::Off), (M::Inpaint, EdgeColour::AlongEdge), (M::BigInpaint, EdgeColour::AlongEdge), (M::MiganInpaint, EdgeColour::AlongEdge)] {
+            let generated = model.to_model_id().is_some_and(|id| id.is_sd_family());
+            let brush = crate::gui::presets::prunr_view(model, None).brush;
+            assert_eq!(brush.edge_colour(generated), want, "{model:?}");
+            assert!(brush.sd_soft_edge, "{model:?}");
         }
     }
 

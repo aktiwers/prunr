@@ -16,9 +16,7 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
-use super::presets::{
-    model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
-};
+use super::presets::{Preset, PresetFile, PRESET_FORMAT_VERSION};
 use super::settings::PRUNR_PRESET;
 use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
@@ -86,9 +84,9 @@ pub fn sanitize_filename(name: &str) -> String {
     out
 }
 
-/// A v1 file (raw `ItemSettings`, no model) wraps under
-/// `DEFAULT_PRESET_MODEL`; brush and SD values come from the factory floor
-/// at apply time. The file on disk stays v1 until the user re-saves it.
+/// A v1 file (raw `ItemSettings`, no model) wraps under the default
+/// model; its brush and SD values are Prunr's. The file on disk stays v1
+/// until the user re-saves it.
 fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
     // `#[serde(default)]` would read an array or unrelated value as a
     // fully-default ItemSettings, masking a corrupt file.
@@ -101,7 +99,7 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
 
 /// A malformed file is skipped with a warning, so one broken preset
 /// doesn't hide the rest.
-pub(crate) fn load_all() -> (HashMap<String, PresetFile>, HashSet<String>) {
+pub(crate) fn load_all() -> (HashMap<String, Preset>, HashSet<String>) {
     let Some(dir) = presets_dir() else { return Default::default() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return Default::default() };
 
@@ -126,7 +124,7 @@ pub(crate) fn load_all() -> (HashMap<String, PresetFile>, HashSet<String>) {
     for (name, file) in read {
         match file {
             Ok(file) => {
-                presets.insert(name, file);
+                presets.insert(name, Preset::from(file));
             }
             Err(Skipped::Newer) => {
                 newer.insert(name.to_lowercase());
@@ -157,15 +155,15 @@ pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>) -> Option<&'stat
 
 const RESERVED_NAME: &str = "\"Prunr\" is reserved — pick another name.";
 
-/// Parse a `serde_json::Value` into a `PresetFile`. v2 (has
-/// `format_version: 2`) deserializes directly; one with no version is
-/// attempted as a v1 `ItemSettings` migration. A later version is a
-/// newer Prunr's, never read as v1.
+/// Parse a `serde_json::Value` into a `PresetFile`, trimmed to what
+/// differs from Prunr's. v2 (has `format_version: 2`) deserializes
+/// directly; one with no version is attempted as a v1 `ItemSettings`
+/// migration. A later version is a newer Prunr's, never read as v1.
 fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skipped> {
     super::item_settings::migrate_old_item_settings(&mut value);
     match value.get("format_version").and_then(|v| v.as_u64()) {
         Some(v) if v > u64::from(PRESET_FORMAT_VERSION) => Err(Skipped::Newer),
-        Some(2) => serde_json::from_value(value).map_err(|_| Skipped::Unreadable),
+        Some(2) => serde_json::from_value::<PresetFile>(value).map(PresetFile::trimmed).map_err(|_| Skipped::Unreadable),
         _ => migrate_v1_to_v2(&value).ok_or(Skipped::Unreadable),
     }
 }
@@ -221,16 +219,6 @@ pub(crate) fn queue_delete(name: &str) {
     if let Some(path) = preset_path(name) {
         super::disk_queue::remove(path);
     }
-}
-
-/// `model_preset` merged into `file`, the preset as it stands: entries for
-/// other models stay verbatim. Scheduler bundles within `model_id`'s entry
-/// come straight from `model_preset.sd.schedulers`: the caller carries
-/// over any prior bundles it wants to keep.
-pub(crate) fn merged(mut file: PresetFile, model_id: prunr_models::ModelId, model_preset: ModelPreset) -> PresetFile {
-    file.format_version = PRESET_FORMAT_VERSION;
-    file.models.insert(model_id_key(model_id), model_preset);
-    file
 }
 
 /// No-op once the seed marker exists.
@@ -469,198 +457,85 @@ mod tests {
     // ── v1 → v2 migration ────────────────────────────────────────────
     //
     // v1 preset files are raw `ItemSettings` JSON (no `format_version`
-    // key). They predate per-model bundling, so they carry no model
-    // identity — every v1 file wraps under the workspace default
-    // (`Settings::default().model`, currently `BiRefNetLite`).
+    // key). They predate per-model presets, so every v1 file wraps under
+    // the default model, keeping what differs from Prunr's.
 
-    #[test]
-    fn migrate_v1_with_item_settings_fields_wraps_into_default_model_entry() {
-        let v1_json = serde_json::json!({
-            "gamma": 2.0,
-            "edge_thickness": 5,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
-        assert_eq!(migrated.format_version, 2);
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings.gamma, 2.0);
-        assert_eq!(entry.item_settings.edge_thickness, 5);
-        assert_eq!(entry.brush, super::super::brush_state::BrushSettings::default());
-        assert!(entry.sd.is_none());
+    fn default_entry(file: &PresetFile) -> Option<&super::super::presets::Entry> {
+        file.models.get(&super::super::presets::preset_key(super::super::settings::DEFAULT_MODEL))
     }
 
     #[test]
-    fn migrate_v1_empty_object_wraps_default_item_settings() {
-        // An empty JSON object is a valid v1 file (every ItemSettings field
-        // serde-defaults). Migration must succeed and yield factory defaults.
-        let v1_json = serde_json::json!({});
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate empty");
+    fn migrate_v1_wraps_what_differs_under_the_default_model() {
+        let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 2.0, "edge_thickness": 5, "definitely_not_a_real_field": 42 })).expect("migrates");
         assert_eq!(migrated.format_version, 2);
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings, ItemSettings::default());
-    }
-
-    #[test]
-    fn migrate_v1_with_unknown_fields_succeeds() {
-        // Unknown forward-compat fields must not break v1 migration.
-        let v1_json = serde_json::json!({
-            "gamma": 1.5,
-            "definitely_not_a_real_field": 42,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings.gamma, 1.5);
+        let entry = default_entry(&migrated).expect("default model entry");
+        assert_eq!((entry.item_settings["gamma"].as_f64(), entry.item_settings["edge_thickness"].as_u64()), (Some(2.0), Some(5)));
+        assert_eq!(entry.item_settings.len(), 2, "only what differs");
+        assert!(entry.brush.is_empty() && entry.sd.is_empty());
+        let empty = migrate_v1_to_v2(&serde_json::json!({})).expect("an empty v1 file migrates");
+        assert!(empty.models.is_empty(), "nothing apart from Prunr's");
     }
 
     #[test]
     fn migrate_v1_with_garbage_json_returns_none() {
-        // Anything that doesn't deserialize as ItemSettings → None →
-        // load_all silently skips. (Strings, arrays, scalars at top level
-        // can't be ItemSettings.)
-        let v1_json = serde_json::json!("not an object");
-        assert!(migrate_v1_to_v2(&v1_json).is_none());
-        let v1_json = serde_json::json!([1, 2, 3]);
-        assert!(migrate_v1_to_v2(&v1_json).is_none());
+        // Strings, arrays and scalars at top level can't be ItemSettings:
+        // load_all skips them.
+        assert!(migrate_v1_to_v2(&serde_json::json!("not an object")).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!([1, 2, 3])).is_none());
     }
 
+    /// Once saved as v2, a migrated file loads back as it was.
     #[test]
-    fn v1_to_v2_round_trip_via_serde_is_stable() {
-        // Seed a v1-shaped JSON, migrate to v2 in-memory, serialize as if
-        // saving, parse back via the load_all branch logic, assert the
-        // second-load PresetFile equals the migrated one. Proves migration
-        // is idempotent — once persisted as v2, it stays v2 verbatim.
-        let v1_json = serde_json::json!({
-            "gamma": 1.7,
-            "feather": 3.5,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("migrate");
-        let serialized = serde_json::to_string_pretty(&migrated).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&serialized).expect("reparse");
-        // Second load must take the v2 branch, not re-migrate.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        let reloaded: PresetFile = serde_json::from_value(value).expect("v2 deserialize");
-        assert_eq!(reloaded, migrated);
+    fn v1_to_v2_round_trip_is_stable() {
+        let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 1.5, "feather": 3.5 })).expect("migrates");
+        let saved: serde_json::Value = serde_json::from_str(&serde_json::to_string_pretty(&migrated).unwrap()).unwrap();
+        assert_eq!(saved.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(parse_preset_value(saved).expect("loads as v2"), migrated);
     }
 
-    // ── Merge-save semantics ──────────────────────────────────────────
+    // ── Saving into a preset ──────────────────────────────────────────
     //
-    // Overwriting a preset for the active model touches ONLY that model's
-    // entry, written as the caller built it; other models round-trip
-    // bytewise. Tests use `overwrite_at` so they don't write to the
-    // user's real presets dir.
+    // Saving sets the model in use and keeps every other model's entry as
+    // it was. Tests use `save_at` so they don't write to the user's
+    // presets folder.
 
-    /// An overwrite as the app makes it: the preset as loaded, merged,
-    /// written whole.
-    fn overwrite_at(path: &std::path::Path, model_id: prunr_models::ModelId, mp: ModelPreset) -> std::io::Result<()> {
+    /// A save as the app makes it: the preset as loaded, the model in use
+    /// set from the current settings, written whole.
+    fn save_at(path: &std::path::Path, model: super::super::settings::SettingsModel, item: &ItemSettings, brush: &super::super::brush_state::BrushSettings) -> std::io::Result<()> {
         let existing = read_preset(path).unwrap_or_default();
-        write_preset(path, &merged(existing, model_id, mp))
+        write_preset(path, &existing.with_settings(model, item, brush))
     }
 
     #[test]
-    fn overwrite_preserves_other_model_entries() {
-        use super::super::brush_state::BrushSettings;
-        use super::super::presets::SdPreset;
-        use prunr_models::ModelId;
-
+    fn saving_keeps_the_other_models_entries() {
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::SettingsModel;
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Foo.json");
-
-        // Seed: Silueta entry with custom gamma + an SD entry alongside.
-        let silueta_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.5, ..ItemSettings::default() },
-            brush: BrushSettings::default(),
-            sd: None,
-        };
-        let mut seed = PresetFile::default();
-        seed.models.insert(model_id_key(ModelId::Silueta), silueta_mp.clone());
-        seed.models.insert(
-            model_id_key(ModelId::SdV15InpaintFp16),
-            ModelPreset { sd: Some(SdPreset::default()), ..ModelPreset::default() },
-        );
-        std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
-
-        // Save-merge a fresh SD entry. Silueta must survive untouched.
-        let new_sd_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.5, ..ItemSettings::default() },
-            brush: BrushSettings::default(),
-            sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
-        };
-        overwrite_at(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
-
-        let reloaded = read_preset(&path).expect("reload");
-        let silueta_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::Silueta))
-            .expect("Silueta entry preserved");
-        assert_eq!(*silueta_back, silueta_mp, "Silueta entry must be byte-equal");
-        let sd_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry exists");
-        assert_eq!(*sd_back, new_sd_mp, "SD entry must equal the merged-in preset");
+        let silueta = ItemSettings { gamma: 1.5, ..prunr_item_settings(SettingsModel::Silueta) };
+        save_at(&path, SettingsModel::Silueta, &silueta, &prunr_view(SettingsModel::Silueta, None).brush).unwrap();
+        let lama_brush = super::super::brush_state::BrushSettings { inpaint_grow: 6.0, ..prunr_view(SettingsModel::Inpaint, None).brush };
+        save_at(&path, SettingsModel::Inpaint, &prunr_item_settings(SettingsModel::Inpaint), &lama_brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        assert_eq!(reloaded.item_settings(SettingsModel::Silueta), silueta, "the earlier model's entry stays");
+        assert_eq!(reloaded.resolve(SettingsModel::Inpaint, None).brush, lama_brush);
     }
 
+    /// Saving onto a v1 file keeps its settings under the default model
+    /// beside the new entry.
     #[test]
-    fn overwrite_creates_file_when_none_exists() {
-        use prunr_models::ModelId;
-
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Fresh.json");
-        assert!(!path.exists());
-
-        let mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
-            ..ModelPreset::default()
-        };
-        overwrite_at(&path, ModelId::Silueta, mp.clone()).unwrap();
-
-        let reloaded = read_preset(&path).expect("reload");
-        assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
-        assert_eq!(reloaded.models.len(), 1);
-        assert_eq!(
-            reloaded.models.get(&model_id_key(ModelId::Silueta)),
-            Some(&mp),
-        );
-    }
-
-    #[test]
-    fn overwrite_handles_v1_file_via_load_path() {
-        use prunr_models::ModelId;
-
+    fn saving_onto_a_v1_file_keeps_it() {
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::{SettingsModel, DEFAULT_MODEL};
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("LegacyV1.json");
-
-        // v1 file: raw ItemSettings JSON, no format_version.
-        let v1_json = serde_json::json!({
-            "gamma": 1.4,
-            "edge_thickness": 7,
-        });
-        std::fs::write(&path, serde_json::to_string_pretty(&v1_json).unwrap()).unwrap();
-
-        // Save-merge a different model on top. v1 → v2 migration runs
-        // before merge so the v1 entry survives.
-        let lama_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
-            ..ModelPreset::default()
-        };
-        overwrite_at(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
-
-        let reloaded = read_preset(&path).expect("reload");
-        assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
-        // v1 wraps under the workspace default model (BiRefNetLite).
-        let v1_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::BiRefNetLite))
-            .expect("v1 entry migrated under workspace default");
-        assert!((v1_back.item_settings.gamma - 1.4).abs() < f32::EPSILON);
-        assert_eq!(v1_back.item_settings.edge_thickness, 7);
-        // New entry merged in alongside.
-        assert_eq!(
-            reloaded.models.get(&model_id_key(ModelId::LaMaFp32)),
-            Some(&lama_mp),
-        );
+        std::fs::write(&path, serde_json::json!({ "gamma": 1.25, "edge_thickness": 7 }).to_string()).unwrap();
+        let nomos = ItemSettings { sharpen: 0.5, ..prunr_item_settings(SettingsModel::Nomos2Upscale) };
+        save_at(&path, SettingsModel::Nomos2Upscale, &nomos, &prunr_view(SettingsModel::Nomos2Upscale, None).brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        let v1 = reloaded.item_settings(DEFAULT_MODEL);
+        assert_eq!((v1.gamma, v1.edge_thickness), (1.25, 7));
+        assert_eq!(reloaded.item_settings(SettingsModel::Nomos2Upscale).sharpen, 0.5);
     }
 
     #[test]
@@ -671,43 +546,32 @@ mod tests {
         }
     }
 
+    /// Every Stable Diffusion setting a save keeps comes back on load: a
+    /// new one that does not read from default, or is dropped on save,
+    /// breaks the round trip.
     #[test]
-    fn merge_save_dynamic_field_capture() {
+    fn every_sd_setting_round_trips_through_a_save() {
         use super::super::brush_state::{BrushSettings, SdScheduler};
-        use super::super::presets::{fuse_brush_for_apply, sd_preset_for_save};
-        use prunr_models::ModelId;
-
-        // Build a BrushSettings with every SD-tuning field mutated to a
-        // distinctive value. If a future field is added that doesn't
-        // serde-default — or that gets stripped at split/save — the
-        // round-trip equality breaks.
-        let mut base = BrushSettings::default();
-        base.radius = 73.0;
-        base.hardness = 0.42;
-        base.sd_prompt = "a-distinctive-prompt".into();
-        base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
-        base.sd_steps = 17;
-        base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::DpmPlusPlus2MKarras;
-        base.sd_seed = Some(13579);
-        base.sd_use_taesd = Some(true);
-
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::SettingsModel;
+        let sd = SettingsModel::SdInpaint;
+        let brush = BrushSettings {
+            radius: 73.0,
+            sd_prompt: "a-distinctive-prompt".into(),
+            sd_negative_prompt: "a-distinctive-neg-prompt".into(),
+            sd_steps: 17,
+            sd_guidance_scale: 5.25,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            sd_seed: Some(13579),
+            sd_use_taesd: Some(true),
+            sd_strength: 0.75,
+            inpaint_grow: 5.0,
+            ..prunr_view(sd, None).brush
+        };
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
-
-        let mp = ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: base.clone(),
-            sd: sd_preset_for_save(&base, ModelId::SdV15InpaintFp16),
-        };
-        overwrite_at(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
-
-        let reloaded = read_preset(&path).expect("reload");
-        let mp_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry");
-        let fused = fuse_brush_for_apply(mp_back, Some(base.sd_scheduler));
-        assert_eq!(fused, base, "every BrushSettings field must round-trip");
+        save_at(&path, sd, &prunr_item_settings(sd), &brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        assert_eq!(reloaded.resolve(sd, None).brush, brush);
     }
 }
