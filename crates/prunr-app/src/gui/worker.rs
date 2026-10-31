@@ -887,7 +887,15 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
     let line_mode = state.config.run.line_mode;
     let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look, line_mode, line_fade: false };
     let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
-    engines.plan(held_mb).map_err(|short| {
+    let planned = engines.plan(held_mb);
+    if let (Ok(plan), false) = (&planned, first_look) {
+        // An image shown later in the batch may take a first look: where
+        // there is room for one beside the jobs planned, it stays open.
+        let looked = super::memory::CutoutEngines { jobs: plan.jobs, first_look: true, ..engines }.plan(held_mb);
+        let room = looked == Ok(super::memory::CutoutPlan { jobs: plan.jobs, first_look: true });
+        return Ok(super::memory::CutoutPlan { first_look: room, ..*plan });
+    }
+    planned.map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
         // Lines alone run no cut-out model: the line model is what is short.
         let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
@@ -1624,6 +1632,25 @@ mod tests {
         assert!(!on(&with(ModelKind::Silueta, 4), &with(ModelKind::Silueta, 5)), "a larger pool needs a new worker");
         assert!(on(&with(ModelKind::BiRefNetLite, 1), &with(ModelKind::BiRefNetLite, 3)), "the same pool from other job counts");
         assert!(!with(ModelKind::BiRefNetLite, 1).reusable_by(&with(ModelKind::BiRefNetLite, 3), "CUDA"), "a GPU builds one per job, up to two");
+    }
+
+    /// The image on screen is not one the batch runs at its start: its
+    /// first look stays open, where there is room for it, for an image
+    /// shown later in the batch.
+    #[test]
+    fn a_first_look_not_asked_at_the_start_stays_open() {
+        let cfg = ProcessingConfig {
+            engines: EngineSpec { model: ModelKind::U2net, jobs: 1, cpu_only: true },
+            run: RunSettings::neutral(),
+            first_look: Shown::default(),
+            on_screen: Shown::default(),
+        };
+        cfg.first_look.set(Some(99));
+        let source = crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new()));
+        let work = |id| WorkItem { id, run: 0, source: source.clone(), image: None, correction: None };
+        let state = BatchRunState::new(7, vec![work(1), work(2)], Vec::new(), Vec::new(), None, cfg);
+        let plan = engines_fit(&state, None, 1).expect("U2-Net and its first look fit");
+        assert!(plan.first_look);
     }
 
     #[test]
