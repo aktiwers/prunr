@@ -19,11 +19,6 @@ fn idle_release_due(no_in_flight: bool, idle: Duration, keep_loaded: bool) -> bo
     no_in_flight && idle > IDLE_RELEASE && !keep_loaded
 }
 
-/// Below this much free RAM the watchdog force-kills the worker.
-/// 1 GB sits below Linux's aggressive-reclaim band and above macOS's
-/// memory-pressure warning, so it kicks in before swap-thrashing on either.
-const MEMORY_PRESSURE_THRESHOLD_BYTES: u64 = 1024 * 1024 * 1024;
-
 /// How long a released subprocess gets to exit before it is killed.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -135,13 +130,11 @@ fn run(msg_rx: mpsc::Receiver<InpaintBridgeMsg>, res_tx: mpsc::Sender<InpaintBri
         // Watchdog for `needs` underestimates and mid-load RAM shifts
         // the pre-flight gate can't see; only once Ready, since a spawning
         // worker has loaded nothing yet.
-        if !strokes.is_empty() && matches!(sub_state, SubState::Ready(_)) {
-            let free = crate::hardware::available_ram_bytes_throttled();
-            // 0 is nothing free, unless the system reports no memory.
-            if crate::hardware::total_ram_bytes() > 0 && free < MEMORY_PRESSURE_THRESHOLD_BYTES {
+        if matches!(sub_state, SubState::Ready(_)) {
+            let mut free = None;
+            if crate::subprocess::batch_rules::stops_for_memory(strokes.len(), || { free = prunr_core::sysmem::available_ram_bytes(); free }) {
                 tracing::warn!(
-                    free_mb = free / (1024 * 1024),
-                    threshold_mb = MEMORY_PRESSURE_THRESHOLD_BYTES / (1024 * 1024),
+                    free_mb = free.unwrap_or_default() / (1024 * 1024),
                     in_flight = strokes.len(),
                     "memory-pressure abort: killing inpaint subprocess",
                 );

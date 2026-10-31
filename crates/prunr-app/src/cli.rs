@@ -383,6 +383,18 @@ pub enum CliModel {
     BirefnetLite,
 }
 
+impl CliModel {
+    /// The `--model` value that runs `kind`, when one does.
+    fn of(kind: prunr_core::ModelKind) -> Option<Self> {
+        Self::value_variants().iter().copied().find(|m| prunr_core::ModelKind::from(*m) == kind)
+    }
+
+    /// As typed after `--model`.
+    fn flag_value(self) -> String {
+        self.to_possible_value().map(|v| v.get_name().to_string()).unwrap_or_default()
+    }
+}
+
 impl From<CliModel> for prunr_core::ModelKind {
     fn from(m: CliModel) -> Self {
         match m {
@@ -1266,7 +1278,7 @@ fn run_batch_subprocess(
     quiet: bool,
     land: &mut dyn FnMut(usize, Result<prunr_core::ProcessResult, CoreError>),
 ) {
-    use prunr_app::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, OnCrash, HANG_TIMEOUT};
+    use prunr_app::subprocess::batch_rules::{is_stalled, on_crash, room_to_send, stops_for_memory, OnCrash, HANG_TIMEOUT};
     use prunr_app::subprocess::manager::{Crash, SubprocessManager};
     use prunr_app::subprocess::protocol::SubprocessEvent;
 
@@ -1293,6 +1305,18 @@ fn run_batch_subprocess(
         if pending.is_empty() { break; }
 
         let effective_jobs = max_jobs.min(pending.len());
+        if let Err(short) = prunr_app::gui::memory::cutout_fits(model, effective_jobs, cpu_only, false, 0) {
+            let lighter: Vec<String> = prunr_app::gui::memory::lighter_cutouts_that_fit(model, cpu_only)
+                .into_iter()
+                .filter_map(CliModel::of)
+                .map(|m| format!("--model {}", m.flag_value()))
+                .collect();
+            let instead = if lighter.is_empty() { String::new() } else { format!(", or use {}", lighter.join(" or ")) };
+            for &idx in &pending {
+                give(idx, Err(CoreError::Model(format!("not enough memory: the model {short}. Close other apps{instead}"))));
+            }
+            break;
+        }
         let (mut sub, provider) = match SubprocessManager::spawn(
             model, effective_jobs, mask, cpu_only, lines,
         ) {
@@ -1394,6 +1418,10 @@ fn run_batch_subprocess(
                 sub.kill();
                 break Some(Crash::Unresponsive);
             }
+            if stops_for_memory(in_flight.len(), prunr_core::sysmem::available_ram_bytes) {
+                sub.kill();
+                break Some(Crash::MemoryLow);
+            }
         };
 
         let Some(crash) = crash else {
@@ -1406,7 +1434,7 @@ fn run_batch_subprocess(
         prunr_app::subprocess::protocol::cleanup_seg_pipeline_temps();
         match on_crash(max_jobs) {
             OnCrash::FailInFlight => {
-                let advice = if crash == Crash::OutOfMemory { " \u{2014} try a smaller model" } else { "" };
+                let advice = if matches!(crash, Crash::OutOfMemory | Crash::MemoryLow) { " \u{2014} try a smaller model" } else { "" };
                 for idx in in_flight {
                     give(idx, Err(CoreError::Model(format!("worker {crash}{advice}"))));
                 }

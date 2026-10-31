@@ -30,8 +30,7 @@ impl AdmissionController {
     /// the first-look model may load beside the engines.
     pub fn new(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> Self {
         let available = crate::hardware::available_ram_bytes_now() as usize;
-        let overhead = model_overhead(model, jobs, cpu_only)
-            + if first_look { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL, cpu_only) } else { 0 };
+        let overhead = cutout_need_bytes(model, jobs, cpu_only, first_look);
         let budget = ((available as f64) * 0.85) as usize;
         let budget = budget.saturating_sub(overhead);
         Self {
@@ -150,6 +149,42 @@ pub(crate) fn cpu_need_mb(model: ModelKind) -> u32 {
     prunr_models::descriptor(id).map_or(800, |d| d.needs.host_cpu().host_mb)
 }
 
+/// System RAM a cut-out batch's engines take: `jobs` engines of `model`
+/// and, with `first_look`, the first-look model beside them, which runs
+/// on the CPU.
+pub(crate) fn cutout_need_bytes(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool) -> usize {
+    let looks = first_look && prunr_core::subject::may_take_first_look(model);
+    model_overhead(model, jobs, cpu_only) + if looks { per_engine_cost(prunr_core::subject::FIRST_LOOK_MODEL, true) } else { 0 }
+}
+
+/// Whether a cut-out batch's engines (`cutout_need_bytes`) fit what is
+/// free now, with the reserve kept for other apps. `held_mb`: what a warm
+/// worker already holds, its own again for the run. No reading of free
+/// memory lets it run.
+pub fn cutout_fits(model: ModelKind, jobs: usize, cpu_only: bool, first_look: bool, held_mb: u64) -> Result<(), prunr_core::memory::Short> {
+    let Some(free) = prunr_core::sysmem::available_ram_bytes() else { return Ok(()) };
+    fits_beside_held(cutout_need_bytes(model, jobs, cpu_only, first_look) as u64, free, held_mb)
+}
+
+fn fits_beside_held(need_bytes: u64, free_bytes: u64, held_mb: u64) -> Result<(), prunr_core::memory::Short> {
+    const MB: u64 = 1024 * 1024;
+    let charge = prunr_core::memory::Charge { ram_mb: need_bytes.div_ceil(MB), card_mb: 0 };
+    prunr_core::memory::fit(charge, prunr_core::memory::Room { ram_mb: free_bytes / MB + held_mb, card_mb: None })
+}
+
+/// The cut-out models lighter than `model` whose engine fits now, the
+/// lightest first: what a refusal for memory offers instead.
+pub fn lighter_cutouts_that_fit(model: ModelKind, cpu_only: bool) -> Vec<ModelKind> {
+    let mut lighter: Vec<ModelKind> = super::settings::SettingsModel::ALL
+        .into_iter()
+        .filter(|m| m.role() == super::knob_catalog::ModelRole::Cutout)
+        .filter_map(super::settings::SettingsModel::to_model_kind)
+        .filter(|m| cpu_need_mb(*m) < cpu_need_mb(model) && cutout_fits(*m, 1, cpu_only, false, 0).is_ok())
+        .collect();
+    lighter.sort_by_key(|m| cpu_need_mb(*m));
+    lighter
+}
+
 fn model_overhead(model: ModelKind, jobs: usize, cpu_only: bool) -> usize {
     // Not waiting on the accelerator probe here (the UI thread): until it
     // answers the engines are counted as on the CPU, the larger figure.
@@ -194,6 +229,26 @@ mod tests {
         for model in [ModelKind::Silueta, ModelKind::BiRefNetLite] {
             assert!(default_jobs(Some(model), true, true) <= safe_max_jobs(model, true), "{model:?}");
         }
+    }
+
+    /// The cut-out that froze a desktop: BiRefNet-lite on the CPU with the
+    /// first look beside it, 7.9 GB free. It is refused; it runs once the
+    /// reserve is free beside its need, a warm worker's memory counted as
+    /// its own.
+    #[test]
+    fn a_cut_out_starts_only_with_room_beside_it() {
+        const MB: u64 = 1024 * 1024;
+        let alone = cutout_need_bytes(ModelKind::BiRefNetLite, 1, true, false) as u64;
+        let with_look = cutout_need_bytes(ModelKind::BiRefNetLite, 1, true, true) as u64;
+        let look = engine_cost_on(prunr_core::subject::FIRST_LOOK_MODEL, prunr_core::engine::CPU_NAME) as u64;
+        assert_eq!(with_look - alone, look, "the first look beside it, on the CPU");
+        assert_eq!(cutout_need_bytes(ModelKind::Silueta, 1, true, true), cutout_need_bytes(ModelKind::Silueta, 1, true, false), "Silueta takes no first look");
+
+        let (need_mb, reserve) = (with_look.div_ceil(MB), prunr_core::memory::RAM_RESERVE_MB);
+        assert!(fits_beside_held(with_look, 7_881 * MB, 0).is_err());
+        assert!(fits_beside_held(with_look, (need_mb + reserve - 1) * MB, 0).is_err());
+        assert!(fits_beside_held(with_look, (need_mb + reserve) * MB, 0).is_ok());
+        assert!(fits_beside_held(with_look, (need_mb + reserve - 1_000) * MB, 1_000).is_ok(), "a warm worker's own memory");
     }
 
     /// An engine on a card is charged its share of system RAM, measured

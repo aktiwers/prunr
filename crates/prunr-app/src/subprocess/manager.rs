@@ -123,6 +123,9 @@ impl WorkerLines {
 pub enum Crash {
     /// The system killed it (SIGKILL), which on a desktop means memory.
     OutOfMemory,
+    /// Prunr stopped it: free memory fell below the line while it ran
+    /// (`batch_rules::stops_for_memory`).
+    MemoryLow,
     /// It is alive but can no longer be heard: it sent nothing for too
     /// long, or what it sent could not be read.
     Unresponsive,
@@ -152,6 +155,7 @@ impl std::fmt::Display for Crash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OutOfMemory => f.write_str("killed by the system (out of memory)"),
+            Self::MemoryLow => f.write_str("stopped: free memory ran low"),
             Self::Unresponsive => f.write_str("stopped responding"),
             Self::Other(what) => f.write_str(what),
         }
@@ -593,6 +597,11 @@ impl SubprocessManager {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait(); // reap zombie
+    }
+
+    /// The memory the worker holds now, in MB; 0 when it cannot be read.
+    pub fn resident_mb(&self) -> u64 {
+        prunr_core::sysmem::rss_mb_of(self.child.id()).unwrap_or(0)
     }
 }
 

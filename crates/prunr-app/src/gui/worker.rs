@@ -823,6 +823,13 @@ fn spawn_and_initial_burst(
     // Cached-tensor work doesn't use the seg engine pool.
     let effective_jobs = pool_jobs(state.max_jobs, state.pending.len());
 
+    if let Err(why) = engines_fit(state, warm.as_ref().map(|(sub, _)| sub), effective_jobs) {
+        emit_pending_errors(state, &why, res_tx);
+        let _ = res_tx.send(state.complete_event());
+        ctx.request_repaint();
+        return None;
+    }
+
     let (mut sub, engines) = match warm {
         Some(pair) => pair,
         None => match SubprocessManager::spawn(
@@ -847,6 +854,41 @@ fn spawn_and_initial_burst(
     let mut sent = SentWork::default();
     top_up(&mut sub, state, &mut sent, cancels, res_tx, ctx);
     Some(InitialBurst { sub, sent, engines })
+}
+
+/// Whether the batch's cut-out engines fit what is free now with the
+/// reserve kept, a warm worker's memory counted as its own; `Err`: what
+/// the images it refuses tell the user. Only full runs need the engines.
+fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: usize) -> Result<(), String> {
+    if state.pending.is_empty() {
+        return Ok(());
+    }
+    let EngineSpec { model, cpu_only, .. } = state.config.engines;
+    let shown = state.config.first_look.get();
+    let first_look = state.pending.iter().any(|item| Some(item.id) == shown);
+    let held_mb = warm.map_or(0, SubprocessManager::resident_mb);
+    super::memory::cutout_fits(model, jobs, cpu_only, first_look, held_mb).map_err(|short| {
+        tracing::warn!(?model, jobs, held_mb, %short, "cut-out refused: not enough memory");
+        memory_refusal(model, cpu_only, short)
+    })
+}
+
+/// A cut-out refused for memory: what it needs, and the lighter cut-out
+/// models that fit now.
+fn memory_refusal(model: ModelKind, cpu_only: bool, short: prunr_core::memory::Short) -> String {
+    let name = |kind| {
+        super::settings::SettingsModel::ALL
+            .into_iter()
+            .find(|m| m.to_model_kind() == Some(kind))
+            .map_or("This model", super::views::model_name)
+    };
+    let lighter: Vec<&str> = super::memory::lighter_cutouts_that_fit(model, cpu_only).into_iter().map(name).collect();
+    refusal_text(name(model), short, &lighter)
+}
+
+fn refusal_text(model: &str, short: prunr_core::memory::Short, lighter: &[&str]) -> String {
+    let instead = if lighter.is_empty() { String::new() } else { format!(", or pick {} in the model list", lighter.join(" or ")) };
+    format!("{model} {short}. Close other apps{instead}.")
 }
 
 /// Give the worker the batch's run settings and the image on screen whose
@@ -897,6 +939,12 @@ fn run_event_loop(
             sub.kill();
             tracing::warn!(silent_secs = HANG_TIMEOUT.as_secs(), "worker sent nothing; killed");
             return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::Unresponsive);
+        }
+
+        if crate::subprocess::batch_rules::stops_for_memory(sent.len(), prunr_core::sysmem::available_ram_bytes) {
+            sub.kill();
+            tracing::warn!(in_flight = sent.len(), "free memory ran low; worker stopped");
+            return EventLoopOutcome::Crashed(crate::subprocess::manager::Crash::MemoryLow);
         }
 
         for event in sub.poll_events_blocking(Duration::from_millis(50)) {
@@ -1286,6 +1334,7 @@ fn crash_message(crash: &crate::subprocess::manager::Crash) -> &'static str {
     use crate::subprocess::manager::Crash;
     match crash {
         Crash::OutOfMemory => "Ran out of memory. Try a smaller model or fewer images at once.",
+        Crash::MemoryLow => "Stopped before the computer ran out of memory. Close other apps and process again, or pick a lighter model.",
         Crash::Unresponsive => "The model stopped responding. Process again.",
         Crash::Other(_) => "The model stopped unexpectedly. Process again; if it happens again, run prunr --doctor and send the report.",
     }
@@ -1620,8 +1669,25 @@ mod tests {
     fn a_crash_tells_why() {
         use crate::subprocess::manager::Crash;
         assert!(super::crash_message(&Crash::OutOfMemory).starts_with("Ran out of memory"));
+        assert!(super::crash_message(&Crash::MemoryLow).starts_with("Stopped before the computer ran out of memory"));
         assert!(super::crash_message(&Crash::Unresponsive).starts_with("The model stopped responding"));
         assert!(super::crash_message(&Crash::Other("exited with code 3".into())).starts_with("The model stopped unexpectedly"));
+    }
+
+    /// A cut-out refused for memory says what it needs, what Prunr keeps
+    /// free and what is free, and names the lighter models that fit; the
+    /// toast shows it as written.
+    #[test]
+    fn a_refusal_for_memory_says_what_to_do() {
+        let short = prunr_core::memory::Short::Ram { need_mb: 7_700, kept_mb: prunr_core::memory::RAM_RESERVE_MB, free_mb: 7_881 };
+        let text = super::refusal_text("BiRefNet", short, &["Silueta", "U2Net"]);
+        assert_eq!(
+            text,
+            "BiRefNet needs about 7.5 GB of free memory, and Prunr keeps 1.5 GB free for your other apps; 7.7 GB is free. \
+             Close other apps, or pick Silueta or U2Net in the model list.",
+        );
+        assert_eq!(prunr_core::plain::error(&text), text);
+        assert!(super::refusal_text("Silueta", short, &[]).ends_with("7.7 GB is free. Close other apps."));
     }
 
 }

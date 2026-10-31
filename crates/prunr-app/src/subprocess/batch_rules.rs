@@ -17,6 +17,21 @@ pub fn room_to_send(working: usize, max_jobs: usize, paused: bool) -> usize {
     max_jobs.saturating_sub(working)
 }
 
+/// Free system RAM below which a worker's run is stopped. 1 GB sits
+/// below Linux's aggressive-reclaim band and above macOS's
+/// memory-pressure warning, so the worker goes before the desktop
+/// thrashes. Runs start with `memory::RAM_RESERVE_MB` free beside their
+/// need, so only a figure that was low, or another app growing, gets
+/// here.
+pub const STOP_BELOW_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Whether a worker with work in flight stops for memory, by the free
+/// RAM `read_free` reads now, only while work is in flight. No reading:
+/// it runs on.
+pub fn stops_for_memory(in_flight_count: usize, read_free: impl FnOnce() -> Option<u64>) -> bool {
+    in_flight_count > 0 && read_free().is_some_and(|free| free < STOP_BELOW_FREE_BYTES)
+}
+
 /// Alive but silent too long; the event loop treats it as a crash.
 pub fn is_stalled(last_event_age: Duration, in_flight_count: usize, hang_timeout: Duration) -> bool {
     in_flight_count > 0 && last_event_age > hang_timeout
@@ -61,6 +76,19 @@ mod tests {
         assert_eq!(room_to_send(1, 2, true), 0, "paused while one runs");
         assert_eq!(room_to_send(0, 2, true), 2, "nothing running: the pause cannot lift itself");
         assert_eq!(room_to_send(3, 2, false), 0, "fewer jobs after a crash");
+    }
+
+    /// A run stops when free memory falls under the line while it works;
+    /// an idle worker, or no reading, is left alone.
+    #[test]
+    fn a_run_stops_only_when_memory_runs_low_under_it() {
+        let gb = 1024 * 1024 * 1024;
+        assert!(stops_for_memory(1, || Some(700 * 1024 * 1024)), "the desktop that froze had 0.7 GB free");
+        assert!(stops_for_memory(1, || Some(STOP_BELOW_FREE_BYTES - 1)));
+        assert!(!stops_for_memory(1, || Some(STOP_BELOW_FREE_BYTES)));
+        assert!(!stops_for_memory(0, || panic!("read only while work runs")), "nothing running");
+        assert!(!stops_for_memory(1, || None), "no reading");
+        assert!(!stops_for_memory(2, || Some(8 * gb)));
     }
 
     /// A worker is hung only when it sits on work past the timeout: an

@@ -116,7 +116,15 @@ pub fn return_freed_memory() {
 
 /// Current process RSS in MB; `None` when sysinfo can't read the process.
 pub fn process_rss_mb() -> Option<u64> {
-    let pid = sysinfo::get_current_pid().ok()?;
+    rss_mb(sysinfo::get_current_pid().ok()?)
+}
+
+/// Process `pid`'s RSS in MB; `None` when it cannot be read.
+pub fn rss_mb_of(pid: u32) -> Option<u64> {
+    rss_mb(sysinfo::Pid::from_u32(pid))
+}
+
+fn rss_mb(pid: sysinfo::Pid) -> Option<u64> {
     with_system(|sys| {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
         sys.process(pid).map(|p| p.memory() / (1024 * 1024))
