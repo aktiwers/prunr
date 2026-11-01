@@ -11,6 +11,7 @@ use super::PrunrApp;
 impl PrunrApp {
     pub(super) fn handle_preset_request(&mut self, request: PresetRequest, ctx: &egui::Context) {
         match request {
+            PresetRequest::SaveSettings => self.settings.save(),
             PresetRequest::Rescan => self.preset_store.rescan(&self.settings, ctx),
             PresetRequest::Import => self.ask_dialog(DialogRequest::ImportPresets),
             PresetRequest::Export(name) => self.ask_dialog(DialogRequest::ExportPreset { name }),

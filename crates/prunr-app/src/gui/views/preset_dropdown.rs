@@ -55,6 +55,8 @@ const MODEL_LIST_HEIGHT: f32 = 110.0;
 /// What the preset list asks the app to do with preset files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PresetRequest {
+    /// The default preset changed: save the settings, which keep it.
+    SaveSettings,
     /// The list opened: read the presets folder again.
     Rescan,
     /// Pick preset files to add.
@@ -219,6 +221,7 @@ pub(crate) fn render(
                             let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
                             if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
                                 settings.default_preset = name.clone();
+                                *request = Some(PresetRequest::SaveSettings);
                             }
                             let export = ui.small_button(RichText::new(ICON_IOS_SHARE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
                             if crate::gui::views::chip::named(export, "Export preset").on_hover_text("Save this preset as a file to share").clicked() {
@@ -456,6 +459,29 @@ mod tests {
         let mut keys: Vec<String> = dialog.file_for(&s, "Portrait").models.into_keys().collect();
         keys.sort();
         assert_eq!(keys, ["BiRefNetLite", "FourXNomos2RealPlksr", "Silueta"]);
+    }
+
+    /// Starring a preset asks for the settings to be saved, which keep
+    /// the default: without that a restart lost it unless something else
+    /// saved them first.
+    #[test]
+    fn starring_a_preset_saves_the_settings() {
+        use egui_kittest::kittest::Queryable;
+        struct State { settings: Settings, item: ItemSettings, applied: String, changes: Changes<ItemSettings>, dialog: Option<SaveDialog>, request: Option<PresetRequest> }
+        let mut settings = Settings::default();
+        settings.presets.insert("Mine".into(), PresetFile::default().into());
+        let state = State { settings, item: ItemSettings::default(), applied: PRUNR_PRESET.into(), changes: Changes::new(ItemSettings::default()), dialog: None, request: None };
+        let mut h = egui_kittest::Harness::new_ui_state(|ui, s: &mut State| {
+            let mut presets = PresetUi { applied: &mut s.applied, changes: &s.changes, save_dialog: &mut s.dialog };
+            render(ui, &mut s.settings, &mut s.item, &mut presets, &mut s.request);
+        }, state);
+        h.get_by_label("Preset").click();
+        h.run();
+        // Prunr's row comes first and is the default already.
+        h.get_all_by_label("Set as default").nth(1).expect("Mine's star").click();
+        h.run();
+        assert_eq!(h.state().settings.default_preset, "Mine");
+        assert_eq!(h.state().request, Some(PresetRequest::SaveSettings));
     }
 
     /// Prunr first, then the user's presets by name ignoring case
