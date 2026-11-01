@@ -887,7 +887,11 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
     // plan says whether a first look has room beside the jobs.
     let engines = super::memory::CutoutEngines { model, jobs, cpu_only, first_look: true, line_mode, line_fade: false };
     let held_mb = warm.and_then(SubprocessManager::resident_mb).unwrap_or(0);
-    engines.plan(held_mb).map_err(|short| {
+    engines.plan(held_mb).inspect(|plan| {
+        if plan.jobs < jobs || !plan.first_look {
+            tracing::info!(?engines, held_mb, ?plan, "cut-out planned down for the memory free");
+        }
+    }).map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
         // Lines alone run no cut-out model: the line model is what is short.
         let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
