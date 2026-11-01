@@ -90,9 +90,6 @@ struct InFlightBatch {
     /// Frozen at dispatch, so progress counts only this dispatch, not
     /// items processed before it.
     total: usize,
-    /// Nobody asked for it (the lines a brush's putting down retraces):
-    /// its end says nothing.
-    quiet: bool,
 }
 
 /// How an inpaint stroke ended; it travels with the item id.
@@ -869,6 +866,8 @@ pub(crate) struct Processor {
     /// The batches sent and not finished, oldest first: one queued behind
     /// a running one keeps its own images and recipe.
     in_flight: Vec<InFlightBatch>,
+    /// The batches nobody asked for (`hush_batch_of`), until they end.
+    quiet_batches: std::collections::HashSet<u64>,
     next_batch: u64,
     /// The progress run the in-flight batch shows through.
     seg_run: Option<super::dispatch_progress::RunSink>,
@@ -959,6 +958,7 @@ impl Processor {
             failed_reruns: 0,
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
+            quiet_batches: std::collections::HashSet::new(),
             next_batch: 0,
             seg_run: None,
             inpaint_done: Chan::default(),
@@ -1497,7 +1497,7 @@ impl Processor {
         });
         let id = self.next_batch;
         self.next_batch += 1;
-        self.in_flight.push(InFlightBatch { id, recipe, pending, total, quiet: false });
+        self.in_flight.push(InFlightBatch { id, recipe, pending, total });
         if self.seg_run.is_none() {
             let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Seg, "Starting");
             self.seg_run = Some(self.dispatch_progress.begin(initial));
@@ -1604,16 +1604,19 @@ impl Processor {
         Some((recipe, run))
     }
 
-    /// The batch running `item_id`'s run is one nobody asked for.
+    /// The batch running `item_id`'s run is one nobody asked for (the
+    /// lines a brush's putting down retraces): its end says nothing.
     pub(crate) fn hush_batch_of(&mut self, item_id: u64) {
-        if let Some(batch) = self.in_flight.iter_mut().find(|b| b.pending.contains_key(&item_id)) {
-            batch.quiet = true;
+        if let Some(batch) = self.in_flight.iter().find(|b| b.pending.contains_key(&item_id)) {
+            self.quiet_batches.insert(batch.id);
         }
     }
 
-    /// Whether batch `id` is one nobody asked for (`hush_batch_of`).
-    pub(crate) fn batch_is_quiet(&self, id: u64) -> bool {
-        self.in_flight.iter().any(|b| b.id == id && b.quiet)
+    /// Whether batch `id`, ending, is one nobody asked for. Kept apart
+    /// from the batch's tracking, which its last answer ends before the
+    /// worker says it is done.
+    pub(crate) fn take_quiet(&mut self, id: u64) -> bool {
+        self.quiet_batches.remove(&id)
     }
 
     /// The worker finished batch `id`: drop it and return the images it

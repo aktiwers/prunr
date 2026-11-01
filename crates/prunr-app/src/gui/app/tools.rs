@@ -1099,12 +1099,14 @@ mod stroke_lines_tests {
                 WorkerMessage::BatchProcess { batch, .. } => Some(batch),
                 _ => None,
             }).expect("a lines run");
+            let toasts = app.toasts.len_for_test();
             if stopped {
                 app.set_tool(Some(Tool::Paint));
             } else {
-                land_lines(&mut app);
+                // As the worker answers: the batch's last answer ends its tracking.
+                let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+                app.on_batch_item_done(&egui::Context::default(), batch, 1, Ok(traced), None, edge_lines(&prunr_core::EdgeScale::ALL, None));
             }
-            let toasts = app.toasts.len_for_test();
             app.on_batch_complete(batch);
             assert_eq!(app.toasts.len_for_test(), toasts, "stopped {stopped}: no \"All done\"");
         }
