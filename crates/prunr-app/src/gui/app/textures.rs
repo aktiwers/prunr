@@ -24,9 +24,11 @@ impl PrunrApp {
     /// Once per frame. On a selection change (detected here, so no
     /// selection path can forget it): free the background items' results,
     /// restore the selected one from history, leave Compare. Every frame:
-    /// the decoded source, the canvas textures, the bg-image texture, the
-    /// selection texture and the Magic Brush embedding the selected item
-    /// lacks. Every arm is idempotent behind its pending flag.
+    /// the background picture every processed image shows (one texture
+    /// each picture, so thumbnails draw it), and the decoded source, the
+    /// canvas textures, the backdrop texture, the selection texture and
+    /// the Magic Brush embedding the selected item lacks. Every arm is
+    /// idempotent behind its pending flag.
     pub(super) fn reconcile_selected(&mut self, ctx: &egui::Context) {
         let selected = self.batch.selected_id();
         let idx = self.batch.selected_idx_clamped();
@@ -41,6 +43,9 @@ impl PrunrApp {
                 self.batch.items[idx].decode_failed = false;
             }
             self.show_original = false;
+        }
+        for id in self.batch.share_picture_backdrops() {
+            self.kick_backdrop_tex_prep(id, ctx);
         }
         if let (Some(idx), Some(id)) = (idx, selected) {
             self.batch.items[idx].settle_reveal();
@@ -312,5 +317,21 @@ mod tests {
         app.batch.items[0].hold_bg_image(picture(8));
         app.kick_backdrop_tex_prep(1, &ctx);
         assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the named one is held");
+    }
+
+    /// An image processed off screen gets its background picture built
+    /// without being shown, so its thumbnail draws it.
+    #[test]
+    fn an_image_off_screen_gets_its_picture_for_its_thumbnail() {
+        let mut app = PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        push_test_item(&mut app, 1);
+        let item = push_test_item(&mut app, 2);
+        item.settings.bg_image_hash = NonZeroU64::new(7);
+        item.hold_bg_image(picture(7));
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        app.batch.select_item(0);
+        app.reconcile_selected(&ctx);
+        assert!(app.batch.items[1].backdrop_tex_pending.is_some(), "its picture builds while it is off screen");
     }
 }
