@@ -869,6 +869,14 @@ fn box_blur(mask: &mut GrayImage, radius: u32) {
 mod tests {
     use super::*;
 
+    /// BiRefNet gives logits, made probabilities by a sigmoid; the rembg
+    /// models give probabilities already.
+    #[test]
+    fn only_birefnet_gives_logits() {
+        assert!(super::outputs_logits(ModelKind::BiRefNetLite));
+        assert!(!super::outputs_logits(ModelKind::Silueta) && !super::outputs_logits(ModelKind::U2net));
+    }
+
     /// Blurred photo and Lens blur blur the background alone: the subject's
     /// colour does not spread past its edge onto the backdrop around it,
     /// the halo it drew there. With no cut-out the whole photo blurs.
