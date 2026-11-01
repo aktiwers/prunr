@@ -541,9 +541,26 @@ struct CliRender<'a> {
     role: crate::gui::knob_catalog::ModelRole,
     faces: Option<CliFaces>,
     depth: &'a CliDepth,
+    /// `--large-image downscale`: a photo over the limit is shrunk, as the
+    /// worker's copy was; `say` notes it where the worker did not.
+    downscale: bool,
+    say: bool,
 }
 
 impl CliRender<'_> {
+    /// Why the worker's answer cannot be rendered: a tensor the run made
+    /// did not come back with it.
+    fn lacks(&self, seg: Option<&crate::gui::worker::RawSegTensor>, edges: Option<&crate::gui::worker::RawEdgeTensors>) -> Option<&'static str> {
+        let cut = self.role == crate::gui::knob_catalog::ModelRole::Cutout && self.settings.line_mode != LineMode::EdgesOnly;
+        if cut && seg.is_none() {
+            Some("the worker's cut-out mask did not come back. Run it again.")
+        } else if self.settings.line_mode != LineMode::Off && edges.is_none() {
+            Some("the worker's lines did not come back. Run it again.")
+        } else {
+            None
+        }
+    }
+
     /// `path`'s photo as the app renders it, cut and lined from the
     /// worker's tensors when it ran, on `backdrop`.
     fn render(
@@ -553,7 +570,7 @@ impl CliRender<'_> {
         seg: Option<crate::gui::worker::RawSegTensor>,
         edges: Option<crate::gui::worker::RawEdgeTensors>,
     ) -> Result<image::RgbaImage, String> {
-        let photo = prunr_core::load_image_from_path(path).map_err(|e| could_not(path, "read", e.message()))?.into_rgba8();
+        let photo = read_for_run(path, self.downscale, !self.say).map_err(|e| e.message())?.into_rgba8();
         let faces = self.faces.as_mut().map(|faces| restore_faces(faces, &photo).map(|found| (std::sync::Arc::new(found), faces.1))).transpose()?;
         let places: Option<Vec<prunr_core::face::FacePlace>> = faces.as_ref().map(|(found, _)| found.iter().map(|face| *face.place()).collect());
         let depth = self.settings.photo_reads_depth(self.role)
@@ -606,7 +623,10 @@ fn cli_finish<'a>(args: &Cli, depth: &'a CliDepth, s: &ItemSettings) -> Option<C
     let faces = load_faces(args, s).ok()?;
     let role = args.settings_model().role();
     let renders = faces.is_some() || role == crate::gui::knob_catalog::ModelRole::Filters;
-    let render = renders.then(|| CliRender { settings: *s, role, faces, depth });
+    let downscale = args.large_image == LargeImagePolicy::Downscale;
+    // With No model and no lines, no worker read the photo first.
+    let say = !args.quiet && s.line_mode == LineMode::Off;
+    let render = renders.then(|| CliRender { settings: *s, role, faces, depth, downscale, say });
     Some(CliFinish { backdrop, render })
 }
 
@@ -636,19 +656,27 @@ fn run_whole_photo(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     for input in &args.inputs {
         let started = Instant::now();
         let out_path = args.result_path(input);
-        let result = check_overwrite(&out_path, args.force)
-            .and_then(|()| render.render(&backdrop, input, None, None))
-            .and_then(|image| save_png(&out_path, &image).map_err(|e| could_not(&out_path, "write", e)));
-        match result {
-            Ok(()) => {
-                saved += 1;
-                if !args.quiet {
-                    println!("✓ {} ({:.1}s)", input.display(), started.elapsed().as_secs_f32());
+        if let Err(e) = check_overwrite(&out_path, args.force) {
+            failed += 1;
+            report_skipped(None, input, &e, args.quiet);
+            continue;
+        }
+        match render.render(&backdrop, input, None, None) {
+            Ok(image) => match save_png(&out_path, &image) {
+                Ok(()) => {
+                    saved += 1;
+                    if !args.quiet {
+                        println!("✓ {} ({:.1}s)", input.display(), started.elapsed().as_secs_f32());
+                    }
                 }
-            }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("error: {}", could_not(&out_path, "write", e));
+                }
+            },
             Err(e) => {
                 failed += 1;
-                eprintln!("error: {}", prunr_core::plain::reason(e));
+                report_failure(None, input, "process", e);
             }
         }
     }
@@ -1313,14 +1341,23 @@ fn check_overwrite(out: &std::path::Path, force: bool) -> Result<(), String> {
 }
 
 fn downscale_to_png(path: &std::path::Path, quiet: bool) -> Result<Vec<u8>, CoreError> {
+    encode_rgba_png(&read_for_run(path, true, quiet)?.into_rgba8())
+}
+
+/// `path`'s photo as a run reads it: with `downscale`, one over the limit
+/// shrunk to `DOWNSCALE_TARGET`, said unless `quiet`.
+fn read_for_run(path: &std::path::Path, downscale: bool, quiet: bool) -> Result<image::DynamicImage, CoreError> {
     let img = load_image_from_path(path)?;
+    if !downscale || !prunr_core::exceeds_large_image_limit(img.width(), img.height()) {
+        return Ok(img);
+    }
     if !quiet {
         eprintln!(
             "note: '{}' is over {} px: shrinking it to {} px (--large-image downscale).",
             path.display(), prunr_core::LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET
         );
     }
-    encode_rgba_png(&downscale_image(img, DOWNSCALE_TARGET).into_rgba8())
+    Ok(downscale_image(img, DOWNSCALE_TARGET))
 }
 
 fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
@@ -1372,8 +1409,11 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     let inputs_arc = std::sync::Arc::new(args.inputs.clone());
     let quiet = args.quiet;
     let mask = s.mask_settings();
+    // A render fades the lines from its own depth map; the worker's
+    // result is not kept, so it measures none.
+    let fade_pct = if finish.render.is_some() { 0 } else { s.line_fade_pct };
     let lines = prunr_app::subprocess::manager::WorkerLines {
-        mode: s.line_mode, edge: s.edge_settings(), fade_pct: s.line_fade_pct,
+        mode: s.line_mode, edge: s.edge_settings(), fade_pct,
         scales: prunr_app::subprocess::protocol::InferredScales::Drawn,
     };
     let mut success_count = 0usize;
@@ -1592,28 +1632,37 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageDone { item_id, result_path, width, height, tensor_cache, edge_cache, .. } => {
                         let input = &inputs[item_id as usize];
-                        if finish.render.is_some() {
-                            // Read now: the files go, and the slot frees.
-                            let _ = std::fs::remove_file(&result_path);
-                            let seg = crate::gui::worker::read_raw_seg_tensor(tensor_cache.as_ref(), model);
-                            let edges = crate::gui::worker::read_raw_edge_tensors(edge_cache.as_ref());
-                            if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
-                                in_flight.retain(|&i| i != ridx);
-                                to_render.push(ToRender { ridx, input: item_id as usize, seg, edges });
+                        let result = match finish.render.as_ref() {
+                            Some(render) => {
+                                // Read now: the files go, and the slot frees.
+                                let _ = std::fs::remove_file(&result_path);
+                                let seg = crate::gui::worker::read_raw_seg_tensor(tensor_cache.as_ref(), model);
+                                let edges = crate::gui::worker::read_raw_edge_tensors(edge_cache.as_ref());
+                                match render.lacks(seg.as_ref(), edges.as_ref()) {
+                                    Some(why) => Err(CoreError::Model(why.into())),
+                                    None => {
+                                        if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
+                                            in_flight.retain(|&i| i != ridx);
+                                            to_render.push(ToRender { ridx, input: item_id as usize, seg, edges });
+                                        }
+                                        continue;
+                                    }
+                                }
                             }
-                            continue;
-                        }
-                        // The tensors are for a render; without one their
-                        // files go (in RAM on Linux).
-                        for path in tensor_cache.map(|t| t.path).into_iter().chain(edge_cache.map(|e| e.path)) {
-                            let _ = std::fs::remove_file(path);
-                        }
-                        let result = prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
-                            .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()))
-                            .map(|mut rgba_image| {
-                                finish.backdrop.apply(&mut rgba_image, input, None);
-                                prunr_core::ProcessResult { rgba_image, active_provider: String::new() }
-                            });
+                            None => {
+                                // The tensors are for a render; without one
+                                // their files go (in RAM on Linux).
+                                for path in tensor_cache.map(|t| t.path).into_iter().chain(edge_cache.map(|e| e.path)) {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                                prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
+                                    .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()))
+                                    .map(|mut rgba_image| {
+                                        finish.backdrop.apply(&mut rgba_image, input, None);
+                                        prunr_core::ProcessResult { rgba_image, active_provider: String::new() }
+                                    })
+                            }
+                        };
                         (item_id, result)
                     }
                     SubprocessEvent::ImageError { item_id, error } => (item_id, Err(CoreError::Model(error))),
@@ -2009,6 +2058,39 @@ mod tests {
             prunr_core::apply_subject_effect(&mut want, effect);
             assert_eq!(image::open(&out).expect("the result").to_rgba8(), want, "{effect:?}");
         }
+    }
+
+    /// `--large-image downscale` holds on a run the command line renders
+    /// itself, as on the worker's: a photo over the limit is shrunk.
+    #[test]
+    fn a_rendered_run_keeps_the_large_image_policy() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let input = dir.path().join("wide.png");
+        image::RgbaImage::from_pixel(prunr_core::LARGE_IMAGE_LIMIT + 1, 4, image::Rgba([90, 120, 150, 255])).save(&input).expect("saved");
+        let out = dir.path().join("out.png");
+        let args = ["prunr", input.to_str().expect("utf-8"), "-m", "none", "-q", "-f", "--large-image", "downscale", "-o", out.to_str().expect("utf-8")];
+        assert_eq!(super::run_remove(&super::Cli::parse_from(args)), 0);
+        assert_eq!(image::image_dimensions(&out).expect("the result").0, prunr_core::DOWNSCALE_TARGET);
+    }
+
+    /// The worker's answer is rendered only with the tensors its run
+    /// made: a cut-out without its mask, or lines without theirs, is a
+    /// failure, not the photo saved uncut.
+    #[test]
+    fn a_render_needs_the_tensors_its_run_made() {
+        use crate::gui::knob_catalog::ModelRole;
+        use prunr_core::LineMode;
+        let depth = super::CliDepth::default();
+        let render = |role, line_mode| super::CliRender {
+            settings: crate::gui::item_settings::ItemSettings { line_mode, ..Default::default() },
+            role, faces: None, depth: &depth, downscale: false, say: false,
+        };
+        let seg = crate::gui::worker::RawSegTensor { data: vec![0.0], height: 1, width: 1, model: prunr_core::ModelKind::Silueta };
+        let edges = crate::gui::worker::RawEdgeTensors { tensors: Default::default(), height: 1, width: 1, spare: None };
+        assert!(render(ModelRole::Cutout, LineMode::Off).lacks(None, None).is_some(), "a cut-out without its mask");
+        assert!(render(ModelRole::Cutout, LineMode::Off).lacks(Some(&seg), None).is_none());
+        assert!(render(ModelRole::Cutout, LineMode::SubjectOutline).lacks(Some(&seg), None).is_some(), "lines without theirs");
+        assert!(render(ModelRole::Filters, LineMode::EdgesOnly).lacks(None, Some(&edges)).is_none(), "No model's lines need no mask");
     }
 
     /// Without flags or a preset a run takes Prunr's settings for its
