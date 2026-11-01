@@ -531,6 +531,34 @@ impl BatchManager {
 
     /// Load and hash a background picture off the UI thread, picked by
     /// the user or one that `fills` names; it lands on `bg_io.bg_image_rx`.
+    /// Images showing one background picture share one texture of it, so
+    /// one processed off screen draws it on its thumbnail too, and none
+    /// uploads a copy of its own. One that lacks it takes another's; of
+    /// the pictures none holds, one image each is returned to build it.
+    pub(crate) fn share_picture_backdrops(&mut self) -> Vec<u64> {
+        use super::item_settings::Backdrop;
+        let shows_picture = |item: &BatchItem| matches!(item.settings.backdrop(), Backdrop::Image(_)) && item.has_result();
+        let lacks = |item: &BatchItem| shows_picture(item) && item.backdrop_texture.as_ref().map(|(key, _)| *key) != item.backdrop_key();
+        if !self.items.iter().any(lacks) {
+            return Vec::new();
+        }
+        let held: HashMap<u64, super::image_texture::ImageTexture> = self.items.iter()
+            .filter(|item| shows_picture(item))
+            .filter_map(|item| item.backdrop_texture.as_ref().filter(|(key, _)| Some(*key) == item.backdrop_key()).cloned())
+            .collect();
+        let mut building: HashSet<u64> = self.items.iter().filter_map(|item| item.backdrop_tex_pending).collect();
+        let mut build = Vec::new();
+        for item in self.items.iter_mut().filter(|item| lacks(item)) {
+            let Some(key) = item.backdrop_key() else { continue };
+            if let Some(texture) = held.get(&key) {
+                item.backdrop_texture = Some((key, texture.clone()));
+            } else if item.named_bg_image().is_some() && building.insert(key) {
+                build.push(item.id);
+            }
+        }
+        build
+    }
+
     pub(crate) fn request_bg_image(&self, item_id: u64, path: PathBuf, fills: Option<u64>) {
         let tx = self.bg_io.bg_image_tx.clone();
         self.bg_io.decode_slots.spawn(move || {
@@ -1394,6 +1422,34 @@ mod tests {
         assert!(bm.keep_bg_images_in_step(&HashMap::new()));
         assert!(bm.items.iter().all(|item| item.settings.bg_image_hash.is_none()));
         assert!(!bm.keep_bg_images_in_step(&HashMap::new()), "told once");
+    }
+
+    /// Images showing one background picture share one texture of it, so
+    /// one processed off screen draws it on its thumbnail with no upload
+    /// of its own; of a picture none holds, one image builds it.
+    #[test]
+    fn images_showing_one_picture_share_its_texture() {
+        use crate::gui::image_texture::ImageTexture;
+        let ctx = egui::Context::default();
+        let mut bm = fixture();
+        let picture = Arc::new(crate::gui::item::BgImage { source_path: None, image: Arc::new(image::DynamicImage::new_rgb8(1, 1)), hash: 7 });
+        for id in [1, 2, 3] {
+            let mut item = naming_picture(id, 7);
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+            item.hold_bg_image(Arc::clone(&picture));
+            bm.items.push(item);
+        }
+        assert_eq!(bm.share_picture_backdrops(), vec![1], "none holds it: one image builds it");
+        let key = bm.items[0].backdrop_key().expect("a picture backdrop");
+        bm.items[0].backdrop_tex_pending = Some(key);
+        assert!(bm.share_picture_backdrops().is_empty(), "nothing more while it builds");
+
+        let texture = ImageTexture::single(ctx.load_texture("backdrop", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        assert!(bm.items[0].install_backdrop(key, texture.clone()));
+        assert!(bm.share_picture_backdrops().is_empty());
+        for item in &bm.items {
+            assert_eq!(item.backdrop_texture.as_ref().map(|(k, t)| (*k, t.id())), Some((key, texture.id())), "image {} shares it", item.id);
+        }
     }
 
     /// A load that fails, or whose file holds another picture now, drops
