@@ -31,6 +31,11 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     }
 }
 
+/// The square side a cut-out model reads.
+pub(crate) fn input_side(model: ModelKind) -> u32 {
+    if model == ModelKind::BiRefNetLite { BIREFNET_SIZE } else { REMBG_SIZE }
+}
+
 /// Build NCHW tensor from a resized image with the given divisor.
 fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     let s = size as usize;

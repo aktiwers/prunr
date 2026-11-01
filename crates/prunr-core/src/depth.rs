@@ -35,6 +35,9 @@ pub struct DepthMap {
     /// How near the photo's largest face is (the median nearness inside
     /// its box), when its faces were looked for and one was found.
     face: Option<f32>,
+    /// How near the subject the first-look model saw is (the median
+    /// nearness under it), when it was looked for and seen.
+    subject: Option<f32>,
 }
 
 impl DepthMap {
@@ -44,7 +47,7 @@ impl DepthMap {
         let (lo, hi, _) = crate::math::slice_stats(&raw);
         let span = (hi - lo).max(1e-6);
         raw.iter_mut().for_each(|v| *v = ((*v - lo) / span).clamp(0.0, 1.0));
-        Self { width, height, near: raw, face: None }
+        Self { width, height, near: raw, face: None, subject: None }
     }
 
     /// The map knowing the faces found in its photo: Auto focus aims at
@@ -57,6 +60,18 @@ impl DepthMap {
     /// How near the photo's largest face is, when one was found.
     pub fn face_nearness(&self) -> Option<f32> {
         self.face
+    }
+
+    /// The map knowing where the subject is (`subject::find_subject`):
+    /// Auto focus aims at it where no face is.
+    pub fn with_subject(mut self, hint: &crate::subject::SubjectHint) -> Self {
+        let (w, h) = (hint.width.max(1) as usize, hint.height.max(1) as usize);
+        let mut under: Vec<f32> = hint.coverage.iter().enumerate()
+            .filter(|&(_, &coverage)| coverage >= 128)
+            .map(|(i, _)| self.at(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32))
+            .collect();
+        self.subject = percentile(&mut under, 0.5);
+        self
     }
 
     /// The median nearness of the cells whose middles lie in `bounds`
@@ -133,11 +148,13 @@ pub fn engine() -> Result<OrtEngine, CoreError> {
 
 /// Measures photos on one `engine()`, built at the first photo and kept
 /// for the rest. A failed build is kept too, so a batch tries it once.
-/// Each map knows the faces in its photo, for Auto focus.
+/// Each map knows the faces in its photo, for Auto focus, or else where
+/// the first-look model sees the subject (its engine kept the same way).
 #[derive(Default)]
 pub struct Measurer {
     engine: OnceLock<Option<OrtEngine>>,
     faces: std::sync::Mutex<crate::face::LazyFaceFinder>,
+    look: OnceLock<Option<OrtEngine>>,
     /// The maps only fade lines, which focus on nothing: no faces looked for.
     lines_only: bool,
 }
@@ -160,26 +177,41 @@ impl Measurer {
 
     pub fn measure(&self, photo: &RgbaImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
-        Ok(self.with_faces(map, photo.dimensions(), |f| f.find(photo)))
+        Ok(self.with_focus(map, photo.dimensions(), |f| f.find(photo), |look| crate::subject::find_subject_rgba(photo, look)))
     }
 
     /// `measure` for a decoded photo in any layout.
     pub fn measure_decoded(&self, photo: &DynamicImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth_decoded(self.engine()?, photo, &Progress::none())?;
-        Ok(self.with_faces(map, (photo.width(), photo.height()), |f| f.find_decoded(photo)))
+        Ok(self.with_focus(map, (photo.width(), photo.height()), |f| f.find_decoded(photo), |look| crate::subject::find_subject(photo, look)))
     }
 
-    fn with_faces(
+    /// `map` knowing what Auto focus aims at: the faces, or where none is,
+    /// the subject; a failed search leaves the nearest tenth to it.
+    fn with_focus(
         &self,
         map: DepthMap,
         (w, h): (u32, u32),
-        find: impl FnOnce(&mut crate::face::FaceFinder) -> Result<Vec<crate::face::Face>, CoreError>,
+        find_faces: impl FnOnce(&mut crate::face::FaceFinder) -> Result<Vec<crate::face::Face>, CoreError>,
+        find_subject: impl FnOnce(&OrtEngine) -> Result<crate::subject::SubjectHint, CoreError>,
     ) -> DepthMap {
         if self.lines_only {
             return map;
         }
-        let places = self.faces.lock().unwrap_or_else(std::sync::PoisonError::into_inner).places([w, h], find);
-        map.with_faces(&places)
+        let places = self.faces.lock().unwrap_or_else(std::sync::PoisonError::into_inner).places([w, h], find_faces);
+        let map = map.with_faces(&places);
+        if map.face_nearness().is_some() {
+            return map;
+        }
+        let look = self.look.get_or_init(|| crate::subject::first_look_engine(1).inspect_err(|err| tracing::warn!(%err, "first-look model failed to load")).ok());
+        match look.as_ref().map(find_subject) {
+            Some(Ok(hint)) => map.with_subject(&hint),
+            Some(Err(err)) => {
+                tracing::warn!(%err, "subject search failed; Auto focus takes the nearest tenth");
+                map
+            }
+            None => map,
+        }
     }
 }
 
@@ -512,10 +544,11 @@ impl DepthLook {
     }
 }
 
-/// Where focus goes with no point set: the largest face, or else what is
-/// nearer than 90% of the photo.
+/// Where focus goes with no point set: the largest face, else the subject
+/// the first-look model saw, else what is nearer than 90% of the photo
+/// (often foreground leaves or road, nearer than the subject).
 pub fn auto_focus(depth: &DepthMap) -> f32 {
-    depth.face.unwrap_or_else(|| nearest_tenth(depth))
+    depth.face.or(depth.subject).unwrap_or_else(|| nearest_tenth(depth))
 }
 
 /// The nearness that is nearer than 90% of the photo: where a camera
@@ -539,11 +572,11 @@ pub fn subject_nearness(depth: &DepthMap, cutout: &RgbaImage) -> Option<f32> {
 }
 
 /// What a lens-blur background focuses on: the largest face, else the
-/// cut-out's subject, else what is nearer than 90% of the photo.
+/// cut-out's subject, else `auto_focus`'s.
 pub fn backdrop_focus(depth: &DepthMap, cutout: Option<&RgbaImage>) -> f32 {
     depth.face
         .or_else(|| cutout.and_then(|c| subject_nearness(depth, c)))
-        .unwrap_or_else(|| nearest_tenth(depth))
+        .unwrap_or_else(|| auto_focus(depth))
 }
 
 fn percentile(values: &mut [f32], q: f32) -> Option<f32> {
@@ -689,6 +722,17 @@ mod tests {
         assert!((auto_focus(&depth) - 0.9).abs() < 0.02, "no face: the nearest tenth");
         assert!((backdrop_focus(&depth, Some(&subject)) - 0.75).abs() < 0.03, "no face: the subject");
         assert_eq!(depth.clone().with_faces(&[]).face_nearness(), None, "none found");
+
+        // The first look's subject, a band two tenths up from the bottom:
+        // before the nearest tenth (foreground leaves), after a cut-out.
+        let hint = crate::subject::SubjectHint { width: 10, height: 10, coverage: (0..100).map(|i| if i / 10 == 7 { 255 } else { 0 }).collect() };
+        let found = depth.clone().with_subject(&hint);
+        assert!((auto_focus(&found) - 0.75).abs() < 0.03, "no face: the subject found, {}", auto_focus(&found));
+        let mut lower = RgbaImage::new(10, 100);
+        (0..10).for_each(|x| lower.put_pixel(x, 50, image::Rgba([0, 0, 0, 255])));
+        assert!((backdrop_focus(&found, Some(&lower)) - 0.5).abs() < 0.03, "a cut-out before the subject found");
+        let nothing = crate::subject::SubjectHint { width: 10, height: 10, coverage: vec![0; 100] };
+        assert_eq!(auto_focus(&depth.clone().with_subject(&nothing)), auto_focus(&depth), "no subject seen: the nearest tenth");
 
         // A small face low down, a large one high up: the large one counts.
         let faced = depth.clone().with_faces(&[face(0.3, [0.4, 0.9, 0.5, 0.95]), face(1.0, [0.3, 0.2, 0.7, 0.4])]);
