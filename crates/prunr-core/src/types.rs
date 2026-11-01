@@ -941,6 +941,16 @@ pub const DOWNSCALE_TARGET: u32 = 4096;
 
 #[cfg(test)]
 mod tests {
+
+    /// Lines alone trace the whole photo; every other mode cuts the
+    /// subject out.
+    #[test]
+    fn only_lines_alone_cut_nothing_out() {
+        use super::LineMode;
+        assert!(!LineMode::EdgesOnly.cuts_out());
+        assert!(LineMode::Off.cuts_out());
+        assert!(LineMode::SubjectOutline.cuts_out());
+    }
     #[test]
     fn pixel_sizes_scale_with_the_image() {
         use super::{Decoration, SubjectEffect, ShadowKind};
