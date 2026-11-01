@@ -615,6 +615,7 @@ impl PrunrApp {
                     self.on_subprocess_retry(reduced_jobs, re_queued_count);
                 }
                 WorkerResult::BackendReady(backend) => self.settings.note_backend(backend),
+                WorkerResult::WarmHeld(mb) => self.processor.warm_held_mb = mb,
             }
         }
     }

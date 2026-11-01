@@ -320,21 +320,34 @@ pub fn cap_jobs(model: Option<ModelKind>, jobs: usize, cpu_only: bool) -> usize 
     type Asked = (ModelKind, usize, bool, Option<u64>);
     static LAST: std::sync::Mutex<Option<(Asked, usize)>> = std::sync::Mutex::new(None);
     let Some(model) = model else { return jobs };
-    let asked = (model, jobs, cpu_only, FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::available_ram_bytes_throttled));
+    let asked = (model, jobs, cpu_only, ram_bounding_a_cutout());
     let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((seen, fit)) = *last {
         if seen == asked {
             return fit;
         }
     }
-    let fit = jobs_in_ram(CutoutEngines::of_cutout(model, jobs, cpu_only), asked.3);
+    let fit = jobs_in_ram(CutoutEngines::of_cutout(model, jobs, cpu_only), asked.3, 0);
     *last = Some((asked, fit));
     fit
 }
 
-/// The most of `engines`' jobs the plan fits in `ram`, at least one.
-fn jobs_in_ram(engines: CutoutEngines, ram: Option<u64>) -> usize {
-    engines.plan_in_ram_of(ram).map_or(1, |plan| plan.jobs)
+/// How many of `engines`' jobs a run starts with: what the plan fits in
+/// RAM now, a warm worker's `held_mb` counted as its own; at least one.
+pub fn jobs_for_run(engines: CutoutEngines, held_mb: u64) -> usize {
+    jobs_in_ram(engines, ram_bounding_a_cutout(), held_mb)
+}
+
+/// RAM available, throttled, where it bounds a cut-out; `None` when it
+/// does not (macOS) or cannot be read.
+fn ram_bounding_a_cutout() -> Option<u64> {
+    FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::available_ram_reading_throttled).flatten()
+}
+
+/// The most of `engines`' jobs the plan fits in `ram` (`None`: all) and
+/// `held_mb` a warm worker holds, at least one.
+fn jobs_in_ram(engines: CutoutEngines, ram: Option<u64>, held_mb: u64) -> usize {
+    engines.plan_in(ram.map(|ram| (ram, 0)), held_mb).map_or(1, |plan| plan.jobs)
 }
 
 #[cfg(test)]
@@ -359,9 +372,12 @@ mod tests {
     fn the_memory_plan_alone_holds_the_job_count() {
         const MB: u64 = 1024 * 1024;
         let u2net = |jobs| CutoutEngines::of_cutout(ModelKind::U2net, jobs, true);
-        assert_eq!(jobs_in_ram(u2net(4), Some(2600 * MB)), 2);
-        assert_eq!(jobs_in_ram(u2net(4), Some(1000 * MB)), 1, "one at least: a run that cannot fit is refused when it starts, saying why");
-        assert_eq!(jobs_in_ram(u2net(4), None), 4, "no reading, or macOS: all of them");
+        assert_eq!(jobs_in_ram(u2net(4), Some(2600 * MB), 0), 2);
+        assert_eq!(jobs_in_ram(u2net(4), Some(1000 * MB), 0), 1, "one at least: a run that cannot fit is refused when it starts, saying why");
+        assert_eq!(jobs_in_ram(u2net(4), None, 0), 4, "no reading, or macOS: all of them");
+        assert_eq!(jobs_in_ram(u2net(4), Some(2500 * MB), 2800), 4, "a warm worker's engines are the run's own");
+        let lines = CutoutEngines { line_mode: prunr_core::LineMode::EdgesOnly, ..u2net(4) };
+        assert!(jobs_in_ram(lines, Some(2600 * MB), 0) > 2, "lines alone build no cut-out engine");
     }
 
     /// A cut-out batch is charged the engines it builds: the first look

@@ -1473,7 +1473,10 @@ fn run_batch_subprocess(
     let mut pending: std::collections::VecDeque<usize> = (0..to_send.len()).collect();
     // Without -j, the app's default: the processor's until the worker
     // names a graphics card, so this process never probes for one.
-    let default_on = |on_host_cpu| prunr_app::gui::memory::default_jobs(Some(model), on_host_cpu, cpu_only);
+    // Lines alone build no cut-out engine: the worker's plan holds the
+    // line model's jobs to memory.
+    let cuts = lines.mode != LineMode::EdgesOnly;
+    let default_on = |on_host_cpu| prunr_app::gui::memory::default_jobs(cuts.then_some(model), on_host_cpu, cpu_only);
     let mut max_jobs = jobs.unwrap_or_else(|| default_on(true));
 
     // Inverse index: orig_idx (item_id cast to usize) → batch_results slot,
@@ -1519,8 +1522,12 @@ fn run_batch_subprocess(
                 Ok(_) => {}
                 Err(short) => {
                     sub.kill();
-                    let lighter: Vec<String> = engines.lighter_that_fit(held_mb).into_iter().filter_map(|m| m.to_model_kind()).filter_map(CliModel::flag_for).collect();
-                    let subject = CliModel::flag_for(model).unwrap_or_else(|| "the model".into());
+                    let (subject, lighter) = if cuts {
+                        let lighter = engines.lighter_that_fit(held_mb).into_iter().filter_map(|m| m.to_model_kind()).filter_map(CliModel::flag_for).collect();
+                        (CliModel::flag_for(model).unwrap_or_else(|| "the model".into()), lighter)
+                    } else {
+                        ("the line model".to_string(), Vec::new())
+                    };
                     let why = prunr_app::gui::memory::refusal_text(&format!("not enough memory: {subject}"), short, &lighter, |flags| format!("use {flags}"));
                     for &idx in &pending {
                         give(idx, Err(CoreError::Model(why.clone())));

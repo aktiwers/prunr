@@ -453,6 +453,9 @@ pub enum WorkerResult {
     /// The EP the subprocess actually built, once per spawn: corrects the
     /// startup guess (e.g. CUDA driver installed but EP init fell back).
     BackendReady(String),
+    /// The memory the warm worker holds (MB), sent as it changes: a run
+    /// it serves counts it as its own.
+    WarmHeld(u64),
 }
 
 /// The worker bridge thread: UI messages to subprocess IPC, with crash
@@ -472,8 +475,14 @@ pub(crate) fn spawn_worker(
             // Blocks this thread for the model load; a Process sent
             // meanwhile queues on msg_rx.
             let mut warm: Option<WarmWorker> = prewarm.and_then(|spec| spawn_warm(spec, &res_tx, &ctx));
+            let mut told_held = 0;
 
             loop {
+                let held = warm.as_ref().and_then(|w| w.sub.resident_mb()).unwrap_or(0);
+                if held != told_held {
+                    told_held = held;
+                    let _ = res_tx.send(WorkerResult::WarmHeld(held));
+                }
                 let wait = warm.as_ref().map_or(WARM_IDLE, |w| w.release_at.saturating_duration_since(Instant::now()));
                 let msg = match msg_rx.recv_timeout(wait) {
                     Ok(msg) => msg,
