@@ -869,6 +869,9 @@ pub(crate) struct Processor {
     in_flight: Vec<InFlightBatch>,
     /// How many results each batch landed, until it ends.
     landed: HashMap<u64, usize>,
+    /// Results of batches that ended while work asked for still ran, until
+    /// "All done" tells them.
+    untold: usize,
     next_batch: u64,
     /// The progress run the in-flight batch shows through.
     seg_run: Option<super::dispatch_progress::RunSink>,
@@ -960,6 +963,7 @@ impl Processor {
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             landed: HashMap::new(),
+            untold: 0,
             next_batch: 0,
             seg_run: None,
             inpaint_done: Chan::default(),
@@ -1610,9 +1614,19 @@ impl Processor {
         *self.landed.entry(id).or_default() += 1;
     }
 
-    /// What batch `id`, ending, has to tell.
-    pub(crate) fn take_landed(&mut self, id: u64) -> usize {
-        self.landed.remove(&id).unwrap_or(0)
+    /// Batch `id` ended: what it landed waits to be told.
+    pub(crate) fn batch_ended(&mut self, id: u64) {
+        self.untold += self.landed.remove(&id).unwrap_or(0);
+    }
+
+    /// Batch `id` was dropped: what it landed is not told.
+    pub(crate) fn batch_dropped(&mut self, id: u64) {
+        self.landed.remove(&id);
+    }
+
+    /// The results ended batches landed, not told yet.
+    pub(crate) fn take_untold(&mut self) -> usize {
+        std::mem::take(&mut self.untold)
     }
 
     /// The worker finished batch `id`: drop it and return the images it

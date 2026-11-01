@@ -222,6 +222,12 @@ impl BatchManager {
         self.items.iter().any(BatchItem::awaits_cut)
     }
 
+    /// Whether a cut someone asked for is queued or under way: a brush's
+    /// retrace holds no batch's "All done" back.
+    pub(crate) fn any_awaiting_asked_cut(&self) -> bool {
+        self.items.iter().any(|item| item.awaits_cut() && !item.job.as_ref().is_some_and(|job| job.quiet))
+    }
+
     /// The ticked images whose cut is queued or under way: what Cancel
     /// Selected stops, and what its label counts.
     pub(crate) fn ticked_awaiting_cut(&self) -> impl Iterator<Item = u64> + '_ {
