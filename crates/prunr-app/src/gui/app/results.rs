@@ -848,7 +848,7 @@ impl PrunrApp {
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
     pub(super) fn on_batch_complete(&mut self, batch: u64) {
-        let landed = self.processor.take_landed(batch);
+        self.processor.batch_ended(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
         never_answered.extend(self.processor.end_admission_with(batch));
@@ -860,7 +860,8 @@ impl PrunrApp {
             self.end_run_without_result(item_id, "processing", RunLost::Unanswered);
         }
         let counts = self.batch.status_counts();
-        let still_processing = self.batch.any_awaiting_cut();
+        let still_processing = self.batch.any_awaiting_asked_cut();
+        let landed = if still_processing { 0 } else { self.processor.take_untold() };
         let failed_reruns = self.processor.take_failed_reruns();
         if failed_reruns > 0 && counts.errored == 0 {
             // Each one was toasted as it failed.
@@ -874,7 +875,7 @@ impl PrunrApp {
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
-        } else if !still_processing && landed > 0 {
+        } else if landed > 0 {
             let msg = format!("All done \u{2014} {} processed", crate::gui::views::fmt::count(landed, "image", "images"));
             self.status.text = msg.clone();
             self.toasts.success(msg);
@@ -906,7 +907,7 @@ impl PrunrApp {
     /// Every image batch `batch` still held, sent or waiting for room,
     /// stops waiting on it.
     fn drop_batch(&mut self, batch: u64) {
-        self.processor.take_landed(batch);
+        self.processor.batch_dropped(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
@@ -2295,6 +2296,51 @@ mod timeline_contract_tests {
         let toasts = app.toasts.len_for_test();
         app.on_batch_complete(batch);
         assert_eq!(app.toasts.len_for_test(), toasts, "none landed: nothing to tell");
+    }
+
+    /// A batch ending while a run nobody asked for (a brush's retrace)
+    /// still runs tells what it finished; batches that overlap tell
+    /// together, when the last one asked for ends.
+    #[test]
+    fn all_done_waits_only_for_runs_someone_asked_for() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        for id in [2, 3, 4] {
+            crate::gui::tests::fixtures::push_test_item(&mut app, id).dimensions = (4, 4);
+        }
+        let send = |app: &mut PrunrApp, ids: &[u64], quiet: bool| {
+            let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+            let runs: Vec<(u64, u64)> = ids.iter().map(|&id| {
+                let item = app.batch.find_by_id_mut(id).expect("pushed");
+                item.start_job(Some(StepKind::Process), Engine::Segment);
+                item.mark_running();
+                if let Some(job) = item.job.as_mut() {
+                    job.quiet = quiet;
+                }
+                (id, item.job_run().expect("a run"))
+            }).collect();
+            app.processor.track_dispatch(recipe, runs)
+        };
+        let cut = || prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: String::new() };
+        let told = |app: &PrunrApp| app.toasts.last_for_test().map(|(_, text)| text.to_string());
+
+        let retrace = send(&mut app, &[1], true);
+        let process = send(&mut app, &[2], false);
+        app.on_batch_item_done(&ctx, process, 2, Ok(cut()), None, None);
+        app.on_batch_complete(process);
+        assert_eq!(told(&app).as_deref(), Some("All done \u{2014} 1 image processed"), "the retrace still running does not hold it back");
+        app.on_batch_item_done(&ctx, retrace, 1, Ok(cut()), None, None);
+        app.on_batch_complete(retrace);
+
+        let (first, second) = (send(&mut app, &[3], false), send(&mut app, &[4], false));
+        app.on_batch_item_done(&ctx, first, 3, Ok(cut()), None, None);
+        let toasts = app.toasts.len_for_test();
+        app.on_batch_complete(first);
+        assert_eq!(app.toasts.len_for_test(), toasts, "another batch asked for still runs");
+        app.on_batch_item_done(&ctx, second, 4, Ok(cut()), None, None);
+        app.on_batch_complete(second);
+        assert_eq!(told(&app).as_deref(), Some("All done \u{2014} 2 images processed"), "both batches, told together");
     }
 
     /// A re-run that fails on an image still showing a result says so,
