@@ -551,7 +551,7 @@ impl CliRender<'_> {
     /// Why the worker's answer cannot be rendered: a tensor the run made
     /// did not come back with it.
     fn lacks(&self, seg: Option<&crate::gui::worker::RawSegTensor>, edges: Option<&crate::gui::worker::RawEdgeTensors>) -> Option<&'static str> {
-        let cut = self.role == crate::gui::knob_catalog::ModelRole::Cutout && self.settings.line_mode != LineMode::EdgesOnly;
+        let cut = self.role == crate::gui::knob_catalog::ModelRole::Cutout && self.settings.line_mode.cuts_out();
         if cut && seg.is_none() {
             Some("the worker's cut-out mask did not come back. Run it again.")
         } else if self.settings.line_mode != LineMode::Off && edges.is_none() {
@@ -661,23 +661,22 @@ fn run_whole_photo(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
             report_skipped(None, input, &e, args.quiet);
             continue;
         }
-        match render.render(&backdrop, input, None, None) {
-            Ok(image) => match save_png(&out_path, &image) {
-                Ok(()) => {
-                    saved += 1;
-                    if !args.quiet {
-                        println!("✓ {} ({:.1}s)", input.display(), started.elapsed().as_secs_f32());
-                    }
-                }
-                Err(e) => {
-                    failed += 1;
-                    eprintln!("error: {}", could_not(&out_path, "write", e));
-                }
-            },
+        let image = match render.render(&backdrop, input, None, None) {
+            Ok(image) => image,
             Err(e) => {
                 failed += 1;
                 report_failure(None, input, "process", e);
+                continue;
             }
+        };
+        if let Err(e) = save_png(&out_path, &image) {
+            failed += 1;
+            report_failure(None, &out_path, "write", e);
+            continue;
+        }
+        saved += 1;
+        if !args.quiet {
+            println!("✓ {} ({:.1}s)", input.display(), started.elapsed().as_secs_f32());
         }
     }
     finish_run(args.quiet, saved, failed)
@@ -1515,7 +1514,7 @@ fn run_batch_subprocess(
     // names a graphics card, so this process never probes for one.
     // Lines alone build no cut-out engine: the worker's plan holds the
     // line model's jobs to memory.
-    let cuts = lines.mode != LineMode::EdgesOnly;
+    let cuts = lines.mode.cuts_out();
     let default_on = |on_host_cpu| prunr_app::gui::memory::default_jobs(cuts.then_some(model), on_host_cpu, cpu_only);
     let mut max_jobs = jobs.unwrap_or_else(|| default_on(true));
 

@@ -31,13 +31,6 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     format!("{applied_preset}  {state_icon}")
 }
 
-/// Sort USER preset names case-insensitively. The synthetic "Prunr" preset
-/// is NOT included — callers prepend it manually since it always appears
-/// first in the dropdown regardless of alphabetical order.
-pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
-    crate::gui::presets_fs::sorted_names(settings.presets.keys().cloned())
-}
-
 /// The presets a save may write over: not the built-in ones.
 fn writable_preset_names(settings: &Settings) -> Vec<String> {
     let writable = settings.presets.iter().filter(|(_, preset)| !preset.is_built_in()).map(|(name, _)| name.clone());
@@ -58,12 +51,12 @@ fn delete_preset(settings: &mut Settings, name: &str) {
     }
 }
 
-/// All preset names in display order: Prunr first, then user presets
-/// alphabetically.
+/// All preset names in display order: Prunr first, then the others by
+/// name, case ignored.
 pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
     let mut names = Vec::with_capacity(settings.presets.len() + 1);
     names.push(PRUNR_PRESET.to_string());
-    names.extend(sorted_preset_names(settings));
+    names.extend(crate::gui::presets_fs::sorted_names(settings.presets.keys().cloned()));
     names
 }
 
@@ -75,7 +68,8 @@ const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
 const PRESET_LIST_HEIGHT: f32 = 360.0;
 const MODEL_LIST_HEIGHT: f32 = 110.0;
 
-/// What the preset list asks the app to do with preset files.
+/// What the preset list asks the app to do: with preset files, or to save
+/// the settings it changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PresetRequest {
     /// The default preset changed or a built-in preset was hidden: save

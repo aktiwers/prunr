@@ -17,7 +17,7 @@ pub(crate) fn first_look_for(
     animations: bool,
     expected: impl FnOnce(ModelKind) -> Option<Duration>,
 ) -> Option<u64> {
-    let model = model.filter(|_| animations && line_mode != LineMode::EdgesOnly)?;
+    let model = model.filter(|_| animations && line_mode.cuts_out())?;
     shown.filter(|_| prunr_core::subject::first_look_pays(model, || expected(model)))
 }
 

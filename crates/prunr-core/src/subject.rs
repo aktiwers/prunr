@@ -54,7 +54,7 @@ pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> 
 }
 
 /// Where `look` (the first-look model's engine) sees the subject in
-/// `img`: the first look, and what Auto focus aims at where no face is.
+/// `img`, for the first look's outline.
 ///
 /// Peak beyond the session: the RGB copy the resize to the model's square
 /// reads, gone before the model runs.
@@ -78,8 +78,9 @@ pub fn find_sure_subject(photo: &image::RgbaImage, look: &OrtEngine) -> Result<O
     find_sure_subject_decoded(&DynamicImage::ImageRgba8(square), look)
 }
 
-/// `find_sure_subject` for a decoded photo in any layout (`find_subject`'s
-/// peak).
+/// `find_sure_subject` for a decoded photo in any layout. Peak beyond the
+/// session: the RGB copy the resize to the model's square reads (36 MB at
+/// 12 MP), gone before the model runs.
 pub fn find_sure_subject_decoded(img: &DynamicImage, look: &OrtEngine) -> Result<Option<SubjectHint>, CoreError> {
     read_first_look(img, look, sure_subject_hint)
 }

@@ -57,8 +57,9 @@ pub struct Settings {
     /// File format Save writes (the save dialog's extension can override it).
     #[serde(default)]
     pub export_format: prunr_core::ExportFormat,
-    /// Named presets (not "Prunr"), loaded from the presets folder where
-    /// each is its own shareable file; never written to settings.json.
+    /// Named presets (not "Prunr"): the presets folder's files, each one
+    /// shareable, and the built-in showcases not hidden; never written to
+    /// settings.json.
     /// `default` lets old files that embedded presets still load.
     #[serde(default, skip_serializing)]
     pub(crate) presets: HashMap<String, super::presets::Preset>,
@@ -467,10 +468,9 @@ impl Settings {
     }
 
     /// Reset every preference to its default, keeping what the user owns
-    /// or agreed to: presets (and the built-in ones deleted) and the
-    /// default one, licence acceptances,
-    /// background pictures, the model in use and the OpenVINO prompt
-    /// snooze. The brush takes the default preset's settings for the
+    /// or agreed to: presets, the built-in ones hidden and the default
+    /// one, licence acceptances, background pictures, the model in use
+    /// and the OpenVINO prompt snooze. The brush takes the default preset's settings for the
     /// model; `parallel_jobs` re-derives for the detected hardware.
     pub fn reset_preserving_identity(&mut self) {
         let kept = std::mem::take(self);

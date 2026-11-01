@@ -196,7 +196,7 @@ impl CutoutEngines {
     /// line model and, for a fade, the depth model.
     pub(crate) fn need_bytes(self) -> usize {
         use prunr_core::LineMode;
-        let cuts = self.line_mode != LineMode::EdgesOnly;
+        let cuts = self.line_mode.cuts_out();
         let looks = cuts && self.first_look && prunr_core::subject::may_take_first_look(self.model);
         let lines = self.line_mode != LineMode::Off;
         let fades = lines && self.line_fade;
@@ -224,12 +224,13 @@ impl CutoutEngines {
     /// `plan` in RAM alone, for engines loaded before any run asks for
     /// them: an idle worker does not push other apps into swap.
     pub fn plan_in_ram(self) -> Result<CutoutPlan, prunr_core::memory::Short> {
-        self.plan_in_ram_of(free_bounding_a_cutout().map(|(ram, _)| ram))
+        self.plan_in_ram_of(free_bounding_a_cutout().map(|(ram, _)| ram), 0)
     }
 
-    /// `plan_in_ram` with `ram` available (`None`: runs it all).
-    fn plan_in_ram_of(self, ram: Option<u64>) -> Result<CutoutPlan, prunr_core::memory::Short> {
-        self.plan_in(ram.map(|ram| (ram, 0)), 0)
+    /// `plan_in_ram` with `ram` available (`None`: runs it all) and
+    /// `held_mb` a warm worker holds of it.
+    fn plan_in_ram_of(self, ram: Option<u64>, held_mb: u64) -> Result<CutoutPlan, prunr_core::memory::Short> {
+        self.plan_in(ram.map(|ram| (ram, 0)), held_mb)
     }
 
     /// `plan` with `free`, RAM available and free swap (`None`: runs it
@@ -347,7 +348,7 @@ fn ram_bounding_a_cutout() -> Option<u64> {
 /// The most of `engines`' jobs the plan fits in `ram` (`None`: all) and
 /// `held_mb` a warm worker holds, at least one.
 fn jobs_in_ram(engines: CutoutEngines, ram: Option<u64>, held_mb: u64) -> usize {
-    engines.plan_in(ram.map(|ram| (ram, 0)), held_mb).map_or(1, |plan| plan.jobs)
+    engines.plan_in_ram_of(ram, held_mb).map_or(1, |plan| plan.jobs)
 }
 
 #[cfg(test)]

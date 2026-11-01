@@ -171,6 +171,14 @@ pub enum LineMode {
     SubjectOutline,
 }
 
+impl LineMode {
+    /// Whether a run in this mode cuts the subject out (with a cut-out
+    /// model): lines alone trace the whole photo.
+    pub fn cuts_out(self) -> bool {
+        self != LineMode::EdgesOnly
+    }
+}
+
 #[derive(Debug)]
 pub struct ProcessResult {
     /// Raw RGBA pixels of the output image with background removed

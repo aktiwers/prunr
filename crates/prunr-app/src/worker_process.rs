@@ -336,7 +336,7 @@ pub fn run_worker() -> ! {
     // mode's engines build lazily at first dispatch.
     let (mut mask, mut line_mode, mut edge) = (mask, line_mode, edge);
     let needs_edge = !inpaint_only && line_mode != LineMode::Off;
-    let needs_segmentation = !inpaint_only && line_mode != LineMode::EdgesOnly;
+    let needs_segmentation = !inpaint_only && line_mode.cuts_out();
 
     let line_depth = (!inpaint_only && line_fade_pct > 0).then(|| Arc::new(LineDepth::new(line_fade_pct)));
     let mut traced_scales = edge_scales.of(&edge);
@@ -415,7 +415,7 @@ pub fn run_worker() -> ! {
                     // A model built here (a compile can run minutes) says so
                     // as it goes, or the parent's hang watchdog kills it.
                     let builds = (line_mode != LineMode::Off && edge_engine.is_none())
-                        || (line_mode != LineMode::EdgesOnly && engines.is_empty());
+                        || (line_mode.cuts_out() && engines.is_empty());
                     let _loading = builds.then(|| {
                         let events = evt_tx.clone();
                         let loading = prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel);
@@ -424,7 +424,7 @@ pub fn run_worker() -> ! {
                     if line_mode != LineMode::Off {
                         ensure_edge_engine(&mut edge_engine, on_cpu)?;
                     }
-                    if line_mode != LineMode::EdgesOnly && engines.is_empty() {
+                    if line_mode.cuts_out() && engines.is_empty() {
                         let started = std::time::Instant::now();
                         engines = engine_pool(model, jobs, on_cpu)?;
                         tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "worker: engine pool built on first use");
