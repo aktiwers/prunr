@@ -1518,6 +1518,7 @@ impl BatchItem {
     pub(crate) fn fail(&mut self, why: String) {
         self.job = None;
         self.failure = Some(prunr_core::plain::reason(why));
+        self.record_unlanded_look();
     }
 
     /// True while a model works on this image: a cut-out the worker has
@@ -2458,12 +2459,22 @@ impl BatchItem {
     }
 
     /// The awaited run will not land (cancelled): the item shows its
-    /// current state again.
+    /// current state again, keeping the look it took for the run.
     pub(crate) fn abandon_job(&mut self) {
         self.job = None;
         self.reveal = None;
         self.subject = None;
         self.tile_preview = None;
+        self.record_unlanded_look();
+    }
+
+    /// Record the settings as a step when they differ from the shown
+    /// step's: a look the image took for a run (the shown image's, on
+    /// Process) that no landed result records, so Undo puts it back.
+    pub(crate) fn record_unlanded_look(&mut self) {
+        if self.settings != self.timeline.current().settings {
+            self.commit(StepKind::Adjust);
+        }
     }
 
     /// Record a landed run's result, now in the working copy.

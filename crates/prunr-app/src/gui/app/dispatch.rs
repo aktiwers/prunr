@@ -73,6 +73,9 @@ impl PrunrApp {
             if started {
                 return;
             }
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                item.record_unlanded_look();
+            }
         }
     }
 
@@ -87,9 +90,9 @@ impl PrunrApp {
         let ids: Vec<u64> = self.batch.items_to_process().into_iter()
             .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| self.run_may_start(i)))
             .collect();
-        let adopted = self.batch.selected_idx_clamped()
-            .map(|shown| self.batch.share_settings(shown, &ids.iter().copied().collect()))
-            .unwrap_or_default();
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &ids.iter().copied().collect());
+        }
         let refinish = if model.is_upscale() { PreviewKind::UpscaleTier2 } else { PreviewKind::ColorizeTier2 };
         let (mut runs, mut up_to_date, mut refinished) = (Vec::new(), 0, 0);
         for id in ids {
@@ -97,16 +100,12 @@ impl PrunrApp {
             match item.kept_run_tier(model) {
                 KeptRunTier::UpToDate if model.is_upscale() => runs.push(id),
                 KeptRunTier::UpToDate => {
-                    if adopted.contains(&id) {
-                        item.commit(StepKind::Adjust);
-                    }
+                    item.record_unlanded_look();
                     up_to_date += 1;
                 }
                 KeptRunTier::Refinish => {
-                    // The shown image's own knob change is a step already.
-                    if adopted.contains(&id) {
-                        item.commit(StepKind::Adjust);
-                    }
+                    // The re-finish lands in place, on the look's step.
+                    item.record_unlanded_look();
                     self.processor.live_preview.render_now(id, refinish);
                     refinished += 1;
                 }
@@ -298,18 +297,16 @@ impl PrunrApp {
         // image's settings first, so one that was up to date under its own
         // reruns under these. A background image's result stays parked:
         // the run starts from its stored step.
-        let adopted = self.batch.selected_idx_clamped()
-            .map(|shown| self.batch.share_settings(shown, &candidate_ids))
-            .unwrap_or_default();
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &candidate_ids);
+        }
 
         let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
         let action = self.settings.brush.cutout_action;
         let tiers = self.batch.classify(&candidate_ids, model, step, cutter, action);
         let runs = tiers.all_process_ids();
-        for &id in adopted.difference(&runs) {
-            if let Some(item) = self.batch.find_by_id_mut(id) {
-                item.commit(StepKind::Adjust);
-            }
+        for item in self.batch.in_set(&candidate_ids).filter(|item| !runs.contains(&item.id)) {
+            item.record_unlanded_look();
         }
         self.notify_skip(tiers.up_to_date_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
@@ -644,6 +641,28 @@ mod process_targets_tests {
         assert_eq!(other.timeline.undo_steps(), steps + 1, "as a step of its own");
         other.undo_step().expect("a step to undo");
         assert_eq!((other.settings.bg, other.status()), (None, BatchStatus::Done), "Undo puts the look back and keeps the cut-out");
+    }
+
+    /// The look a ticked image takes on Process for a run that never
+    /// lands, cancelled or failed (a memory refusal fails it), is a step
+    /// of its own, so Undo puts it back.
+    #[test]
+    fn a_ticked_images_look_stays_undoable_when_its_run_does_not_land() {
+        type End = fn(&mut crate::gui::item::BatchItem);
+        let ends: [(&str, End); 2] = [("cancelled", |i| i.abandon_job()), ("failed", |i| i.fail("refused".into()))];
+        for (how, end) in ends {
+            let mut app = two_images(SettingsModel::Silueta);
+            for item in &mut app.batch.items {
+                item.ticked = true;
+            }
+            app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
+            app.process_items(|i| i.ticked, Some(StepKind::Process));
+            let other = &mut app.batch.items[1];
+            assert!(other.job.is_some(), "{how}: it runs");
+            end(other);
+            other.undo_step().unwrap_or_else(|_| panic!("{how}: its look is a step"));
+            assert_eq!(other.settings.bg, None, "{how}: Undo puts its look back");
+        }
     }
 
     /// Process by another model than the one that cut the image on screen
