@@ -840,54 +840,6 @@ impl DispatchInputs {
         }
     }
 
-}
-
-/// One full-size render of a photo outside the app (the command line),
-/// through the app's own render, so a preset looks the same there: the
-/// faces go into the photo, then with No model the Depth chip's look,
-/// then the cut-out, effect and lines. The background is not drawn.
-pub struct ExportRender {
-    pub photo: Arc<RgbaImage>,
-    pub settings: ItemSettings,
-    /// No model: the photo is its own subject, and the Depth chip's look
-    /// goes on it.
-    pub filter_only: bool,
-    /// The cut-out model's raw output, from the worker.
-    pub seg: Option<crate::gui::worker::RawSegTensor>,
-    /// The line planes the worker traced.
-    pub edges: Option<crate::gui::worker::RawEdgeTensors>,
-    pub faces: Option<(Arc<Vec<prunr_core::face::RestoredFace>>, prunr_core::face::FaceBlend)>,
-    /// For the Depth chip's look and lines that fade with distance.
-    pub depth: Option<Arc<prunr_core::depth::DepthMap>>,
-}
-
-impl ExportRender {
-    /// The rendered image; why not, when the render refuses (too large).
-    pub fn render(self) -> Result<RgbaImage, String> {
-        let settings = self.settings;
-        let edge_tensor = |scale: prunr_core::EdgeScale| {
-            let raw = self.edges.as_ref()?;
-            let data = raw.tensors.get(scale as usize).filter(|t| !t.is_empty())?;
-            let (height, width) = prunr_core::edge_scale_dims(scale, raw.height, raw.width);
-            Some(EdgeTensor { data: Arc::new(data.clone()), height, width })
-        };
-        let dual = matches!(settings.line_style, prunr_core::LineStyle::DualScale { .. });
-        let look = self.filter_only.then_some(settings.depth).filter(prunr_core::depth::DepthLook::is_active);
-        let inputs = DispatchInputs {
-            seg_tensor: self.seg.map(|s| Arc::new(SegTensor { data: s.data, height: s.height, width: s.width, model: s.model })),
-            edge_tensor: edge_tensor(settings.edge_settings().primary_scale()),
-            secondary_edge_tensor: dual.then(|| edge_tensor(prunr_core::EdgeScale::Bold)).flatten(),
-            faces: self.faces.map(|(faces, blend)| FacesInput { key: FacedKey { faces, blend }, faced: None }),
-            depth: self.depth.map(|map| DepthInput { map, look, photo: None }),
-            ..DispatchInputs::new(PreviewKind::photo_rerun(settings.line_mode), 0, self.photo, settings)
-        };
-        let mut output = run_preview(inputs, &AtomicBool::new(false));
-        output.rgba.take().map(Arc::unwrap_or_clone)
-            .ok_or_else(|| output.refused.take().unwrap_or_else(|| "the photo could not be rendered".to_string()))
-    }
-}
-
-impl DispatchInputs {
     /// Whether a drag's in-between frame of this render is a quick one:
     /// one of an image larger than a quick frame. An upscale with restored
     /// faces re-finishes at full size: the faces go back where the model's
@@ -902,6 +854,59 @@ impl DispatchInputs {
             PreviewKind::Photo => return false,
         };
         w.max(h) > QUICK_FRAME_SIDE
+    }
+}
+
+/// One full-size render of a photo outside the app (the command line),
+/// through the app's own render, so a preset looks the same there: the
+/// faces go into the photo, then with No model the Depth chip's look,
+/// then the cut-out, effect and lines. The background is not drawn.
+pub struct ExportRender {
+    pub photo: Arc<RgbaImage>,
+    pub settings: ItemSettings,
+    /// The run's model's role: with No model the photo is its own
+    /// subject, and the Depth chip's look goes on it.
+    pub role: crate::gui::knob_catalog::ModelRole,
+    /// The cut-out model's raw output, from the worker.
+    pub seg: Option<crate::gui::worker::RawSegTensor>,
+    /// The line planes the worker traced.
+    pub edges: Option<crate::gui::worker::RawEdgeTensors>,
+    pub faces: Option<(Arc<Vec<prunr_core::face::RestoredFace>>, prunr_core::face::FaceBlend)>,
+    /// For the Depth chip's look and lines that fade with distance.
+    pub depth: Option<Arc<prunr_core::depth::DepthMap>>,
+}
+
+impl ExportRender {
+    /// The rendered image; why not, when the render refuses (too large).
+    pub fn render(self) -> Result<RgbaImage, String> {
+        let settings = self.settings;
+        let mut edges = self.edges;
+        // Planes move out of the worker's; none is copied.
+        let mut edge_tensor = |scale: prunr_core::EdgeScale| {
+            let raw = edges.as_mut()?;
+            let data = std::mem::take(raw.tensors.get_mut(scale as usize)?);
+            let (height, width) = prunr_core::edge_scale_dims(scale, raw.height, raw.width);
+            (!data.is_empty()).then(|| EdgeTensor { data: Arc::new(data), height, width })
+        };
+        let primary = settings.edge_settings().primary_scale();
+        let edge = edge_tensor(primary);
+        let bold = match (settings.draws_bold_lines(), primary) {
+            (false, _) => None,
+            (true, prunr_core::EdgeScale::Bold) => edge.as_ref().map(|e| EdgeTensor { data: Arc::clone(&e.data), ..*e }),
+            (true, _) => edge_tensor(prunr_core::EdgeScale::Bold),
+        };
+        let look = settings.photo_depth_look(self.role);
+        let inputs = DispatchInputs {
+            seg_tensor: self.seg.map(|s| Arc::new(SegTensor { data: s.data, height: s.height, width: s.width, model: s.model })),
+            edge_tensor: edge,
+            secondary_edge_tensor: bold,
+            faces: self.faces.map(|(faces, blend)| FacesInput { key: FacedKey { faces, blend }, faced: None }),
+            depth: self.depth.map(|map| DepthInput { map, look, photo: None }),
+            ..DispatchInputs::new(PreviewKind::photo_rerun(settings.line_mode), 0, self.photo, settings)
+        };
+        let mut output = run_preview(inputs, &AtomicBool::new(false));
+        output.rgba.take().map(Arc::unwrap_or_clone)
+            .ok_or_else(|| output.refused.take().unwrap_or_else(|| "the photo could not be rendered".to_string()))
     }
 }
 
@@ -1165,7 +1170,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
             None
         }
         Some(FacesInput { key, faced: None }) => {
-            let faced = Arc::new(key.blend_into((*inputs.original).clone()));
+            let faced = Arc::new(key.blend_into(Arc::unwrap_or_clone(std::mem::take(&mut inputs.original))));
             inputs.original = Arc::clone(&faced);
             Some(faced)
         }
@@ -1298,7 +1303,7 @@ fn run_photo_preview(inputs: DispatchInputs) -> RunOutput {
                 // No seg tensor (No model, or not processed yet): the effect
                 // goes straight on the source.
                 let Some(seg) = inputs.seg_tensor.as_ref() else {
-                    let mut rgba = (*inputs.original).clone();
+                    let mut rgba = Arc::unwrap_or_clone(inputs.original);
                     prunr_core::apply_subject_effect(&mut rgba, inputs.settings.effect);
                     return RunOutput { rgba: Some(Arc::new(rgba)), ..RunOutput::default() };
                 };
@@ -2506,7 +2511,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod export_render_tests {
     use std::sync::Arc;
@@ -2519,7 +2523,9 @@ mod export_render_tests {
     }
 
     fn render(settings: ItemSettings, filter_only: bool, seg: Option<crate::gui::worker::RawSegTensor>, depth: Option<Arc<prunr_core::depth::DepthMap>>) -> RgbaImage {
-        ExportRender { photo: photo(), settings, filter_only, seg, edges: None, faces: None, depth }.render().expect("renders")
+        use crate::gui::knob_catalog::ModelRole;
+        let role = if filter_only { ModelRole::Filters } else { ModelRole::Cutout };
+        ExportRender { photo: photo(), settings, role, seg, edges: None, faces: None, depth }.render().expect("renders")
     }
 
     /// No model: the effect goes on the whole photo, as the app shows it.

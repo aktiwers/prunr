@@ -16,8 +16,8 @@ pub(crate) const IMAGENET_STD:  [f32; 3] = [0.229, 0.224, 0.225];
 /// Preprocess for the given model. Returns NCHW tensor at the model's expected resolution.
 pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     match model {
-        ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img),
-        ModelKind::BiRefNetLite => preprocess_birefnet(img),
+        ModelKind::Silueta | ModelKind::U2net => preprocess_rembg(img, input_side(model)),
+        ModelKind::BiRefNetLite => preprocess_birefnet(img, input_side(model)),
         ModelKind::RealEsrganX4Plus
         | ModelKind::Nomos8kSchatL
         | ModelKind::RealEsrganX2Plus
@@ -31,9 +31,21 @@ pub fn preprocess(img: &DynamicImage, model: ModelKind) -> Array4<f32> {
     }
 }
 
-/// The square side a cut-out model reads.
+/// The square side a cut-out model reads; a model of another kind is
+/// never preprocessed here.
 pub(crate) fn input_side(model: ModelKind) -> u32 {
-    if model == ModelKind::BiRefNetLite { BIREFNET_SIZE } else { REMBG_SIZE }
+    match model {
+        ModelKind::Silueta | ModelKind::U2net => REMBG_SIZE,
+        ModelKind::BiRefNetLite => BIREFNET_SIZE,
+        ModelKind::RealEsrganX4Plus
+        | ModelKind::Nomos8kSchatL
+        | ModelKind::RealEsrganX2Plus
+        | ModelKind::FourXNmkdSiaxCx
+        | ModelKind::FourXNmkdSuperscale
+        | ModelKind::FourXNomos2RealPlksr
+        | ModelKind::DdcolorTiny
+        | ModelKind::DepthAnythingV2Small => REMBG_SIZE,
+    }
 }
 
 /// Build NCHW tensor from a resized image with the given divisor.
@@ -63,17 +75,17 @@ fn to_nchw(resized: &image::RgbImage, size: u32, divisor: f32) -> Array4<f32> {
     unsafe { out.assume_init() }
 }
 
-fn preprocess_rembg(img: &DynamicImage) -> Array4<f32> {
-    let resized = resize_rgb_lanczos3(img, REMBG_SIZE, REMBG_SIZE);
+fn preprocess_rembg(img: &DynamicImage, side: u32) -> Array4<f32> {
+    let resized = resize_rgb_lanczos3(img, side, side);
     // Clamp to 1e-6 so an all-black image doesn't divide by zero.
     let max_u8 = resized.as_raw().iter().copied().max().unwrap_or(0);
     let max_val = (max_u8 as f32).max(1e-6_f32);
-    to_nchw(&resized, REMBG_SIZE, max_val)
+    to_nchw(&resized, side, max_val)
 }
 
-fn preprocess_birefnet(img: &DynamicImage) -> Array4<f32> {
-    let resized = resize_rgb_lanczos3(img, BIREFNET_SIZE, BIREFNET_SIZE);
-    to_nchw(&resized, BIREFNET_SIZE, 255.0)
+fn preprocess_birefnet(img: &DynamicImage, side: u32) -> Array4<f32> {
+    let resized = resize_rgb_lanczos3(img, side, side);
+    to_nchw(&resized, side, 255.0)
 }
 
 #[cfg(test)]

@@ -65,13 +65,37 @@ impl DepthMap {
     /// The map knowing where the subject is (`subject::find_subject`):
     /// Auto focus aims at it where no face is.
     pub fn with_subject(mut self, hint: &crate::subject::SubjectHint) -> Self {
-        let (w, h) = (hint.width.max(1) as usize, hint.height.max(1) as usize);
-        let mut under: Vec<f32> = hint.coverage.iter().enumerate()
-            .filter(|&(_, &coverage)| coverage >= 128)
-            .map(|(i, _)| self.at(((i % w) as f32 + 0.5) / w as f32, ((i / w) as f32 + 0.5) / h as f32))
-            .collect();
-        self.subject = percentile(&mut under, 0.5);
+        let width = hint.width as usize;
+        let covered = |x: u32, y: u32| hint.coverage.get(y as usize * width + x as usize).is_some_and(|&c| c >= 128);
+        self.subject = self.median_nearness_over((hint.width, hint.height), 1, covered);
         self
+    }
+
+    /// `self`, knowing where the subject is when it knows no face:
+    /// `search` finds it; when it cannot, focus stays on the nearest tenth.
+    pub fn with_subject_unless_faced<E: std::fmt::Display>(self, search: impl FnOnce() -> Result<crate::subject::SubjectHint, E>) -> Self {
+        if self.face.is_some() {
+            return self;
+        }
+        match search() {
+            Ok(hint) => self.with_subject(&hint),
+            Err(err) => {
+                tracing::info!(%err, "no subject search; Auto focus takes the nearest tenth");
+                self
+            }
+        }
+    }
+
+    /// The median nearness under the cells of a `w × h` grid over the
+    /// photo, every `step`th, that `covered` marks; `None` when none is.
+    fn median_nearness_over(&self, (w, h): (u32, u32), step: u32, covered: impl Fn(u32, u32) -> bool) -> Option<f32> {
+        let step = step.max(1) as usize;
+        let mut under: Vec<f32> = (0..h).step_by(step)
+            .flat_map(|y| (0..w).step_by(step).map(move |x| (x, y)))
+            .filter(|&(x, y)| covered(x, y))
+            .map(|(x, y)| self.at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32))
+            .collect();
+        percentile(&mut under, 0.5)
     }
 
     /// The median nearness of the cells whose middles lie in `bounds`
@@ -155,7 +179,8 @@ pub struct Measurer {
     engine: OnceLock<Option<OrtEngine>>,
     faces: std::sync::Mutex<crate::face::LazyFaceFinder>,
     look: OnceLock<Option<OrtEngine>>,
-    /// The maps only fade lines, which focus on nothing: no faces looked for.
+    /// The maps focus on nothing (they fade lines, or go to files): no
+    /// face or subject is looked for.
     lines_only: bool,
 }
 
@@ -170,7 +195,8 @@ impl Measurer {
         }
     }
 
-    /// A measurer whose maps only fade lines.
+    /// A measurer whose maps focus on nothing: they fade lines, or go to
+    /// files, so no face or subject is looked for.
     pub fn lines_only() -> Self {
         Self { lines_only: true, ..Self::default() }
     }
@@ -178,6 +204,12 @@ impl Measurer {
     pub fn measure(&self, photo: &RgbaImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
         Ok(self.with_focus(map, photo.dimensions(), |f| f.find(photo), |look| crate::subject::find_subject_rgba(photo, look)))
+    }
+
+    /// `measure`, with the faces already found in `photo`.
+    pub fn measure_with_faces(&self, photo: &RgbaImage, faces: &[crate::face::FacePlace]) -> Result<DepthMap, CoreError> {
+        let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
+        Ok(if self.lines_only { map } else { self.focused(map, faces, |look| crate::subject::find_subject_rgba(photo, look)) })
     }
 
     /// `measure` for a decoded photo in any layout.
@@ -199,19 +231,20 @@ impl Measurer {
             return map;
         }
         let places = self.faces.lock().unwrap_or_else(std::sync::PoisonError::into_inner).places([w, h], find_faces);
-        let map = map.with_faces(&places);
-        if map.face_nearness().is_some() {
-            return map;
-        }
-        let look = self.look.get_or_init(|| crate::subject::first_look_engine(1).inspect_err(|err| tracing::warn!(%err, "first-look model failed to load")).ok());
-        match look.as_ref().map(find_subject) {
-            Some(Ok(hint)) => map.with_subject(&hint),
-            Some(Err(err)) => {
-                tracing::warn!(%err, "subject search failed; Auto focus takes the nearest tenth");
-                map
-            }
-            None => map,
-        }
+        self.focused(map, &places, find_subject)
+    }
+
+    /// `map` knowing the faces in its photo, or where none is, the subject.
+    fn focused(
+        &self,
+        map: DepthMap,
+        faces: &[crate::face::FacePlace],
+        find_subject: impl FnOnce(&OrtEngine) -> Result<crate::subject::SubjectHint, CoreError>,
+    ) -> DepthMap {
+        map.with_faces(faces).with_subject_unless_faced(|| {
+            let look = self.look.get_or_init(|| crate::subject::first_look_engine(1).inspect_err(|err| tracing::warn!(%err, "first-look model failed to load")).ok());
+            look.as_ref().ok_or_else(|| CoreError::Model("the first-look model did not load".into())).and_then(find_subject)
+        })
     }
 }
 
@@ -562,13 +595,7 @@ fn nearest_tenth(depth: &DepthMap) -> f32 {
 /// sampled on a grid; `None` when nothing is opaque.
 pub fn subject_nearness(depth: &DepthMap, cutout: &RgbaImage) -> Option<f32> {
     let (w, h) = cutout.dimensions();
-    let step = (w.max(h) / SUBJECT_SAMPLES).max(1);
-    let mut under: Vec<f32> = (0..h).step_by(step as usize)
-        .flat_map(|y| (0..w).step_by(step as usize).map(move |x| (x, y)))
-        .filter(|&(x, y)| cutout.get_pixel(x, y).0[3] >= 128)
-        .map(|(x, y)| depth.at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32))
-        .collect();
-    percentile(&mut under, 0.5)
+    depth.median_nearness_over((w, h), w.max(h) / SUBJECT_SAMPLES, |x, y| cutout.get_pixel(x, y).0[3] >= 128)
 }
 
 /// What a lens-blur background focuses on: the largest face, else the

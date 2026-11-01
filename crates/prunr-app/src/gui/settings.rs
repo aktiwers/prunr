@@ -689,6 +689,19 @@ impl SettingsModel {
         self.uses_segmentation().then(|| self.dispatch_model_kind()).flatten()
     }
 
+    /// The model a recipe of this model is built and diffed with: its
+    /// cut-out model, or for No model a stand-in that never runs. Every
+    /// site picks this one, or `applied_recipe` reads as drift.
+    pub fn recipe_kind(self) -> ModelKind {
+        self.to_model_kind().unwrap_or(ModelKind::BiRefNetLite)
+    }
+
+    /// Whether a run is the photo's render alone, with no worker: No
+    /// model, with no lines to trace.
+    pub fn renders_photo_alone(self, line_mode: prunr_core::LineMode) -> bool {
+        self.to_model_kind().is_none() && line_mode == prunr_core::LineMode::Off
+    }
+
     /// The cut-out model that runs `kind`, the inverse of `to_model_kind`.
     pub fn of_kind(kind: ModelKind) -> Option<Self> {
         Self::ALL.into_iter().find(|m| m.to_model_kind() == Some(kind))

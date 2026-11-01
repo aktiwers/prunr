@@ -101,7 +101,6 @@ impl PrunrApp {
         }
         let item_id = item.id;
         self.process_items(|item| item.id == item_id, None);
-        self.processor.hush_batch_of(item_id);
         let item = &mut self.batch.items[idx];
         if let Some(job) = item.job.as_mut() {
             job.quiet = true;

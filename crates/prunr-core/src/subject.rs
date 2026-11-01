@@ -40,18 +40,8 @@ pub fn first_look_engine(pool_size: usize) -> Result<OrtEngine, CoreError> {
     OrtEngine::new_cpu_only(FIRST_LOOK_MODEL, crate::batch::ort_intra_threads(pool_size))
 }
 
-/// Report where `look` (the first-look model's engine) sees the subject
-/// in `img`, before the run's own model starts. A cancel before or during
-/// it stops it unreported.
-///
-/// Peak beyond the session: the RGB copy the resize to the model's 320 px
-/// square reads, gone before the model runs, as the run's own model
-/// makes next.
-///
-/// | image  | RGB copy |
-/// |--------|----------|
-/// | 12 MP  | 36 MB    |
-/// | 24 MP  | 72 MB    |
+/// Report the subject `find_subject` sees in `img`, before the run's own
+/// model starts. A cancel before or during it stops it unreported.
 pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> Result<(), CoreError> {
     progress.check_cancelled()?;
     let started = std::time::Instant::now();
@@ -65,7 +55,14 @@ pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> 
 
 /// Where `look` (the first-look model's engine) sees the subject in
 /// `img`: the first look, and what Auto focus aims at where no face is.
-/// Peak beyond the session: the RGB copy the resize reads (`first_look`).
+///
+/// Peak beyond the session: the RGB copy the resize to the model's square
+/// reads, gone before the model runs.
+///
+/// | image  | RGB copy |
+/// |--------|----------|
+/// | 12 MP  | 36 MB    |
+/// | 24 MP  | 72 MB    |
 pub fn find_subject(img: &DynamicImage, look: &OrtEngine) -> Result<SubjectHint, CoreError> {
     let model = look.model_kind();
     look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))

@@ -25,7 +25,7 @@ impl PrunrApp {
     /// selection path can forget it): free the background items' results,
     /// restore the selected one from history, leave Compare. Every frame:
     /// the background picture every processed image shows (one texture
-    /// each picture, so thumbnails draw it), and the decoded source, the
+    /// a picture, so thumbnails draw it), and the decoded source, the
     /// canvas textures, the backdrop texture, the selection texture and
     /// the Magic Brush embedding the selected item lacks. Every arm is
     /// idempotent behind its pending flag.
@@ -44,7 +44,7 @@ impl PrunrApp {
             }
             self.show_original = false;
         }
-        for id in self.batch.share_picture_backdrops() {
+        for id in self.batch.lacking_picture_backdrops() {
             self.kick_backdrop_tex_prep(id, ctx);
         }
         if let (Some(idx), Some(id)) = (idx, selected) {
@@ -117,9 +117,23 @@ impl PrunrApp {
             item.backdrop_texture = None;
             return;
         };
-        if item.backdrop_tex_pending.is_some() || item.backdrop_texture.as_ref().is_some_and(|(k, _)| *k == key) {
+        if item.backdrop_tex_pending.is_some() || item.backdrop_texture_for(key).is_some() {
             return;
         }
+        if matches!(backdrop, Backdrop::Image(_)) {
+            use crate::gui::batch_manager::PictureBackdrop;
+            match self.batch.picture_backdrop(key) {
+                Some(PictureBackdrop::Held(texture)) => {
+                    if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                        item.install_backdrop(key, texture);
+                    }
+                    return;
+                }
+                Some(PictureBackdrop::Building) => return,
+                None => {}
+            }
+        }
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         use crate::gui::background_io::BackdropBuilt;
         use crate::gui::image_texture::PreparedImage;
         let build: Box<dyn FnOnce() -> BackdropBuilt + Send> = match backdrop {
@@ -295,12 +309,9 @@ mod tests {
     use std::num::NonZeroU64;
     use std::sync::Arc;
     use super::PrunrApp;
-    use crate::gui::item::BgImage;
     use crate::gui::tests::fixtures::push_test_item;
 
-    fn picture(hash: u64) -> Arc<BgImage> {
-        Arc::new(BgImage { source_path: None, image: Arc::new(image::DynamicImage::new_rgb8(1, 1)), hash })
-    }
+    use crate::gui::tests::fixtures::bg_picture as picture;
 
     /// A newly named picture loads while the one held before stays: the
     /// backdrop is built from the named one only, never the old one under
@@ -333,5 +344,31 @@ mod tests {
         app.batch.select_item(0);
         app.reconcile_selected(&ctx);
         assert!(app.batch.items[1].backdrop_tex_pending.is_some(), "its picture builds while it is off screen");
+    }
+
+    /// One picture builds once, the image on screen included: the others
+    /// wait for it, then take that texture.
+    #[test]
+    fn a_picture_builds_once_for_every_image_showing_it() {
+        let mut app = PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        for id in [1, 2, 3] {
+            let item = push_test_item(&mut app, id);
+            item.settings.bg_image_hash = NonZeroU64::new(7);
+            item.hold_bg_image(picture(7));
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        }
+        app.batch.select_item(2);
+        app.reconcile_selected(&ctx);
+        let building: Vec<u64> = app.batch.items.iter().filter(|i| i.backdrop_tex_pending.is_some()).map(|i| i.id).collect();
+        assert_eq!(building.len(), 1, "one build: {building:?}");
+        let key = app.batch.items[0].backdrop_key().expect("a picture backdrop");
+        let texture = crate::gui::image_texture::ImageTexture::single(ctx.load_texture("picture", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        let builder = app.batch.find_by_id_mut(building[0]).expect("pushed");
+        assert!(builder.install_backdrop(key, texture.clone()));
+        app.reconcile_selected(&ctx);
+        for item in &app.batch.items {
+            assert_eq!(item.backdrop_texture_for(key).map(|t| t.id()), Some(texture.id()), "image {} takes the one texture", item.id);
+        }
     }
 }
