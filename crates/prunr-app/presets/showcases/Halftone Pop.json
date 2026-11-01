@@ -1,0 +1,50 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          255,
+          72,
+          160,
+          255
+        ],
+        "fill_style": {
+          "halftone": {
+            "dot_spacing": 8
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          255,
+          72,
+          160,
+          255
+        ],
+        "fill_style": {
+          "halftone": {
+            "dot_spacing": 8
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          255,
+          72,
+          160,
+          255
+        ],
+        "fill_style": {
+          "halftone": {
+            "dot_spacing": 8
+          }
+        }
+      }
+    }
+  }
+}

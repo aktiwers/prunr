@@ -1,0 +1,35 @@
+{
+  "format_version": 2,
+  "models": {
+    "NoModel": {
+      "item_settings": {
+        "fill_style": {
+          "gradient_map": {
+            "stops": [
+              [
+                0,
+                10,
+                0
+              ],
+              [
+                0,
+                80,
+                20
+              ],
+              [
+                60,
+                220,
+                80
+              ],
+              [
+                220,
+                255,
+                200
+              ]
+            ]
+          }
+        }
+      }
+    }
+  }
+}

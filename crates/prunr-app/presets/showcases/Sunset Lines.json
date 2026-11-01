@@ -1,0 +1,40 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Teed": {
+      "item_settings": {
+        "edge_thickness": 2,
+        "line_strength": 0.7,
+        "line_style": {
+          "gradient_y": {
+            "bottom": [
+              120,
+              20,
+              90
+            ],
+            "top": [
+              255,
+              180,
+              40
+            ]
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "line_mode": "SubjectOutline"
+      }
+    }
+  }
+}

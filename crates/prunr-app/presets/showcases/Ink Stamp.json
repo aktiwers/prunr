@@ -1,0 +1,50 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          246,
+          239,
+          224,
+          255
+        ],
+        "fill_style": {
+          "threshold": {
+            "level": 110
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          246,
+          239,
+          224,
+          255
+        ],
+        "fill_style": {
+          "threshold": {
+            "level": 110
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          246,
+          239,
+          224,
+          255
+        ],
+        "fill_style": {
+          "threshold": {
+            "level": 110
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "format_version": 2,
+  "models": {
+    "DdcolorTiny": {
+      "item_settings": {
+        "color_strength_pct": 120
+      }
+    },
+    "FaceGfpgan": {
+      "item_settings": {
+        "faces.strength_pct": 60
+      }
+    },
+    "FourXNomos2RealPlksr": {
+      "item_settings": {
+        "color_match": true,
+        "faces.on": true,
+        "sharpen": 0.25
+      }
+    }
+  }
+}

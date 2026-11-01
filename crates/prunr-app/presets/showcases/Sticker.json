@@ -1,0 +1,53 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 14.0,
+          "shadow": "drop",
+          "shadow_blur": 18.0,
+          "shadow_distance": 14.0,
+          "shadow_opacity": 0.45
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 14.0,
+          "shadow": "drop",
+          "shadow_blur": 18.0,
+          "shadow_distance": 14.0,
+          "shadow_opacity": 0.45
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 14.0,
+          "shadow": "drop",
+          "shadow_blur": 18.0,
+          "shadow_distance": 14.0,
+          "shadow_opacity": 0.45
+        }
+      }
+    }
+  }
+}

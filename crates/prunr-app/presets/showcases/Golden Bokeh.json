@@ -1,0 +1,47 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 95
+          }
+        },
+        "fill_style": {
+          "saturate": {
+            "percent": 125
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 95
+          }
+        },
+        "fill_style": {
+          "saturate": {
+            "percent": 125
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 95
+          }
+        },
+        "fill_style": {
+          "saturate": {
+            "percent": 125
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
+        "compose_mode": "engraving",
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
+        "compose_mode": "engraving",
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Teed": {
+      "item_settings": {
+        "edge_thickness": 1,
+        "line_strength": 0.6
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
+        "compose_mode": "engraving",
+        "line_mode": "SubjectOutline"
+      }
+    }
+  }
+}

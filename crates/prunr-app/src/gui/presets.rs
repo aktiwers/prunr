@@ -555,6 +555,7 @@ pub(crate) struct Preset {
     /// restorer in `FaceModel::ALL` order, worked out on first need: a
     /// model switch asks it for every image on the preset.
     switch: Vec<OnceLock<Map<String, Value>>>,
+    built_in: bool,
 }
 
 impl From<PresetFile> for Preset {
@@ -569,7 +570,7 @@ impl From<PresetFile> for Preset {
         keys.sort_by_key(|key| (key_order(key), *key));
         let covers = keys.into_iter().map(entry_name).collect::<Vec<_>>().join(" \u{b7} ");
         let switch = std::iter::repeat_with(OnceLock::new).take(SettingsModel::ALL.len() * FaceModel::ALL.len()).collect();
-        Self { file: Arc::new(file), views, helpers, covers, switch }
+        Self { file: Arc::new(file), views, helpers, covers, switch, built_in: false }
     }
 }
 
@@ -586,6 +587,16 @@ impl Preset {
 
     pub(crate) fn shared_file(&self) -> Arc<PresetFile> {
         Arc::clone(&self.file)
+    }
+
+    /// The preset as one built into Prunr (a showcase): like Prunr's own,
+    /// never written over, and deleting it hides it.
+    pub(crate) fn built_in(self) -> Self {
+        Self { built_in: true, ..self }
+    }
+
+    pub(crate) fn is_built_in(&self) -> bool {
+        self.built_in
     }
 
     /// The models it has settings for: "BiRefNet · Lines".
@@ -816,6 +827,17 @@ mod tests {
         );
         let unchanged = PresetFile::default().with_settings(model, &prunr_item_settings(model), &prunr_view(model, None).brush);
         assert!(unchanged.models.is_empty(), "nothing apart from Prunr's");
+    }
+
+    /// The command line runs a built-in showcase by name, in any case, on
+    /// each cut-out model it has settings for.
+    #[test]
+    fn the_command_line_runs_a_showcase() {
+        for model in [SettingsModel::BiRefNetLite, SettingsModel::U2net, SettingsModel::Silueta] {
+            let (item, _) = command_line_settings(Some("comic"), model, None).expect("Comic is built in");
+            assert_eq!(item.line_mode, prunr_core::LineMode::SubjectOutline, "{model:?}");
+            assert!((item.gamma - 1.3).abs() < 1e-6, "{model:?}");
+        }
     }
 
     /// A model the preset has no entry for takes Prunr's settings, never

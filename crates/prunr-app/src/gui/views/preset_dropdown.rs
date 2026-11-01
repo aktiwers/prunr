@@ -38,6 +38,26 @@ pub(super) fn sorted_preset_names(settings: &Settings) -> Vec<String> {
     crate::gui::presets_fs::sorted_names(settings.presets.keys().cloned())
 }
 
+/// The presets a save may write over: not the built-in ones.
+fn writable_preset_names(settings: &Settings) -> Vec<String> {
+    let writable = settings.presets.iter().filter(|(_, preset)| !preset.is_built_in()).map(|(name, _)| name.clone());
+    crate::gui::presets_fs::sorted_names(writable)
+}
+
+/// Take preset `name` out of the list: a file of the user's is deleted,
+/// a built-in one hidden. The default falls back to Prunr when it goes.
+fn delete_preset(settings: &mut Settings, name: &str) {
+    match settings.presets.remove(name) {
+        Some(preset) if preset.is_built_in() => {
+            settings.hidden_showcases.insert(name.to_string());
+        }
+        _ => crate::gui::presets_fs::queue_delete(name),
+    }
+    if settings.default_preset == name {
+        settings.default_preset = PRUNR_PRESET.to_string();
+    }
+}
+
 /// All preset names in display order: Prunr first, then user presets
 /// alphabetically.
 pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
@@ -50,12 +70,16 @@ pub(super) fn all_preset_names(settings: &Settings) -> Vec<String> {
 const SAVE_DIALOG_ID: &str = "preset_save_dialog";
 const SAVE_DIALOG_SIZE: [f32; 2] = [420.0, 500.0];
 const OVERWRITE_LIST_HEIGHT: f32 = 120.0;
+/// The preset rows scroll past this, keeping Save, Import and Show folder
+/// in a short window.
+const PRESET_LIST_HEIGHT: f32 = 360.0;
 const MODEL_LIST_HEIGHT: f32 = 110.0;
 
 /// What the preset list asks the app to do with preset files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PresetRequest {
-    /// The default preset changed: save the settings, which keep it.
+    /// The default preset changed or a built-in preset was hidden: save
+    /// the settings, which keep both.
     SaveSettings,
     /// The list opened: read the presets folder again.
     Rescan,
@@ -164,81 +188,76 @@ pub(crate) fn render(
             crate::gui::views::chip::popover_header(ui, "Presets", None);
 
             // Prunr's is built in: it cannot be deleted or overwritten.
-            for name in all_preset_names(settings) {
-                let is_prunr = crate::gui::presets_fs::is_prunr(&name);
-                let is_default = settings.default_preset == name;
-                ui.horizontal(|ui| {
-                    let label_text = RichText::new(&name)
-                        .color(theme::TEXT_PRIMARY)
-                        .size(theme::FONT_SIZE_BODY);
-                    if ui.selectable_label(false, label_text)
-                        .on_hover_text("Click to apply these settings to the current image")
-                        .clicked()
-                    {
-                        // Applying sets what Reset to this preset would.
-                        settings.apply_preset(&name, current_item);
-                        applied = Some(name.clone());
-                        egui::Popup::close_id(ui.ctx(), pop_id);
-                    }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            if !is_prunr {
-                                let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
-                                let armed = RichText::new("Delete?").size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
-                                if crate::gui::views::chip::confirm_button(ui, delete_scope, &name, idle, armed, "Delete preset") {
-                                    settings.presets.remove(&name);
-                                    // Remove the on-disk file too; presets are
-                                    // the filesystem-store's source of truth.
-                                    crate::gui::presets_fs::queue_delete(&name);
-                                    // If the deleted preset was the app's default,
-                                    // fall back to Prunr so default_preset stays valid.
-                                    if is_default {
-                                        settings.default_preset = PRUNR_PRESET.to_string();
+            egui::ScrollArea::vertical().id_salt("preset_rows").max_height(PRESET_LIST_HEIGHT).show(ui, |ui| {
+                for name in all_preset_names(settings) {
+                    let is_prunr = crate::gui::presets_fs::is_prunr(&name);
+                    let is_default = settings.default_preset == name;
+                    ui.horizontal(|ui| {
+                        let label_text = RichText::new(&name)
+                            .color(theme::TEXT_PRIMARY)
+                            .size(theme::FONT_SIZE_BODY);
+                        if ui.selectable_label(false, label_text)
+                            .on_hover_text("Click to apply these settings to the current image")
+                            .clicked()
+                        {
+                            // Applying sets what Reset to this preset would.
+                            settings.apply_preset(&name, current_item);
+                            applied = Some(name.clone());
+                            egui::Popup::close_id(ui.ctx(), pop_id);
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if !is_prunr {
+                                    let idle = RichText::new(ICON_DELETE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
+                                    let armed = RichText::new("Delete?").size(theme::FONT_SIZE_SECONDARY).color(theme::DESTRUCTIVE);
+                                    if crate::gui::views::chip::confirm_button(ui, delete_scope, &name, idle, armed, "Delete preset") {
+                                        delete_preset(settings, &name);
+                                        *request = Some(PresetRequest::SaveSettings);
                                     }
                                 }
-                            }
-                            let star_icon = if is_default {
-                                ICON_STAR.codepoint
-                            } else {
-                                ICON_STAR_OUTLINE.codepoint
-                            };
-                            let star_color = if is_default {
-                                theme::ACCENT
-                            } else {
-                                theme::TEXT_SECONDARY
-                            };
-                            let star_tooltip = if is_default {
-                                "Default for new images (click another preset's star to switch)"
-                            } else {
-                                "Set as default for new images"
-                            };
-                            let star_btn = ui.small_button(
-                                RichText::new(star_icon)
-                                    .size(theme::FONT_SIZE_SECONDARY)
-                                    .color(star_color),
-                            );
-                            let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
-                            if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
-                                settings.default_preset = name.clone();
-                                *request = Some(PresetRequest::SaveSettings);
-                            }
-                            let export = ui.small_button(RichText::new(ICON_IOS_SHARE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
-                            if crate::gui::views::chip::named(export, "Export preset").on_hover_text("Save this preset as a file to share").clicked() {
-                                *request = Some(PresetRequest::Export(name.clone()));
-                                egui::Popup::close_id(ui.ctx(), pop_id);
-                            }
-                        },
-                    );
-                });
-                if let Some(covers) = settings.presets.get(&name).map(|p| p.covers()).filter(|c| !c.is_empty()) {
-                    ui.horizontal(|ui| {
-                        // Under the name, which sits inside its row's padding.
-                        ui.add_space(ui.spacing().button_padding.x);
-                        ui.label(RichText::new(covers).color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                                let star_icon = if is_default {
+                                    ICON_STAR.codepoint
+                                } else {
+                                    ICON_STAR_OUTLINE.codepoint
+                                };
+                                let star_color = if is_default {
+                                    theme::ACCENT
+                                } else {
+                                    theme::TEXT_SECONDARY
+                                };
+                                let star_tooltip = if is_default {
+                                    "Default for new images (click another preset's star to switch)"
+                                } else {
+                                    "Set as default for new images"
+                                };
+                                let star_btn = ui.small_button(
+                                    RichText::new(star_icon)
+                                        .size(theme::FONT_SIZE_SECONDARY)
+                                        .color(star_color),
+                                );
+                                let star_btn = crate::gui::views::chip::named(star_btn, "Set as default");
+                                if star_btn.on_hover_text(star_tooltip).clicked() && !is_default {
+                                    settings.default_preset = name.clone();
+                                    *request = Some(PresetRequest::SaveSettings);
+                                }
+                                let export = ui.small_button(RichText::new(ICON_IOS_SHARE.codepoint).size(theme::FONT_SIZE_SECONDARY).color(theme::TEXT_SECONDARY));
+                                if crate::gui::views::chip::named(export, "Export preset").on_hover_text("Save this preset as a file to share").clicked() {
+                                    *request = Some(PresetRequest::Export(name.clone()));
+                                    egui::Popup::close_id(ui.ctx(), pop_id);
+                                }
+                            },
+                        );
                     });
+                    if let Some(covers) = settings.presets.get(&name).map(|p| p.covers()).filter(|c| !c.is_empty()) {
+                        ui.horizontal(|ui| {
+                            // Under the name, which sits inside its row's padding.
+                            ui.add_space(ui.spacing().button_padding.x);
+                            ui.label(RichText::new(covers).color(theme::TEXT_HINT).size(theme::FONT_SIZE_SECONDARY));
+                        });
+                    }
                 }
-            }
+            });
 
             ui.add_space(theme::SPACE_SM);
             ui.separator();
@@ -279,7 +298,7 @@ pub(crate) fn render(
 
         // Snapshot existing preset names so we can offer overwrite targets
         // without holding a borrow on `settings.presets` across the dialog.
-        let existing_names = sorted_preset_names(settings);
+        let existing_names = writable_preset_names(settings);
 
         let backdrop_closed = theme::standard_modal_window(ui.ctx(), SAVE_DIALOG_ID, "Save preset", SAVE_DIALOG_SIZE, |ui| {
                 let name_label = ui.label("Name for this preset:");
@@ -293,7 +312,7 @@ pub(crate) fn render(
                     text_resp.request_focus();
                 }
                 let name = crate::gui::presets_fs::preset_name(name_buf);
-                let refusal = name.as_deref().and_then(|name| crate::gui::presets_fs::name_refusal(name, &settings.newer_presets));
+                let refusal = name.as_deref().and_then(|name| crate::gui::presets_fs::name_refusal(name, &settings.newer_presets, &settings.presets));
                 if let Some(why) = refusal {
                     ui.label(RichText::new(why).color(theme::DESTRUCTIVE).size(theme::FONT_SIZE_SECONDARY));
                 } else if let Some(name) = name.as_ref().filter(|name| existing_names.contains(name)) {
@@ -360,7 +379,7 @@ pub(crate) fn render(
         // preset the now-applied one — label reads "Name ✓" after.
         let target_name = overwrite_target.or_else(|| {
             crate::gui::presets_fs::preset_name(name_buf)
-                .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets).is_none())
+                .filter(|name| commit && crate::gui::presets_fs::name_refusal(name, &settings.newer_presets, &settings.presets).is_none())
         });
         if let Some(name) = target_name {
             // The store keeps what is written, for the preset button's mark.
@@ -482,6 +501,23 @@ mod tests {
         h.run();
         assert_eq!(h.state().settings.default_preset, "Mine");
         assert_eq!(h.state().request, Some(PresetRequest::SaveSettings));
+    }
+
+    /// Deleting a built-in preset hides it and writes no file; the
+    /// default falls back to Prunr when it was the one deleted. Saving
+    /// never offers to write over a built-in one.
+    #[test]
+    fn deleting_a_built_in_preset_hides_it() {
+        let mut s = Settings::default();
+        let built_in = PresetFile::default();
+        s.presets.insert("Comic".into(), crate::gui::presets::Preset::from(built_in).built_in());
+        s.presets.insert("Mine".into(), PresetFile::default().into());
+        assert_eq!(writable_preset_names(&s), ["Mine"]);
+        s.default_preset = "Comic".into();
+        delete_preset(&mut s, "Comic");
+        assert!(!s.presets.contains_key("Comic"));
+        assert!(s.hidden_showcases.contains("Comic"));
+        assert_eq!(s.default_preset, PRUNR_PRESET);
     }
 
     /// Prunr first, then the user's presets by name ignoring case

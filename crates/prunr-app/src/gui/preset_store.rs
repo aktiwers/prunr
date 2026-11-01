@@ -64,10 +64,10 @@ impl PresetStore {
         if !self.reads_folder() {
             return;
         }
-        let (tx, ctx, held) = (self.tx.clone(), ctx.clone(), held(settings));
+        let (tx, ctx, held, hidden) = (self.tx.clone(), ctx.clone(), held(settings), settings.hidden_showcases.clone());
         super::disk_queue::call(move || {
             let imported = presets_fs::import(sources);
-            let (presets, newer) = presets_fs::load_all();
+            let (presets, newer) = presets_fs::load_all(&hidden);
             let _ = tx.send(Scan { held, presets, newer, imported });
             ctx.request_repaint();
         });

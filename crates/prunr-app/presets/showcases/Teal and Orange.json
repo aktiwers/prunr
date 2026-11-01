@@ -1,0 +1,46 @@
+{
+  "format_version": 2,
+  "models": {
+    "DepthAnythingV2Small": {
+      "item_settings": {
+        "depth": {
+          "aerial_pct": 0,
+          "blur": "point",
+          "blur_pct": 35,
+          "focus": null,
+          "fog_pct": 0
+        }
+      }
+    },
+    "NoModel": {
+      "item_settings": {
+        "fill_style": {
+          "gradient_map": {
+            "stops": [
+              [
+                10,
+                25,
+                35
+              ],
+              [
+                25,
+                90,
+                110
+              ],
+              [
+                235,
+                145,
+                75
+              ],
+              [
+                255,
+                235,
+                200
+              ]
+            ]
+          }
+        }
+      }
+    }
+  }
+}
