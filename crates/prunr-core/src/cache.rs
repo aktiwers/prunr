@@ -688,14 +688,17 @@ mod tests {
         }
     }
 
-    /// Whether the run that made `dir` has ended: its lock file locks
-    /// (closed again before the folder goes, which Windows needs). A
-    /// folder without one is being made, or was made before runs held
-    /// one and has ended once it is older than `RUN_START`.
+    /// Whether the run that made `dir` has ended: its lock file, older than
+    /// `RUN_START`, locks (closed again before the folder goes, which
+    /// Windows needs). A folder without one is being made, or was made
+    /// before runs held one and has ended once that old.
     fn run_ended(dir: &Path) -> bool {
-        match std::fs::File::open(dir.join(RUN_LOCK)) {
-            Ok(lock) => lock.try_lock().is_ok(),
-            Err(_) => dir.metadata().and_then(|m| m.modified()).is_ok_and(|made| made.elapsed().is_ok_and(|age| age > RUN_START)),
+        let older = |path: &Path| path.metadata().and_then(|m| m.modified()).is_ok_and(|made| made.elapsed().is_ok_and(|age| age > RUN_START));
+        let lock_path = dir.join(RUN_LOCK);
+        match std::fs::File::open(&lock_path) {
+            // One just made may not be locked yet.
+            Ok(lock) => older(&lock_path) && lock.try_lock().is_ok(),
+            Err(_) => older(dir),
         }
     }
 
@@ -707,10 +710,14 @@ mod tests {
         let hold = |name: &str| hold_run(&base.path().join(name)).expect("held");
         let running = hold(&std::process::id().to_string());
         drop(hold("1"));
+        let long_ago = std::time::SystemTime::now() - RUN_START * 2;
+        std::fs::File::options().write(true).open(base.path().join("1").join(RUN_LOCK)).unwrap().set_modified(long_ago).unwrap();
+        drop(hold("just-made"));
         std::fs::create_dir(base.path().join("starting")).unwrap();
         remove_ended_runs(base.path());
         assert!(base.path().join(std::process::id().to_string()).exists(), "a running test's");
         assert!(!base.path().join("1").exists(), "an ended test's, its number another process's now");
+        assert!(base.path().join("just-made").exists(), "one whose lock file is not locked yet");
         assert!(base.path().join("starting").exists(), "one still being made");
         drop(running);
     }
