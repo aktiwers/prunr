@@ -66,6 +66,9 @@ pub struct Settings {
     /// `presets`, and never saved over.
     #[serde(skip)]
     pub(crate) newer_presets: std::collections::HashSet<String>,
+    /// The built-in presets the user deleted, kept out of the list.
+    #[serde(default)]
+    pub(crate) hidden_showcases: std::collections::BTreeSet<String>,
     /// Which preset new imports inherit, and what Reset All Knobs restores;
     /// a missing one falls back to "Prunr".
     #[serde(default = "default_preset_name")]
@@ -209,11 +212,8 @@ impl Settings {
     /// The saved settings and presets, and a note for the first frame when
     /// some did not read. Missing or corrupt falls back to defaults.
     pub fn load() -> (Self, Option<&'static str>) {
-        // Before any load_all(), so the built-ins show on first launch.
-        super::presets_fs::seed_builtins_once();
-
         let (mut settings, note) = Self::config_path().map_or_else(|| (Self::default(), None), |path| Self::read(&path));
-        let (mut loaded, newer) = super::presets_fs::load_all();
+        let (mut loaded, newer) = super::presets_fs::load_all(&settings.hidden_showcases);
         settings.newer_presets = newer;
         // The migrated "Previous defaults" survives a failed save.
         for (k, v) in settings.presets.drain() {
@@ -467,7 +467,8 @@ impl Settings {
     }
 
     /// Reset every preference to its default, keeping what the user owns
-    /// or agreed to: presets and the default one, licence acceptances,
+    /// or agreed to: presets (and the built-in ones deleted) and the
+    /// default one, licence acceptances,
     /// background pictures, the model in use and the OpenVINO prompt
     /// snooze. The brush takes the default preset's settings for the
     /// model; `parallel_jobs` re-derives for the detected hardware.
@@ -477,6 +478,7 @@ impl Settings {
             active_backend: kept.active_backend,
             presets: kept.presets,
             newer_presets: kept.newer_presets,
+            hidden_showcases: kept.hidden_showcases,
             default_preset: kept.default_preset,
             accepted_licenses: kept.accepted_licenses,
             bg_image_paths: kept.bg_image_paths,
@@ -763,6 +765,7 @@ impl Default for Settings {
             export_format: prunr_core::ExportFormat::Png,
             presets: HashMap::new(),
             newer_presets: Default::default(),
+            hidden_showcases: Default::default(),
             default_preset: default_preset_name(),
             bg_image_paths: HashMap::new(),
             accepted_licenses: Vec::new(),

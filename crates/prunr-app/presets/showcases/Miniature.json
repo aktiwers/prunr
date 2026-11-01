@@ -1,0 +1,25 @@
+{
+  "format_version": 2,
+  "models": {
+    "DepthAnythingV2Small": {
+      "item_settings": {
+        "depth": {
+          "aerial_pct": 0,
+          "blur": "tilt_shift",
+          "blur_pct": 80,
+          "focus": null,
+          "fog_pct": 0
+        }
+      }
+    },
+    "NoModel": {
+      "item_settings": {
+        "fill_style": {
+          "saturate": {
+            "percent": 150
+          }
+        }
+      }
+    }
+  }
+}

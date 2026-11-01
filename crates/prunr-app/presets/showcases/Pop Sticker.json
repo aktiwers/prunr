@@ -1,0 +1,68 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 12.0,
+          "shadow": "soft",
+          "shadow_blur": 20.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.5
+        },
+        "fill_style": {
+          "posterize": {
+            "levels": 5
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 12.0,
+          "shadow": "soft",
+          "shadow_blur": 20.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.5
+        },
+        "fill_style": {
+          "posterize": {
+            "levels": 5
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "decoration": {
+          "outline_color": [
+            255,
+            255,
+            255
+          ],
+          "outline_width": 12.0,
+          "shadow": "soft",
+          "shadow_blur": 20.0,
+          "shadow_distance": 20.0,
+          "shadow_opacity": 0.5
+        },
+        "fill_style": {
+          "posterize": {
+            "levels": 5
+          }
+        }
+      }
+    }
+  }
+}

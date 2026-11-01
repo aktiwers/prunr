@@ -10,7 +10,7 @@
 //!
 //! The tests below are the tripwires.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,15 +19,10 @@ use rayon::prelude::*;
 use super::item_settings::ItemSettings;
 use super::presets::{Preset, PresetFile, PRESET_FORMAT_VERSION};
 use super::settings::PRUNR_PRESET;
-use prunr_core::{ComposeMode, SubjectEffect, LineMode, LineStyle};
 
 const PRESETS_SUBDIR: &str = "prunr/presets";
 
 pub(crate) const PRESET_EXT: &str = "json";
-
-/// Present once the built-ins were seeded, so a deleted built-in stays
-/// deleted. Bump the suffix when shipping a fresh batch of built-ins.
-const SEED_MARKER: &str = ".builtins_seeded_v2";
 
 /// Created if needed; `None` without a platform config dir.
 pub(crate) fn presets_dir() -> Option<PathBuf> {
@@ -115,11 +110,71 @@ fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
     Some(PresetFile::of_item_settings(item_settings))
 }
 
-/// A malformed file is skipped with a warning, so one broken preset
-/// doesn't hide the rest.
-pub(crate) fn load_all() -> (HashMap<String, Preset>, HashSet<String>) {
-    let Some(dir) = presets_dir() else { return Default::default() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Default::default() };
+/// The showcase presets built into Prunr, read-only like Prunr's own.
+const SHOWCASES: &[(&str, &str)] = &[
+    ("Catalog", include_str!("../../presets/showcases/Catalog.json")),
+    ("Cinematic", include_str!("../../presets/showcases/Cinematic.json")),
+    ("Color Pop", include_str!("../../presets/showcases/Color Pop.json")),
+    ("Comic", include_str!("../../presets/showcases/Comic.json")),
+    ("Duotone Poster", include_str!("../../presets/showcases/Duotone Poster.json")),
+    ("Engraving", include_str!("../../presets/showcases/Engraving.json")),
+    ("Golden Bokeh", include_str!("../../presets/showcases/Golden Bokeh.json")),
+    ("Halftone Pop", include_str!("../../presets/showcases/Halftone Pop.json")),
+    ("Halftone Print", include_str!("../../presets/showcases/Halftone Print.json")),
+    ("Ink Stamp", include_str!("../../presets/showcases/Ink Stamp.json")),
+    ("Lens Portrait", include_str!("../../presets/showcases/Lens Portrait.json")),
+    ("Midnight Duotone", include_str!("../../presets/showcases/Midnight Duotone.json")),
+    ("Miniature", include_str!("../../presets/showcases/Miniature.json")),
+    ("Misty Morning", include_str!("../../presets/showcases/Misty Morning.json")),
+    ("Neon Glow", include_str!("../../presets/showcases/Neon Glow.json")),
+    ("Night Vision", include_str!("../../presets/showcases/Night Vision.json")),
+    ("Noir", include_str!("../../presets/showcases/Noir.json")),
+    ("Old Photo", include_str!("../../presets/showcases/Old Photo.json")),
+    ("Pencil Sketch", include_str!("../../presets/showcases/Pencil Sketch.json")),
+    ("Pixel Art", include_str!("../../presets/showcases/Pixel Art.json")),
+    ("Pop Sticker", include_str!("../../presets/showcases/Pop Sticker.json")),
+    ("Soft Focus", include_str!("../../presets/showcases/Soft Focus.json")),
+    ("Sticker", include_str!("../../presets/showcases/Sticker.json")),
+    ("Studio", include_str!("../../presets/showcases/Studio.json")),
+    ("Sunset Lines", include_str!("../../presets/showcases/Sunset Lines.json")),
+    ("Teal and Orange", include_str!("../../presets/showcases/Teal and Orange.json")),
+    ("Thumbnail", include_str!("../../presets/showcases/Thumbnail.json")),
+    ("Warhol", include_str!("../../presets/showcases/Warhol.json")),
+    ("X-Ray", include_str!("../../presets/showcases/X-Ray.json")),
+];
+
+/// The showcases as presets, read once.
+fn showcases() -> &'static [(&'static str, Preset)] {
+    static READ: std::sync::OnceLock<Vec<(&str, Preset)>> = std::sync::OnceLock::new();
+    READ.get_or_init(|| {
+        SHOWCASES
+            .iter()
+            .filter_map(|&(name, json)| parse_preset_bytes(json.as_bytes()).ok().map(|file| (name, Preset::from(file).built_in())))
+            .collect()
+    })
+}
+
+/// The presets in the presets folder, and the showcases not `hidden` and
+/// not named by a file there (a file of the user's wins); the names a
+/// newer Prunr saved are left out. A malformed file is skipped with a
+/// warning, so one broken preset doesn't hide the rest.
+pub(crate) fn load_all(hidden: &BTreeSet<String>) -> (HashMap<String, Preset>, HashSet<String>) {
+    let (mut presets, newer) = presets_dir().map(|dir| load_files(&dir)).unwrap_or_default();
+    add_showcases(&mut presets, hidden, &newer);
+    (presets, newer)
+}
+
+fn add_showcases(presets: &mut HashMap<String, Preset>, hidden: &BTreeSet<String>, newer: &HashSet<String>) {
+    for (name, showcase) in showcases() {
+        let taken = hidden.iter().chain(presets.keys()).any(|other| other.eq_ignore_ascii_case(name)) || newer.contains(&name.to_lowercase());
+        if !taken {
+            presets.insert(name.to_string(), showcase.clone());
+        }
+    }
+}
+
+fn load_files(dir: &Path) -> (HashMap<String, Preset>, HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Default::default() };
 
     let paths: Vec<PathBuf> = entries
         .flatten()
@@ -163,7 +218,7 @@ pub(crate) fn find_preset(name: &str) -> Result<Preset, String> {
             Skipped::Unreadable => format!("{name} is not a Prunr preset"),
         });
     }
-    let (mut presets, newer) = load_all();
+    let (mut presets, newer) = load_all(&BTreeSet::new());
     let found = presets.keys().find(|key| key.eq_ignore_ascii_case(name)).cloned();
     if let Some(preset) = found.and_then(|key| presets.remove(&key)) {
         return Ok(preset);
@@ -183,11 +238,15 @@ enum Skipped {
     Unreadable,
 }
 
-/// Why a preset cannot be saved under `name`, when it cannot: "Prunr" is
-/// reserved, and a name in `newer` (a newer Prunr's preset) is kept for it.
-pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>) -> Option<&'static str> {
+/// Why a preset cannot be saved under `name`, when it cannot: "Prunr" and
+/// the built-in presets in `presets` are never written over, and a name
+/// in `newer` (a newer Prunr's preset) is kept for it.
+pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>, presets: &HashMap<String, Preset>) -> Option<&'static str> {
     if is_prunr(name) {
         return Some(RESERVED_NAME);
+    }
+    if presets.iter().any(|(other, preset)| preset.is_built_in() && other.eq_ignore_ascii_case(name.trim())) {
+        return Some("A preset built into Prunr has this name — pick another.");
     }
     newer.contains(&name.trim().to_lowercase()).then_some("A newer version of Prunr saved a preset with this name — pick another.")
 }
@@ -345,123 +404,6 @@ pub(crate) fn queue_delete(name: &str) {
     }
 }
 
-/// No-op once the seed marker exists.
-pub fn seed_builtins_once() {
-    let Some(dir) = presets_dir() else { return };
-    let marker = dir.join(SEED_MARKER);
-    if marker.exists() { return; }
-    for (name, item_settings) in builtin_presets() {
-        // Never overwrite: a re-seed after a mid-seed crash, or a new
-        // batch reusing a name, must keep the user's file.
-        let Some(path) = preset_path(name) else { continue };
-        if path.exists() { continue; }
-        let _ = save(name, &PresetFile::of_item_settings(item_settings));
-    }
-    let _ = std::fs::write(&marker, b"");
-}
-
-fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
-    let base = ItemSettings::default();
-    vec![
-        ("Comic", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            effect: SubjectEffect::Posterize { levels: 4 },
-            gamma: 1.3,
-            ..base
-        }),
-        ("Pencil Sketch", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.8,
-            edge_thickness: 0,
-            solid_line_color: None,
-            effect: SubjectEffect::Desaturate,
-            gamma: 1.1,
-            ..base
-        }),
-        ("Neon Glow", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.6,
-            edge_thickness: 3,
-            line_style: LineStyle::Rainbow { cycles: 2 },
-            effect: SubjectEffect::Saturate { percent: 220 },
-            ..base
-        }),
-        ("Sepia", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.6,
-            edge_thickness: 1,
-            solid_line_color: Some([70, 45, 20]),
-            effect: SubjectEffect::Sepia,
-            ..base
-        }),
-        ("Duotone Poster", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.6,
-            edge_thickness: 2,
-            solid_line_color: Some([10, 10, 40]),
-            effect: SubjectEffect::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
-            ..base
-        }),
-        ("X-Ray", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.8,
-            edge_thickness: 1,
-            solid_line_color: Some([200, 230, 255]),
-            effect: SubjectEffect::Invert,
-            bg: Some([0, 0, 30, 255]),
-            ..base
-        }),
-        ("Pop Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.65,
-            edge_thickness: 3,
-            solid_line_color: Some([0, 0, 0]),
-            effect: SubjectEffect::Posterize { levels: 3 },
-            gamma: 1.4,
-            ..base
-        }),
-        ("Ghost", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.55,
-            edge_thickness: 1,
-            solid_line_color: Some([230, 230, 235]),
-            effect: SubjectEffect::Desaturate,
-            ..base
-        }),
-        ("Sunset Lines", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            line_style: LineStyle::GradientY {
-                top: [255, 180, 40],
-                bottom: [120, 20, 90],
-            },
-            ..base
-        }),
-        ("Pixel Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.5,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            effect: SubjectEffect::Pixelate { block_size: 10 },
-            ..base
-        }),
-    ]
-}
-
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
@@ -526,10 +468,10 @@ mod tests {
         std::fs::write(&path, r#"{ "format_version": 3, "models": {}, "something_new": true }"#).unwrap();
         assert_eq!(read_preset(&path).unwrap_err(), Skipped::Newer);
         let newer: HashSet<String> = ["future".to_string()].into();
-        assert!(name_refusal("Future", &newer).is_some(), "its name is refused, any case");
-        assert!(name_refusal(" future ", &newer).is_some());
-        assert_eq!(name_refusal("Other", &newer), None);
-        assert!(name_refusal("prunr", &HashSet::new()).is_some(), "Prunr stays reserved");
+        assert!(name_refusal("Future", &newer, &HashMap::new()).is_some(), "its name is refused, any case");
+        assert!(name_refusal(" future ", &newer, &HashMap::new()).is_some());
+        assert_eq!(name_refusal("Other", &newer, &HashMap::new()), None);
+        assert!(name_refusal("prunr", &HashSet::new(), &HashMap::new()).is_some(), "Prunr stays reserved");
     }
 
     #[test]
@@ -559,23 +501,47 @@ mod tests {
         assert_eq!(parsed, ItemSettings::default());
     }
 
+    /// Every file in `presets/showcases` is built in, reads as a preset,
+    /// and holds only what differs from Prunr's settings.
     #[test]
-    fn builtins_have_unique_names_and_serialize() {
-        let presets = super::builtin_presets();
-        assert!(presets.len() >= 5, "ship at least 5 curated looks; got {}", presets.len());
-        let mut seen = std::collections::HashSet::new();
-        for (name, settings) in &presets {
-            assert!(seen.insert(*name), "duplicate builtin preset name: {name}");
-            // Reserved name would be silently rejected by `save`.
-            assert!(
-                !name.eq_ignore_ascii_case(PRUNR_PRESET),
-                "built-in preset cannot use reserved name '{PRUNR_PRESET}'",
-            );
-            // Each preset must round-trip through JSON — otherwise seed_builtins_once
-            // would silently skip it.
-            let json = serde_json::to_string(settings).expect("preset serializes");
-            let _: ItemSettings = serde_json::from_str(&json).expect("preset deserializes");
+    fn every_showcase_file_is_built_in_and_holds_only_its_differences() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("presets/showcases");
+        let mut files: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path().file_stem().unwrap().to_str().unwrap().to_string()).collect();
+        files.sort_by_key(|name| name.to_lowercase());
+        let listed: Vec<&str> = SHOWCASES.iter().map(|&(name, _)| name).collect();
+        assert_eq!(files, listed, "SHOWCASES lists every file once, by name");
+        assert_eq!(showcases().len(), SHOWCASES.len(), "every showcase reads");
+        for &(name, json) in SHOWCASES {
+            assert!(!is_prunr(name));
+            let file: PresetFile = serde_json::from_str(json).unwrap();
+            assert_eq!(file.clone().trimmed(), file, "{name} sets only what differs from Prunr's");
         }
+    }
+
+    /// The list shows a showcase unless it was hidden or a file of the
+    /// user's has its name; only an unshadowed one is built in.
+    #[test]
+    fn a_showcase_shows_unless_hidden_or_the_user_has_its_name() {
+        let (name, _) = showcases()[0];
+        let shown = |hidden: &BTreeSet<String>, mut presets: HashMap<String, Preset>| {
+            add_showcases(&mut presets, hidden, &HashSet::new());
+            presets.get(name).map(Preset::is_built_in)
+        };
+        assert_eq!(shown(&BTreeSet::new(), HashMap::new()), Some(true));
+        assert_eq!(shown(&BTreeSet::from([name.to_lowercase()]), HashMap::new()), None, "hidden, in any case");
+        assert_eq!(shown(&BTreeSet::new(), HashMap::from([(name.to_string(), PresetFile::default().into())])), Some(false), "the user's file wins");
+    }
+
+    /// A shown showcase is never written over; once hidden, or shadowed
+    /// by a file of the user's, its name is free.
+    #[test]
+    fn a_shown_showcases_name_is_refused_for_a_save() {
+        let (name, preset) = &showcases()[0];
+        let shown = HashMap::from([(name.to_string(), preset.clone())]);
+        assert!(name_refusal(&name.to_uppercase(), &HashSet::new(), &shown).is_some());
+        assert_eq!(name_refusal(name, &HashSet::new(), &HashMap::new()), None);
+        let users = HashMap::from([(name.to_string(), PresetFile::default().into())]);
+        assert_eq!(name_refusal(name, &HashSet::new(), &users), None);
     }
 
     // ── v1 → v2 migration ────────────────────────────────────────────

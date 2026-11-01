@@ -1,0 +1,77 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          0,
+          190,
+          230,
+          255
+        ],
+        "fill_style": {
+          "duotone": {
+            "dark": [
+              200,
+              0,
+              110
+            ],
+            "light": [
+              255,
+              230,
+              0
+            ]
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          0,
+          190,
+          230,
+          255
+        ],
+        "fill_style": {
+          "duotone": {
+            "dark": [
+              200,
+              0,
+              110
+            ],
+            "light": [
+              255,
+              230,
+              0
+            ]
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          0,
+          190,
+          230,
+          255
+        ],
+        "fill_style": {
+          "duotone": {
+            "dark": [
+              200,
+              0,
+              110
+            ],
+            "light": [
+              255,
+              230,
+              0
+            ]
+          }
+        }
+      }
+    }
+  }
+}

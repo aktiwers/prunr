@@ -445,6 +445,8 @@ fn import_adds_the_picked_presets() {
     let shared = FolderPreset::named("Shared");
     let mut h = reading_presets();
     click(&mut h, "Preset");
+    // The app starts with the built-in presets the first read brings here.
+    landed(&mut h);
     click(&mut h, "Import…");
     assert_eq!(asked(h.state()), Some(&DialogRequest::ImportPresets));
     let dir = tempfile::tempdir().unwrap();

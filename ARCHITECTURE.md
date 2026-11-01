@@ -270,7 +270,7 @@ A preset is one JSON file in the platform config dir (`prunr/presets/`); the fol
 | Import, drop a `.json`, Export | Files copied in under a free name, or written out; JSON that names no setting is refused |
 | `prunr --preset NAME\|FILE` | The command line starts from it; flags given override it |
 
-Old files keep loading: a file saved whole is trimmed to what differs, a picked model's old line or face settings move to the helpers' entries, and v1 files migrate under the default model. Showcase presets are seeded once (a marker keeps deleted ones deleted); the starred default preset is what new images take. Applying a preset is a `PresetApply` undo step.
+Old files keep loading: a file saved whole is trimmed to what differs, a picked model's old line or face settings move to the helpers' entries, and v1 files migrate under the default model. The showcase presets are built in like Prunr's (`crates/prunr-app/presets/showcases/`, compiled in) and read-only: a save under a showcase's name is refused, deleting one hides it (the settings keep the hidden names), and a file of the user's with a showcase's name takes its place. The starred default preset is what new images take. Applying a preset is a `PresetApply` undo step.
 
 ## Memory Management
 
