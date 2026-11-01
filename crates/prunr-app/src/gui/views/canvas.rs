@@ -133,7 +133,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
                 match target {
                     CancelTarget::Inpaint => app.cancel_erases(),
                     // The capsule counts the queued images too: its Cancel ends them all.
-                    CancelTarget::Upscale | CancelTarget::Colorize => app.processor.cancel_runs(),
+                    CancelTarget::Upscale | CancelTarget::Colorize => app.cancel_runs(),
                     CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
                     CancelTarget::Faces => app.processor.cancel_faces(),
                 }

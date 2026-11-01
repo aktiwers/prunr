@@ -1918,10 +1918,12 @@ impl Processor {
     /// change end the whole batch. An undo on one image cancels only its
     /// own run (`cancel_upscale` / `cancel_colorize`) and leaves the
     /// queue to the others.
-    pub(crate) fn cancel_runs(&self) {
-        self.clear_run_queue();
+    /// The images that were queued, which never run.
+    pub(crate) fn cancel_runs(&self) -> Vec<u64> {
+        let dropped = self.clear_run_queue();
         self.cancel_upscale();
         self.cancel_colorize();
+        dropped
     }
 
     fn run_queue(&self) -> std::sync::MutexGuard<'_, RunQueue> {
@@ -1966,8 +1968,9 @@ impl Processor {
         (q.total > 1).then_some((q.started.max(1), q.total))
     }
 
-    pub(crate) fn clear_run_queue(&self) {
-        *self.run_queue() = RunQueue::default();
+    /// The images that were queued, which never run.
+    pub(crate) fn clear_run_queue(&self) -> Vec<u64> {
+        std::mem::take(&mut *self.run_queue()).waiting.into()
     }
 
     /// A run's first snapshot: "Loading the model", counting images when
