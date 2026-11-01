@@ -320,7 +320,11 @@ impl PrunrApp {
         let mask_work = self.batch.cached_tensor_work(&tiers.mask, None);
         let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge, Some(action));
 
-        let jobs = crate::gui::memory::cap_jobs(Some(model), self.settings.parallel_jobs, self.settings.cpu_only());
+        let engines = crate::gui::memory::CutoutEngines {
+            line_mode: self.run_settings().line_mode,
+            ..crate::gui::memory::CutoutEngines::of_cutout(model, self.settings.parallel_jobs, self.settings.cpu_only())
+        };
+        let jobs = crate::gui::memory::jobs_for_run(engines, self.processor.warm_held_mb);
         self.update_on_screen();
         if tiers.full.len() > 1 {
             self.dispatch_with_admission(&tiers.full, mask_work, add_edge_work, model, jobs);

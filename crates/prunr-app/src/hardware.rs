@@ -219,6 +219,13 @@ pub fn available_ram_bytes_throttled() -> u64 {
     throttled(&CACHE, available_ram_bytes_now)
 }
 
+/// `available_ram_bytes_throttled` keeping an unreadable reading apart
+/// from nothing free: `None` when the system reports no memory.
+pub fn available_ram_reading_throttled() -> Option<u64> {
+    static CACHE: Reading<Option<u64>> = Mutex::new(None);
+    throttled(&CACHE, prunr_core::sysmem::available_ram_bytes)
+}
+
 /// Free RAM and swap for the run watchdogs. RAM is read at most every
 /// quarter second, as a model can take gigabytes within a second; swap
 /// as often, but every two seconds on Windows, where reading it walks

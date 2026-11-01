@@ -869,6 +869,8 @@ pub(crate) struct Processor {
     in_flight: Vec<InFlightBatch>,
     /// How many results each batch landed, until it ends.
     landed: HashMap<u64, usize>,
+    /// What the warm worker holds (MB), as the bridge last told.
+    pub(crate) warm_held_mb: u64,
     /// Results of batches that ended while work asked for still ran, until
     /// "All done" tells them.
     untold: usize,
@@ -963,6 +965,7 @@ impl Processor {
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             landed: HashMap::new(),
+            warm_held_mb: 0,
             untold: 0,
             next_batch: 0,
             seg_run: None,
