@@ -71,7 +71,13 @@ fn drop_tensors(item: &mut BatchItem) -> (usize, bool) {
 }
 
 /// Maximum thumbnail edge length in pixels.
-pub(crate) const THUMB_MAX_PX: u32 = 160;
+const THUMB_MAX_PX: u32 = 160;
+
+/// `rgba` shrunk to a thumbnail's size; never enlarged.
+pub(crate) fn thumbnail_rgba(rgba: &image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
+    prunr_core::formats::resize_rgba(rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear)
+}
 
 pub(crate) struct BatchManager {
     pub(crate) items: Vec<BatchItem>,
@@ -630,8 +636,7 @@ impl BatchManager {
             self.bg_io.decode_slots.spawn(move || {
                 // A parked result unpacks here, off the UI thread.
                 let image = crate::panics::caught("a thumbnail", || result.load().map(|rgba| {
-                    let (w, h) = fit_dimensions(rgba.width(), rgba.height(), THUMB_MAX_PX, THUMB_MAX_PX);
-                    let thumb = prunr_core::formats::resize_rgba(&rgba, w, h, prunr_core::formats::ResizeFilter::Bilinear);
+                    let thumb = thumbnail_rgba(&rgba);
                     (thumb.width(), thumb.height(), thumb.into_raw())
                 })).flatten();
                 let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
@@ -1312,9 +1317,8 @@ mod tests {
     /// under way.
     #[test]
     fn off_screen_idle_images_let_go_of_their_photo_and_textures() {
-        use crate::gui::image_texture::ImageTexture;
         let ctx = egui::Context::default();
-        let texture = || ImageTexture::single(ctx.load_texture("t", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        let texture = || crate::gui::tests::fixtures::red_texture(&ctx);
         let mut bm = fixture();
         for id in 1..=4 {
             let mut item = item_with_cache(id, 0);
@@ -1436,7 +1440,6 @@ mod tests {
     /// being built, for the others to wait on and then share.
     #[test]
     fn images_showing_one_picture_find_its_one_texture() {
-        use crate::gui::image_texture::ImageTexture;
         use super::PictureBackdrop;
         let ctx = egui::Context::default();
         let mut bm = fixture();
@@ -1454,7 +1457,7 @@ mod tests {
         assert!(matches!(bm.picture_backdrop(key), Some(PictureBackdrop::Building)));
         assert_eq!(bm.lacking_picture_backdrops(), vec![2, 3], "the one building is not listed");
 
-        let texture = ImageTexture::single(ctx.load_texture("backdrop", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         assert!(bm.items[0].install_backdrop(key, texture.clone()));
         assert!(matches!(bm.picture_backdrop(key), Some(PictureBackdrop::Held(held)) if held.id() == texture.id()));
     }

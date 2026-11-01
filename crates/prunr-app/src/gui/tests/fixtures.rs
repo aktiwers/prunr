@@ -30,6 +30,11 @@ pub(crate) fn bg_picture(hash: u64) -> std::sync::Arc<crate::gui::item::BgImage>
 /// Make `item` a cut-out by `model` as a run leaves it: its segmentation
 /// kept, a result on the shown step, and the step recorded as that cut.
 /// Adds no undo step.
+/// A one-pixel red texture, where a test needs one to hold.
+pub(crate) fn red_texture(ctx: &egui::Context) -> crate::gui::image_texture::ImageTexture {
+    crate::gui::image_texture::ImageTexture::single(ctx.load_texture("red", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR))
+}
+
 pub(crate) fn cut_out(item: &mut BatchItem, model: prunr_core::ModelKind) {
     let (w, h) = if item.dimensions.0 > 1 { item.dimensions } else { (8, 8) };
     let raw = crate::gui::worker::RawSegTensor { data: vec![0.5; (w * h) as usize], height: h, width: w, model };
