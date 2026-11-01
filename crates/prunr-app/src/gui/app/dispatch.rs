@@ -87,24 +87,24 @@ impl PrunrApp {
         let ids: Vec<u64> = self.batch.items_to_process().into_iter()
             .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| self.run_may_start(i)))
             .collect();
-        let shown = self.batch.selected_idx_clamped();
-        let shown_settings = shown.map(|i| self.batch.items[i].settings);
-        let adopting: HashSet<u64> = ids.iter().copied()
-            .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| Some(i.settings) != shown_settings))
-            .collect();
-        if let Some(shown) = shown {
-            self.batch.share_settings(shown, &ids.iter().copied().collect());
-        }
+        let adopted = self.batch.selected_idx_clamped()
+            .map(|shown| self.batch.share_settings(shown, &ids.iter().copied().collect()))
+            .unwrap_or_default();
         let refinish = if model.is_upscale() { PreviewKind::UpscaleTier2 } else { PreviewKind::ColorizeTier2 };
         let (mut runs, mut up_to_date, mut refinished) = (Vec::new(), 0, 0);
         for id in ids {
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
             match item.kept_run_tier(model) {
                 KeptRunTier::UpToDate if model.is_upscale() => runs.push(id),
-                KeptRunTier::UpToDate => up_to_date += 1,
+                KeptRunTier::UpToDate => {
+                    if adopted.contains(&id) {
+                        item.commit(StepKind::Adjust);
+                    }
+                    up_to_date += 1;
+                }
                 KeptRunTier::Refinish => {
                     // The shown image's own knob change is a step already.
-                    if adopting.contains(&id) {
+                    if adopted.contains(&id) {
                         item.commit(StepKind::Adjust);
                     }
                     self.processor.live_preview.render_now(id, refinish);
@@ -298,17 +298,23 @@ impl PrunrApp {
         // image's settings first, so one that was up to date under its own
         // reruns under these. A background image's result stays parked:
         // the run starts from its stored step.
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &candidate_ids);
-        }
+        let adopted = self.batch.selected_idx_clamped()
+            .map(|shown| self.batch.share_settings(shown, &candidate_ids))
+            .unwrap_or_default();
 
         let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
         let action = self.settings.brush.cutout_action;
         let tiers = self.batch.classify(&candidate_ids, model, step, cutter, action);
+        let runs = tiers.all_process_ids();
+        for &id in adopted.difference(&runs) {
+            if let Some(item) = self.batch.find_by_id_mut(id) {
+                item.commit(StepKind::Adjust);
+            }
+        }
         self.notify_skip(tiers.up_to_date_count, tiers.process_count());
         if tiers.process_count() == 0 { return; }
 
-        for id in tiers.all_process_ids() {
+        for id in runs {
             // A re-run lands in place, keeping the step's version: a render
             // of the image's drag would still land after it.
             self.processor.live_preview.cancel(id);
@@ -618,6 +624,28 @@ mod process_targets_tests {
         assert_eq!(other.status(), crate::gui::item::BatchStatus::Processing, "and reruns under them");
     }
 
+    /// An image already cut out as the shown settings ask runs nothing on
+    /// Process, but takes their look as a step of its own, so Undo puts
+    /// its look back and keeps its cut-out.
+    #[test]
+    fn a_ticked_image_up_to_date_takes_the_shown_look_as_a_step() {
+        use crate::gui::item::BatchStatus;
+        let mut app = two_images(SettingsModel::Silueta);
+        for item in &mut app.batch.items {
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+            item.ticked = true;
+        }
+        app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
+        let steps = app.batch.items[1].timeline.undo_steps();
+        app.process_items(|i| i.ticked, Some(StepKind::Process));
+        let other = &mut app.batch.items[1];
+        assert_eq!((other.settings.bg, other.status()), (Some([10, 20, 30, 255]), BatchStatus::Done), "it took the look, nothing reruns");
+        assert_eq!(other.timeline.undo_steps(), steps + 1, "as a step of its own");
+        other.undo_step().expect("a step to undo");
+        assert_eq!((other.settings.bg, other.status()), (None, BatchStatus::Done), "Undo puts the look back and keeps the cut-out");
+    }
+
     /// Process by another model than the one that cut the image on screen
     /// builds on that cut-out, with No model too; the same model, or a
     /// knob's re-run, redoes the step from its own start.
@@ -719,14 +747,25 @@ mod process_targets_tests {
         let model = crate::gui::settings::COLORIZER;
         let img = std::sync::Arc::new(image::RgbaImage::new(4, 4));
         let plane = std::sync::Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]);
-        let item = &mut app.batch.items[0];
-        item.start_job(Some(StepKind::Colorize), Engine::Colorize);
-        item.applied_recipe = Some(item.settings.current_recipe(model));
-        item.result_rgba = Some(img.clone());
-        item.land_colorize(ColorizeCache::new(plane, img));
-        crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+        for item in &mut app.batch.items {
+            item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+            item.applied_recipe = Some(item.settings.current_recipe(model));
+            item.result_rgba = Some(img.clone());
+            item.land_colorize(ColorizeCache::new(plane.clone(), img.clone()));
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Done);
+        }
+        app.batch.items[0].ticked = true;
         app.process_kept_run_items();
         assert!(app.batch.items[0].job.is_none() && !app.processor.is_colorize_in_flight(), "nothing runs");
+
+        // A ticked image takes the shown look without a run, as a step.
+        app.batch.items[1].ticked = true;
+        app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
+        let steps = app.batch.items[1].timeline.undo_steps();
+        app.process_kept_run_items();
+        assert!(app.batch.items[1].job.is_none() && !app.processor.is_colorize_in_flight(), "still nothing runs");
+        assert_eq!(app.batch.items[1].settings.bg, Some([10, 20, 30, 255]));
+        assert_eq!(app.batch.items[1].timeline.undo_steps(), steps + 1, "the look is a step of its own");
     }
 
     /// An upscale that would not fit in free memory is refused, saying so.

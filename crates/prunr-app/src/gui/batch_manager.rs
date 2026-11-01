@@ -738,13 +738,19 @@ impl BatchManager {
 
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
-    pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
-        let Some(source) = self.items.get(from) else { return };
+    /// The images whose settings it changed: one that runs nothing for
+    /// them takes them as a step of its own.
+    pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) -> HashSet<u64> {
+        let Some(source) = self.items.get(from) else { return HashSet::new() };
         let (settings, bg_image) = (source.settings, source.bg_image.clone());
         let (preset, changes) = (source.applied_preset.clone(), source.preset_changes.clone());
-        for item in self.in_set(ids) {
-            item.adopt_settings(settings, bg_image.clone(), &preset, &changes);
-        }
+        self.in_set(ids)
+            .filter_map(|item| {
+                let changed = item.settings != settings;
+                item.adopt_settings(settings, bg_image.clone(), &preset, &changes);
+                changed.then_some(item.id)
+            })
+            .collect()
     }
 
     /// Drop every image's Magic Brush embedding (16 MB each).
