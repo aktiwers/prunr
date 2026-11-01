@@ -42,7 +42,7 @@ pub(crate) enum TexLanding {
     /// The picture behind the result, for `key`.
     Backdrop { item_id: u64, key: u64 },
     /// An effect's thumbnail-size copy, for `key`.
-    BackdropThumb { item_id: u64, key: u64 },
+    BackdropThumb { item_id: u64, key: crate::gui::item::ThumbKey },
 }
 
 impl TexLanding {
@@ -166,11 +166,11 @@ pub(crate) enum BackdropBuilt {
     Picture(
         Option<crate::gui::image_texture::PreparedImage>,
         Option<crate::gui::item::BackdropMade>,
-        Option<(u64, crate::gui::image_texture::PreparedImage)>,
+        Option<(crate::gui::item::ThumbKey, crate::gui::image_texture::PreparedImage)>,
     ),
-    /// An effect's thumbnail-size copy alone, for an image off screen
-    /// (`None`: none could be made).
-    Thumb(Option<crate::gui::image_texture::PreparedImage>),
+    /// An effect's thumbnail-size copy alone, for an image off screen, and
+    /// the key it was made for (`None`: none could be made).
+    Thumb(crate::gui::item::ThumbKey, Option<crate::gui::image_texture::PreparedImage>),
     /// The cut-out is the one the shown backdrop was made of: it stays.
     Same,
 }
