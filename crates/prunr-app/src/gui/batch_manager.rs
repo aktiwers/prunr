@@ -545,9 +545,6 @@ impl BatchManager {
                 && item.named_bg_image().is_some()
                 && item.backdrop_key().is_some_and(|key| item.backdrop_texture_for(key).is_none() && item.backdrop_tex_pending != Some(key))
         };
-        if !self.items.iter().any(lacks) {
-            return Vec::new();
-        }
         self.items.iter().filter(|item| lacks(item)).map(|item| item.id).collect()
     }
 
