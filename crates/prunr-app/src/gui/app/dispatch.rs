@@ -57,22 +57,22 @@ impl PrunrApp {
             }
             // Its image changed while it waited (a run started on it, its
             // region was cleared): it passes its turn.
-            if refusal != Some(None) {
-                continue;
-            }
-            if let Some(shown) = self.batch.selected_idx_clamped() {
-                self.batch.share_settings(shown, &HashSet::from([item_id]));
-            }
-            let started = if self.settings.model.is_inpaint() {
-                self.batch.index_of(item_id).is_some_and(|idx| self.dispatch_inpaint_for_item(idx))
-            } else if self.settings.model.is_colorize() {
-                self.dispatch_colorize_for(item_id)
-            } else {
-                self.dispatch_upscale_for(item_id)
+            let started = refusal == Some(None) && {
+                if let Some(shown) = self.batch.selected_idx_clamped() {
+                    self.batch.share_settings(shown, &HashSet::from([item_id]));
+                }
+                if self.settings.model.is_inpaint() {
+                    self.batch.index_of(item_id).is_some_and(|idx| self.dispatch_inpaint_for_item(idx))
+                } else if self.settings.model.is_colorize() {
+                    self.dispatch_colorize_for(item_id)
+                } else {
+                    self.dispatch_upscale_for(item_id)
+                }
             };
             if started {
                 return;
             }
+            // The look it took on Process, for a run that will not run.
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.record_unlanded_look();
             }
@@ -660,6 +660,46 @@ mod process_targets_tests {
             other.undo_step().unwrap_or_else(|_| panic!("{how}: its look is a step"));
             assert_eq!(other.settings.bg, None, "{how}: Undo puts its look back");
         }
+    }
+
+    /// A queued upscale that never starts (Cancel ends the queue) keeps
+    /// the look Process gave its image as a step of its own.
+    #[test]
+    fn a_queued_runs_look_stays_undoable_when_the_queue_is_cancelled() {
+        let mut app = two_images(SettingsModel::RealEsrganUpscale);
+        for item in &mut app.batch.items {
+            item.ticked = true;
+        }
+        app.processor.set_upscale_in_flight_for_test(true);
+        app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
+        app.process_kept_run_items();
+        app.processor.set_upscale_in_flight_for_test(false);
+        assert_eq!(app.batch.items[1].settings.bg, Some([10, 20, 30, 255]), "it took the look, queued");
+        app.cancel_runs();
+        let other = &mut app.batch.items[1];
+        other.undo_step().expect("its look is a step");
+        assert_eq!(other.settings.bg, None, "Undo puts its look back");
+    }
+
+    /// Undo pressed while a ticked image's run is under way takes back the
+    /// look Process gave it, not the step before.
+    #[test]
+    fn undo_during_a_run_takes_back_the_look_the_run_was_for() {
+        let ctx = egui::Context::default();
+        let mut app = two_images(SettingsModel::Silueta);
+        for item in &mut app.batch.items {
+            item.ticked = true;
+        }
+        // A preset given to it before.
+        let other = &mut app.batch.items[1];
+        other.settings.gamma = 1.4;
+        other.commit(StepKind::Preset);
+        app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
+        app.process_items(|i| i.ticked, Some(StepKind::Process));
+        assert!(app.batch.items[1].job.is_some(), "it runs");
+        app.step_items(&ctx, crate::gui::views::shortcuts::Action::Undo, &[2]);
+        let other = &app.batch.items[1];
+        assert_eq!((other.settings.bg, other.settings.gamma), (None, 1.4), "back to before Process, its own change kept");
     }
 
     /// Process by another model than the one that cut the image on screen

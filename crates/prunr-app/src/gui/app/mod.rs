@@ -765,6 +765,11 @@ impl PrunrApp {
         let mut lost = false;
         for &id in ids {
             let Some(idx) = self.batch.index_of(id) else { continue };
+            // The look a run under way was given lands with it; Undo takes
+            // back that look first, not the step before it.
+            if action != Action::Redo && self.batch.items[idx].job.is_some() {
+                self.batch.items[idx].record_unlanded_look();
+            }
             // A run belongs to the state being left, but strokes painted
             // while it runs keep it.
             if !keeps_run(&self.batch.items[idx]) {
@@ -917,7 +922,7 @@ impl PrunrApp {
         // Always cancel an in-flight upscale or colorize; the call is
         // idempotent and gating on the model would drop the signal if the
         // user switched model mid-flight.
-        self.processor.cancel_runs();
+        self.cancel_runs();
         self.processor.cancel_faces();
     }
 
@@ -938,8 +943,26 @@ impl PrunrApp {
     /// Stop every erase in flight and the images queued after it: the
     /// capsule's Cancel and Escape alike.
     pub(crate) fn cancel_erases(&mut self) {
-        self.processor.clear_run_queue();
+        let dropped = self.processor.clear_run_queue();
+        self.keep_dropped_looks(&dropped);
         self.processor.cancel_all_inpaints();
+    }
+
+    /// Stop the upscale or colorize under way and the images queued after
+    /// it: the capsule's Cancel and the app's.
+    pub(crate) fn cancel_runs(&mut self) {
+        let dropped = self.processor.cancel_runs();
+        self.keep_dropped_looks(&dropped);
+    }
+
+    /// A look the queued images took for runs that will not run stays a
+    /// step of their own.
+    fn keep_dropped_looks(&mut self, ids: &[u64]) {
+        for &id in ids {
+            if let Some(item) = self.batch.find_by_id_mut(id) {
+                item.record_unlanded_look();
+            }
+        }
     }
 
     /// Cancel the cuts under way or waiting: the ticked ones when any
@@ -1077,7 +1100,7 @@ impl PrunrApp {
         }
         let finding_faces = self.processor.dispatch_progress().is_some_and(|p| p.kind == super::dispatch_progress::ProgressKind::Faces);
         if self.processor.is_run_in_flight() {
-            self.processor.cancel_runs();
+            self.cancel_runs();
         } else if finding_faces {
             self.processor.cancel_faces();
         } else if self.processor.any_inpaint_in_flight() {
@@ -1360,7 +1383,7 @@ impl PrunrApp {
         self.settings.switch_brush_model(from, &preset);
         self.fit_brush_models_to_model();
         // A run of the old model would land on the wrong selection.
-        self.processor.cancel_runs();
+        self.cancel_runs();
         // The kept runs came from the old model; a Tier-2 tick would show
         // them under the new model's knobs.
         for item in &mut self.batch.items {
