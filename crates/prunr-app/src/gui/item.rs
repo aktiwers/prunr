@@ -3169,15 +3169,6 @@ impl BatchItem {
         self.settings.bg_image_hash = std::num::NonZeroU64::new(hash);
     }
 
-    /// Without a background-removal model there is no subject to
-    /// outline, so Subject lines draw over the whole photo, the nearest
-    /// mode that still has lines.
-    pub(crate) fn fit_line_mode_to(&mut self, model: super::settings::SettingsModel) {
-        if !model.uses_segmentation() && self.settings.line_mode == prunr_core::LineMode::SubjectOutline {
-            self.settings.line_mode = prunr_core::LineMode::EdgesOnly;
-        }
-    }
-
     /// Leave model `from`, which ran face restorer `face`, for `to` on
     /// `preset`: what was changed since the preset was applied stays, the
     /// rest takes `to`'s settings.
@@ -3185,7 +3176,7 @@ impl BatchItem {
         self.preset_changes.note(&self.settings, &super::preset_fields::entries_of(from, face));
         let values = preset.values_after_switch(to, &self.settings, &self.preset_changes);
         self.settings = super::presets::take(self.settings, values, &self.preset_changes);
-        self.fit_line_mode_to(to);
+        self.settings.fit_line_mode_to(to);
         self.preset_changes.rebase(&self.settings);
     }
 

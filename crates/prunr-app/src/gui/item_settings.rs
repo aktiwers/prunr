@@ -297,6 +297,15 @@ impl ItemSettings {
     }
 
     /// Convert mask-related fields into the core `MaskSettings`.
+    /// Without a background-removal model there is no subject to
+    /// outline, so Subject lines draw over the whole photo, the nearest
+    /// mode that still has lines.
+    pub fn fit_line_mode_to(&mut self, model: crate::gui::settings::SettingsModel) {
+        if !model.uses_segmentation() && self.line_mode == LineMode::SubjectOutline {
+            self.line_mode = LineMode::EdgesOnly;
+        }
+    }
+
     pub fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,
