@@ -60,9 +60,10 @@ libc = "0.2"
 libc = "0.2"
 
 # Graphics memory on Windows: DXGI's budget for this process and what it
-# holds, which counts CUDA's allocations under WDDM too.
+# holds, which counts CUDA's allocations under WDDM too; and the memory
+# Windows can still commit.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 prunr-models = { path = "../prunr-models", features = ["dev-models"] }
