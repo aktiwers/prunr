@@ -903,7 +903,7 @@ fn engines_fit(state: &BatchRunState, warm: Option<&SubprocessManager>, jobs: us
     }).map_err(|short| {
         tracing::warn!(?engines, held_mb, %short, "cut-out refused: not enough memory");
         // Lines alone run no cut-out model: the line model is what is short.
-        let (subject, lighter) = if line_mode == LineMode::EdgesOnly {
+        let (subject, lighter) = if !line_mode.cuts_out() {
             ("Sketch", Vec::new())
         } else {
             let lighter = engines.lighter_that_fit(held_mb).into_iter().map(|m| super::views::model_name(m).to_string()).collect();

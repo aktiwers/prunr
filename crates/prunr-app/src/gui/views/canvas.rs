@@ -811,10 +811,9 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
     cell.get_or_init(|| ctx.load_texture(name, build_checker_image(light, dark), TextureOptions::NEAREST)).clone()
 }
 
-/// What sits behind `item`'s result, painted into `rect` under it. Until a
-/// picture's texture lands, nothing (the checkerboard) shows.
-/// `item`'s backdrop under its image in `rect`; a picture or effect from
-/// `texture`.
+/// What sits behind `item`'s result, painted into `rect` under it; a
+/// picture or effect from `texture`. Until that lands, nothing (the
+/// checkerboard) shows.
 pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem, image_px: Vec2, texture: Option<&ImageTexture>) {
     use crate::gui::item_settings::Backdrop;
     let backdrop = item.settings.backdrop();

@@ -124,10 +124,10 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
         },
         Need::PhotoRender if matches!(role, ModelRole::Cutout | ModelRole::Filters) => Verdict::Ready,
         Need::PhotoRender => Verdict::Never(Reason::NotForModel),
-        Need::Cutout if facts.line_mode == LineMode::EdgesOnly => Verdict::Never(Reason::SketchCoversPhoto),
+        Need::Cutout if !facts.line_mode.cuts_out() => Verdict::Never(Reason::SketchCoversPhoto),
         // No model's photo is its own result: what cut-out controls act on.
         Need::Cutout if role == ModelRole::Filters => Verdict::Ready,
-        Need::Subject if facts.line_mode == LineMode::EdgesOnly => Verdict::Never(Reason::NoSubject),
+        Need::Subject if !facts.line_mode.cuts_out() => Verdict::Never(Reason::NoSubject),
         Need::Subject => check(facts, Need::Cutout, role),
         Need::Transparency if role == ModelRole::Filters && facts.line_mode == LineMode::Off => Verdict::Never(Reason::NothingTransparent),
         Need::Transparency => check(facts, Need::Processed, role),

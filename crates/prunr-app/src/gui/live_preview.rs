@@ -127,7 +127,7 @@ impl PreviewKind {
     /// render there would draw the photo without them); otherwise a Mask
     /// render, which also redraws Subject lines.
     pub fn photo_rerun(line_mode: LineMode) -> Self {
-        if line_mode == LineMode::EdgesOnly { Self::Edge } else { Self::Mask }
+        if line_mode.cuts_out() { Self::Mask } else { Self::Edge }
     }
 }
 

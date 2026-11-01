@@ -34,7 +34,19 @@ pub(crate) fn presets_dir() -> Option<PathBuf> {
 
 /// Whether `name` is Prunr's own preset, in any case.
 pub(crate) fn is_prunr(name: &str) -> bool {
-    name.trim().eq_ignore_ascii_case(PRUNR_PRESET)
+    same_name(name, PRUNR_PRESET)
+}
+
+/// Whether two preset names are one: case and outer spaces ignored, as
+/// the file systems presets are shared through treat them.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Whether a newer Prunr saved preset `name` (`newer` holds lowercased
+/// names).
+fn newer_has(newer: &HashSet<String>, name: &str) -> bool {
+    newer.contains(&name.trim().to_lowercase())
 }
 
 /// The file preset `name` is kept in.
@@ -52,7 +64,7 @@ pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
 /// Preset names in the order the list shows them, case ignored.
 pub(crate) fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut names: Vec<String> = names.into_iter().collect();
-    names.sort_by_key(|name| name.to_lowercase());
+    names.sort_by_cached_key(|name| name.to_lowercase());
     names
 }
 
@@ -148,7 +160,7 @@ fn showcases() -> &'static [(&'static str, Preset)] {
     static READ: std::sync::OnceLock<Vec<(&str, Preset)>> = std::sync::OnceLock::new();
     READ.get_or_init(|| {
         SHOWCASES
-            .iter()
+            .par_iter()
             .filter_map(|&(name, json)| parse_preset_bytes(json.as_bytes()).ok().map(|file| (name, Preset::from(file).built_in())))
             .collect()
     })
@@ -166,7 +178,7 @@ pub(crate) fn load_all(hidden: &BTreeSet<String>) -> (HashMap<String, Preset>, H
 
 fn add_showcases(presets: &mut HashMap<String, Preset>, hidden: &BTreeSet<String>, newer: &HashSet<String>) {
     for (name, showcase) in showcases() {
-        let taken = hidden.iter().chain(presets.keys()).any(|other| other.eq_ignore_ascii_case(name)) || newer.contains(&name.to_lowercase());
+        let taken = hidden.iter().chain(presets.keys()).any(|other| same_name(other, name)) || newer_has(newer, name);
         if !taken {
             presets.insert(name.to_string(), showcase.clone());
         }
@@ -219,11 +231,11 @@ pub(crate) fn find_preset(name: &str) -> Result<Preset, String> {
         });
     }
     let (mut presets, newer) = load_all(&BTreeSet::new());
-    let found = presets.keys().find(|key| key.eq_ignore_ascii_case(name)).cloned();
+    let found = presets.keys().find(|key| same_name(key, name)).cloned();
     if let Some(preset) = found.and_then(|key| presets.remove(&key)) {
         return Ok(preset);
     }
-    if newer.contains(&name.to_lowercase()) {
+    if newer_has(&newer, name) {
         return Err(format!("the preset \"{name}\" was saved by a newer Prunr"));
     }
     let names: Vec<String> = std::iter::once(PRUNR_PRESET.to_string()).chain(sorted_names(presets.into_keys())).collect();
@@ -245,10 +257,10 @@ pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>, presets: &HashMa
     if is_prunr(name) {
         return Some(RESERVED_NAME);
     }
-    if presets.iter().any(|(other, preset)| preset.is_built_in() && other.eq_ignore_ascii_case(name.trim())) {
+    if presets.iter().any(|(other, preset)| preset.is_built_in() && same_name(other, name)) {
         return Some("A preset built into Prunr has this name — pick another.");
     }
-    newer.contains(&name.trim().to_lowercase()).then_some("A newer version of Prunr saved a preset with this name — pick another.")
+    newer_has(newer, name).then_some("A newer version of Prunr saved a preset with this name — pick another.")
 }
 
 const RESERVED_NAME: &str = "\"Prunr\" is reserved — pick another name.";
@@ -506,8 +518,7 @@ mod tests {
     #[test]
     fn every_showcase_file_is_built_in_and_holds_only_its_differences() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("presets/showcases");
-        let mut files: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path().file_stem().unwrap().to_str().unwrap().to_string()).collect();
-        files.sort_by_key(|name| name.to_lowercase());
+        let files = sorted_names(std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path().file_stem().unwrap().to_str().unwrap().to_string()));
         let listed: Vec<&str> = SHOWCASES.iter().map(|&(name, _)| name).collect();
         assert_eq!(files, listed, "SHOWCASES lists every file once, by name");
         assert_eq!(showcases().len(), SHOWCASES.len(), "every showcase reads");

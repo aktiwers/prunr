@@ -363,7 +363,7 @@ impl ItemSettings {
     /// to defaults where segmentation is skipped, so unused knobs don't
     /// trigger reprocessing. `model` is app-global.
     pub fn current_recipe(&self, model: prunr_core::ModelKind) -> prunr_core::ProcessingRecipe {
-        let uses_segmentation = self.line_mode != LineMode::EdgesOnly;
+        let uses_segmentation = self.line_mode.cuts_out();
         let uses_edge_detection = self.line_mode != LineMode::Off;
         let mask = if uses_segmentation {
             prunr_core::MaskRecipe::from(&self.mask_settings())

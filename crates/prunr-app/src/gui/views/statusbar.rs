@@ -38,8 +38,6 @@ pub fn render(ui: &mut egui::Ui, app: &PrunrApp) {
         } else if batch_processing {
             format!("Processing {batch_done_count}/{}\u{2026}", super::fmt::count(batch_total, "image", "images"))
         } else if batch_total >= 2 && batch_done_count > 0 {
-            // "All done" is the toast's: it tells what the run did, this
-            // line how many images have results.
             format!("{batch_done_count} of {batch_total} images processed")
         } else {
             match app_state {

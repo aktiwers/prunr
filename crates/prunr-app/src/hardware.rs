@@ -215,8 +215,7 @@ pub fn available_ram_mb_throttled() -> u32 {
 /// Cached available-RAM read with a 1-second TTL; cheap enough for
 /// per-frame UI code (~10 ns on a cache hit).
 pub fn available_ram_bytes_throttled() -> u64 {
-    static CACHE: Reading<u64> = Mutex::new(None);
-    throttled(&CACHE, available_ram_bytes_now)
+    available_ram_reading_throttled().unwrap_or(0)
 }
 
 /// `available_ram_bytes_throttled` keeping an unreadable reading apart
