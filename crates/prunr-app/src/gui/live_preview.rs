@@ -878,6 +878,15 @@ pub struct ExportRender {
 
 impl ExportRender {
     /// The rendered image; why not, when the render refuses (too large).
+    ///
+    /// Peak beyond the photo, measured on a 24 MP photo (96 MB), no faces:
+    ///
+    /// | render                       | peak    |
+    /// |------------------------------|---------|
+    /// | No model, an effect          | 0 (in place) |
+    /// | cut-out, or lines only       | 116 MB  |
+    /// | cut-out + Subject outline    | 234 MB  |
+    /// | No model + the Depth look    | 370 MB, all the look's own blur |
     pub fn render(self) -> Result<RgbaImage, String> {
         let settings = self.settings;
         let mut edges = self.edges;
