@@ -1055,7 +1055,7 @@ fn read_result_image(
         .ok_or_else(|| "The model's result could not be read. Process again.".to_string())
 }
 
-fn read_raw_seg_tensor(file: Option<&TensorCacheFile>, model: ModelKind) -> Option<RawSegTensor> {
+pub fn read_raw_seg_tensor(file: Option<&TensorCacheFile>, model: ModelKind) -> Option<RawSegTensor> {
     let TensorCacheFile { path: p, height: h, width: w } = file?;
     let (h, w) = (*h, *w);
     let bytes = read_and_delete(p)?;
@@ -1073,7 +1073,7 @@ fn read_raw_seg_tensor(file: Option<&TensorCacheFile>, model: ModelKind) -> Opti
 
 /// Read the TEED planes the worker wrote, split by each listed scale's
 /// size; the scales it did not write stay empty.
-fn read_raw_edge_tensors(file: Option<&EdgeCacheFile>) -> Option<RawEdgeTensors> {
+pub fn read_raw_edge_tensors(file: Option<&EdgeCacheFile>) -> Option<RawEdgeTensors> {
     let file = file?;
     let raw_bytes = read_and_delete(&file.path)?;
 
