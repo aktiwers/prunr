@@ -230,6 +230,7 @@ mod tests {
             ("Non-zero status code returned while running Conv node. Status Message: CUDA error: out of memory", Kind::CardMemory),
             ("allocator.h:333 onnxruntime::IAllocator::ValidateAllocation p != nullptr || size == 0 was false. Memory allocation failed. Size=825294864", Kind::Memory),
             ("Non-zero status code returned while running Gemm node. Status Message: cuBLAS error: 7", Kind::ModelFailed),
+            ("Inference error: ORT inference failed: Allocation failed.", Kind::Memory),
         ];
         for (raw, kind) in failures {
             assert_eq!(Kind::in_light_of(raw, false), Some(kind), "{raw}");
