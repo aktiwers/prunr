@@ -182,10 +182,20 @@ pub fn available_commit_bytes() -> Option<u64> {
 }
 
 /// Whether Windows has less left to commit than a run's stop line
-/// (`memory::STOP_BELOW_FREE_MB`): a run failing then failed for that,
-/// not for the card's memory or the model. Never elsewhere.
+/// (`memory::STOP_BELOW_FREE_MB`) and no room to grow its page file for
+/// more, the system drive as full: a run failing then failed for that,
+/// not for the card's memory or the model. With room, Windows grows the
+/// page file and a short reading passes. Never elsewhere.
 pub fn commit_is_short() -> bool {
-    available_commit_bytes().is_some_and(|free| free < crate::memory::STOP_BELOW_FREE_MB * 1024 * 1024)
+    const STOP: u64 = crate::memory::STOP_BELOW_FREE_MB * 1024 * 1024;
+    available_commit_bytes().is_some_and(|free| free < STOP) && system_drive_free_bytes().is_some_and(|free| free < STOP)
+}
+
+/// Free space on the drive Windows runs from, where its page file grows.
+fn system_drive_free_bytes() -> Option<u64> {
+    let mut root = std::path::PathBuf::from(std::env::var_os("SystemDrive")?);
+    root.push(std::path::MAIN_SEPARATOR_STR);
+    free_disk_bytes(&root)
 }
 
 /// The system's memory; `None` when it doesn't report it.
@@ -251,6 +261,9 @@ mod tests {
     #[test]
     fn only_windows_reports_its_commit() {
         assert_eq!(available_commit_bytes().is_some(), cfg!(windows));
+        if !cfg!(windows) {
+            assert!(!commit_is_short());
+        }
     }
 
     /// macOS names its pressure 1 (normal), 2 (warning) or 4 (critical):
