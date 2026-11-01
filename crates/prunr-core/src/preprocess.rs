@@ -118,4 +118,14 @@ mod tests {
         let red = preprocess(&solid_rgb_image(255, 0, 0, 64, 64), ModelKind::Silueta);
         assert!(red[[0, 0, 160, 160]] > red[[0, 1, 160, 160]], "channel 0 is R");
     }
+
+    /// A photo shrunk to `input_side` before a first look is at the side
+    /// `preprocess` makes, so it is not resized a second time.
+    #[test]
+    fn input_side_is_the_side_preprocess_makes() {
+        for model in [ModelKind::Silueta, ModelKind::U2net, ModelKind::BiRefNetLite] {
+            let side = input_side(model) as usize;
+            assert_eq!(preprocess(&solid_rgb_image(9, 9, 9, 640, 480), model).shape(), &[1, 3, side, side], "{model:?}");
+        }
+    }
 }
