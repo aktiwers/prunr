@@ -842,7 +842,8 @@ impl PrunrApp {
     /// marked as processing was never answered and must not wait on, with
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
-    fn on_batch_complete(&mut self, batch: u64) {
+    pub(super) fn on_batch_complete(&mut self, batch: u64) {
+        let quiet = self.processor.batch_is_quiet(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
         never_answered.extend(self.processor.end_admission_with(batch));
@@ -868,7 +869,7 @@ impl PrunrApp {
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
-        } else if !still_processing {
+        } else if !still_processing && !quiet {
             let msg = format!("All done \u{2014} {} processed", crate::gui::views::fmt::count(counts.done, "image", "images"));
             self.status.text = msg.clone();
             self.toasts.success(msg);

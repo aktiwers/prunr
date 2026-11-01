@@ -90,6 +90,9 @@ struct InFlightBatch {
     /// Frozen at dispatch, so progress counts only this dispatch, not
     /// items processed before it.
     total: usize,
+    /// Nobody asked for it (the lines a brush's putting down retraces):
+    /// its end says nothing.
+    quiet: bool,
 }
 
 /// How an inpaint stroke ended; it travels with the item id.
@@ -1494,7 +1497,7 @@ impl Processor {
         });
         let id = self.next_batch;
         self.next_batch += 1;
-        self.in_flight.push(InFlightBatch { id, recipe, pending, total });
+        self.in_flight.push(InFlightBatch { id, recipe, pending, total, quiet: false });
         if self.seg_run.is_none() {
             let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Seg, "Starting");
             self.seg_run = Some(self.dispatch_progress.begin(initial));
@@ -1599,6 +1602,18 @@ impl Processor {
         }
         self.after_batch_change();
         Some((recipe, run))
+    }
+
+    /// The batch running `item_id`'s run is one nobody asked for.
+    pub(crate) fn hush_batch_of(&mut self, item_id: u64) {
+        if let Some(batch) = self.in_flight.iter_mut().find(|b| b.pending.contains_key(&item_id)) {
+            batch.quiet = true;
+        }
+    }
+
+    /// Whether batch `id` is one nobody asked for (`hush_batch_of`).
+    pub(crate) fn batch_is_quiet(&self, id: u64) -> bool {
+        self.in_flight.iter().any(|b| b.id == id && b.quiet)
     }
 
     /// The worker finished batch `id`: drop it and return the images it

@@ -101,6 +101,7 @@ impl PrunrApp {
         }
         let item_id = item.id;
         self.process_items(|item| item.id == item_id, None);
+        self.processor.hush_batch_of(item_id);
         let item = &mut self.batch.items[idx];
         if let Some(job) = item.job.as_mut() {
             job.quiet = true;
@@ -1082,6 +1083,31 @@ mod stroke_lines_tests {
         assert!(app.batch.items[0].job.as_ref().is_some_and(|j| j.quiet), "a run nobody asked for");
         app.set_tool(Some(Tool::Paint));
         assert!(app.batch.items[0].is_idle(), "the brush paints at once");
+    }
+
+    /// A lines run nobody asked for ends without "All done", stopped by
+    /// picking the brush up or landed: the user only put the brush down.
+    #[test]
+    fn a_lines_run_nobody_asked_for_ends_without_all_done() {
+        use crate::gui::brush_state::Tool;
+        for stopped in [true, false] {
+            let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+            app.set_tool(Some(Tool::Paint));
+            stroke(&mut app, FULL);
+            app.set_tool(None);
+            let batch = rx.try_iter().find_map(|message| match message {
+                WorkerMessage::BatchProcess { batch, .. } => Some(batch),
+                _ => None,
+            }).expect("a lines run");
+            if stopped {
+                app.set_tool(Some(Tool::Paint));
+            } else {
+                land_lines(&mut app);
+            }
+            let toasts = app.toasts.len_for_test();
+            app.on_batch_complete(batch);
+            assert_eq!(app.toasts.len_for_test(), toasts, "stopped {stopped}: no \"All done\"");
+        }
     }
 
     /// A stroke that lands while the lines run is under way starts no
