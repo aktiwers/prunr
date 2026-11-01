@@ -550,6 +550,26 @@ pub(crate) enum Cutter {
 }
 
 /// A lens-blur focus and what it was measured from.
+/// What an effect backdrop's thumbnail copy is made for: the effect, and
+/// by address the depth map a lens blur reads and the result a blur fills
+/// from. Compared, never hashed: the sidebar asks every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThumbKey {
+    effect: prunr_core::BgEffect,
+    depth: Option<usize>,
+    result: Option<usize>,
+}
+
+/// A `ThumbKey` and weak handles on what it names by address: they pin
+/// the allocations, so a new depth map or result can never pass for the
+/// old one at a freed address.
+#[derive(Clone, Debug)]
+pub(crate) struct ThumbFor {
+    pub(crate) key: ThumbKey,
+    _depth: Option<std::sync::Weak<prunr_core::depth::DepthMap>>,
+    _result: Option<std::sync::Weak<super::timeline::Stored<image::RgbaImage>>>,
+}
+
 struct LensFocus {
     depth: std::sync::Weak<prunr_core::depth::DepthMap>,
     result: Option<std::sync::Weak<image::RgbaImage>>,
@@ -1089,11 +1109,13 @@ pub(crate) struct BatchItem {
     /// The key of the picture a background thread is building, so the
     /// next frame doesn't start the same one again.
     pub(crate) backdrop_tex_pending: Option<u64>,
-    /// An effect backdrop's thumbnail-size copy and its
-    /// `thumb_backdrop_key` (`None` inside: none could be made). It stays
-    /// when the full-size picture is let go off screen, so the thumbnail
-    /// still shows the background Save writes.
-    pub(crate) backdrop_thumb: Option<(u64, Option<super::image_texture::ImageTexture>)>,
+    /// An effect backdrop's thumbnail-size copy and what it was made for
+    /// (`None` inside: none could be made). It stays when the full-size
+    /// picture is let go off screen, so the thumbnail still shows the
+    /// background Save writes.
+    pub(crate) backdrop_thumb: Option<(ThumbFor, Option<super::image_texture::ImageTexture>)>,
+    /// The copy being made or uploaded, so it is not asked for again.
+    pub(crate) backdrop_thumb_pending: Option<ThumbFor>,
     /// Where a lens-blur backdrop focuses, measured once per depth map
     /// and result. Weak handles pin the allocations, so a new result can
     /// never pass for the old one by address.
@@ -2108,37 +2130,51 @@ impl BatchItem {
                 }
                 landed
             }
-            BackdropBuilt::Thumb(thumb) => {
-                self.land_backdrop_thumb(key, thumb, upload);
+            BackdropBuilt::Thumb(thumb_key, thumb) => {
+                self.land_backdrop_thumb(thumb_key, thumb, upload);
                 false
             }
         }
     }
 
     /// An effect's thumbnail-size copy arrives: handed to `upload` while
-    /// it is still for what the image is; none made is kept as such, so
-    /// it is not asked for again.
+    /// it is still for what the image is (pending until it is installed);
+    /// none made is kept as such, so it is not asked for again.
     fn land_backdrop_thumb(
         &mut self,
-        key: u64,
+        key: ThumbKey,
         thumb: Option<super::image_texture::PreparedImage>,
         upload: impl FnOnce(super::image_texture::PreparedImage, super::background_io::TexLanding, egui::TextureOptions),
     ) {
         if self.thumb_backdrop_key() != Some(key) {
+            self.backdrop_thumb_pending.take_if(|pending| pending.key == key);
             return;
         }
         match thumb {
-            Some(thumb) => upload(thumb, super::background_io::TexLanding::BackdropThumb { item_id: self.id, key }, egui::TextureOptions::LINEAR),
-            None => self.backdrop_thumb = Some((key, None)),
+            Some(thumb) => {
+                if self.backdrop_thumb_pending.as_ref().is_none_or(|pending| pending.key != key) {
+                    self.backdrop_thumb_pending = self.thumb_for();
+                }
+                upload(thumb, super::background_io::TexLanding::BackdropThumb { item_id: self.id, key }, egui::TextureOptions::LINEAR);
+            }
+            None => self.backdrop_thumb = self.take_thumb_for(key).map(|made| (made, None)),
         }
     }
 
     /// The thumbnail-size copy uploaded: kept while it is for what the
     /// image is.
-    pub(crate) fn install_backdrop_thumb(&mut self, key: u64, texture: super::image_texture::ImageTexture) {
+    pub(crate) fn install_backdrop_thumb(&mut self, key: ThumbKey, texture: super::image_texture::ImageTexture) {
         if self.thumb_backdrop_key() == Some(key) {
-            self.backdrop_thumb = Some((key, Some(texture)));
+            self.backdrop_thumb = self.take_thumb_for(key).map(|made| (made, Some(texture)));
+        } else {
+            self.backdrop_thumb_pending.take_if(|pending| pending.key == key);
         }
+    }
+
+    /// The pending copy's `ThumbFor` when it is for `key`, else one made
+    /// now (the image is what `key` names).
+    fn take_thumb_for(&mut self, key: ThumbKey) -> Option<ThumbFor> {
+        self.backdrop_thumb_pending.take().filter(|pending| pending.key == key).or_else(|| self.thumb_for())
     }
 
     /// The picture built for the backdrop arrives: handed to `upload`
@@ -2194,7 +2230,9 @@ impl BatchItem {
             TexLanding::Image { .. } => {}
             TexLanding::Selection { key, .. } => clear_if(&mut self.selection_tex_pending, *key),
             TexLanding::Backdrop { key, .. } => clear_if(&mut self.backdrop_tex_pending, *key),
-            TexLanding::BackdropThumb { .. } => {}
+            TexLanding::BackdropThumb { key, .. } => {
+                self.backdrop_thumb_pending.take_if(|pending| pending.key == *key);
+            }
         }
     }
 
@@ -3179,6 +3217,7 @@ impl BatchItem {
             backdrop_made: None,
             backdrop_tex_pending: None,
             backdrop_thumb: None,
+            backdrop_thumb_pending: None,
             selection_mask: None,
             selection_hash: None,
             edits: None,
@@ -3298,35 +3337,54 @@ impl BatchItem {
         self.backdrop_texture.as_ref().filter(|(made, _)| *made == key).map(|(_, texture)| texture)
     }
 
-    /// What an effect backdrop's thumbnail-size copy is made for: the
-    /// effect, the depth map and the result as the undo timeline keeps it,
-    /// which stay the same when the image goes off screen and lets its
-    /// full-size result go. `None` for any other backdrop.
-    pub(crate) fn thumb_backdrop_key(&self) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        let backdrop = self.settings.backdrop();
-        if !matches!(backdrop, super::item_settings::Backdrop::Effect(_)) {
-            return None;
-        }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        backdrop.picture_key().hash(&mut h);
-        self.depth.as_ref().map(|d| Arc::as_ptr(d) as usize).hash(&mut h);
-        self.timeline.current().result.as_ref().map(|r| Arc::as_ptr(r) as usize).hash(&mut h);
-        Some(h.finish())
+    /// What an effect backdrop's thumbnail-size copy is made for now;
+    /// `None` for any other backdrop. The depth map and the result (as the
+    /// undo timeline keeps it, the same off screen where the full-size
+    /// result is let go) count only for an effect that reads them.
+    pub(crate) fn thumb_backdrop_key(&self) -> Option<ThumbKey> {
+        let super::item_settings::Backdrop::Effect(effect) = self.settings.backdrop() else { return None };
+        let depth = self.depth.as_ref().filter(|_| effect.needs_depth());
+        let result = self.timeline.current().result.as_ref().filter(|_| effect.takes_cutout());
+        Some(ThumbKey { effect, depth: depth.map(|d| Arc::as_ptr(d) as usize), result: result.map(|r| Arc::as_ptr(r) as usize) })
     }
 
-    /// The effect and `thumb_backdrop_key` of the small copy the
-    /// thumbnail lacks, when a build of it alone is due: a result to make
-    /// it from, the depth map a lens blur needs, and no full-size picture
-    /// held or on its way (that build brings the copy along).
-    pub(crate) fn wanted_backdrop_thumb(&self) -> Option<(prunr_core::BgEffect, u64)> {
+    /// `thumb_backdrop_key` holding what it names by address.
+    fn thumb_for(&self) -> Option<ThumbFor> {
+        let key = self.thumb_backdrop_key()?;
+        Some(ThumbFor {
+            key,
+            _depth: key.depth.and(self.depth.as_ref()).map(Arc::downgrade),
+            _result: key.result.and(self.timeline.current().result.as_ref()).map(Arc::downgrade),
+        })
+    }
+
+    /// The key a full-size build's thumbnail copy is made for, when the
+    /// image holds no copy for it (a failed one is made again).
+    pub(crate) fn thumb_key_to_bring(&self) -> Option<ThumbKey> {
+        let key = self.thumb_backdrop_key()?;
+        (!matches!(&self.backdrop_thumb, Some((made, Some(_))) if made.key == key)).then_some(key)
+    }
+
+    /// The effect and key of the small copy the thumbnail lacks, when a
+    /// build of it alone is due: off screen, with a result to make it from
+    /// and the depth map a lens blur needs, no full-size picture held or
+    /// on its way (that build brings the copy along), and none made or
+    /// coming for this key.
+    pub(crate) fn wanted_backdrop_thumb(&self) -> Option<(prunr_core::BgEffect, ThumbKey)> {
         use super::item_settings::Backdrop;
         let Backdrop::Effect(effect) = self.settings.backdrop() else { return None };
-        if !self.has_result() || self.backdrop_texture.is_some() || self.backdrop_tex_pending.is_some() || self.awaits_depth(effect) {
+        if self.on_screen || !self.has_result() || self.backdrop_texture.is_some() || self.backdrop_tex_pending.is_some() || self.awaits_depth(effect) {
             return None;
         }
         let key = self.thumb_backdrop_key()?;
-        (self.backdrop_thumb.as_ref().map(|(made, _)| *made) != Some(key)).then_some((effect, key))
+        let held = self.backdrop_thumb.as_ref().is_some_and(|(made, _)| made.key == key);
+        let coming = self.backdrop_thumb_pending.as_ref().is_some_and(|pending| pending.key == key);
+        (!held && !coming).then_some((effect, key))
+    }
+
+    /// Mark the copy for `key` as being made.
+    pub(crate) fn backdrop_thumb_asked(&mut self, key: ThumbKey) {
+        self.backdrop_thumb_pending = self.thumb_for().filter(|made| made.key == key);
     }
 
     pub(crate) fn wants_backdrop_thumb(&self) -> bool {
@@ -3343,7 +3401,8 @@ impl BatchItem {
     /// made for what the image is now.
     pub(crate) fn thumbnail_backdrop(&self) -> Option<&super::image_texture::ImageTexture> {
         self.backdrop_texture.as_ref().map(|(_, texture)| texture).or_else(|| {
-            self.backdrop_thumb.as_ref().filter(|(made, _)| Some(*made) == self.thumb_backdrop_key()).and_then(|(_, texture)| texture.as_ref())
+            let (made, texture) = self.backdrop_thumb.as_ref()?;
+            texture.as_ref().filter(|_| Some(made.key) == self.thumb_backdrop_key())
         })
     }
 
@@ -4278,7 +4337,9 @@ mod tests {
 
     /// Off screen, the thumbnail keeps showing an effect background from
     /// its small copy, made for what the image is; another effect asks for
-    /// a new copy, and a lens blur waits for its depth map.
+    /// a new copy, and a lens blur waits for its depth map. On screen the
+    /// full-size build brings the copy, so none is made alone there, and
+    /// one coming or uploading is not asked for again.
     #[test]
     fn a_thumbnail_keeps_its_effect_background_off_screen() {
         use crate::gui::background_io::{BackdropBuilt, TexLanding};
@@ -4287,14 +4348,19 @@ mod tests {
         let mut item = fixture_item(1);
         crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
+        item.set_on_screen(true);
+        assert!(!item.wants_backdrop_thumb(), "on screen: its full-size build brings the copy");
+        item.set_on_screen(false);
         item.backdrop_tex_pending = item.backdrop_key();
-        assert!(!item.wants_backdrop_thumb(), "on screen, the full-size build brings the copy: no second build");
+        assert!(!item.wants_backdrop_thumb(), "a full-size build on its way brings it too");
         item.backdrop_tex_pending = None;
-        assert!(item.wants_backdrop_thumb());
-        let key = item.thumb_backdrop_key().expect("an effect");
+        let (_, key) = item.wanted_backdrop_thumb().expect("off screen, wanted");
+        item.backdrop_thumb_asked(key);
+        assert!(!item.wants_backdrop_thumb(), "asked once");
         let mut landed = Vec::new();
-        item.land_backdrop_built(key, BackdropBuilt::Thumb(Some(PreparedImage::from_rgba(&image::RgbaImage::new(2, 2)))), |_, landing, _| landed.push(landing));
+        item.land_backdrop_built(0, BackdropBuilt::Thumb(key, Some(PreparedImage::from_rgba(&image::RgbaImage::new(2, 2)))), |_, landing, _| landed.push(landing));
         assert!(matches!(landed[..], [TexLanding::BackdropThumb { key: k, .. }] if k == key), "the copy goes up");
+        assert!(!item.wants_backdrop_thumb(), "not asked again while it uploads");
         let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         item.install_backdrop_thumb(key, texture.clone());
         assert!(item.park_result(), "off screen, the full-size result goes");
@@ -4308,6 +4374,47 @@ mod tests {
         assert!(!item.wants_backdrop_thumb(), "a lens blur waits for the depth map");
     }
 
+    /// A copy is made for what its effect reads: a black & white photo
+    /// keeps its copy through a new cut-out and a depth map, a blur does
+    /// not keep it through a new cut-out.
+    #[test]
+    fn a_thumbnail_copy_follows_only_what_its_effect_reads() {
+        let ctx = egui::Context::default();
+        let mut item = fixture_item(1);
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
+        let new_cut_out = |item: &mut BatchItem| {
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+            item.amend();
+        };
+        item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
+        let key = item.thumb_backdrop_key().expect("an effect");
+        item.install_backdrop_thumb(key, crate::gui::tests::fixtures::red_texture(&ctx));
+        new_cut_out(&mut item);
+        item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(2, 2, vec![0.5; 4])));
+        assert_eq!(item.thumb_backdrop_key(), Some(key), "black & white reads neither");
+        item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
+        let blur = item.thumb_backdrop_key();
+        new_cut_out(&mut item);
+        assert_ne!(item.thumb_backdrop_key(), blur, "a blur fills from the cut-out");
+    }
+
+    /// A copy that could not be made is not asked for again alone, but a
+    /// full-size build brings one; a copy held is not made again.
+    #[test]
+    fn a_failed_thumbnail_copy_comes_with_the_next_full_size_build() {
+        use crate::gui::background_io::BackdropBuilt;
+        let ctx = egui::Context::default();
+        let mut item = fixture_item(1);
+        crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
+        item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
+        let (_, key) = item.wanted_backdrop_thumb().expect("wanted");
+        item.land_backdrop_built(0, BackdropBuilt::Thumb(key, None), |_, _, _| panic!("nothing to upload"));
+        assert!(!item.wants_backdrop_thumb(), "not asked for again alone");
+        assert_eq!(item.thumb_key_to_bring(), Some(key), "a full-size build brings one");
+        item.install_backdrop_thumb(key, crate::gui::tests::fixtures::red_texture(&ctx));
+        assert_eq!(item.thumb_key_to_bring(), None, "held, not made again");
+    }
+
     /// The full-size effect built for the image on screen brings its
     /// thumbnail copy along, so going off screen needs no second build.
     #[test]
@@ -4317,7 +4424,7 @@ mod tests {
         let mut item = fixture_item(1);
         crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
-        let (key, thumb_key) = (item.backdrop_key().expect("an effect"), item.thumb_backdrop_key().expect("an effect"));
+        let (key, thumb_key) = (item.backdrop_key().expect("an effect"), item.thumb_key_to_bring().expect("none held"));
         let picture = || PreparedImage::from_rgba(&image::RgbaImage::new(2, 2));
         let mut landed = Vec::new();
         item.land_backdrop_built(key, BackdropBuilt::Picture(Some(picture()), None, Some((thumb_key, picture()))), |_, landing, _| landed.push(landing));

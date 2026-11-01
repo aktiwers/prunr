@@ -153,7 +153,7 @@ impl PrunrApp {
                 // new result with the shown backdrop's alpha keeps it.
                 let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
                 let (shown, apart_from_cut) = (item.shown_backdrop_made(), item.backdrop_key_apart_from_cut());
-                let thumb_key = item.thumb_backdrop_key().filter(|key| item.backdrop_thumb.as_ref().map(|(made, _)| made) != Some(key));
+                let thumb_key = item.thumb_key_to_bring();
                 Box::new(move || {
                     let cutout = cutout.and_then(|c| c.load());
                     let alpha = cutout.as_deref().map(prunr_core::formats::alpha_fingerprint);
@@ -194,8 +194,9 @@ impl PrunrApp {
         if self.batch.building_backdrop_thumb.is_some() || crate::gui::memory::under_memory_pressure() {
             return;
         }
-        let Some(item) = self.batch.find_by_id(item_id) else { return };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let Some((effect, key)) = item.wanted_backdrop_thumb() else { return };
+        item.backdrop_thumb_asked(key);
         let photo = item.backdrop_photo().unwrap_or_else(|| item.photo_pixels());
         let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
         let depth = item.depth.clone();
@@ -208,7 +209,8 @@ impl PrunrApp {
                 let cutout = cutout.and_then(|c| c.load());
                 effect_picture(&photo, effect, depth.as_deref(), cutout.as_deref()).map(|rgba| thumbnail_copy(&rgba))
             }).flatten();
-            let _ = tx.send((item_id, key, crate::gui::background_io::BackdropBuilt::Thumb(thumb)));
+            // The full backdrop's key has no part in a copy alone.
+            let _ = tx.send((item_id, 0, crate::gui::background_io::BackdropBuilt::Thumb(key, thumb)));
             ctx.request_repaint();
         });
     }
