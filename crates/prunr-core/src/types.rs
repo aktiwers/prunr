@@ -772,6 +772,16 @@ impl BgEffect {
         matches!(self, BgEffect::BlurredSource { .. } | BgEffect::LensBlur { .. })
     }
 
+    /// The same effect on the image at `scale` times its size: a blur's
+    /// radius scales with it, at least a pixel; a lens blur already
+    /// follows the image's size.
+    pub fn at_scale(self, scale: f32) -> Self {
+        match self {
+            BgEffect::BlurredSource { radius } => BgEffect::BlurredSource { radius: ((radius as f32 * scale).round() as u32).max(1) },
+            other => other,
+        }
+    }
+
     pub const ALL: &'static [Self] = &[
         BgEffect::None,
         BgEffect::BlurredSource { radius: Self::BLUR_START_RADIUS },
@@ -944,6 +954,15 @@ mod tests {
 
     /// Lines alone trace the whole photo; every other mode cuts the
     /// subject out.
+    #[test]
+    fn a_background_blur_scales_with_the_image() {
+        use super::BgEffect;
+        assert_eq!(BgEffect::BlurredSource { radius: 12 }.at_scale(0.5), BgEffect::BlurredSource { radius: 6 });
+        assert_eq!(BgEffect::BlurredSource { radius: 2 }.at_scale(0.1), BgEffect::BlurredSource { radius: 1 }, "at least a pixel");
+        let lens = BgEffect::LensBlur { amount_pct: 60 };
+        assert_eq!(lens.at_scale(0.1), lens, "a lens blur follows the image's size already");
+    }
+
     #[test]
     fn only_lines_alone_cut_nothing_out() {
         use super::LineMode;

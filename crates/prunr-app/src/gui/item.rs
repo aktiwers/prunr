@@ -779,6 +779,21 @@ impl Pixels {
         self.read().ok()
     }
 
+    /// The image shrunk to fit `side` (never enlarged): a photo file
+    /// decoded at that size where its format allows (a JPEG), any other
+    /// unpacked and shrunk at once, so one full-size copy is held at most,
+    /// briefly.
+    pub(crate) fn load_to_fit(&self, side: u32) -> Option<image::RgbaImage> {
+        let image = match self {
+            Self::Source(source) => {
+                let bytes = source.load_bytes().ok()?;
+                prunr_core::formats::load_image_to_fit_from_bytes(&bytes, side).ok()?
+            }
+            held => image::DynamicImage::ImageRgba8(Arc::unwrap_or_clone(held.load()?)),
+        };
+        Some(prunr_core::formats::downscale_image(image, side).into_rgba8())
+    }
+
     /// Width and height without unpacking; `None` for a photo not decoded.
     pub(crate) fn decoded_dims(&self) -> Option<(u32, u32)> {
         match self {
@@ -4413,6 +4428,14 @@ mod tests {
         assert_eq!(item.thumb_key_to_bring(), Some(key), "a full-size build brings one");
         item.install_backdrop_thumb(key, crate::gui::tests::fixtures::red_texture(&ctx));
         assert_eq!(item.thumb_key_to_bring(), None, "held, not made again");
+    }
+
+    /// An image read to fit a side is shrunk to it, never enlarged.
+    #[test]
+    fn an_image_read_to_fit_is_shrunk_never_enlarged() {
+        let held = |w, h| Pixels::Resident(Arc::new(image::RgbaImage::new(w, h)));
+        assert_eq!(held(1000, 500).load_to_fit(640).map(|i| i.dimensions()), Some((640, 320)));
+        assert_eq!(held(100, 50).load_to_fit(640).map(|i| i.dimensions()), Some((100, 50)));
     }
 
     /// The full-size effect built for the image on screen brings its
