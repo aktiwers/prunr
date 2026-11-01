@@ -478,26 +478,59 @@ enum CliBackdrop<'a> {
 
 impl CliBackdrop<'_> {
     /// Put the backdrop under `result`; an effect is made from the photo
-    /// at `photo_path`.
-    fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path) {
+    /// at `photo_path`, `photo` when it is decoded already.
+    fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path, photo: Option<&image::RgbaImage>) {
         match self {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
-            CliBackdrop::Effect(effect, depth) => match prunr_core::load_image_from_path(photo_path) {
-                Ok(photo) => {
-                    let photo = photo.into_rgba8();
-                    let depth = effect.needs_depth()
-                        .then(|| depth.for_photo(photo_path, &photo)
-                            .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
-                            .ok())
-                        .flatten();
-                    prunr_core::apply_bg_effect(result, &photo, *effect, depth.as_deref());
-                }
-                Err(err) => tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
-            },
+            CliBackdrop::Effect(effect, depth) => {
+                let decoded;
+                let photo = match photo {
+                    Some(photo) => photo,
+                    None => match prunr_core::load_image_from_path(photo_path) {
+                        Ok(read) => {
+                            decoded = read.into_rgba8();
+                            &decoded
+                        }
+                        Err(err) => return tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
+                    },
+                };
+                let depth = effect.needs_depth()
+                    .then(|| depth.for_photo(photo_path, photo, None)
+                        .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
+                        .ok())
+                    .flatten();
+                prunr_core::apply_bg_effect(result, photo, *effect, depth.as_deref());
+            }
         }
     }
+
+    /// An effect is made from the photo.
+    fn reads_photo(&self) -> bool {
+        matches!(self, CliBackdrop::Effect(..))
+    }
+}
+
+/// The face restorer a run uses, and how its faces blend in.
+type CliFaces = (prunr_core::face::FaceRestorer, prunr_core::face::FaceBlend);
+
+/// The face restorer `s` asks for, loaded; `Err` when its model is not
+/// installed or does not load, said already.
+fn load_faces(args: &Cli, s: &ItemSettings) -> Result<Option<CliFaces>, ()> {
+    let Some(model) = s.faces.wanted() else { return Ok(None) };
+    if !prunr_models::is_available(model) {
+        eprintln!("error: {}", prunr_models::not_installed_error(model));
+        return Err(());
+    }
+    prunr_core::face::FaceRestorer::new(model, args.cpu)
+        .map(|restorer| Some((restorer, s.faces.blend())))
+        .map_err(|e| eprintln!("error: cannot load the face model: {e}"))
+}
+
+/// The faces in `image`, found and redrawn.
+fn restore_faces((restorer, blend): &mut CliFaces, image: &image::RgbaImage) -> Result<Vec<prunr_core::face::RestoredFace>, String> {
+    restorer.find_and_restore(image, *blend, &prunr_core::Progress::none()).map_err(|e| format!("restore faces failed: {e}"))
 }
 
 /// The app's render of each photo, after the worker or in its place:
@@ -506,33 +539,34 @@ impl CliBackdrop<'_> {
 struct CliRender<'a> {
     settings: ItemSettings,
     role: crate::gui::knob_catalog::ModelRole,
-    faces: Option<(prunr_core::face::FaceRestorer, prunr_core::face::FaceBlend)>,
+    faces: Option<CliFaces>,
     depth: &'a CliDepth,
 }
 
 impl CliRender<'_> {
     /// `path`'s photo as the app renders it, cut and lined from the
-    /// worker's tensors when it ran.
+    /// worker's tensors when it ran, on `backdrop`.
     fn render(
         &mut self,
+        backdrop: &CliBackdrop,
         path: &std::path::Path,
         seg: Option<crate::gui::worker::RawSegTensor>,
         edges: Option<crate::gui::worker::RawEdgeTensors>,
     ) -> Result<image::RgbaImage, String> {
         let photo = prunr_core::load_image_from_path(path).map_err(|e| could_not(path, "read", e.message()))?.into_rgba8();
-        let faces = match self.faces.as_mut() {
-            Some((restorer, blend)) => {
-                let found = restorer.find_and_restore(&photo, *blend, &prunr_core::Progress::none()).map_err(|e| format!("restore faces failed: {e}"))?;
-                Some((std::sync::Arc::new(found), *blend))
-            }
-            None => None,
-        };
+        let faces = self.faces.as_mut().map(|faces| restore_faces(faces, &photo).map(|found| (std::sync::Arc::new(found), faces.1))).transpose()?;
+        let places: Option<Vec<prunr_core::face::FacePlace>> = faces.as_ref().map(|(found, _)| found.iter().map(|face| *face.place()).collect());
         let depth = self.settings.photo_reads_depth(self.role)
-            .then(|| self.depth.for_photo(path, &photo))
+            .then(|| self.depth.for_photo(path, &photo, places.as_deref()))
             .transpose()
             .map_err(|e| format!("depth failed: {e}"))?;
-        let filter_only = self.role == crate::gui::knob_catalog::ModelRole::Filters;
-        crate::gui::live_preview::ExportRender { photo: std::sync::Arc::new(photo), settings: self.settings, filter_only, seg, edges, faces, depth }.render()
+        let photo = std::sync::Arc::new(photo);
+        // Kept only for an effect backdrop: a photo the render alone holds
+        // is not copied for the faces or the effect.
+        let kept = backdrop.reads_photo().then(|| std::sync::Arc::clone(&photo));
+        let mut image = crate::gui::live_preview::ExportRender { photo, settings: self.settings, role: self.role, seg, edges, faces, depth }.render()?;
+        backdrop.apply(&mut image, path, kept.as_deref());
+        Ok(image)
     }
 }
 
@@ -569,28 +603,24 @@ fn cli_finish<'a>(args: &Cli, depth: &'a CliDepth, s: &ItemSettings) -> Option<C
         }
         (Backdrop::Transparent, None) => CliBackdrop::Transparent,
     };
-    let faces = match s.faces.wanted() {
-        None => None,
-        Some(model) if !prunr_models::is_available(model) => {
-            eprintln!("error: {}", prunr_models::not_installed_error(model));
-            return None;
-        }
-        Some(model) => match prunr_core::face::FaceRestorer::new(model, args.cpu) {
-            Ok(restorer) => Some((restorer, s.faces.blend())),
-            Err(e) => {
-                eprintln!("error: cannot load the face model: {e}");
-                return None;
-            }
-        },
-    };
+    let faces = load_faces(args, s).ok()?;
     let role = args.settings_model().role();
     let renders = faces.is_some() || role == crate::gui::knob_catalog::ModelRole::Filters;
     let render = renders.then(|| CliRender { settings: *s, role, faces, depth });
     Some(CliFinish { backdrop, render })
 }
 
-/// The exit code for a run of images: 0 all saved, 1 none, 2 some.
-fn batch_exit(saved: usize, failed: usize) -> i32 {
+/// Write `image` to `path` as PNG, replacing a file there.
+fn save_png(path: &std::path::Path, image: &image::RgbaImage) -> std::io::Result<()> {
+    prunr_app::fs_util::write_replacing(path, |w| prunr_core::ExportFormat::Png.encode_into(image, w).map_err(std::io::Error::other)).map(drop)
+}
+
+/// The line a run of images ends with, and its exit code: 0 all saved,
+/// 1 none, 2 some.
+fn finish_run(quiet: bool, saved: usize, failed: usize) -> i32 {
+    if !quiet {
+        println!("{saved} succeeded, {failed} failed.");
+    }
     match (failed, saved) {
         (0, _) => 0,
         (_, 0) => 1,
@@ -601,21 +631,14 @@ fn batch_exit(saved: usize, failed: usize) -> i32 {
 /// No model without lines: no worker runs. Each photo is the app's render
 /// of it (faces, the Depth chip's look, the effect) on its backdrop.
 fn run_whole_photo(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
-    let Some(mut finish) = cli_finish(args, depth, s) else { return 1 };
+    let Some(CliFinish { backdrop, render: Some(mut render) }) = cli_finish(args, depth, s) else { return 1 };
     let (mut saved, mut failed) = (0usize, 0usize);
     for input in &args.inputs {
         let started = Instant::now();
         let out_path = args.result_path(input);
         let result = check_overwrite(&out_path, args.force)
-            .and_then(|()| finish.render.as_mut().ok_or_else(|| "No model renders the photo".to_string())?.render(input, None, None))
-            .and_then(|mut rgba| {
-                finish.backdrop.apply(&mut rgba, input);
-                prunr_app::fs_util::write_replacing(&out_path, |w| {
-                    prunr_core::ExportFormat::Png.encode_into(&rgba, w).map_err(std::io::Error::other)
-                })
-                .map(drop)
-                .map_err(|e| could_not(&out_path, "write", e))
-            });
+            .and_then(|()| render.render(&backdrop, input, None, None))
+            .and_then(|image| save_png(&out_path, &image).map_err(|e| could_not(&out_path, "write", e)));
         match result {
             Ok(()) => {
                 saved += 1;
@@ -629,10 +652,7 @@ fn run_whole_photo(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
             }
         }
     }
-    if !args.quiet {
-        println!("{saved} succeeded, {failed} failed.");
-    }
-    batch_exit(saved, failed)
+    finish_run(args.quiet, saved, failed)
 }
 
 /// `blur`, `blur:N` (1-64 px), `lens`, `lens:N` (0-100 %) or `bw`.
@@ -680,16 +700,27 @@ struct CliDepth {
 type KeptDepth = (std::sync::Arc<prunr_core::depth::DepthMap>, (u32, u32));
 
 impl CliDepth {
-    fn new(args: &Cli) -> Self {
-        Self { kept: args.depth_map.then(Default::default), ..Self::default() }
+    fn new(args: &Cli, s: &ItemSettings) -> Self {
+        let focused = s.reads_auto_focus(args.settings_model().role());
+        let measurer = if focused { prunr_core::depth::Measurer::default() } else { prunr_core::depth::Measurer::lines_only() };
+        Self { measurer, kept: args.depth_map.then(Default::default), last: Default::default() }
     }
 
-    /// The map of `photo`, read from `path`, for its render or backdrop.
-    fn for_photo(&self, path: &std::path::Path, photo: &image::RgbaImage) -> Result<std::sync::Arc<prunr_core::depth::DepthMap>, CoreError> {
+    /// The map of `photo`, read from `path`, for its render or backdrop;
+    /// `faces`, when already found in the photo, are not looked for again.
+    fn for_photo(
+        &self,
+        path: &std::path::Path,
+        photo: &image::RgbaImage,
+        faces: Option<&[prunr_core::face::FacePlace]>,
+    ) -> Result<std::sync::Arc<prunr_core::depth::DepthMap>, CoreError> {
         if let Some(map) = self.last.borrow().as_ref().filter(|(seen, _)| seen == path).map(|(_, map)| std::sync::Arc::clone(map)) {
             return Ok(map);
         }
-        let map = std::sync::Arc::new(self.measurer.measure(photo)?);
+        let map = std::sync::Arc::new(match faces {
+            Some(faces) => self.measurer.measure_with_faces(photo, faces)?,
+            None => self.measurer.measure(photo)?,
+        });
         *self.last.borrow_mut() = Some((path.to_path_buf(), std::sync::Arc::clone(&map)));
         if let Some(kept) = &self.kept {
             kept.borrow_mut().insert(path.to_path_buf(), (std::sync::Arc::clone(&map), photo.dimensions()));
@@ -917,7 +948,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         eprintln!("error: {err}");
         return 1;
     }
-    let depth = CliDepth::new(args);
+    let depth = CliDepth::new(args, &run.item);
     let code = if args.depth_only {
         0
     } else if args.inpaint {
@@ -926,7 +957,7 @@ pub fn run_remove(args: &Cli) -> i32 {
         run_upscale(args, upscaler, &run.item)
     } else if args.colorize {
         run_colorize(args, &run.item)
-    } else if args.model == CliModel::NoModel && run.item.line_mode == LineMode::Off {
+    } else if args.settings_model().renders_photo_alone(run.item.line_mode) {
         run_whole_photo(args, &depth, &run.item)
     } else {
         // All processing uses subprocess isolation for OOM protection
@@ -949,7 +980,7 @@ struct UpscaleJob<'a> {
     refine: prunr_core::upscale::Refine,
     denoise: f32,
     /// Loaded once for the batch.
-    faces: Option<(prunr_core::face::FaceRestorer, prunr_core::face::FaceBlend)>,
+    faces: Option<CliFaces>,
 }
 
 impl UpscaleJob<'_> {
@@ -979,10 +1010,9 @@ impl UpscaleJob<'_> {
         .map_err(|e| format!("upscale failed: {e}"))?;
         let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
         let mut out = std::sync::Arc::unwrap_or_clone(shown);
-        if let Some((restorer, blend)) = self.faces.as_mut() {
-            let faces = restorer.find_and_restore(&out, *blend, &progress)
-                .map_err(|e| format!("restore faces failed: {e}"))?;
-            prunr_core::face::compose_faces_into(&mut out, &faces, *blend);
+        if let Some(faces) = self.faces.as_mut() {
+            let found = restore_faces(faces, &out)?;
+            prunr_core::face::compose_faces_into(&mut out, &found, faces.1);
         }
         Ok(out)
     }
@@ -1020,20 +1050,8 @@ fn background_removal_flags(args: &Cli) -> Vec<&'static str> {
 fn run_upscale(args: &Cli, upscaler: CliUpscaler, s: &ItemSettings) -> i32 {
     let scale = s.output_scale;
     let model = prunr_core::upscale::model_for_scale(upscaler.model_id(), scale, prunr_models::is_available(prunr_models::ModelId::RealEsrganX2Plus));
-    for needed in std::iter::once(model).chain(s.faces.wanted()) {
-        if !prunr_models::is_available(needed) {
-            eprintln!("error: {}", prunr_models::not_installed_error(needed));
-            return 1;
-        }
-    }
+    let Ok(faces) = load_faces(args, s) else { return 1 };
     let Some(engine) = load_engine(model, args.cpu, "upscale") else { return 1 };
-    let faces = match s.faces.wanted().map(|model| prunr_core::face::FaceRestorer::new(model, args.cpu)).transpose() {
-        Ok(faces) => faces.map(|restorer| (restorer, s.faces.blend())),
-        Err(e) => {
-            eprintln!("error: cannot load the face model: {e}");
-            return 1;
-        }
-    };
     let mut job = UpscaleJob { engine: &engine, on_cpu: None, model, scale, refine: s.upscale_refine(), denoise: s.pre_denoise, faces };
     run_each_input(args, &format!("_x{}.png", scale.factor()), "Upscaling", |img| job.run(img))
 }
@@ -1349,7 +1367,7 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     let Sendable { indices: valid_indices, paths: mut to_send, refused: load_fail_count } = sendable_inputs(args, &spinners);
 
     // Lines alone build no cut-out engine: the model only names the run.
-    let model = args.model.model_kind().unwrap_or(crate::gui::app::NO_MODEL_RECIPE_KIND);
+    let model = args.model.settings_model().recipe_kind();
     let spinners_arc = std::sync::Arc::new(spinners);
     let inputs_arc = std::sync::Arc::new(args.inputs.clone());
     let quiet = args.quiet;
@@ -1379,11 +1397,8 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
                     fail_count += 1;
                     return;
                 }
-                let saved = prunr_app::fs_util::write_replacing(&out_path, |w| {
-                    prunr_core::ExportFormat::Png.encode_into(&pr.rgba_image, w).map_err(std::io::Error::other)
-                });
-                match saved {
-                    Ok(_) => {
+                match save_png(&out_path, &pr.rgba_image) {
+                    Ok(()) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {
                             pb.finish_with_message(format!(
@@ -1423,11 +1438,7 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
 
     if let Some(ref opb) = overall { opb.finish_and_clear(); }
 
-    if !args.quiet {
-        println!("{} succeeded, {} failed.", success_count, fail_count);
-    }
-
-    batch_exit(success_count, fail_count)
+    finish_run(args.quiet, success_count, fail_count)
 }
 
 /// Run batch processing via subprocess with auto-retry on OOM, each
@@ -1520,6 +1531,9 @@ fn run_batch_subprocess(
         }
 
         let mut in_flight: Vec<usize> = Vec::new();
+        // Finished by the worker, waiting for their render: it runs once the
+        // worker has its next images, so the worker never waits on it.
+        let mut to_render: Vec<ToRender> = Vec::new();
         let mut last_event_at = Instant::now();
         let crash = loop {
             while room_to_send(in_flight.len(), max_jobs, sub.should_pause_admission()) > 0 {
@@ -1551,6 +1565,8 @@ fn run_batch_subprocess(
                 }
             }
 
+            render_finished(&mut to_render, finish, inputs, &mut give);
+
             // Wakes on arrival, so admission follows a finished image without a poll delay.
             let events = sub.poll_events_blocking(std::time::Duration::from_millis(50));
             if !events.is_empty() {
@@ -1569,29 +1585,28 @@ fn run_batch_subprocess(
                     }
                     SubprocessEvent::ImageDone { item_id, result_path, width, height, tensor_cache, edge_cache, .. } => {
                         let input = &inputs[item_id as usize];
-                        let result = match finish.render.as_mut() {
-                            // The app's render of the photo, cut and lined
-                            // from the worker's tensors.
-                            Some(render) => {
-                                let _ = std::fs::remove_file(&result_path);
-                                let seg = crate::gui::worker::read_raw_seg_tensor(tensor_cache.as_ref(), model);
-                                let edges = crate::gui::worker::read_raw_edge_tensors(edge_cache.as_ref());
-                                render.render(input, seg, edges).map_err(CoreError::Model)
+                        if finish.render.is_some() {
+                            // Read now: the files go, and the slot frees.
+                            let _ = std::fs::remove_file(&result_path);
+                            let seg = crate::gui::worker::read_raw_seg_tensor(tensor_cache.as_ref(), model);
+                            let edges = crate::gui::worker::read_raw_edge_tensors(edge_cache.as_ref());
+                            if let Some(ridx) = orig_to_batch.get(&(item_id as usize)).copied() {
+                                in_flight.retain(|&i| i != ridx);
+                                to_render.push(ToRender { ridx, input: item_id as usize, seg, edges });
                             }
-                            None => {
-                                // The tensors are for a render; without one
-                                // their files go (in RAM on Linux).
-                                for path in tensor_cache.map(|t| t.path).into_iter().chain(edge_cache.map(|e| e.path)) {
-                                    let _ = std::fs::remove_file(path);
-                                }
-                                prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
-                                    .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()))
-                            }
+                            continue;
                         }
-                        .map(|mut rgba_image| {
-                            finish.backdrop.apply(&mut rgba_image, input);
-                            prunr_core::ProcessResult { rgba_image, active_provider: String::new() }
-                        });
+                        // The tensors are for a render; without one their
+                        // files go (in RAM on Linux).
+                        for path in tensor_cache.map(|t| t.path).into_iter().chain(edge_cache.map(|e| e.path)) {
+                            let _ = std::fs::remove_file(path);
+                        }
+                        let result = prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
+                            .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()))
+                            .map(|mut rgba_image| {
+                                finish.backdrop.apply(&mut rgba_image, input, None);
+                                prunr_core::ProcessResult { rgba_image, active_provider: String::new() }
+                            });
                         (item_id, result)
                     }
                     SubprocessEvent::ImageError { item_id, error } => (item_id, Err(CoreError::Model(error))),
@@ -1604,7 +1619,7 @@ fn run_batch_subprocess(
                 }
             }
 
-            if in_flight.is_empty() && pending.is_empty() {
+            if in_flight.is_empty() && pending.is_empty() && to_render.is_empty() {
                 break None;
             }
             if let Some(crash) = sub.died() {
@@ -1619,6 +1634,8 @@ fn run_batch_subprocess(
             }
         };
 
+        // What the worker finished before it stopped still renders.
+        render_finished(&mut to_render, finish, inputs, &mut give);
         let Some(crash) = crash else {
             // Matches the GUI's 5s grace budget for model-cache teardown;
             // Drop's 1s covers any slippage.
@@ -1652,6 +1669,30 @@ fn run_batch_subprocess(
 
     for idx in (0..landed.len()).filter(|&idx| !landed[idx]) {
         land(idx, Err(CoreError::Model("Not processed".into())));
+    }
+}
+
+/// An image the worker finished, waiting for the app's render of it.
+struct ToRender {
+    ridx: usize,
+    input: usize,
+    seg: Option<crate::gui::worker::RawSegTensor>,
+    edges: Option<crate::gui::worker::RawEdgeTensors>,
+}
+
+/// Render the images waiting in `to_render` and hand each result on.
+fn render_finished(
+    to_render: &mut Vec<ToRender>,
+    finish: &mut CliFinish,
+    inputs: &[std::path::PathBuf],
+    give: &mut impl FnMut(usize, Result<prunr_core::ProcessResult, CoreError>),
+) {
+    let Some(render) = finish.render.as_mut() else { return };
+    for ToRender { ridx, input, seg, edges } in to_render.drain(..) {
+        let result = render.render(&finish.backdrop, &inputs[input], seg, edges)
+            .map(|rgba_image| prunr_core::ProcessResult { rgba_image, active_provider: String::new() })
+            .map_err(CoreError::Model);
+        give(ridx, result);
     }
 }
 
@@ -2287,14 +2328,14 @@ mod tests {
     fn a_depth_map_a_backdrop_measured_is_written_without_measuring_again() {
         use clap::Parser;
         let args = super::Cli::parse_from(["prunr", "/missing/cat.jpg", "--depth-map"]);
-        let depth = super::CliDepth::new(&args);
+        let depth = super::CliDepth::new(&args, &crate::gui::item_settings::ItemSettings::default());
         let map = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
         let input = std::path::Path::new("/missing/cat.jpg");
         depth.kept.as_ref().expect("kept with --depth-map").borrow_mut().insert(input.into(), (std::sync::Arc::clone(&map), (4, 8)));
         let (got, dims) = depth.for_file(input).expect("the kept map");
         assert!(std::sync::Arc::ptr_eq(&got, &map) && dims == (4, 8));
         assert!(depth.for_file(input).is_err(), "taken once; the missing file is read the next time");
-        assert!(super::CliDepth::new(&super::Cli::parse_from(["prunr", "/p/cat.jpg"])).kept.is_none(), "nothing kept without --depth-map");
+        assert!(super::CliDepth::new(&super::Cli::parse_from(["prunr", "/p/cat.jpg"]), &crate::gui::item_settings::ItemSettings::default()).kept.is_none(), "nothing kept without --depth-map");
     }
 
     /// The effect is made from the input photo and fills what the result
@@ -2305,7 +2346,7 @@ mod tests {
         let photo = dir.path().join("photo.png");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
         let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
-        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default()).apply(&mut result, &photo);
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default()).apply(&mut result, &photo, None);
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");

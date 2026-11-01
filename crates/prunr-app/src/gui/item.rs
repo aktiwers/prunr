@@ -3252,6 +3252,11 @@ impl BatchItem {
 
     /// What the background texture is built from: the picture or effect
     /// and, for an effect, which photo it is made from.
+    /// The backdrop texture when it is the picture `key` names.
+    pub(crate) fn backdrop_texture_for(&self, key: u64) -> Option<&super::image_texture::ImageTexture> {
+        self.backdrop_texture.as_ref().filter(|(made, _)| *made == key).map(|(_, texture)| texture)
+    }
+
     pub(crate) fn backdrop_key(&self) -> Option<u64> {
         self.backdrop_key_with_cut(true)
     }
@@ -3273,8 +3278,11 @@ impl BatchItem {
         use super::item_settings::Backdrop;
         let backdrop = self.settings.backdrop();
         let key = backdrop.picture_key()?;
-        let key = match (backdrop, self.backdrop_photo()) {
-            (Backdrop::Effect(_), Some(Pixels::Parked(start))) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
+        let key = match backdrop {
+            Backdrop::Effect(_) => match self.backdrop_photo() {
+                Some(Pixels::Parked(start)) => key ^ (Arc::as_ptr(&start) as u64).rotate_left(17),
+                _ => key,
+            },
             _ => key,
         };
         // A lens blur is made with the depth map, focused on the result's

@@ -22,6 +22,11 @@ pub(crate) fn push_test_item(app: &mut PrunrApp, id: u64) -> &mut BatchItem {
     app.batch.items.last_mut().unwrap()
 }
 
+/// A 1×1 background picture with content hash `hash`.
+pub(crate) fn bg_picture(hash: u64) -> std::sync::Arc<crate::gui::item::BgImage> {
+    std::sync::Arc::new(crate::gui::item::BgImage { source_path: None, image: std::sync::Arc::new(image::DynamicImage::new_rgb8(1, 1)), hash })
+}
+
 /// Make `item` a cut-out by `model` as a run leaves it: its segmentation
 /// kept, a result on the shown step, and the step recorded as that cut.
 /// Adds no undo step.

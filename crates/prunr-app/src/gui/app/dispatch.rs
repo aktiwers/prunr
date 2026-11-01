@@ -277,16 +277,13 @@ impl PrunrApp {
         self.batch.fit_line_modes_to(self.settings.model);
         // No model with line_mode Off skips inference; No model + EdgesOnly
         // still needs TEED and falls through.
-        let is_pure_filter = self.settings.model.to_model_kind().is_none()
-            && self.run_settings().line_mode == prunr_core::LineMode::Off;
+        let is_pure_filter = self.settings.model.renders_photo_alone(self.run_settings().line_mode);
         if is_pure_filter {
             self.process_filter_only(filter, step);
             return;
         }
         // The placeholder never loads: `needs_segmentation` is false for EdgesOnly.
-        let model: prunr_core::ModelKind = self.settings.model
-            .to_model_kind()
-            .unwrap_or(super::NO_MODEL_RECIPE_KIND);
+        let model = self.settings.model.recipe_kind();
 
         let candidate_ids: HashSet<u64> = self.batch.items.iter()
             .filter(|i| filter(i) && self.run_may_start(i))

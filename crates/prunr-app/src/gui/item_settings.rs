@@ -266,9 +266,29 @@ impl ItemSettings {
     /// backdrop re-renders on its own.
     pub fn photo_reads_depth(&self, role: crate::gui::knob_catalog::ModelRole) -> bool {
         use crate::gui::knob_catalog::ModelRole;
-        let photo_look = role == ModelRole::Filters && self.depth.is_active();
         let lines = matches!(role, ModelRole::Cutout | ModelRole::Filters) && self.line_fade() > 0.0;
-        photo_look || lines
+        self.photo_depth_look(role).is_some() || lines
+    }
+
+    /// The Depth chip's look the photo takes: with No model only.
+    pub fn photo_depth_look(&self, role: crate::gui::knob_catalog::ModelRole) -> Option<prunr_core::depth::DepthLook> {
+        (role == crate::gui::knob_catalog::ModelRole::Filters).then_some(self.depth).filter(prunr_core::depth::DepthLook::is_active)
+    }
+
+    /// Whether Auto focus is read: a lens-blur background, or the photo's
+    /// Depth look blurring at a point with none set. A depth map read
+    /// otherwise fades lines or goes to a file, and needs no face or
+    /// subject found.
+    pub fn reads_auto_focus(&self, role: crate::gui::knob_catalog::ModelRole) -> bool {
+        let lens = matches!(self.backdrop(), Backdrop::Effect(prunr_core::BgEffect::LensBlur { .. }));
+        let look = self.photo_depth_look(role)
+            .is_some_and(|look| look.blurs() && look.blur == prunr_core::depth::LensBlurMode::Point && look.focus_point().is_none());
+        lens || look
+    }
+
+    /// The lines draw a Bold layer under the active scale's.
+    pub fn draws_bold_lines(&self) -> bool {
+        matches!(self.line_style, prunr_core::LineStyle::DualScale { .. })
     }
 
     /// Strength as the colorizer takes it: 1 = as predicted.
@@ -296,7 +316,6 @@ impl ItemSettings {
         }
     }
 
-    /// Convert mask-related fields into the core `MaskSettings`.
     /// Without a background-removal model there is no subject to
     /// outline, so Subject lines draw over the whole photo, the nearest
     /// mode that still has lines.
@@ -306,6 +325,7 @@ impl ItemSettings {
         }
     }
 
+    /// Convert mask-related fields into the core `MaskSettings`.
     pub fn mask_settings(&self) -> MaskSettings {
         MaskSettings {
             gamma: self.gamma,

@@ -498,13 +498,20 @@ impl DepthQueue {
         let engine_slot = Arc::clone(&warm);
         std::thread::spawn(move || {
             let mut faces = prunr_core::face::LazyFaceFinder::default();
-            for job in job_rx {
+            // The first-look model, kept while photos wait to be measured.
+            let mut look = None;
+            let mut next = job_rx.recv().ok();
+            while let Some(job) = next {
                 let item_id = job.item_id;
-                let result = caught(|| measure_depth(&engine_slot, &progress, job, &mut faces)).unwrap_or_else(Err);
+                let result = caught(|| measure_depth(&engine_slot, &progress, job, &mut faces, &mut look)).unwrap_or_else(Err);
                 if let Err(err) = &result {
                     tracing::warn!(item_id, %err, "depth run failed");
                 }
                 let _ = done_tx.send(DepthResult { item_id, result });
+                next = job_rx.try_recv().ok().or_else(|| {
+                    look = None;
+                    job_rx.recv().ok()
+                });
             }
         });
         Self { jobs, done, warm }
@@ -526,6 +533,7 @@ fn measure_depth(
     slot: &super::dispatch_progress::DispatchProgressSlot,
     job: DepthJob,
     finder: &mut prunr_core::face::LazyFaceFinder,
+    look: &mut Option<prunr_core::OrtEngine>,
 ) -> Result<Arc<prunr_core::depth::DepthMap>, String> {
     let DepthJob { item_id, input, cpu_only, faces, .. } = job;
     let kind = prunr_core::depth::MODEL;
@@ -540,7 +548,7 @@ fn measure_depth(
             let engine = ensure_warm_engine(engine_slot, WarmEngineKey { model: kind, cpu_only }, threads)?;
             let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
             let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
-            Ok(with_subject_unless_faced(map.with_faces(&faces), &photo))
+            Ok(map.with_faces(&faces).with_subject_unless_faced(|| find_subject(&photo, look)))
         })
         .map(Arc::new)
         .map_err(|e| e.to_string());
@@ -550,25 +558,18 @@ fn measure_depth(
     result
 }
 
-/// `map` knowing where the subject is when it found no face, for Auto
-/// focus: the first-look model, loaded for this photo when memory admits
-/// it and let go after; else the map as it was (the nearest tenth).
-fn with_subject_unless_faced(map: prunr_core::depth::DepthMap, photo: &image::RgbaImage) -> prunr_core::depth::DepthMap {
+/// Where the first-look model sees the subject in `photo`, for Auto focus:
+/// the model kept in `look` when memory admitted it for an earlier photo.
+fn find_subject(photo: &image::RgbaImage, look: &mut Option<prunr_core::OrtEngine>) -> Result<prunr_core::subject::SubjectHint, String> {
     use prunr_core::subject::{find_subject_rgba, first_look_engine, FIRST_LOOK_MODEL};
-    if map.face_nearness().is_some() {
-        return map;
-    }
-    let found = prunr_models::descriptor(FIRST_LOOK_MODEL.into())
-        .ok_or_else(|| "the first-look model is not registered".to_string())
-        .and_then(|descriptor| admitted(descriptor, true))
-        .and_then(|_| first_look_engine(1).and_then(|look| find_subject_rgba(photo, &look)).map_err(|e| e.to_string()));
-    match found {
-        Ok(hint) => map.with_subject(&hint),
-        Err(err) => {
-            tracing::info!(%err, "no subject search; Auto focus takes the nearest tenth");
-            map
+    let engine = match look {
+        Some(engine) => engine,
+        None => {
+            admitted(prunr_models::descriptor(FIRST_LOOK_MODEL.into()).ok_or("the first-look model is not registered")?, true)?;
+            look.insert(first_look_engine(1).map_err(|e| e.to_string())?)
         }
-    }
+    };
+    find_subject_rgba(photo, engine).map_err(|e| e.to_string())
 }
 
 /// Lay the photo an erase starts from under its tiles' previews, so the
@@ -866,8 +867,6 @@ pub(crate) struct Processor {
     /// The batches sent and not finished, oldest first: one queued behind
     /// a running one keeps its own images and recipe.
     in_flight: Vec<InFlightBatch>,
-    /// The batches nobody asked for (`hush_batch_of`), until they end.
-    quiet_batches: std::collections::HashSet<u64>,
     /// How many results each batch landed, until it ends.
     landed: HashMap<u64, usize>,
     next_batch: u64,
@@ -960,7 +959,6 @@ impl Processor {
             failed_reruns: 0,
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
-            quiet_batches: std::collections::HashSet::new(),
             landed: HashMap::new(),
             next_batch: 0,
             seg_run: None,
@@ -1607,29 +1605,14 @@ impl Processor {
         Some((recipe, run))
     }
 
-    /// The batch running `item_id`'s run is one nobody asked for (the
-    /// lines a brush's putting down retraces): its end says nothing.
-    pub(crate) fn hush_batch_of(&mut self, item_id: u64) {
-        if let Some(batch) = self.in_flight.iter().find(|b| b.pending.contains_key(&item_id)) {
-            self.quiet_batches.insert(batch.id);
-        }
-    }
-
-    /// Batch `id` landed a result.
+    /// Batch `id` landed a result someone asked for.
     pub(crate) fn note_landed(&mut self, id: u64) {
         *self.landed.entry(id).or_default() += 1;
     }
 
-    /// How many results batch `id`, ending, landed.
+    /// What batch `id`, ending, has to tell.
     pub(crate) fn take_landed(&mut self, id: u64) -> usize {
         self.landed.remove(&id).unwrap_or(0)
-    }
-
-    /// Whether batch `id`, ending, is one nobody asked for. Kept apart
-    /// from the batch's tracking, which its last answer ends before the
-    /// worker says it is done.
-    pub(crate) fn take_quiet(&mut self, id: u64) -> bool {
-        self.quiet_batches.remove(&id)
     }
 
     /// The worker finished batch `id`: drop it and return the images it

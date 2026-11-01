@@ -40,11 +40,6 @@ const DIALOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// The poll stops on its own once the work drains.
 const ASYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// The model a No-model recipe is built and diffed with. Any seg model
-/// would do, since No model never runs one, but every site that builds or
-/// diffs a recipe must pick the same one or `applied_recipe` reads as drift.
-pub const NO_MODEL_RECIPE_KIND: prunr_core::ModelKind = prunr_core::ModelKind::BiRefNetLite;
-
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt.
 const RUNTIME_PROMPT_SNOOZE_DAYS: i64 = 14;

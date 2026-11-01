@@ -216,10 +216,20 @@ impl CutoutEngines {
         self.plan_in(free_bounding_a_cutout(), held_mb)
     }
 
+    /// The cut-out engines alone: no first look, no lines.
+    pub fn of_cutout(model: ModelKind, jobs: usize, cpu_only: bool) -> Self {
+        Self { model, jobs, cpu_only, first_look: false, line_mode: prunr_core::LineMode::Off, line_fade: false }
+    }
+
     /// `plan` in RAM alone, for engines loaded before any run asks for
     /// them: an idle worker does not push other apps into swap.
     pub fn plan_in_ram(self) -> Result<CutoutPlan, prunr_core::memory::Short> {
-        self.plan_in(free_bounding_a_cutout().map(|(ram, _)| (ram, 0)), 0)
+        self.plan_in_ram_of(free_bounding_a_cutout().map(|(ram, _)| ram))
+    }
+
+    /// `plan_in_ram` with `ram` available (`None`: runs it all).
+    fn plan_in_ram_of(self, ram: Option<u64>) -> Result<CutoutPlan, prunr_core::memory::Short> {
+        self.plan_in(ram.map(|ram| (ram, 0)), 0)
     }
 
     /// `plan` with `free`, RAM available and free swap (`None`: runs it
@@ -302,19 +312,29 @@ pub fn default_jobs(model: Option<ModelKind>, on_host_cpu: bool, cpu_only: bool)
     cap_jobs(model, if on_host_cpu { (num_cpus::get() / 2).max(1) } else { 2 }, cpu_only)
 }
 
-/// `jobs`, held to what the memory plan fits in RAM now for `model`
-/// (`jobs_in_ram`). Read throttled: the Settings window asks every frame.
+/// `jobs`, held to what the memory plan fits in RAM now for `model`, at
+/// least one: a run that does not fit is refused when it starts. The
+/// Settings window asks every frame, so the reading is throttled and the
+/// plan worked out again only when the reading or the question changes.
 pub fn cap_jobs(model: Option<ModelKind>, jobs: usize, cpu_only: bool) -> usize {
+    type Asked = (ModelKind, usize, bool, Option<u64>);
+    static LAST: std::sync::Mutex<Option<(Asked, usize)>> = std::sync::Mutex::new(None);
     let Some(model) = model else { return jobs };
-    let ram = FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::available_ram_bytes_throttled);
-    let engines = CutoutEngines { model, jobs, cpu_only, first_look: false, line_mode: prunr_core::LineMode::Off, line_fade: false };
-    jobs_in_ram(engines, ram)
+    let asked = (model, jobs, cpu_only, FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::available_ram_bytes_throttled));
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((seen, fit)) = *last {
+        if seen == asked {
+            return fit;
+        }
+    }
+    let fit = jobs_in_ram(CutoutEngines::of_cutout(model, jobs, cpu_only), asked.3);
+    *last = Some((asked, fit));
+    fit
 }
 
-/// The most of `engines`' jobs the plan fits in `ram` (`None`: all), at
-/// least one: a run that does not fit is refused when it starts.
+/// The most of `engines`' jobs the plan fits in `ram`, at least one.
 fn jobs_in_ram(engines: CutoutEngines, ram: Option<u64>) -> usize {
-    engines.plan_in(ram.map(|ram| (ram, 0)), 0).map_or(1, |plan| plan.jobs)
+    engines.plan_in_ram_of(ram).map_or(1, |plan| plan.jobs)
 }
 
 #[cfg(test)]
@@ -337,9 +357,8 @@ mod tests {
     /// engines on the processor (0.7 GB each) and the 1 GB stop line fit.
     #[test]
     fn the_memory_plan_alone_holds_the_job_count() {
-        use prunr_core::LineMode;
         const MB: u64 = 1024 * 1024;
-        let u2net = |jobs| CutoutEngines { model: ModelKind::U2net, jobs, cpu_only: true, first_look: false, line_mode: LineMode::Off, line_fade: false };
+        let u2net = |jobs| CutoutEngines::of_cutout(ModelKind::U2net, jobs, true);
         assert_eq!(jobs_in_ram(u2net(4), Some(2600 * MB)), 2);
         assert_eq!(jobs_in_ram(u2net(4), Some(1000 * MB)), 1, "one at least: a run that cannot fit is refused when it starts, saying why");
         assert_eq!(jobs_in_ram(u2net(4), None), 4, "no reading, or macOS: all of them");

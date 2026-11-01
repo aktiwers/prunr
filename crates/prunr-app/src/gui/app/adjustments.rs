@@ -275,11 +275,7 @@ impl PrunrApp {
         if tc.preset_applied {
             // Upscale and inpaint must diff against their own ModelKind, not
             // the seg-only `to_model_kind` fallback.
-            let model = self
-                .settings
-                .model
-                .dispatch_model_kind()
-                .unwrap_or(super::NO_MODEL_RECIPE_KIND);
+            let model = self.settings.model.dispatch_model_kind().unwrap_or_else(|| self.settings.model.recipe_kind());
             let preset_dispatch = match &item.applied_recipe {
                 None => knob_catalog::DispatchKind::SubprocessFullPipeline,
                 Some(old) => {

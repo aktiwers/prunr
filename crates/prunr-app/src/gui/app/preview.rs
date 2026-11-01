@@ -70,7 +70,7 @@ impl PrunrApp {
         }
         // The mask as the run applies it: pinned to the defaults where the
         // run uses none (Sketch on Full), so its settings never drift.
-        let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
+        let model = self.settings.model.recipe_kind();
         let current = item.settings.current_recipe(model).mask;
         // Asked once per settings: a re-cut the render door would refuse
         // (no cut-out on screen: an erase or an upscale shown, the photo
@@ -238,7 +238,7 @@ impl PrunrApp {
                 crate::gui::live_preview::EdgeTensor { data: Arc::clone(data), height, width }
             });
         let packed_primary = (edge_tensor.is_none() && has_scale(primary)).then_some(primary);
-        let bold = matches!(item.settings.line_style, prunr_core::LineStyle::DualScale { .. }) && has_scale(prunr_core::EdgeScale::Bold);
+        let bold = item.settings.draws_bold_lines() && has_scale(prunr_core::EdgeScale::Bold);
         match kind {
             // Mask without a seg tensor is the filter-only path (effects on
             // the raw source); Edge has nothing to preview without a tensor.
@@ -263,7 +263,7 @@ impl PrunrApp {
         // (filter-only path).
         let correction = seg_model.and_then(|_| item.correction(action));
         let faces = item.faces_input(crate::gui::item::FaceStage::Photo);
-        let depth = Self::depth_input(item, &original, faces.as_ref(), is_filter_only);
+        let depth = Self::depth_input(item, &original, faces.as_ref(), role);
         Ok(DispatchInputs {
             start,
             original_from,
@@ -291,10 +291,10 @@ impl PrunrApp {
         item: &BatchItem,
         original: &Arc<image::RgbaImage>,
         faces: Option<&crate::gui::live_preview::FacesInput>,
-        is_filter_only: bool,
+        role: crate::gui::knob_catalog::ModelRole,
     ) -> Option<crate::gui::live_preview::DepthInput> {
         let map = item.depth.clone()?;
-        let look = is_filter_only.then_some(item.settings.depth).filter(prunr_core::depth::DepthLook::is_active);
+        let look = item.settings.photo_depth_look(role);
         let base = match faces {
             None => Some(Arc::clone(original)),
             Some(f) => f.faced.clone(),

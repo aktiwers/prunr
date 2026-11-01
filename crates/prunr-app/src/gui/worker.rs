@@ -1397,7 +1397,7 @@ fn spawn_warm(
 ) -> Option<WarmWorker> {
     let started = Instant::now();
     let neutral = RunSettings::neutral();
-    let engines = super::memory::CutoutEngines { model: spec.model, jobs: spec.jobs, cpu_only: spec.cpu_only, first_look: false, line_mode: neutral.line_mode, line_fade: false };
+    let engines = super::memory::CutoutEngines { line_mode: neutral.line_mode, ..super::memory::CutoutEngines::of_cutout(spec.model, spec.jobs, spec.cpu_only) };
     let fits = engines.plan_in_ram();
     if fits.map(|plan| plan.jobs) != Ok(spec.jobs) {
         tracing::info!(?engines, ?fits, "pre-warm skipped: not enough memory for its engines");

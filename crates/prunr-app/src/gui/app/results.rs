@@ -693,8 +693,10 @@ impl PrunrApp {
         let landed = result.as_ref().ok().map(|pr| (recipe_snapshot.inference.model, pr.active_provider.as_str()));
         self.processor.cut_times.ended(item_id, landed);
         // A cancelled cut's image may run something else since.
-        if self.batch.find_by_id(item_id).is_some_and(|i| i.awaits_run(run)) {
-            if self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot) {
+        if let Some(item) = self.batch.find_by_id(item_id).filter(|i| i.awaits_run(run)) {
+            // A run nobody asked for (a brush's retrace) lands unannounced.
+            let asked = !item.job.as_ref().is_some_and(|j| j.quiet);
+            if self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot) && asked {
                 self.processor.note_landed(batch);
             }
         } else {
@@ -791,11 +793,10 @@ impl PrunrApp {
         succeeded
     }
 
-
     /// Answer `item_id` from a batch just sent with its own settings.
     #[cfg(test)]
     pub(crate) fn answer_for_test(&mut self, ctx: &egui::Context, item_id: u64, result: Result<prunr_core::ProcessResult, String>) {
-        let model = self.settings.model.to_model_kind().unwrap_or(super::NO_MODEL_RECIPE_KIND);
+        let model = self.settings.model.recipe_kind();
         let Some(recipe) = self.batch.find_by_id(item_id).map(|i| i.settings.current_recipe(model)) else { return };
         let run = self.batch.find_by_id(item_id).and_then(BatchItem::job_run).unwrap_or_default();
         let batch = self.processor.track_dispatch(recipe, [(item_id, run)]);
@@ -847,7 +848,6 @@ impl PrunrApp {
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
     pub(super) fn on_batch_complete(&mut self, batch: u64) {
-        let quiet = self.processor.take_quiet(batch);
         let landed = self.processor.take_landed(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
@@ -874,7 +874,7 @@ impl PrunrApp {
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
-        } else if !still_processing && !quiet && landed > 0 {
+        } else if !still_processing && landed > 0 {
             let msg = format!("All done \u{2014} {} processed", crate::gui::views::fmt::count(landed, "image", "images"));
             self.status.text = msg.clone();
             self.toasts.success(msg);
@@ -906,7 +906,6 @@ impl PrunrApp {
     /// Every image batch `batch` still held, sent or waiting for room,
     /// stops waiting on it.
     fn drop_batch(&mut self, batch: u64) {
-        self.processor.take_quiet(batch);
         self.processor.take_landed(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
