@@ -245,6 +245,10 @@ fn render_thumbnail_layer(
         request_item_thumbnail(app, i);
         needs_repaint = true;
     }
+    if app.batch.items[i].wants_backdrop_thumb() {
+        let (id, ctx) = (app.batch.items[i].id, ui.ctx().clone());
+        app.kick_backdrop_thumb(id, &ctx);
+    }
     if app.batch.items[i].thumb.texture().is_none() && app.batch.items[i].thumb.is_pending() {
         draw_loading_spinner(ui, item_rect);
         needs_repaint = true;
@@ -328,7 +332,7 @@ fn paint_thumbnail(
     // while its thumbnail, built from the result, stays.
     if item.has_result() {
         let (w, h) = item.dimensions;
-        super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32));
+        super::canvas::paint_backdrop(ui, thumb_rect, item, egui::vec2(w as f32, h as f32), item.thumbnail_backdrop());
     }
 
     // Dim to ~40% while being dragged out to an external app.

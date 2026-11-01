@@ -1063,6 +1063,9 @@ impl PrunrApp {
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
         while let Ok((item_id, key, built)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+            if matches!(built, crate::gui::background_io::BackdropBuilt::Thumb(_)) && self.batch.building_backdrop_thumb == Some(item_id) {
+                self.batch.building_backdrop_thumb = None;
+            }
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.land_backdrop_built(key, built, |image, landing, options| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
                 ctx.request_repaint();
@@ -1101,6 +1104,10 @@ impl PrunrApp {
                 TexLanding::Backdrop { item_id, key } => {
                     let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
                     landed |= item.install_backdrop(key, texture);
+                }
+                TexLanding::BackdropThumb { item_id, key } => {
+                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
+                    item.install_backdrop_thumb(key, texture);
                 }
             }
         }

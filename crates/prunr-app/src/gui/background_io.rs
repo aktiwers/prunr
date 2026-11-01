@@ -41,12 +41,14 @@ pub(crate) enum TexLanding {
     },
     /// The picture behind the result, for `key`.
     Backdrop { item_id: u64, key: u64 },
+    /// An effect's thumbnail-size copy, for `key` (`thumb_backdrop_key`).
+    BackdropThumb { item_id: u64, key: u64 },
 }
 
 impl TexLanding {
     pub(crate) fn item_id(&self) -> u64 {
         match *self {
-            Self::Image { item_id, .. } | Self::Selection { item_id, .. } | Self::Backdrop { item_id, .. } => item_id,
+            Self::Image { item_id, .. } | Self::Selection { item_id, .. } | Self::Backdrop { item_id, .. } | Self::BackdropThumb { item_id, .. } => item_id,
         }
     }
 }
@@ -158,9 +160,17 @@ pub struct ThumbMsg {
 
 /// What a backdrop build sends back.
 pub(crate) enum BackdropBuilt {
-    /// The picture (`None`: none could be made), and what it was made of
-    /// when it follows the cut-out.
-    Picture(Option<crate::gui::image_texture::PreparedImage>, Option<crate::gui::item::BackdropMade>),
+    /// The picture (`None`: none could be made), what it was made of when
+    /// it follows the cut-out, and an effect's thumbnail-size copy under
+    /// its `BatchItem::thumb_backdrop_key`.
+    Picture(
+        Option<crate::gui::image_texture::PreparedImage>,
+        Option<crate::gui::item::BackdropMade>,
+        Option<(u64, crate::gui::image_texture::PreparedImage)>,
+    ),
+    /// An effect's thumbnail-size copy alone, for an image off screen
+    /// (`None`: none could be made).
+    Thumb(Option<crate::gui::image_texture::PreparedImage>),
     /// The cut-out is the one the shown backdrop was made of: it stays.
     Same,
 }
