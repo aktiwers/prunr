@@ -160,7 +160,7 @@ fn showcases() -> &'static [(&'static str, Preset)] {
     static READ: std::sync::OnceLock<Vec<(&str, Preset)>> = std::sync::OnceLock::new();
     READ.get_or_init(|| {
         SHOWCASES
-            .par_iter()
+            .iter()
             .filter_map(|&(name, json)| parse_preset_bytes(json.as_bytes()).ok().map(|file| (name, Preset::from(file).built_in())))
             .collect()
     })
