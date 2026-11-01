@@ -163,7 +163,7 @@ impl PrunrApp {
                     }
                     let started = std::time::Instant::now();
                     let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
-                    let rgba = effect_picture(&photo, effect, depth.as_deref(), cutout.as_deref());
+                    let rgba = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
                     let thumb = thumb_key.zip(rgba.as_ref()).map(|(key, rgba)| (key, thumbnail_copy(rgba)));
                     let picture = rgba.map(|rgba| PreparedImage::from_rgba(&rgba));
                     tracing::debug!(item_id, elapsed_ms = started.elapsed().as_millis() as u64, "backdrop built");
@@ -182,14 +182,16 @@ impl PrunrApp {
     }
 
     /// Make the thumbnail copy of an image's effect backdrop, off screen
-    /// where its full-size picture is not kept: from the full-size photo,
-    /// as the canvas and Save make it, then shrunk. One at a time, and not
-    /// while memory is short; the image's sidebar row asks while it is in
-    /// view.
+    /// where its full-size picture is not kept: from the photo and cut-out
+    /// shrunk to `BACKDROP_THUMB_WORK_PX`, the effect's pixel sizes with
+    /// them. A blur made small is not the full-size one shrunk, but at a
+    /// thumbnail's size the two look alike; Save makes its own at full
+    /// size. One at a time, and not while memory is short; the image's
+    /// sidebar row asks while it is in view.
     ///
-    /// Peak, at 24 MP: the photo (96 MB, decoded from the file when not
-    /// held), the cut-out unpacked (96 MB) and the effect's own working
-    /// set (a lens blur about 370 MB); then the copy (100 KB).
+    /// Peak: one full-size image unpacked at a time to be shrunk (96 MB at
+    /// 24 MP; a JPEG photo file decodes at the small size instead), then a
+    /// few MB.
     pub(crate) fn kick_backdrop_thumb(&mut self, item_id: u64, ctx: &egui::Context) {
         if self.batch.building_backdrop_thumb.is_some() || crate::gui::memory::under_memory_pressure() {
             return;
@@ -198,6 +200,7 @@ impl PrunrApp {
         let Some((effect, key)) = item.wanted_backdrop_thumb() else { return };
         item.backdrop_thumb_asked(key);
         let photo = item.backdrop_photo().unwrap_or_else(|| item.photo_pixels());
+        let photo_width = photo.decoded_dims().map_or(item.dimensions.0, |(w, _)| w).max(1);
         let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
         let depth = item.depth.clone();
         self.batch.building_backdrop_thumb = Some(item_id);
@@ -206,8 +209,10 @@ impl PrunrApp {
         self.batch.bg_io.decode_slots.spawn(move || {
             // Answered even on a panic, or the one-at-a-time slot stays taken.
             let thumb = crate::panics::caught("a thumbnail backdrop", || {
-                let cutout = cutout.and_then(|c| c.load());
-                effect_picture(&photo, effect, depth.as_deref(), cutout.as_deref()).map(|rgba| thumbnail_copy(&rgba))
+                let photo = photo.load_to_fit(BACKDROP_THUMB_WORK_PX)?;
+                let cutout = cutout.and_then(|c| c.load_to_fit(BACKDROP_THUMB_WORK_PX));
+                let effect = effect.at_scale(photo.width() as f32 / photo_width as f32);
+                prunr_core::effect_backdrop(&photo, effect, depth.as_deref(), cutout.as_ref()).map(|rgba| thumbnail_copy(&rgba))
             }).flatten();
             // The full backdrop's key has no part in a copy alone.
             let _ = tx.send((item_id, 0, crate::gui::background_io::BackdropBuilt::Thumb(key, thumb)));
@@ -339,15 +344,10 @@ mod background_item_tests {
     }
 }
 
-/// An effect backdrop as the canvas, the thumbnail and Save make it.
-fn effect_picture(
-    photo: &crate::gui::item::Pixels,
-    effect: prunr_core::BgEffect,
-    depth: Option<&prunr_core::depth::DepthMap>,
-    cutout: Option<&image::RgbaImage>,
-) -> Option<image::RgbaImage> {
-    photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth, cutout))
-}
+/// The size a never-shown image's backdrop copy is made at, four times a
+/// thumbnail's: a blur's radius stays over a pixel there, and the shrink
+/// to the thumbnail hides what making it small changes.
+const BACKDROP_THUMB_WORK_PX: u32 = 640;
 
 fn thumbnail_copy(rgba: &image::RgbaImage) -> crate::gui::image_texture::PreparedImage {
     crate::gui::image_texture::PreparedImage::from_rgba(&crate::gui::batch_manager::thumbnail_rgba(rgba))
