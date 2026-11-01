@@ -489,7 +489,7 @@ impl DragKey {
             settings: item.settings,
             result: item.result_rgba.as_ref().map(Arc::downgrade),
             step: item.timeline.current().result.as_ref().map(Arc::downgrade),
-            bg_image: item.bg_image.as_ref().map(Arc::downgrade),
+            bg_image: item.named_bg_image().map(Arc::downgrade),
             backdrop: item.backdrop_key(),
             layers: split.then(|| LayerKey {
                 action,

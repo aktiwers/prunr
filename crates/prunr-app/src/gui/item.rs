@@ -227,6 +227,14 @@ pub(crate) struct BgImage {
     pub(crate) hash: u64,
 }
 
+impl BgImage {
+    /// `held` when it is the picture `named` names; for a caller that
+    /// borrows an item's fields apart.
+    pub(crate) fn if_named(held: Option<&Arc<Self>>, named: Option<std::num::NonZeroU64>) -> Option<&Arc<Self>> {
+        held.filter(|picture| named.map(std::num::NonZeroU64::get) == Some(picture.hash))
+    }
+}
+
 /// `DefaultHasher` (SipHasher13) is deterministic across runs within a
 /// stdlib version, so a hash persisted in a preset survives reload.
 pub(crate) fn bg_image_content_hash(img: &image::DynamicImage) -> u64 {
@@ -3186,6 +3194,12 @@ impl BatchItem {
         self.preset_changes.clone_from(preset_changes);
     }
 
+    /// The background picture the settings name, once it is held: while a
+    /// newly named one loads, the one held before is not it.
+    pub(crate) fn named_bg_image(&self) -> Option<&Arc<BgImage>> {
+        BgImage::if_named(self.bg_image.as_ref(), self.settings.bg_image_hash)
+    }
+
     /// Show `picture`, the one the settings name, shared with the images
     /// that hold it.
     pub(crate) fn hold_bg_image(&mut self, picture: Arc<BgImage>) {
@@ -3217,7 +3231,7 @@ impl BatchItem {
     pub(crate) fn export_bg(&self) -> ExportBg {
         ExportBg {
             backdrop: self.settings.backdrop(),
-            image: self.bg_image.clone(),
+            image: self.named_bg_image().cloned(),
             fit: self.settings.bg_image_fit,
             photo: self.backdrop_photo(),
             depth: self.depth_source(),

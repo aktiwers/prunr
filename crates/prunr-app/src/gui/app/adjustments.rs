@@ -73,8 +73,9 @@ impl PrunrApp {
                 // for the cut-out's own need (`apply_selection_to_active_model`).
                 let brush_gate = item.verdict(crate::gui::capability::Need::ShownImage, settings_ref.model.role())
                     .reason().map(crate::gui::capability::Reason::text);
-                let has_bg_image = item.bg_image.is_some();
-                let bg_image_label = item.bg_image.as_deref()
+                let named_bg_image = crate::gui::item::BgImage::if_named(item.bg_image.as_ref(), item.settings.bg_image_hash);
+                let has_bg_image = named_bg_image.is_some();
+                let bg_image_label = named_bg_image
                     .and_then(|bg| bg.source_path.as_deref())
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str());
