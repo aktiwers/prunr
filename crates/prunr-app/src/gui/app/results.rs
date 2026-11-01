@@ -694,7 +694,9 @@ impl PrunrApp {
         self.processor.cut_times.ended(item_id, landed);
         // A cancelled cut's image may run something else since.
         if self.batch.find_by_id(item_id).is_some_and(|i| i.awaits_run(run)) {
-            self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot);
+            if self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot) {
+                self.processor.note_landed(batch);
+            }
         } else {
             tracing::info!(item_id, run, "a cut's answer for a run no longer awaited dropped");
         }
@@ -711,7 +713,7 @@ impl PrunrApp {
         seg: Option<crate::gui::worker::CompressedTensor>,
         edges: Option<crate::gui::worker::CompressedEdgeTensors>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
-    ) {
+    ) -> bool {
         let is_selected = self.batch.is_selected(item_id);
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
@@ -721,13 +723,13 @@ impl PrunrApp {
                 }
             }
             self.refresh_batch_progress_status();
-            return;
+            return false;
         }
 
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
         // A cancelled run's item already shows its state again.
         if !item.is_cutting() {
-            return;
+            return false;
         }
         if !item.job_is_current() {
             // Nobody asked for a quiet run: a later edit simply supersedes it.
@@ -737,7 +739,7 @@ impl PrunrApp {
             } else {
                 self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
             }
-            return;
+            return false;
         }
         let succeeded = result.is_ok();
         if succeeded {
@@ -759,7 +761,7 @@ impl PrunrApp {
             self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
             self.processor.note_failed_rerun();
         }
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return succeeded };
         // A stable completion signal for debug logs and external observers.
         tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
@@ -786,7 +788,9 @@ impl PrunrApp {
             dropped += self.batch.evict_all_tensors();
         }
         self.tell_dropped_cutouts(dropped);
+        succeeded
     }
+
 
     /// Answer `item_id` from a batch just sent with its own settings.
     #[cfg(test)]
@@ -844,6 +848,7 @@ impl PrunrApp {
     /// left to its own batch.
     pub(super) fn on_batch_complete(&mut self, batch: u64) {
         let quiet = self.processor.take_quiet(batch);
+        let landed = self.processor.take_landed(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
         never_answered.extend(self.processor.end_admission_with(batch));
@@ -869,8 +874,8 @@ impl PrunrApp {
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
-        } else if !still_processing && !quiet {
-            let msg = format!("All done \u{2014} {} processed", crate::gui::views::fmt::count(counts.done, "image", "images"));
+        } else if !still_processing && !quiet && landed > 0 {
+            let msg = format!("All done \u{2014} {} processed", crate::gui::views::fmt::count(landed, "image", "images"));
             self.status.text = msg.clone();
             self.toasts.success(msg);
         }
@@ -902,6 +907,7 @@ impl PrunrApp {
     /// stops waiting on it.
     fn drop_batch(&mut self, batch: u64) {
         self.processor.take_quiet(batch);
+        self.processor.take_landed(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
@@ -2254,6 +2260,42 @@ mod timeline_contract_tests {
         app.drain_background_channels(&ctx);
         assert_eq!(shown(&app), Some(5), "the new pass lands");
         assert!(app.batch.items[0].job.is_none());
+    }
+
+    /// A batch's end tells what it finished: the images it landed, not
+    /// every image done; one that landed none (cancelled) adds nothing to
+    /// what its cancel said.
+    #[test]
+    fn a_batch_tells_only_what_it_finished() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Silueta);
+        for id in [2, 3] {
+            crate::gui::tests::fixtures::push_test_item(&mut app, id).dimensions = (4, 4);
+        }
+        let send = |app: &mut PrunrApp, ids: &[u64]| {
+            let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::Silueta);
+            let runs: Vec<(u64, u64)> = ids.iter().map(|&id| {
+                let item = app.batch.find_by_id_mut(id).expect("pushed");
+                item.start_job(Some(StepKind::Process), Engine::Segment);
+                item.mark_running();
+                (id, item.job_run().expect("a run"))
+            }).collect();
+            app.processor.track_dispatch(recipe, runs)
+        };
+        let batch = send(&mut app, &[2, 3]);
+        let cut = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: String::new() };
+        app.on_batch_item_done(&ctx, batch, 2, Ok(cut), None, None);
+        app.batch.find_by_id_mut(3).expect("pushed").abandon_job();
+        app.on_batch_complete(batch);
+        let told = app.toasts.last_for_test().map(|(_, text)| text.to_string());
+        assert_eq!(told.as_deref(), Some("All done \u{2014} 1 image processed"), "the one it landed, not the two done");
+
+        let batch = send(&mut app, &[3]);
+        app.batch.find_by_id_mut(3).expect("pushed").abandon_job();
+        let toasts = app.toasts.len_for_test();
+        app.on_batch_complete(batch);
+        assert_eq!(app.toasts.len_for_test(), toasts, "none landed: nothing to tell");
     }
 
     /// A re-run that fails on an image still showing a result says so,

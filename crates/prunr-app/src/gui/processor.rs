@@ -868,6 +868,8 @@ pub(crate) struct Processor {
     in_flight: Vec<InFlightBatch>,
     /// The batches nobody asked for (`hush_batch_of`), until they end.
     quiet_batches: std::collections::HashSet<u64>,
+    /// How many results each batch landed, until it ends.
+    landed: HashMap<u64, usize>,
     next_batch: u64,
     /// The progress run the in-flight batch shows through.
     seg_run: Option<super::dispatch_progress::RunSink>,
@@ -959,6 +961,7 @@ impl Processor {
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             quiet_batches: std::collections::HashSet::new(),
+            landed: HashMap::new(),
             next_batch: 0,
             seg_run: None,
             inpaint_done: Chan::default(),
@@ -1610,6 +1613,16 @@ impl Processor {
         if let Some(batch) = self.in_flight.iter().find(|b| b.pending.contains_key(&item_id)) {
             self.quiet_batches.insert(batch.id);
         }
+    }
+
+    /// Batch `id` landed a result.
+    pub(crate) fn note_landed(&mut self, id: u64) {
+        *self.landed.entry(id).or_default() += 1;
+    }
+
+    /// How many results batch `id`, ending, landed.
+    pub(crate) fn take_landed(&mut self, id: u64) -> usize {
+        self.landed.remove(&id).unwrap_or(0)
     }
 
     /// Whether batch `id`, ending, is one nobody asked for. Kept apart
