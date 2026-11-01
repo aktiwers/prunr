@@ -55,13 +55,30 @@ pub fn first_look_engine(pool_size: usize) -> Result<OrtEngine, CoreError> {
 pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> Result<(), CoreError> {
     progress.check_cancelled()?;
     let started = std::time::Instant::now();
-    let model = look.model_kind();
     progress.step(Step::FindingSubject);
-    let hint = look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))?;
+    let hint = find_subject(img, look)?;
     progress.check_cancelled()?;
     progress.subject(|| hint);
     tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "first look reported");
     Ok(())
+}
+
+/// Where `look` (the first-look model's engine) sees the subject in
+/// `img`: the first look, and what Auto focus aims at where no face is.
+/// Peak beyond the session: the RGB copy the resize reads (`first_look`).
+pub fn find_subject(img: &DynamicImage, look: &OrtEngine) -> Result<SubjectHint, CoreError> {
+    let model = look.model_kind();
+    look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))
+}
+
+/// `find_subject` for a photo held as RGBA, shrunk to the model's square
+/// first: no full-size copy, only the square (400 KB at 320 px). The
+/// photos measured are opaque, so dropping alpha after the shrink reads
+/// the same pixels as before it.
+pub fn find_subject_rgba(photo: &image::RgbaImage, look: &OrtEngine) -> Result<SubjectHint, CoreError> {
+    let side = crate::preprocess::input_side(look.model_kind());
+    let square = crate::formats::resize_rgba(photo, side, side, crate::formats::ResizeFilter::Lanczos3);
+    find_subject(&DynamicImage::ImageRgba8(square), look)
 }
 
 /// The hint for a segmentation model's raw output (`1 × 1 × h × w`).

@@ -540,7 +540,7 @@ fn measure_depth(
             let engine = ensure_warm_engine(engine_slot, WarmEngineKey { model: kind, cpu_only }, threads)?;
             let map = prunr_core::depth::estimate_depth(&engine, &photo, &progress)?;
             let faces = faces.unwrap_or_else(|| finder.places([photo.width(), photo.height()], |f| f.find(&photo)));
-            Ok(map.with_faces(&faces))
+            Ok(with_subject_unless_faced(map.with_faces(&faces), &photo))
         })
         .map(Arc::new)
         .map_err(|e| e.to_string());
@@ -548,6 +548,27 @@ fn measure_depth(
         run.end();
     }
     result
+}
+
+/// `map` knowing where the subject is when it found no face, for Auto
+/// focus: the first-look model, loaded for this photo when memory admits
+/// it and let go after; else the map as it was (the nearest tenth).
+fn with_subject_unless_faced(map: prunr_core::depth::DepthMap, photo: &image::RgbaImage) -> prunr_core::depth::DepthMap {
+    use prunr_core::subject::{find_subject_rgba, first_look_engine, FIRST_LOOK_MODEL};
+    if map.face_nearness().is_some() {
+        return map;
+    }
+    let found = prunr_models::descriptor(FIRST_LOOK_MODEL.into())
+        .ok_or_else(|| "the first-look model is not registered".to_string())
+        .and_then(|descriptor| admitted(descriptor, true))
+        .and_then(|_| first_look_engine(1).and_then(|look| find_subject_rgba(photo, &look)).map_err(|e| e.to_string()));
+    match found {
+        Ok(hint) => map.with_subject(&hint),
+        Err(err) => {
+            tracing::info!(%err, "no subject search; Auto focus takes the nearest tenth");
+            map
+        }
+    }
 }
 
 /// Lay the photo an erase starts from under its tiles' previews, so the

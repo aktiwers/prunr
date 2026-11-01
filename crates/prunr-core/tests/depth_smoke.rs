@@ -84,3 +84,24 @@ fn the_gpu_path_maps_each_photo_shape_as_the_cpu_does() {
         assert!(mean <= 3.0, "{w}x{h} on {}: mean Δ {mean:.2}/255 from the CPU's map", gpu.active_provider());
     }
 }
+
+/// With no face, Auto focus aims at the subject the first-look model
+/// sees: on car-1 the car, where the nearest tenth of the photo is the
+/// road in front of it.
+#[test]
+fn auto_focus_finds_the_subject_without_a_face() {
+    if skip_if_no_ort("depth_focus") || skip_if_model_missing("depth_focus", MODEL.into()) {
+        return;
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/test_images");
+    let photo = prunr_core::load_image_from_path(&dir.join("car-1.jpg")).expect("car-1 loads").to_rgba8();
+    let car = prunr_core::load_image_from_path(&dir.join("car-1_nobg.png")).expect("its cut-out loads").to_rgba8();
+    let map = prunr_core::depth::Measurer::default().measure(&photo).expect("depth");
+    assert_eq!(map.face_nearness(), None, "no face on car-1");
+    let (focus, on_car) = (prunr_core::depth::auto_focus(&map), prunr_core::depth::subject_nearness(&map, &car).expect("the car is opaque"));
+    let engine = OrtEngine::new_cpu_only(MODEL, 2).expect("depth session");
+    let unfound = prunr_core::depth::auto_focus(&estimate_depth(&engine, &photo, &Progress::none()).expect("depth"));
+    eprintln!("[depth_focus] focus {focus:.2}, the car {on_car:.2}, the nearest tenth {unfound:.2}");
+    assert!((focus - on_car).abs() < 0.1, "focus {focus:.2} on the car at {on_car:.2}");
+    assert!((unfound - on_car).abs() > 0.3, "the nearest tenth ({unfound:.2}) misses the car");
+}
