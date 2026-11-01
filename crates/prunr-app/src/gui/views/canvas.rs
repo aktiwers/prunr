@@ -759,7 +759,7 @@ fn render_done(ui: &mut egui::Ui, app: &PrunrApp) -> Option<Rect> {
         let shown = done_texture(it)?;
         let img_rect = compute_img_rect(canvas_rect, it.frame_size(), app.zoom_state.zoom, app.zoom_state.pan_offset);
         draw_checkerboard(ui, img_rect, app.settings.dark_checker);
-        paint_backdrop(ui, img_rect, it, it.frame_size());
+        paint_backdrop(ui, img_rect, it, it.frame_size(), it.backdrop_texture.as_ref().map(|(_, texture)| texture));
         paint_image_or_reveal(ui, img_rect, it, shown, Color32::WHITE);
         draw_face_preview(ui, it, img_rect);
         draw_selection(ui, app, it, img_rect);
@@ -813,7 +813,9 @@ fn checker_texture(ctx: &egui::Context, dark: bool) -> TextureHandle {
 
 /// What sits behind `item`'s result, painted into `rect` under it. Until a
 /// picture's texture lands, nothing (the checkerboard) shows.
-pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem, image_px: Vec2) {
+/// `item`'s backdrop under its image in `rect`; a picture or effect from
+/// `texture`.
+pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item::BatchItem, image_px: Vec2, texture: Option<&ImageTexture>) {
     use crate::gui::item_settings::Backdrop;
     let backdrop = item.settings.backdrop();
     match backdrop {
@@ -822,7 +824,7 @@ pub(super) fn paint_backdrop(ui: &egui::Ui, rect: Rect, item: &crate::gui::item:
             ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(r, g, b));
         }
         Backdrop::Image(_) | Backdrop::Effect(_) => {
-            let Some((_, tex)) = item.backdrop_texture.as_ref() else { return };
+            let Some(tex) = texture else { return };
             paint_bg_image(ui, rect, tex, backdrop.fit(item.settings.bg_image_fit), image_px);
         }
     }

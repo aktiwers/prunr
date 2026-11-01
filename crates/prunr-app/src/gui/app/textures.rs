@@ -139,7 +139,7 @@ impl PrunrApp {
         let build: Box<dyn FnOnce() -> BackdropBuilt + Send> = match backdrop {
             Backdrop::Image(_) => {
                 let Some(bg) = item.named_bg_image().cloned() else { return };
-                Box::new(move || BackdropBuilt::Picture(Some(PreparedImage::from_rgba(&bg.image.to_rgba8())), None))
+                Box::new(move || BackdropBuilt::Picture(Some(PreparedImage::from_rgba(&bg.image.to_rgba8())), None, None))
             }
             Backdrop::Effect(effect) => {
                 let Some(photo) = item.backdrop_photo() else { return };
@@ -153,6 +153,7 @@ impl PrunrApp {
                 // new result with the shown backdrop's alpha keeps it.
                 let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
                 let (shown, apart_from_cut) = (item.shown_backdrop_made(), item.backdrop_key_apart_from_cut());
+                let thumb_key = item.thumb_backdrop_key();
                 Box::new(move || {
                     let cutout = cutout.and_then(|c| c.load());
                     let alpha = cutout.as_deref().map(prunr_core::formats::alpha_fingerprint);
@@ -162,11 +163,11 @@ impl PrunrApp {
                     }
                     let started = std::time::Instant::now();
                     let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
-                    let picture = photo.load()
-                        .and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
-                        .map(|rgba| PreparedImage::from_rgba(&rgba));
+                    let rgba = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
+                    let thumb = thumb_key.zip(rgba.as_ref()).map(|(key, rgba)| (key, thumbnail_copy(rgba)));
+                    let picture = rgba.map(|rgba| PreparedImage::from_rgba(&rgba));
                     tracing::debug!(item_id, elapsed_ms = started.elapsed().as_millis() as u64, "backdrop built");
-                    BackdropBuilt::Picture(picture, made)
+                    BackdropBuilt::Picture(picture, made, thumb)
                 })
             }
             Backdrop::Transparent | Backdrop::Color(_) => return,
@@ -176,6 +177,36 @@ impl PrunrApp {
         let ctx = ctx.clone();
         self.batch.bg_io.decode_slots.spawn(move || {
             let _ = tx.send((item_id, key, build()));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Make the thumbnail copy of an image's effect backdrop, off screen
+    /// where its full-size picture is not kept: from the full-size photo,
+    /// as the canvas and Save make it, then shrunk. One at a time; the
+    /// image's sidebar row asks while it is in view.
+    ///
+    /// Peak beyond the photo: the effect's own working set at full size
+    /// (a 24 MP lens blur about 370 MB), then the copy (100 KB).
+    pub(crate) fn kick_backdrop_thumb(&mut self, item_id: u64, ctx: &egui::Context) {
+        use crate::gui::item_settings::Backdrop;
+        if self.batch.building_backdrop_thumb.is_some() {
+            return;
+        }
+        let Some(item) = self.batch.find_by_id(item_id).filter(|item| item.wants_backdrop_thumb()) else { return };
+        let (Backdrop::Effect(effect), Some(key)) = (item.settings.backdrop(), item.thumb_backdrop_key()) else { return };
+        let photo = item.backdrop_photo().unwrap_or_else(|| item.photo_pixels());
+        let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
+        let depth = item.depth.clone();
+        self.batch.building_backdrop_thumb = Some(item_id);
+        let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
+        let ctx = ctx.clone();
+        self.batch.bg_io.decode_slots.spawn(move || {
+            let cutout = cutout.and_then(|c| c.load());
+            let thumb = photo.load()
+                .and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
+                .map(|rgba| thumbnail_copy(&rgba));
+            let _ = tx.send((item_id, key, crate::gui::background_io::BackdropBuilt::Thumb(thumb)));
             ctx.request_repaint();
         });
     }
@@ -304,6 +335,13 @@ mod background_item_tests {
     }
 }
 
+/// `rgba` shrunk to a thumbnail's size.
+fn thumbnail_copy(rgba: &image::RgbaImage) -> crate::gui::image_texture::PreparedImage {
+    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
+    let (w, h) = fit_long_side(rgba.width(), rgba.height(), crate::gui::batch_manager::THUMB_MAX_PX);
+    crate::gui::image_texture::PreparedImage::from_rgba(&resize_rgba(rgba, w, h, ResizeFilter::Bilinear))
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
@@ -344,6 +382,34 @@ mod tests {
         app.batch.select_item(0);
         app.reconcile_selected(&ctx);
         assert!(app.batch.items[1].backdrop_tex_pending.is_some(), "its picture builds while it is off screen");
+    }
+
+    /// Off screen, effect thumbnail copies are made one image at a time,
+    /// and one made is kept when the full-size pictures are let go.
+    #[test]
+    fn off_screen_effect_thumbnails_are_made_one_at_a_time_and_kept() {
+        let mut app = PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        for id in [1, 2, 3] {
+            let item = push_test_item(&mut app, id);
+            crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
+        }
+        app.kick_backdrop_thumb(2, &ctx);
+        app.kick_backdrop_thumb(3, &ctx);
+        assert_eq!(app.batch.building_backdrop_thumb, Some(2), "one at a time");
+        let started = std::time::Instant::now();
+        while app.batch.building_backdrop_thumb.is_some() && started.elapsed() < std::time::Duration::from_secs(20) {
+            app.drain_background_channels(&ctx);
+        }
+        assert_eq!(app.batch.building_backdrop_thumb, None, "the build answered");
+        assert!(!app.batch.items[1].wants_backdrop_thumb(), "answered, it is not asked for again");
+
+        let key = app.batch.items[2].thumb_backdrop_key().expect("an effect");
+        let texture = crate::gui::image_texture::ImageTexture::single(ctx.load_texture("thumb", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        app.batch.items[2].install_backdrop_thumb(key, texture.clone());
+        app.evict_background_item_caches(0);
+        assert_eq!(app.batch.items[2].thumbnail_backdrop().map(|t| t.id()), Some(texture.id()), "kept off screen");
     }
 
     /// One picture builds once, the image on screen included: the others

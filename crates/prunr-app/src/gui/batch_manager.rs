@@ -71,7 +71,7 @@ fn drop_tensors(item: &mut BatchItem) -> (usize, bool) {
 }
 
 /// Maximum thumbnail edge length in pixels.
-const THUMB_MAX_PX: u32 = 160;
+pub(crate) const THUMB_MAX_PX: u32 = 160;
 
 pub(crate) struct BatchManager {
     pub(crate) items: Vec<BatchItem>,
@@ -86,6 +86,9 @@ pub(crate) struct BatchManager {
     /// The pictures loading for the images whose settings name them, by
     /// hash: one load each, however many images name it.
     bg_loads: HashSet<u64>,
+    /// The image whose effect backdrop's thumbnail copy is being made: one
+    /// at a time, as each is made from the full-size photo.
+    pub(crate) building_backdrop_thumb: Option<u64>,
 }
 
 const HISTORY_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -176,6 +179,7 @@ impl BatchManager {
             demoting: Arc::default(),
             selection_queue: super::selection_queue::SelectionQueue::new(),
             bg_loads: HashSet::new(),
+            building_backdrop_thumb: None,
         }
     }
 
