@@ -1225,7 +1225,9 @@ pub fn retry_on_cpu<T>(
     }
     match on_engine() {
         Err(e) if on_card && e.is_out_of_memory() => {
-            if e.is_card_out_of_memory() {
+            // Windows out of memory to commit is no shortage of the card's:
+            // a model kept on the processor for it would stay there.
+            if e.is_card_out_of_memory() && !crate::sysmem::commit_is_short() {
                 crate::memory::note_ran_short(model, provider);
             }
             if let Err(short) = crate::memory::fits_now(model, CPU_NAME) {

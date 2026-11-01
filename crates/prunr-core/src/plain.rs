@@ -37,8 +37,14 @@ const OFFLINE: &[&str] = &[
 ];
 const MODEL_FAILED: &[&str] = &[
     "non-zero status code returned", "[onnxruntimeerror]", "ort session creation failed", "status message:",
-    "invalid_graph", "invalid_protobuf", "failed to load model",
 ];
+/// A model file that does not read: never a run short of memory.
+const MODEL_FILE_BAD: &[&str] = &["invalid_graph", "invalid_protobuf", "failed to load model"];
+
+fn has_mark(raw: &str, marks: &[&str]) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    marks.iter().any(|mark| lower.contains(mark))
+}
 
 impl Kind {
     /// The kind of failure `raw` reports; `None` for a message Prunr wrote,
@@ -47,15 +53,14 @@ impl Kind {
         if Self::ALL.iter().any(|kind| raw.contains(kind.sentence())) {
             return None;
         }
-        let lower = raw.to_ascii_lowercase();
-        let has = |marks: &[&str]| marks.iter().any(|mark| lower.contains(mark));
+        let has = |marks: &[&str]| has_mark(raw, marks);
         if crate::ep_compat::is_device_lost(raw) {
             return Some(Kind::CardStopped);
         }
         if crate::ep_compat::is_out_of_memory(raw) {
             return Some(if crate::ep_compat::is_card_out_of_memory(raw) { Kind::CardMemory } else { Kind::Memory });
         }
-        const BY_TEXT: [(Kind, &[&str]); 7] = [
+        const BY_TEXT: [(Kind, &[&str]); 8] = [
             (Kind::Memory, MEMORY),
             (Kind::NoPermission, NO_PERMISSION),
             (Kind::DiskFull, DISK_FULL),
@@ -63,17 +68,21 @@ impl Kind {
             (Kind::Unreadable, UNREADABLE),
             (Kind::Offline, OFFLINE),
             (Kind::ModelFailed, MODEL_FAILED),
+            (Kind::ModelFailed, MODEL_FILE_BAD),
         ];
         BY_TEXT.iter().find(|(_, marks)| has(marks)).map(|&(kind, _)| kind)
     }
 
-    /// `of`, knowing whether Windows has almost no memory left to commit:
-    /// a run's memory or model failure is then that.
-    pub fn in_light_of(raw: &str, commit_short: bool) -> Option<Self> {
-        Self::of(raw).map(|kind| match kind {
-            Kind::CardMemory | Kind::Memory | Kind::ModelFailed if commit_short => Kind::WindowsMemory,
-            kind => kind,
-        })
+    /// `of`, asking `commit_short` for a run's memory or model failure:
+    /// with Windows nearly out of memory to commit, that is the failure.
+    pub fn in_light_of(raw: &str, commit_short: impl FnOnce() -> bool) -> Option<Self> {
+        let kind = Self::of(raw)?;
+        let a_runs = match kind {
+            Kind::CardMemory | Kind::Memory => true,
+            Kind::ModelFailed => !has_mark(raw, MODEL_FILE_BAD),
+            _ => false,
+        };
+        Some(if a_runs && commit_short() { Kind::WindowsMemory } else { kind })
     }
 
     const ALL: [Kind; 10] = [
@@ -97,16 +106,12 @@ impl Kind {
     }
 }
 
-/// Less memory than this left for Windows to commit is none for a run.
-const COMMIT_SHORT_BYTES: u64 = 1 << 30;
-
 /// `raw` as a person reads it: a system, driver or model failure as the
 /// sentence for its kind, its own text logged; anything else as it is.
 /// Read as it is shown, which is while the run that failed still holds
 /// its memory.
 pub fn error(raw: &str) -> &str {
-    let commit_short = crate::sysmem::available_commit_bytes().is_some_and(|free| free < COMMIT_SHORT_BYTES);
-    match Kind::in_light_of(raw, commit_short) {
+    match Kind::in_light_of(raw, crate::sysmem::commit_is_short) {
         Some(kind) => {
             tracing::warn!(detail = raw, ?kind, "a failure shown in plain words");
             kind.sentence()
@@ -233,11 +238,12 @@ mod tests {
             ("Inference error: ORT inference failed: Allocation failed.", Kind::Memory),
         ];
         for (raw, kind) in failures {
-            assert_eq!(Kind::in_light_of(raw, false), Some(kind), "{raw}");
-            assert_eq!(Kind::in_light_of(raw, true), Some(Kind::WindowsMemory), "{raw}");
+            assert_eq!(Kind::in_light_of(raw, || false), Some(kind), "{raw}");
+            assert_eq!(Kind::in_light_of(raw, || true), Some(Kind::WindowsMemory), "{raw}");
         }
-        assert_eq!(Kind::in_light_of("No space left on device (os error 28)", true), Some(Kind::DiskFull), "not a run's failure");
-        assert_eq!(Kind::in_light_of("Eraser (Big-LaMa) is not installed", true), None);
+        assert_eq!(Kind::in_light_of("No space left on device (os error 28)", || true), Some(Kind::DiskFull), "not a run's failure");
+        assert_eq!(Kind::in_light_of("ORT session creation failed (CUDA): invalid_graph", || true), Some(Kind::ModelFailed), "a model file that does not read");
+        assert_eq!(Kind::in_light_of("Eraser (Big-LaMa) is not installed", || panic!("not asked")), None, "Windows is asked only about a run's failure");
     }
 
     /// Ten-something os errors are not the two they start like.
