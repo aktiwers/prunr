@@ -181,6 +181,13 @@ pub fn available_commit_bytes() -> Option<u64> {
     }
 }
 
+/// Whether Windows has less left to commit than a run's stop line
+/// (`memory::STOP_BELOW_FREE_MB`): a run failing then failed for that,
+/// not for the card's memory or the model. Never elsewhere.
+pub fn commit_is_short() -> bool {
+    available_commit_bytes().is_some_and(|free| free < crate::memory::STOP_BELOW_FREE_MB * 1024 * 1024)
+}
+
 /// The system's memory; `None` when it doesn't report it.
 pub fn total_ram_bytes() -> Option<u64> {
     let total = with_system(|sys| {
