@@ -472,8 +472,9 @@ enum CliBackdrop<'a> {
     Transparent,
     Color([u8; 3]),
     Image(std::sync::Arc<image::DynamicImage>, prunr_core::BgImageFit),
-    /// An effect, and where a lens blur gets its depth.
-    Effect(prunr_core::BgEffect, &'a CliDepth),
+    /// An effect, where a lens blur gets its depth, and whether a photo
+    /// over the limit is shrunk first, as the run's own copy was.
+    Effect(prunr_core::BgEffect, &'a CliDepth, bool),
 }
 
 impl CliBackdrop<'_> {
@@ -484,11 +485,13 @@ impl CliBackdrop<'_> {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
             CliBackdrop::Image(img, fit) => prunr_core::apply_background_image(result, img, *fit),
-            CliBackdrop::Effect(effect, depth) => {
+            CliBackdrop::Effect(effect, depth, downscale) => {
                 let decoded;
                 let photo = match photo {
                     Some(photo) => photo,
-                    None => match prunr_core::load_image_from_path(photo_path) {
+                    // Read as the run read it: a photo the run shrank is the
+                    // one its result was cut from.
+                    None => match read_for_run(photo_path, *downscale, true) {
                         Ok(read) => {
                             decoded = read.into_rgba8();
                             &decoded
@@ -609,7 +612,7 @@ fn cli_finish<'a>(args: &Cli, depth: &'a CliDepth, s: &ItemSettings) -> Option<C
     };
     // The app's rule: an effect wins over an image, an image over a colour.
     let backdrop = match (s.backdrop(), bg_image) {
-        (Backdrop::Effect(effect), _) => CliBackdrop::Effect(effect, depth),
+        (Backdrop::Effect(effect), _) => CliBackdrop::Effect(effect, depth, args.large_image == LargeImagePolicy::Downscale),
         (_, Some(image)) => CliBackdrop::Image(image, s.bg_image_fit),
         (Backdrop::Color(color), None) => CliBackdrop::Color(color),
         (Backdrop::Image(_), None) => {
@@ -2426,6 +2429,25 @@ mod tests {
         assert!(super::CliDepth::new(&super::Cli::parse_from(["prunr", "/p/cat.jpg"]), &crate::gui::item_settings::ItemSettings::default()).kept.is_none(), "nothing kept without --depth-map");
     }
 
+    /// With --large-image downscale, a worker run's effect background is
+    /// made from the photo shrunk as the run's own copy was: the same
+    /// background a rendered run makes from the photo it holds.
+    #[test]
+    fn a_backdrop_is_made_from_the_photo_the_run_shrank() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.png");
+        let w = prunr_core::LARGE_IMAGE_LIMIT + 1;
+        image::RgbaImage::from_fn(w, 4, |x, _| if x < w / 2 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) }).save(&path).unwrap();
+        let shrunk = super::read_for_run(&path, true, true).unwrap().into_rgba8();
+        let depth = super::CliDepth::default();
+        let backdrop = super::CliBackdrop::Effect(prunr_core::BgEffect::BlurredSource { radius: 16 }, &depth, true);
+        let mut from_file = image::RgbaImage::new(shrunk.width(), shrunk.height());
+        let mut from_held = from_file.clone();
+        backdrop.apply(&mut from_file, &path, None);
+        backdrop.apply(&mut from_held, &path, Some(&shrunk));
+        assert!(from_file == from_held, "the worker's background differs from the rendered run's");
+    }
+
     /// The effect is made from the input photo and fills what the result
     /// leaves transparent; the result's own pixels stay.
     #[test]
@@ -2434,7 +2456,7 @@ mod tests {
         let photo = dir.path().join("photo.png");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
         let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
-        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default()).apply(&mut result, &photo, None);
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default(), false).apply(&mut result, &photo, None);
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");
