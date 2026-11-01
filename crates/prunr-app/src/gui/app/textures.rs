@@ -119,7 +119,7 @@ impl PrunrApp {
         use crate::gui::image_texture::PreparedImage;
         let build: Box<dyn FnOnce() -> BackdropBuilt + Send> = match backdrop {
             Backdrop::Image(_) => {
-                let Some(bg) = item.bg_image.clone() else { return };
+                let Some(bg) = item.named_bg_image().cloned() else { return };
                 Box::new(move || BackdropBuilt::Picture(Some(PreparedImage::from_rgba(&bg.image.to_rgba8())), None))
             }
             Backdrop::Effect(effect) => {
@@ -282,5 +282,35 @@ mod background_item_tests {
         let kept = |i: usize| app.batch.items[i].upscale.as_ref().map(|u| u.reference.is_some());
         assert_eq!(kept(0), Some(true), "the shown image keeps its reference");
         assert_eq!(kept(1), Some(false), "the other drops it but keeps its run");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+    use super::PrunrApp;
+    use crate::gui::item::BgImage;
+    use crate::gui::tests::fixtures::push_test_item;
+
+    fn picture(hash: u64) -> Arc<BgImage> {
+        Arc::new(BgImage { source_path: None, image: Arc::new(image::DynamicImage::new_rgb8(1, 1)), hash })
+    }
+
+    /// A newly named picture loads while the one held before stays: the
+    /// backdrop is built from the named one only, never the old one under
+    /// the new picture's key, which would stay on screen.
+    #[test]
+    fn a_backdrop_is_built_only_from_the_picture_the_settings_name() {
+        let mut app = PrunrApp::new_for_test();
+        let ctx = egui::Context::default();
+        let item = push_test_item(&mut app, 1);
+        item.hold_bg_image(picture(7));
+        item.settings.bg_image_hash = NonZeroU64::new(8);
+        app.kick_backdrop_tex_prep(1, &ctx);
+        assert!(app.batch.items[0].backdrop_tex_pending.is_none(), "the old picture is not built as the new one");
+        app.batch.items[0].hold_bg_image(picture(8));
+        app.kick_backdrop_tex_prep(1, &ctx);
+        assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the named one is held");
     }
 }
