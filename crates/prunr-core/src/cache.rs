@@ -654,35 +654,65 @@ mod tests {
     /// often RAM. It lives beside the test binary instead, and each run
     /// removes the directories of test processes that have ended.
     pub(super) fn temp_root() -> Option<PathBuf> {
-        static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        static ROOT: std::sync::OnceLock<Option<(PathBuf, std::fs::File)>> = std::sync::OnceLock::new();
         ROOT.get_or_init(|| {
             let base = std::env::current_exe().ok()?.parent()?.parent()?.join("test-ep-cache");
             remove_ended_runs(&base);
             let own = base.join(std::process::id().to_string());
-            std::fs::create_dir_all(&own).ok()?;
-            Some(own.join("ep_cache"))
-        }).clone()
+            let held = hold_run(&own)?;
+            Some((own.join("ep_cache"), held))
+        }).as_ref().map(|(root, _)| root.clone())
+    }
+
+    /// The file a test run holds locked while its process lives: the
+    /// system lets the lock go when the process ends, however it ends.
+    const RUN_LOCK: &str = "running";
+
+    /// How long a run's folder may lack its lock file while being made.
+    const RUN_START: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// `dir` made and marked as this run's until the returned file drops.
+    fn hold_run(dir: &Path) -> Option<std::fs::File> {
+        std::fs::create_dir_all(dir).ok()?;
+        let lock = std::fs::File::create(dir.join(RUN_LOCK)).ok()?;
+        lock.try_lock().ok()?;
+        Some(lock)
     }
 
     fn remove_ended_runs(base: &Path) {
         let Ok(entries) = std::fs::read_dir(base) else { return };
         for entry in entries.flatten() {
-            let ended = entry.file_name().to_str().and_then(|pid| pid.parse::<u32>().ok())
-                .is_some_and(|pid| !process_runs(pid));
-            if ended {
+            if run_ended(&entry.path()) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
     }
 
-    /// Whether `pid` is a running process. Only Linux can tell cheaply;
-    /// elsewhere every directory is kept (CI machines are thrown away).
-    fn process_runs(pid: u32) -> bool {
-        if cfg!(target_os = "linux") {
-            Path::new("/proc").join(pid.to_string()).exists()
-        } else {
-            true
+    /// Whether the run that made `dir` has ended: its lock file locks
+    /// (closed again before the folder goes, which Windows needs). A
+    /// folder without one is being made, or was made before runs held
+    /// one and has ended once it is older than `RUN_START`.
+    fn run_ended(dir: &Path) -> bool {
+        match std::fs::File::open(dir.join(RUN_LOCK)) {
+            Ok(lock) => lock.try_lock().is_ok(),
+            Err(_) => dir.metadata().and_then(|m| m.modified()).is_ok_and(|made| made.elapsed().is_ok_and(|age| age > RUN_START)),
         }
+    }
+
+    /// A test run's folder goes once its process ended, on every system
+    /// and whoever has its number now; a running test's stays.
+    #[test]
+    fn only_the_folders_of_ended_test_runs_are_removed() {
+        let base = tempfile::tempdir().unwrap();
+        let hold = |name: &str| hold_run(&base.path().join(name)).expect("held");
+        let running = hold(&std::process::id().to_string());
+        drop(hold("1"));
+        std::fs::create_dir(base.path().join("starting")).unwrap();
+        remove_ended_runs(base.path());
+        assert!(base.path().join(std::process::id().to_string()).exists(), "a running test's");
+        assert!(!base.path().join("1").exists(), "an ended test's, its number another process's now");
+        assert!(base.path().join("starting").exists(), "one still being made");
+        drop(running);
     }
 
     /// A draft becomes the cache only when published; one dropped (a
