@@ -558,10 +558,10 @@ fn measure_depth(
     result
 }
 
-/// Where the first-look model sees the subject in `photo`, for Auto focus:
+/// The subject the first-look model is sure of in `photo`, for Auto focus:
 /// the model kept in `look` when memory admitted it for an earlier photo.
-fn find_subject(photo: &image::RgbaImage, look: &mut Option<prunr_core::OrtEngine>) -> Result<prunr_core::subject::SubjectHint, String> {
-    use prunr_core::subject::{find_subject_rgba, first_look_engine, FIRST_LOOK_MODEL};
+fn find_subject(photo: &image::RgbaImage, look: &mut Option<prunr_core::OrtEngine>) -> Result<Option<prunr_core::subject::SubjectHint>, String> {
+    use prunr_core::subject::{find_sure_subject, first_look_engine, FIRST_LOOK_MODEL};
     let engine = match look {
         Some(engine) => engine,
         None => {
@@ -569,7 +569,7 @@ fn find_subject(photo: &image::RgbaImage, look: &mut Option<prunr_core::OrtEngin
             look.insert(first_look_engine(1).map_err(|e| e.to_string())?)
         }
     };
-    find_subject_rgba(photo, engine).map_err(|e| e.to_string())
+    find_sure_subject(photo, engine).map_err(|e| e.to_string())
 }
 
 /// Lay the photo an erase starts from under its tiles' previews, so the

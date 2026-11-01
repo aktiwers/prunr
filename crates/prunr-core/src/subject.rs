@@ -64,26 +64,41 @@ pub fn first_look(img: &DynamicImage, look: &OrtEngine, progress: &Progress) -> 
 /// | 12 MP  | 36 MB    |
 /// | 24 MP  | 72 MB    |
 pub fn find_subject(img: &DynamicImage, look: &OrtEngine) -> Result<SubjectHint, CoreError> {
-    let model = look.model_kind();
-    look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(hint_of_output(view, model)))
+    read_first_look(img, look, subject_hint)
 }
 
-/// `find_subject` for a photo held as RGBA, shrunk to the model's square
-/// first: no full-size copy, only the square (400 KB at 320 px). The
-/// photos measured are opaque, so dropping alpha after the shrink reads
-/// the same pixels as before it.
-pub fn find_subject_rgba(photo: &image::RgbaImage, look: &OrtEngine) -> Result<SubjectHint, CoreError> {
+/// The subject `look` is sure of in `photo` (`sure_subject_hint`), for
+/// Auto focus; `None` when it is sure of none. The photo is shrunk to the
+/// model's square first: no full-size copy, only the square (400 KB at
+/// 320 px). The photos measured are opaque, so dropping alpha after the
+/// shrink reads the same pixels as before it.
+pub fn find_sure_subject(photo: &image::RgbaImage, look: &OrtEngine) -> Result<Option<SubjectHint>, CoreError> {
     let side = crate::preprocess::input_side(look.model_kind());
     let square = crate::formats::resize_rgba(photo, side, side, crate::formats::ResizeFilter::Lanczos3);
-    find_subject(&DynamicImage::ImageRgba8(square), look)
+    find_sure_subject_decoded(&DynamicImage::ImageRgba8(square), look)
+}
+
+/// `find_sure_subject` for a decoded photo in any layout (`find_subject`'s
+/// peak).
+pub fn find_sure_subject_decoded(img: &DynamicImage, look: &OrtEngine) -> Result<Option<SubjectHint>, CoreError> {
+    read_first_look(img, look, sure_subject_hint)
+}
+
+fn read_first_look<T>(img: &DynamicImage, look: &OrtEngine, read: fn(&[f32], usize, usize, ModelKind) -> T) -> Result<T, CoreError> {
+    let model = look.model_kind();
+    look.infer_into(crate::preprocess::preprocess(img, model), |view| Ok(read_output(view, model, read)))
 }
 
 /// The hint for a segmentation model's raw output (`1 × 1 × h × w`).
 pub(crate) fn hint_of_output(view: ndarray::ArrayView4<'_, f32>, model: ModelKind) -> SubjectHint {
+    read_output(view, model, subject_hint)
+}
+
+fn read_output<T>(view: ndarray::ArrayView4<'_, f32>, model: ModelKind, read: fn(&[f32], usize, usize, ModelKind) -> T) -> T {
     let plane = view.slice(ndarray::s![0, 0, .., ..]);
     let (h, w) = (plane.nrows(), plane.ncols());
     let flat = plane.as_standard_layout();
-    subject_hint(flat.as_slice().unwrap_or(&[]), h, w, model)
+    read(flat.as_slice().unwrap_or(&[]), h, w, model)
 }
 
 /// Longest side of a subject hint; plenty for a glow around the subject.
@@ -101,9 +116,39 @@ pub struct SubjectHint {
 /// The hint for a raw `tensor_h × tensor_w` segmentation output, read the
 /// way the mask is (`SegNormaliser`), over the sampled values.
 pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: ModelKind) -> SubjectHint {
+    let (w, h, samples) = sampled(tensor, tensor_h, tensor_w);
+    let (lo, hi, _) = crate::math::slice_stats(&samples);
+    let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
+    let coverage = samples.iter().map(|&v| crate::math::round_u8(norm.apply(v) * 255.0)).collect();
+    SubjectHint { width: w, height: h, coverage }
+}
+
+/// Fewest of a hint's cells a sure subject covers. Photos with a subject
+/// give 16 to 43 % of cells past one half; photos without one give none.
+const SURE_SUBJECT_MIN_SHARE: f32 = 0.005;
+
+/// The cells the model is sure are subject (probability past one half)
+/// at `255`, the rest at `0`; `None` when too few are for a subject.
+/// Unlike `subject_hint` nothing is stretched, so faint output on a photo
+/// without a subject stays background.
+pub fn sure_subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: ModelKind) -> Option<SubjectHint> {
+    let (w, h, samples) = sampled(tensor, tensor_h, tensor_w);
+    let logits = crate::postprocess::outputs_logits(model);
+    let coverage: Vec<u8> = samples
+        .iter()
+        .map(|&v| if logits { crate::math::sigmoid(v) } else { v })
+        .map(|p| if p > 0.5 { 255 } else { 0 })
+        .collect();
+    let sure = coverage.iter().filter(|&&c| c == 255).count();
+    (sure as f32 >= SURE_SUBJECT_MIN_SHARE * coverage.len() as f32).then_some(SubjectHint { width: w, height: h, coverage })
+}
+
+/// `tensor` sampled to at most `SUBJECT_HINT_SIDE` a side: width, height
+/// and the values, row-major.
+fn sampled(tensor: &[f32], tensor_h: usize, tensor_w: usize) -> (u32, u32, Vec<f32>) {
     let scale = (SUBJECT_HINT_SIDE as f32 / tensor_h.max(tensor_w).max(1) as f32).min(1.0);
     let (w, h) = (((tensor_w as f32 * scale) as usize).max(1), ((tensor_h as f32 * scale) as usize).max(1));
-    let samples: Vec<f32> = (0..h)
+    let samples = (0..h)
         .flat_map(|y| (0..w).map(move |x| (y, x)))
         .map(|(y, x)| {
             let ty = (y * tensor_h / h).min(tensor_h - 1);
@@ -111,10 +156,7 @@ pub fn subject_hint(tensor: &[f32], tensor_h: usize, tensor_w: usize, model: Mod
             tensor.get(ty * tensor_w + tx).copied().unwrap_or(0.0)
         })
         .collect();
-    let (lo, hi, _) = crate::math::slice_stats(&samples);
-    let norm = crate::postprocess::SegNormaliser::new(lo, hi, model);
-    let coverage = samples.iter().map(|&v| crate::math::round_u8(norm.apply(v) * 255.0)).collect();
-    SubjectHint { width: w as u32, height: h as u32, coverage }
+    (w as u32, h as u32, samples)
 }
 
 #[cfg(test)]
@@ -129,6 +171,23 @@ mod tests {
         assert_eq!((hint.width, hint.height), (128, 128));
         assert_eq!(hint.coverage[0], 255, "the left half is the subject");
         assert_eq!(hint.coverage[127], 0, "the right half is not");
+    }
+
+    /// Auto focus aims only at a subject the first look is sure of: the
+    /// cells it gives past one half (Silueta's probabilities as they are,
+    /// BiRefNet's logits through a sigmoid). Faint output, which the
+    /// stretched hint would still call a subject, is none.
+    #[test]
+    fn a_sure_subject_is_what_the_first_look_gives_past_one_half() {
+        let (h, w) = (64usize, 64usize);
+        let half: Vec<f32> = (0..h * w).map(|i| if i % w < w / 2 { 0.9 } else { 0.05 }).collect();
+        let hint = sure_subject_hint(&half, h, w, ModelKind::Silueta).expect("sure of the left half");
+        assert_eq!((hint.coverage[0], hint.coverage[hint.width as usize - 1]), (255, 0));
+        let faint: Vec<f32> = (0..h * w).map(|i| if i % w < w / 2 { 0.13 } else { 0.0 }).collect();
+        assert!(subject_hint(&faint, h, w, ModelKind::Silueta).coverage[0] == 255, "stretched, faint output reads as subject");
+        assert!(sure_subject_hint(&faint, h, w, ModelKind::Silueta).is_none(), "but no cell is past one half");
+        let logits: Vec<f32> = half.iter().map(|&p| if p > 0.5 { 4.0 } else { -4.0 }).collect();
+        assert!(sure_subject_hint(&logits, h, w, ModelKind::BiRefNetLite).is_some());
     }
 
     /// Which runs take a first look: BiRefNet and U2Net, untimed or timed

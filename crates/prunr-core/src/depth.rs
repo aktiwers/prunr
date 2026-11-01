@@ -62,7 +62,7 @@ impl DepthMap {
         self.face
     }
 
-    /// The map knowing where the subject is (`subject::find_subject`):
+    /// The map knowing where the subject is (`subject::find_sure_subject`):
     /// Auto focus aims at it where no face is.
     pub fn with_subject(mut self, hint: &crate::subject::SubjectHint) -> Self {
         let width = hint.width as usize;
@@ -72,13 +72,15 @@ impl DepthMap {
     }
 
     /// `self`, knowing where the subject is when it knows no face:
-    /// `search` finds it; when it cannot, focus stays on the nearest tenth.
-    pub fn with_subject_unless_faced<E: std::fmt::Display>(self, search: impl FnOnce() -> Result<crate::subject::SubjectHint, E>) -> Self {
+    /// `search` finds the subject it is sure of; when it finds none or
+    /// cannot look, focus stays on the nearest tenth.
+    pub fn with_subject_unless_faced<E: std::fmt::Display>(self, search: impl FnOnce() -> Result<Option<crate::subject::SubjectHint>, E>) -> Self {
         if self.face.is_some() {
             return self;
         }
         match search() {
-            Ok(hint) => self.with_subject(&hint),
+            Ok(Some(hint)) => self.with_subject(&hint),
+            Ok(None) => self,
             Err(err) => {
                 tracing::info!(%err, "no subject search; Auto focus takes the nearest tenth");
                 self
@@ -203,19 +205,19 @@ impl Measurer {
 
     pub fn measure(&self, photo: &RgbaImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
-        Ok(self.with_focus(map, photo.dimensions(), |f| f.find(photo), |look| crate::subject::find_subject_rgba(photo, look)))
+        Ok(self.with_focus(map, photo.dimensions(), |f| f.find(photo), |look| crate::subject::find_sure_subject(photo, look)))
     }
 
     /// `measure`, with the faces already found in `photo`.
     pub fn measure_with_faces(&self, photo: &RgbaImage, faces: &[crate::face::FacePlace]) -> Result<DepthMap, CoreError> {
         let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
-        Ok(if self.lines_only { map } else { self.focused(map, faces, |look| crate::subject::find_subject_rgba(photo, look)) })
+        Ok(if self.lines_only { map } else { self.focused(map, faces, |look| crate::subject::find_sure_subject(photo, look)) })
     }
 
     /// `measure` for a decoded photo in any layout.
     pub fn measure_decoded(&self, photo: &DynamicImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth_decoded(self.engine()?, photo, &Progress::none())?;
-        Ok(self.with_focus(map, (photo.width(), photo.height()), |f| f.find_decoded(photo), |look| crate::subject::find_subject(photo, look)))
+        Ok(self.with_focus(map, (photo.width(), photo.height()), |f| f.find_decoded(photo), |look| crate::subject::find_sure_subject_decoded(photo, look)))
     }
 
     /// `map` knowing what Auto focus aims at: the faces, or where none is,
@@ -225,7 +227,7 @@ impl Measurer {
         map: DepthMap,
         (w, h): (u32, u32),
         find_faces: impl FnOnce(&mut crate::face::FaceFinder) -> Result<Vec<crate::face::Face>, CoreError>,
-        find_subject: impl FnOnce(&OrtEngine) -> Result<crate::subject::SubjectHint, CoreError>,
+        find_subject: impl FnOnce(&OrtEngine) -> Result<Option<crate::subject::SubjectHint>, CoreError>,
     ) -> DepthMap {
         if self.lines_only {
             return map;
@@ -239,7 +241,7 @@ impl Measurer {
         &self,
         map: DepthMap,
         faces: &[crate::face::FacePlace],
-        find_subject: impl FnOnce(&OrtEngine) -> Result<crate::subject::SubjectHint, CoreError>,
+        find_subject: impl FnOnce(&OrtEngine) -> Result<Option<crate::subject::SubjectHint>, CoreError>,
     ) -> DepthMap {
         map.with_faces(faces).with_subject_unless_faced(|| {
             let look = self.look.get_or_init(|| crate::subject::first_look_engine(1).inspect_err(|err| tracing::warn!(%err, "first-look model failed to load")).ok());
@@ -760,6 +762,8 @@ mod tests {
         assert!((backdrop_focus(&found, Some(&lower)) - 0.5).abs() < 0.03, "a cut-out before the subject found");
         let nothing = crate::subject::SubjectHint { width: 10, height: 10, coverage: vec![0; 100] };
         assert_eq!(auto_focus(&depth.clone().with_subject(&nothing)), auto_focus(&depth), "no subject seen: the nearest tenth");
+        let unsure = depth.clone().with_subject_unless_faced(|| Ok::<_, CoreError>(None));
+        assert_eq!(auto_focus(&unsure), auto_focus(&depth), "no subject the first look is sure of: the nearest tenth");
 
         // A small face low down, a large one high up: the large one counts.
         let faced = depth.clone().with_faces(&[face(0.3, [0.4, 0.9, 0.5, 0.95]), face(1.0, [0.3, 0.2, 0.7, 0.4])]);

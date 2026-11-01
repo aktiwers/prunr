@@ -120,10 +120,16 @@ pub(crate) struct SegNormaliser {
     pub(crate) uniform: Option<f32>,
 }
 
+/// Whether `model`'s mask output is logits (a sigmoid makes them
+/// probabilities) rather than probabilities already.
+pub(crate) fn outputs_logits(model: ModelKind) -> bool {
+    matches!(model, ModelKind::BiRefNetLite)
+}
+
 impl SegNormaliser {
     /// From the raw output's own minimum and maximum.
     pub(crate) fn new(lo: f32, hi: f32, model: ModelKind) -> Self {
-        let use_sigmoid = matches!(model, ModelKind::BiRefNetLite);
+        let use_sigmoid = outputs_logits(model);
         // Sigmoid is monotonic, so min(sigmoid(x)) == sigmoid(min(x)):
         // one exp per bound instead of one per value.
         let (lo, hi) = if use_sigmoid { (sigmoid(lo), sigmoid(hi)) } else { (lo, hi) };
