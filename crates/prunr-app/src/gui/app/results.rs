@@ -672,7 +672,7 @@ impl PrunrApp {
         }
     }
 
-    fn on_batch_item_done(
+    pub(super) fn on_batch_item_done(
         &mut self,
         ctx: &egui::Context,
         batch: u64,
@@ -843,7 +843,7 @@ impl PrunrApp {
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
     pub(super) fn on_batch_complete(&mut self, batch: u64) {
-        let quiet = self.processor.batch_is_quiet(batch);
+        let quiet = self.processor.take_quiet(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
         never_answered.extend(self.processor.end_admission_with(batch));
@@ -901,6 +901,7 @@ impl PrunrApp {
     /// Every image batch `batch` still held, sent or waiting for room,
     /// stops waiting on it.
     fn drop_batch(&mut self, batch: u64) {
+        self.processor.take_quiet(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
