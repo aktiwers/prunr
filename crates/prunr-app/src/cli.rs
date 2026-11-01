@@ -627,8 +627,9 @@ fn cli_finish<'a>(args: &Cli, depth: &'a CliDepth, s: &ItemSettings) -> Option<C
     let role = args.settings_model().role();
     let renders = faces.is_some() || role == crate::gui::knob_catalog::ModelRole::Filters;
     let downscale = args.large_image == LargeImagePolicy::Downscale;
-    // A worker read the photo first, and said so, unless No model drew no lines.
-    let quiet = args.quiet || role != crate::gui::knob_catalog::ModelRole::Filters || s.line_mode != LineMode::Off;
+    // A worker read the photo first, and said so, unless the photo is
+    // rendered alone.
+    let quiet = args.quiet || !args.settings_model().renders_photo_alone(s.line_mode);
     let render = renders.then(|| CliRender { settings: *s, role, faces, depth, downscale, quiet });
     Some(CliFinish { backdrop, render })
 }
