@@ -542,9 +542,9 @@ struct CliRender<'a> {
     faces: Option<CliFaces>,
     depth: &'a CliDepth,
     /// `--large-image downscale`: a photo over the limit is shrunk, as the
-    /// worker's copy was; `say` notes it where the worker did not.
+    /// worker's copy was, and said so unless `quiet`.
     downscale: bool,
-    say: bool,
+    quiet: bool,
 }
 
 impl CliRender<'_> {
@@ -570,7 +570,7 @@ impl CliRender<'_> {
         seg: Option<crate::gui::worker::RawSegTensor>,
         edges: Option<crate::gui::worker::RawEdgeTensors>,
     ) -> Result<image::RgbaImage, String> {
-        let photo = read_for_run(path, self.downscale, !self.say).map_err(|e| e.message())?.into_rgba8();
+        let photo = read_for_run(path, self.downscale, self.quiet).map_err(|e| e.message())?.into_rgba8();
         let faces = self.faces.as_mut().map(|faces| restore_faces(faces, &photo).map(|found| (std::sync::Arc::new(found), faces.1))).transpose()?;
         let places: Option<Vec<prunr_core::face::FacePlace>> = faces.as_ref().map(|(found, _)| found.iter().map(|face| *face.place()).collect());
         let depth = self.settings.photo_reads_depth(self.role)
@@ -624,9 +624,9 @@ fn cli_finish<'a>(args: &Cli, depth: &'a CliDepth, s: &ItemSettings) -> Option<C
     let role = args.settings_model().role();
     let renders = faces.is_some() || role == crate::gui::knob_catalog::ModelRole::Filters;
     let downscale = args.large_image == LargeImagePolicy::Downscale;
-    // With No model and no lines, no worker read the photo first.
-    let say = !args.quiet && s.line_mode == LineMode::Off;
-    let render = renders.then(|| CliRender { settings: *s, role, faces, depth, downscale, say });
+    // A worker read the photo first, and said so, unless No model drew no lines.
+    let quiet = args.quiet || role != crate::gui::knob_catalog::ModelRole::Filters || s.line_mode != LineMode::Off;
+    let render = renders.then(|| CliRender { settings: *s, role, faces, depth, downscale, quiet });
     Some(CliFinish { backdrop, render })
 }
 
@@ -2083,7 +2083,7 @@ mod tests {
         let depth = super::CliDepth::default();
         let render = |role, line_mode| super::CliRender {
             settings: crate::gui::item_settings::ItemSettings { line_mode, ..Default::default() },
-            role, faces: None, depth: &depth, downscale: false, say: false,
+            role, faces: None, depth: &depth, downscale: false, quiet: true,
         };
         let seg = crate::gui::worker::RawSegTensor { data: vec![0.0], height: 1, width: 1, model: prunr_core::ModelKind::Silueta };
         let edges = crate::gui::worker::RawEdgeTensors { tensors: Default::default(), height: 1, width: 1, spare: None };
