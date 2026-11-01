@@ -143,17 +143,17 @@ impl PrunrApp {
             }
             Backdrop::Effect(effect) => {
                 let Some(photo) = item.backdrop_photo() else { return };
-                let depth = item.depth.clone();
-                if effect.needs_depth() && depth.is_none() {
+                if item.awaits_depth(effect) {
                     // Built when the depth map lands.
                     item.backdrop_texture = None;
                     return;
                 }
+                let depth = item.depth.clone();
                 // A parked cut-out is unpacked on the build's thread, where a
                 // new result with the shown backdrop's alpha keeps it.
                 let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
                 let (shown, apart_from_cut) = (item.shown_backdrop_made(), item.backdrop_key_apart_from_cut());
-                let thumb_key = item.thumb_backdrop_key();
+                let thumb_key = item.thumb_backdrop_key().filter(|key| item.backdrop_thumb.as_ref().map(|(made, _)| made) != Some(key));
                 Box::new(move || {
                     let cutout = cutout.and_then(|c| c.load());
                     let alpha = cutout.as_deref().map(prunr_core::formats::alpha_fingerprint);
@@ -163,7 +163,7 @@ impl PrunrApp {
                     }
                     let started = std::time::Instant::now();
                     let made = apart_from_cut.zip(alpha).map(|(apart_from_cut, alpha)| crate::gui::item::BackdropMade { apart_from_cut, alpha });
-                    let rgba = photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()));
+                    let rgba = effect_picture(&photo, effect, depth.as_deref(), cutout.as_deref());
                     let thumb = thumb_key.zip(rgba.as_ref()).map(|(key, rgba)| (key, thumbnail_copy(rgba)));
                     let picture = rgba.map(|rgba| PreparedImage::from_rgba(&rgba));
                     tracing::debug!(item_id, elapsed_ms = started.elapsed().as_millis() as u64, "backdrop built");
@@ -183,18 +183,19 @@ impl PrunrApp {
 
     /// Make the thumbnail copy of an image's effect backdrop, off screen
     /// where its full-size picture is not kept: from the full-size photo,
-    /// as the canvas and Save make it, then shrunk. One at a time; the
-    /// image's sidebar row asks while it is in view.
+    /// as the canvas and Save make it, then shrunk. One at a time, and not
+    /// while memory is short; the image's sidebar row asks while it is in
+    /// view.
     ///
-    /// Peak beyond the photo: the effect's own working set at full size
-    /// (a 24 MP lens blur about 370 MB), then the copy (100 KB).
+    /// Peak, at 24 MP: the photo (96 MB, decoded from the file when not
+    /// held), the cut-out unpacked (96 MB) and the effect's own working
+    /// set (a lens blur about 370 MB); then the copy (100 KB).
     pub(crate) fn kick_backdrop_thumb(&mut self, item_id: u64, ctx: &egui::Context) {
-        use crate::gui::item_settings::Backdrop;
-        if self.batch.building_backdrop_thumb.is_some() {
+        if self.batch.building_backdrop_thumb.is_some() || crate::gui::memory::under_memory_pressure() {
             return;
         }
-        let Some(item) = self.batch.find_by_id(item_id).filter(|item| item.wants_backdrop_thumb()) else { return };
-        let (Backdrop::Effect(effect), Some(key)) = (item.settings.backdrop(), item.thumb_backdrop_key()) else { return };
+        let Some(item) = self.batch.find_by_id(item_id) else { return };
+        let Some((effect, key)) = item.wanted_backdrop_thumb() else { return };
         let photo = item.backdrop_photo().unwrap_or_else(|| item.photo_pixels());
         let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
         let depth = item.depth.clone();
@@ -202,10 +203,11 @@ impl PrunrApp {
         let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
         let ctx = ctx.clone();
         self.batch.bg_io.decode_slots.spawn(move || {
-            let cutout = cutout.and_then(|c| c.load());
-            let thumb = photo.load()
-                .and_then(|p| prunr_core::effect_backdrop(&p, effect, depth.as_deref(), cutout.as_deref()))
-                .map(|rgba| thumbnail_copy(&rgba));
+            // Answered even on a panic, or the one-at-a-time slot stays taken.
+            let thumb = crate::panics::caught("a thumbnail backdrop", || {
+                let cutout = cutout.and_then(|c| c.load());
+                effect_picture(&photo, effect, depth.as_deref(), cutout.as_deref()).map(|rgba| thumbnail_copy(&rgba))
+            }).flatten();
             let _ = tx.send((item_id, key, crate::gui::background_io::BackdropBuilt::Thumb(thumb)));
             ctx.request_repaint();
         });
@@ -335,11 +337,18 @@ mod background_item_tests {
     }
 }
 
-/// `rgba` shrunk to a thumbnail's size.
+/// An effect backdrop as the canvas, the thumbnail and Save make it.
+fn effect_picture(
+    photo: &crate::gui::item::Pixels,
+    effect: prunr_core::BgEffect,
+    depth: Option<&prunr_core::depth::DepthMap>,
+    cutout: Option<&image::RgbaImage>,
+) -> Option<image::RgbaImage> {
+    photo.load().and_then(|p| prunr_core::effect_backdrop(&p, effect, depth, cutout))
+}
+
 fn thumbnail_copy(rgba: &image::RgbaImage) -> crate::gui::image_texture::PreparedImage {
-    use prunr_core::formats::{fit_long_side, resize_rgba, ResizeFilter};
-    let (w, h) = fit_long_side(rgba.width(), rgba.height(), crate::gui::batch_manager::THUMB_MAX_PX);
-    crate::gui::image_texture::PreparedImage::from_rgba(&resize_rgba(rgba, w, h, ResizeFilter::Bilinear))
+    crate::gui::image_texture::PreparedImage::from_rgba(&crate::gui::batch_manager::thumbnail_rgba(rgba))
 }
 
 #[cfg(test)]
@@ -406,7 +415,7 @@ mod tests {
         assert!(!app.batch.items[1].wants_backdrop_thumb(), "answered, it is not asked for again");
 
         let key = app.batch.items[2].thumb_backdrop_key().expect("an effect");
-        let texture = crate::gui::image_texture::ImageTexture::single(ctx.load_texture("thumb", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         app.batch.items[2].install_backdrop_thumb(key, texture.clone());
         app.evict_background_item_caches(0);
         assert_eq!(app.batch.items[2].thumbnail_backdrop().map(|t| t.id()), Some(texture.id()), "kept off screen");
@@ -429,7 +438,7 @@ mod tests {
         let building: Vec<u64> = app.batch.items.iter().filter(|i| i.backdrop_tex_pending.is_some()).map(|i| i.id).collect();
         assert_eq!(building.len(), 1, "one build: {building:?}");
         let key = app.batch.items[0].backdrop_key().expect("a picture backdrop");
-        let texture = crate::gui::image_texture::ImageTexture::single(ctx.load_texture("picture", egui::ColorImage::new([1, 1], vec![egui::Color32::RED]), egui::TextureOptions::LINEAR));
+        let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         let builder = app.batch.find_by_id_mut(building[0]).expect("pushed");
         assert!(builder.install_backdrop(key, texture.clone()));
         app.reconcile_selected(&ctx);

@@ -3315,16 +3315,27 @@ impl BatchItem {
         Some(h.finish())
     }
 
-    /// Whether the thumbnail lacks the effect backdrop's small copy for
-    /// what the image is now, and has what a build needs: a result, and
-    /// the depth map a lens blur is made with.
-    pub(crate) fn wants_backdrop_thumb(&self) -> bool {
+    /// The effect and `thumb_backdrop_key` of the small copy the
+    /// thumbnail lacks, when a build of it alone is due: a result to make
+    /// it from, the depth map a lens blur needs, and no full-size picture
+    /// held or on its way (that build brings the copy along).
+    pub(crate) fn wanted_backdrop_thumb(&self) -> Option<(prunr_core::BgEffect, u64)> {
         use super::item_settings::Backdrop;
-        let Backdrop::Effect(effect) = self.settings.backdrop() else { return false };
-        let key = self.thumb_backdrop_key();
-        self.has_result()
-            && self.backdrop_thumb.as_ref().map(|(made, _)| *made) != key
-            && (!effect.needs_depth() || self.depth.is_some())
+        let Backdrop::Effect(effect) = self.settings.backdrop() else { return None };
+        if !self.has_result() || self.backdrop_texture.is_some() || self.backdrop_tex_pending.is_some() || self.awaits_depth(effect) {
+            return None;
+        }
+        let key = self.thumb_backdrop_key()?;
+        (self.backdrop_thumb.as_ref().map(|(made, _)| *made) != Some(key)).then_some((effect, key))
+    }
+
+    pub(crate) fn wants_backdrop_thumb(&self) -> bool {
+        self.wanted_backdrop_thumb().is_some()
+    }
+
+    /// Whether `effect` is made with the depth map and it has not landed.
+    pub(crate) fn awaits_depth(&self, effect: prunr_core::BgEffect) -> bool {
+        effect.needs_depth() && self.depth.is_none()
     }
 
     /// What the thumbnail shows behind the result: the backdrop's own
@@ -4276,12 +4287,15 @@ mod tests {
         let mut item = fixture_item(1);
         crate::gui::tests::fixtures::cut_out(&mut item, prunr_core::ModelKind::Silueta);
         item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
+        item.backdrop_tex_pending = item.backdrop_key();
+        assert!(!item.wants_backdrop_thumb(), "on screen, the full-size build brings the copy: no second build");
+        item.backdrop_tex_pending = None;
         assert!(item.wants_backdrop_thumb());
         let key = item.thumb_backdrop_key().expect("an effect");
         let mut landed = Vec::new();
         item.land_backdrop_built(key, BackdropBuilt::Thumb(Some(PreparedImage::from_rgba(&image::RgbaImage::new(2, 2)))), |_, landing, _| landed.push(landing));
         assert!(matches!(landed[..], [TexLanding::BackdropThumb { key: k, .. }] if k == key), "the copy goes up");
-        let texture = ImageTexture::single(ctx.load_texture("thumb", egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]), egui::TextureOptions::LINEAR));
+        let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         item.install_backdrop_thumb(key, texture.clone());
         assert!(item.park_result(), "off screen, the full-size result goes");
         assert_eq!(item.thumbnail_backdrop().map(ImageTexture::id), Some(texture.id()), "the copy stays");
@@ -4315,9 +4329,9 @@ mod tests {
     #[test]
     fn a_new_cut_out_with_the_same_alpha_keeps_the_backdrop() {
         use crate::gui::background_io::BackdropBuilt;
-        use crate::gui::image_texture::{ImageTexture, PreparedImage};
+        use crate::gui::image_texture::PreparedImage;
         let ctx = egui::Context::default();
-        let texture = ImageTexture::single(ctx.load_texture("backdrop", egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]), egui::TextureOptions::LINEAR));
+        let texture = crate::gui::tests::fixtures::red_texture(&ctx);
         let mut item = fixture_item(1);
         item.settings.bg_effect = prunr_core::BgEffect::BlurredSource { radius: 12 };
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));

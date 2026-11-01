@@ -41,7 +41,7 @@ pub(crate) enum TexLanding {
     },
     /// The picture behind the result, for `key`.
     Backdrop { item_id: u64, key: u64 },
-    /// An effect's thumbnail-size copy, for `key` (`thumb_backdrop_key`).
+    /// An effect's thumbnail-size copy, for `key`.
     BackdropThumb { item_id: u64, key: u64 },
 }
 
@@ -161,8 +161,8 @@ pub struct ThumbMsg {
 /// What a backdrop build sends back.
 pub(crate) enum BackdropBuilt {
     /// The picture (`None`: none could be made), what it was made of when
-    /// it follows the cut-out, and an effect's thumbnail-size copy under
-    /// its `BatchItem::thumb_backdrop_key`.
+    /// it follows the cut-out, and an effect's thumbnail-size copy with the
+    /// key it was made for.
     Picture(
         Option<crate::gui::image_texture::PreparedImage>,
         Option<crate::gui::item::BackdropMade>,
