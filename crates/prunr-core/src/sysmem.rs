@@ -160,6 +160,27 @@ fn reported_available(available: u64, total: u64) -> Option<u64> {
     (total > 0).then_some(available)
 }
 
+/// The memory Windows can still commit: its limit (RAM plus page file)
+/// less what processes have committed. CUDA's allocations are committed
+/// too (a BiRefNet worker on a 12 GB card held 8.9 GB), so with the page
+/// file unable to grow (a full system drive) runs fail with RAM free.
+/// `None` elsewhere, and when it cannot be read.
+pub fn available_commit_bytes() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        // SAFETY: `status` is a MEMORYSTATUSEX with its length set, as the
+        // call requires; it only writes that struct.
+        unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+        Some(status.ullAvailPageFile)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The system's memory; `None` when it doesn't report it.
 pub fn total_ram_bytes() -> Option<u64> {
     let total = with_system(|sys| {
@@ -217,6 +238,13 @@ pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows reports the memory it can still commit; elsewhere there is
+    /// none to report.
+    #[test]
+    fn only_windows_reports_its_commit() {
+        assert_eq!(available_commit_bytes().is_some(), cfg!(windows));
+    }
 
     /// macOS names its pressure 1 (normal), 2 (warning) or 4 (critical):
     /// the warning is when memory is short.

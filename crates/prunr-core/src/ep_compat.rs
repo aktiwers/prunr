@@ -148,13 +148,13 @@ pub(crate) fn is_device_lost(error: &str) -> bool {
 /// `is_out_of_memory`, of the card's memory rather than the system's: a
 /// failed allocation in the host's C++ runtime names no card.
 pub(crate) fn is_card_out_of_memory(error: &str) -> bool {
-    const HOST: &[&str] = &["bad_alloc", "bad allocation"];
+    const HOST: &[&str] = &["bad_alloc", "bad allocation", "memory allocation failed"];
     let lower = error.to_ascii_lowercase();
     is_out_of_memory(error) && !HOST.iter().any(|m| lower.contains(m))
 }
 
 pub(crate) fn is_out_of_memory(error: &str) -> bool {
-    const MARKS: &[&str] = &["out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate"];
+    const MARKS: &[&str] = &["out of memory", "outofmemory", "8007000e", "bad allocation", "bad_alloc", "failed to allocate", "memory allocation failed"];
     let error = error.to_ascii_lowercase();
     MARKS.iter().any(|m| error.contains(m))
 }

@@ -8,6 +8,9 @@
 pub enum Kind {
     CardMemory,
     Memory,
+    /// Windows could commit no more memory: a run's failure then is that,
+    /// whatever the card or the model reported.
+    WindowsMemory,
     CardStopped,
     NoPermission,
     DiskFull,
@@ -64,8 +67,17 @@ impl Kind {
         BY_TEXT.iter().find(|(_, marks)| has(marks)).map(|&(kind, _)| kind)
     }
 
-    const ALL: [Kind; 9] = [
-        Kind::CardMemory, Kind::Memory, Kind::CardStopped, Kind::NoPermission, Kind::DiskFull,
+    /// `of`, knowing whether Windows has almost no memory left to commit:
+    /// a run's memory or model failure is then that.
+    pub fn in_light_of(raw: &str, commit_short: bool) -> Option<Self> {
+        Self::of(raw).map(|kind| match kind {
+            Kind::CardMemory | Kind::Memory | Kind::ModelFailed if commit_short => Kind::WindowsMemory,
+            kind => kind,
+        })
+    }
+
+    const ALL: [Kind; 10] = [
+        Kind::CardMemory, Kind::Memory, Kind::WindowsMemory, Kind::CardStopped, Kind::NoPermission, Kind::DiskFull,
         Kind::FileGone, Kind::Unreadable, Kind::Offline, Kind::ModelFailed,
     ];
 
@@ -73,6 +85,7 @@ impl Kind {
         match self {
             Kind::CardMemory => "The graphics card ran out of memory. Close other apps that use it, or try a smaller image.",
             Kind::Memory => "The computer ran out of memory. Close other apps, or try a smaller image.",
+            Kind::WindowsMemory => "Windows ran out of memory. Close other apps, or free space on the system drive so Windows can grow its page file.",
             Kind::CardStopped => "The graphics card stopped responding. Try again; if it keeps happening, update its driver or run on the processor (CPU only).",
             Kind::NoPermission => "Prunr is not allowed to open or save that file. Check its permissions, or choose another folder.",
             Kind::DiskFull => "The disk is full. Free some space and try again.",
@@ -84,10 +97,16 @@ impl Kind {
     }
 }
 
+/// Less memory than this left for Windows to commit is none for a run.
+const COMMIT_SHORT_BYTES: u64 = 1 << 30;
+
 /// `raw` as a person reads it: a system, driver or model failure as the
 /// sentence for its kind, its own text logged; anything else as it is.
+/// Read as it is shown, which is while the run that failed still holds
+/// its memory.
 pub fn error(raw: &str) -> &str {
-    match Kind::of(raw) {
+    let commit_short = crate::sysmem::available_commit_bytes().is_some_and(|free| free < COMMIT_SHORT_BYTES);
+    match Kind::in_light_of(raw, commit_short) {
         Some(kind) => {
             tracing::warn!(detail = raw, ?kind, "a failure shown in plain words");
             kind.sentence()
@@ -194,11 +213,30 @@ mod tests {
     #[test]
     fn every_kind_is_in_all() {
         let listed = |kind: Kind| match kind {
-            Kind::CardMemory | Kind::Memory | Kind::CardStopped | Kind::NoPermission | Kind::DiskFull
+            Kind::CardMemory | Kind::Memory | Kind::WindowsMemory | Kind::CardStopped | Kind::NoPermission | Kind::DiskFull
             | Kind::FileGone | Kind::Unreadable | Kind::Offline | Kind::ModelFailed => Kind::ALL.contains(&kind),
         };
         assert!(Kind::ALL.iter().all(|&kind| listed(kind)));
-        assert_eq!(Kind::ALL.len(), 9);
+        assert_eq!(Kind::ALL.len(), 10);
+    }
+
+    /// With Windows' commit nearly spent (a full system drive keeps its
+    /// page file from growing), a run's memory or model failure is that,
+    /// whatever the card or the model said; with room to spare each reads
+    /// as its own. Seen on a 12 GB card with 8.7 GB of RAM free.
+    #[test]
+    fn a_failure_while_windows_is_out_of_memory_says_so() {
+        let failures = [
+            ("Non-zero status code returned while running Conv node. Status Message: CUDA error: out of memory", Kind::CardMemory),
+            ("allocator.h:333 onnxruntime::IAllocator::ValidateAllocation p != nullptr || size == 0 was false. Memory allocation failed. Size=825294864", Kind::Memory),
+            ("Non-zero status code returned while running Gemm node. Status Message: cuBLAS error: 7", Kind::ModelFailed),
+        ];
+        for (raw, kind) in failures {
+            assert_eq!(Kind::in_light_of(raw, false), Some(kind), "{raw}");
+            assert_eq!(Kind::in_light_of(raw, true), Some(Kind::WindowsMemory), "{raw}");
+        }
+        assert_eq!(Kind::in_light_of("No space left on device (os error 28)", true), Some(Kind::DiskFull), "not a run's failure");
+        assert_eq!(Kind::in_light_of("Eraser (Big-LaMa) is not installed", true), None);
     }
 
     /// Ten-something os errors are not the two they start like.
