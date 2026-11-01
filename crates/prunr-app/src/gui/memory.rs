@@ -302,19 +302,19 @@ pub fn default_jobs(model: Option<ModelKind>, on_host_cpu: bool, cpu_only: bool)
     cap_jobs(model, if on_host_cpu { (num_cpus::get() / 2).max(1) } else { 2 }, cpu_only)
 }
 
-/// `jobs`, held to what memory allows for `model`.
+/// `jobs`, held to what the memory plan fits in RAM now for `model`
+/// (`jobs_in_ram`). Read throttled: the Settings window asks every frame.
 pub fn cap_jobs(model: Option<ModelKind>, jobs: usize, cpu_only: bool) -> usize {
-    model.map_or(jobs, |model| jobs.min(safe_max_jobs(model, cpu_only)))
+    let Some(model) = model else { return jobs };
+    let ram = FREE_MEMORY_BOUNDS_A_CUTOUT.then(crate::hardware::available_ram_bytes_throttled);
+    let engines = CutoutEngines { model, jobs, cpu_only, first_look: false, line_mode: prunr_core::LineMode::Off, line_fade: false };
+    jobs_in_ram(engines, ram)
 }
 
-/// Engines take at most 50% of available RAM, leaving the rest for image
-/// buffers, history and OS headroom.
-pub fn safe_max_jobs(model: ModelKind, cpu_only: bool) -> usize {
-    let available = crate::hardware::available_ram_bytes_throttled() as usize;
-    let budget = available / 2; // 50% of available RAM for engines
-    let cost = per_engine_cost(model, cpu_only);
-    if cost == 0 { return 4; }
-    (budget / cost).clamp(1, 8)
+/// The most of `engines`' jobs the plan fits in `ram` (`None`: all), at
+/// least one: a run that does not fit is refused when it starts.
+fn jobs_in_ram(engines: CutoutEngines, ram: Option<u64>) -> usize {
+    engines.plan_in(ram.map(|ram| (ram, 0)), 0).map_or(1, |plan| plan.jobs)
 }
 
 #[cfg(test)]
@@ -328,8 +328,21 @@ mod tests {
         assert_eq!(default_jobs(None, true, false), (num_cpus::get() / 2).max(1));
         assert_eq!(default_jobs(None, false, false), 2);
         for model in [ModelKind::Silueta, ModelKind::BiRefNetLite] {
-            assert!(default_jobs(Some(model), true, true) <= safe_max_jobs(model, true), "{model:?}");
+            assert!((1..=(num_cpus::get() / 2).max(1)).contains(&default_jobs(Some(model), true, true)), "{model:?}");
         }
+    }
+
+    /// The jobs a run starts with are the ones the memory plan fits in
+    /// RAM, not half the free memory: with 2.6 GB free, two U2-Net
+    /// engines on the processor (0.7 GB each) and the 1 GB stop line fit.
+    #[test]
+    fn the_memory_plan_alone_holds_the_job_count() {
+        use prunr_core::LineMode;
+        const MB: u64 = 1024 * 1024;
+        let u2net = |jobs| CutoutEngines { model: ModelKind::U2net, jobs, cpu_only: true, first_look: false, line_mode: LineMode::Off, line_fade: false };
+        assert_eq!(jobs_in_ram(u2net(4), Some(2600 * MB)), 2);
+        assert_eq!(jobs_in_ram(u2net(4), Some(1000 * MB)), 1, "one at least: a run that cannot fit is refused when it starts, saying why");
+        assert_eq!(jobs_in_ram(u2net(4), None), 4, "no reading, or macOS: all of them");
     }
 
     /// A cut-out batch is charged the engines it builds: the first look
