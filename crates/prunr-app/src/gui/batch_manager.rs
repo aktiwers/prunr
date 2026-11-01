@@ -789,7 +789,7 @@ impl BatchManager {
     /// still has lines.
     pub fn fit_line_modes_to(&mut self, model: super::settings::SettingsModel) {
         for item in &mut self.items {
-            item.fit_line_mode_to(model);
+            item.settings.fit_line_mode_to(model);
         }
     }
 
