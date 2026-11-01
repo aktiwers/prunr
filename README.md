@@ -77,6 +77,7 @@ prunr --lines logo.png                       # line extraction only
 prunr --inpaint photo.jpg --mask m.png       # erase area defined by mask
 prunr photo.jpg --bg-image studio.jpg        # bake a chosen image as the new background
 prunr --preset Portrait *.jpg -o out/        # the settings of a preset from the app
+prunr -m none --preset Dreamy photo.jpg      # a whole-photo look, no cut-out
 ```
 
 Every setting flag starts from Prunr's own settings for the model, or from `--preset`'s (a name from the app's Presets menu, or a preset file); a flag you give overrides it.
@@ -86,7 +87,7 @@ Common flags:
 | Flag | Description |
 |------|-------------|
 | `-o, --output <PATH>` | Output file or directory |
-| `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net` |
+| `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net`, or `none` (No model: a preset's whole-photo look, lines over the photo) |
 | `--preset <NAME\|FILE>` | Start from a preset; the flags below override it |
 | `-j, --jobs <N>` | Images at once (default: as the app: half the cores, 2 on a graphics card, fewer when memory is short) |
 | `-f, --force` | Overwrite existing output |
@@ -113,7 +114,7 @@ Common flags:
 | `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `nomos2`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
 | `--scale <2\|3\|4>` | Upscale: how much larger |
 | `--denoise`, `--sharpen`, `--ai-blend`, `--color-match` | Upscale: the Refine knobs |
-| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Redraw soft faces with `gfpgan` or `restoreformer` |
+| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Redraw soft faces with `gfpgan` or `restoreformer`: after an upscale, else in the photo before the cut-out, effect and lines |
 | `--colorize`, `--color-strength <0-1.5>` | Colorize mode: colour a black-and-white photo with DDColor; saves `{stem}_color.png` |
 | `--bg-effect lens[:N]` | Lens-blur the photo behind the subject, 0–100 (needs the depth model) |
 | `--line-fade <0-100>` | Lines lighten with distance (needs the depth model) |

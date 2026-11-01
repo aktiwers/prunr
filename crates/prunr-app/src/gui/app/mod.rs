@@ -43,7 +43,7 @@ const ASYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// The model a No-model recipe is built and diffed with. Any seg model
 /// would do, since No model never runs one, but every site that builds or
 /// diffs a recipe must pick the same one or `applied_recipe` reads as drift.
-const NO_MODEL_RECIPE_KIND: prunr_core::ModelKind = prunr_core::ModelKind::BiRefNetLite;
+pub const NO_MODEL_RECIPE_KIND: prunr_core::ModelKind = prunr_core::ModelKind::BiRefNetLite;
 
 /// Days the user is left alone after dismissing the first-launch
 /// runtime prompt.
