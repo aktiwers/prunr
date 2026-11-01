@@ -176,6 +176,11 @@ pub(crate) fn load_all(hidden: &BTreeSet<String>) -> (HashMap<String, Preset>, H
     (presets, newer)
 }
 
+/// Whether a built-in showcase has `name`, hidden or not.
+pub(crate) fn is_showcase(name: &str) -> bool {
+    SHOWCASES.iter().any(|&(showcase, _)| same_name(showcase, name))
+}
+
 fn add_showcases(presets: &mut HashMap<String, Preset>, hidden: &BTreeSet<String>, newer: &HashSet<String>) {
     for (name, showcase) in showcases() {
         let taken = hidden.iter().chain(presets.keys()).any(|other| same_name(other, name)) || newer_has(newer, name);

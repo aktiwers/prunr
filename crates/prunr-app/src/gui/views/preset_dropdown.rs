@@ -38,13 +38,15 @@ fn writable_preset_names(settings: &Settings) -> Vec<String> {
 }
 
 /// Take preset `name` out of the list: a file of the user's is deleted,
-/// a built-in one hidden. The default falls back to Prunr when it goes.
+/// a built-in one hidden, and so is the built-in a file of that name stood
+/// in for, or it would be back at the next read. The default falls back
+/// to Prunr when it goes.
 fn delete_preset(settings: &mut Settings, name: &str) {
-    match settings.presets.remove(name) {
-        Some(preset) if preset.is_built_in() => {
-            settings.hidden_showcases.insert(name.to_string());
-        }
-        _ => crate::gui::presets_fs::queue_delete(name),
+    if !settings.presets.remove(name).is_some_and(|preset| preset.is_built_in()) {
+        crate::gui::presets_fs::queue_delete(name);
+    }
+    if crate::gui::presets_fs::is_showcase(name) {
+        settings.hidden_showcases.insert(name.to_string());
     }
     if settings.default_preset == name {
         settings.default_preset = PRUNR_PRESET.to_string();
@@ -512,6 +514,11 @@ mod tests {
         assert!(!s.presets.contains_key("Comic"));
         assert!(s.hidden_showcases.contains("Comic"));
         assert_eq!(s.default_preset, PRUNR_PRESET);
+
+        let mut s = Settings::default();
+        s.presets.insert("Comic".into(), PresetFile::default().into());
+        delete_preset(&mut s, "Comic");
+        assert!(s.hidden_showcases.contains("Comic"), "a file standing in for the built-in takes it along");
     }
 
     /// Prunr first, then the user's presets by name ignoring case
