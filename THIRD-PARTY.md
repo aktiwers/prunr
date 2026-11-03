@@ -18,7 +18,7 @@ Prunr is built from the open-source Rust crates below (every platform's build co
 
 Generated from `cargo metadata`; the licence column is the crate's own declaration. Regenerate after changing dependencies.
 
-### MIT OR Apache-2.0 (315)
+### MIT OR Apache-2.0 (316)
 
 | Crate | Version | Repository |
 |---|---|---|
@@ -144,6 +144,7 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | jni-sys | 0.4.1 | https://github.com/jni-rs/jni-sys |
 | jni-sys-macros | 0.4.1 | https://github.com/jni-rs/jni-sys |
 | jobserver | 0.1.34 | https://github.com/rust-lang/jobserver-rs |
+| jpeg-decoder | 0.3.2 | https://github.com/image-rs/jpeg-decoder |
 | js-sys | 0.3.94 | https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys |
 | lazy_static | 1.5.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
 | libc | 0.2.184 | https://github.com/rust-lang/libc |
@@ -168,8 +169,8 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | once_cell | 1.21.4 | https://github.com/matklad/once_cell |
 | once_cell_polyfill | 1.70.2 | https://github.com/polyfill-rs/once_cell_polyfill |
 | ordered-stream | 0.2.0 | https://github.com/danieldg/ordered-stream |
-| ort | 2.0.0-rc.13 | https://github.com/pykeio/ort |
-| ort-sys | 2.0.0-rc.13 | https://github.com/pykeio/ort |
+| ort | 2.0.0-rc.15 | https://github.com/pykeio/ort |
+| ort-sys | 2.0.0-rc.15 | https://github.com/pykeio/ort |
 | parking_lot | 0.12.5 | https://github.com/Amanieu/parking_lot |
 | parking_lot_core | 0.9.12 | https://github.com/Amanieu/parking_lot |
 | paste | 1.0.15 | https://github.com/dtolnay/paste |
@@ -737,6 +738,16 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | termcolor | 1.4.1 | https://github.com/BurntSushi/termcolor |
 | winapi-util | 0.1.11 | https://github.com/BurntSushi/winapi-util |
 
+### Zlib (5)
+
+| Crate | Version | Repository |
+|---|---|---|
+| adler32 | 1.2.0 | https://github.com/remram44/adler32-rs |
+| foldhash | 0.1.5 | https://github.com/orlp/foldhash |
+| foldhash | 0.2.0 | https://github.com/orlp/foldhash |
+| slotmap | 1.1.1 | https://github.com/orlp/slotmap |
+| zlib-rs | 0.6.8 | https://github.com/trifectatechfoundation/zlib-rs |
+
 ### BSD-2-Clause (4)
 
 | Crate | Version | Repository |
@@ -754,15 +765,6 @@ Generated from `cargo metadata`; the licence column is the crate's own declarati
 | libloading | 0.9.0 | https://github.com/nagisa/rust_libloading/ |
 | rustls-webpki | 0.103.10 | https://github.com/rustls/webpki |
 | untrusted | 0.9.0 | https://github.com/briansmith/untrusted |
-
-### Zlib (4)
-
-| Crate | Version | Repository |
-|---|---|---|
-| adler32 | 1.2.0 | https://github.com/remram44/adler32-rs |
-| foldhash | 0.1.5 | https://github.com/orlp/foldhash |
-| foldhash | 0.2.0 | https://github.com/orlp/foldhash |
-| slotmap | 1.1.1 | https://github.com/orlp/slotmap |
 
 ### Apache-2.0/MIT (3)
 
