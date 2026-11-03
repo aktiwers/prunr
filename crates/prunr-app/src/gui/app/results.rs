@@ -32,7 +32,7 @@ enum CutLanding {
 /// the UI responsive; the rest drain next frame.
 const WORKER_POLL_PER_FRAME: usize = 8;
 
-/// Per-frame cap on `batch.bg_io.file_load_rx` receipts, so a big import
+/// Per-frame cap on `batch.bg_io.file_load.rx` receipts, so a big import
 /// keeps the UI responsive.
 const FILE_LOAD_DRAIN_PER_FRAME: usize = 5;
 
@@ -946,7 +946,7 @@ impl PrunrApp {
         const THUMB_UPLOADS_PER_FRAME: usize = 3;
         let mut uploaded = 0;
         while uploaded < THUMB_UPLOADS_PER_FRAME {
-            let Ok(msg) = self.batch.bg_io.thumb_rx.try_recv() else { break };
+            let Ok(msg) = self.batch.bg_io.thumb.rx.try_recv() else { break };
             let Some(item) = self.batch.find_by_id_mut(msg.item_id) else { continue };
             let Some((tw, th, pixels)) = msg.image else {
                 item.thumb.failed();
@@ -968,7 +968,7 @@ impl PrunrApp {
         let mut decode_arrived = false;
         let mut shown_decoded = false;
         let shown = self.batch.selected_id();
-        while let Ok((item_id, result)) = self.batch.bg_io.decode_rx.try_recv() {
+        while let Ok((item_id, result)) = self.batch.bg_io.decode.rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if item.land_decode(result) {
                 decode_arrived = true;
@@ -988,7 +988,7 @@ impl PrunrApp {
             self.show_original = false;
         }
 
-        while let Ok(prep) = self.batch.bg_io.tex_prep_rx.try_recv() {
+        while let Ok(prep) = self.batch.bg_io.tex_prep.rx.try_recv() {
             let Some(item) = self.batch.find_by_id_mut(prep.item_id) else { continue };
             let Some(image) = prep.image else {
                 item.texture_unreadable(prep.target);
@@ -1000,7 +1000,7 @@ impl PrunrApp {
 
         let mut filter_only_arrived = false;
         let mut filtered = Vec::new();
-        while let Ok((item_id, run, result, chain_start)) = self.batch.bg_io.filter_only_rx.try_recv() {
+        while let Ok((item_id, run, result, chain_start)) = self.batch.bg_io.filter_only.rx.try_recv() {
             filtered.push(item_id);
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             if !item.awaits_run(run) {
@@ -1033,7 +1033,7 @@ impl PrunrApp {
             self.after_result_landed(item_id);
         }
 
-        while let Ok((image, hint)) = self.batch.bg_io.copy_ready_rx.try_recv() {
+        while let Ok((image, hint)) = self.batch.bg_io.copy_ready.rx.try_recv() {
             let note = crate::gui::system_bridge::CopyNote::Image { hint };
             match image {
                 Some(rgba) => self.system.copy_image(rgba, note),
@@ -1041,16 +1041,16 @@ impl PrunrApp {
             }
         }
         self.land_selection_edits(ctx);
-        while let Ok(done) = self.batch.bg_io.selection_edit_rx.try_recv() {
+        while let Ok(done) = self.batch.bg_io.selection_edit.rx.try_recv() {
             self.land_selection_edit(done, ctx);
         }
         for (note, took) in self.system.take_copy_outcomes() {
             self.on_copy_done(note, took);
         }
-        while let Ok(done) = self.batch.bg_io.save_done_rx.try_recv() {
+        while let Ok(done) = self.batch.bg_io.save_done.rx.try_recv() {
             self.land_save(done);
         }
-        while let Ok(outcome) = self.batch.bg_io.removed_rx.try_recv() {
+        while let Ok(outcome) = self.batch.bg_io.removed.rx.try_recv() {
             self.toasts.outcome(outcome);
             self.refresh_install_cache();
             landed = true;
@@ -1062,14 +1062,14 @@ impl PrunrApp {
         // A result for a mask that has since changed is dropped;
         // `ensure_selection_texture` already requested the current one.
         let mut to_upload = Vec::new();
-        while let Ok(result) = self.batch.bg_io.selection_texture_rx.try_recv() {
+        while let Ok(result) = self.batch.bg_io.selection_texture.rx.try_recv() {
             let item_id = result.item_id;
             let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
             item.land_selection_texture(result, |image, landing| to_upload.push((format!("selection_{item_id}"), image, landing, egui::TextureOptions::LINEAR)));
         }
 
 
-        while let Ok(load) = self.batch.bg_io.bg_image_rx.try_recv() {
+        while let Ok(load) = self.batch.bg_io.bg_image.rx.try_recv() {
             self.land_bg_image(load);
             landed = true;
             ctx.request_repaint();
@@ -1078,7 +1078,7 @@ impl PrunrApp {
 
         // A picture that is no longer the item's backdrop (changed while it
         // was built) is dropped; the next kick builds the current one.
-        while let Ok((item_id, key, built)) = self.batch.bg_io.bg_tex_prep_rx.try_recv() {
+        while let Ok((item_id, key, built)) = self.batch.bg_io.bg_tex_prep.rx.try_recv() {
             if matches!(built, crate::gui::background_io::BackdropBuilt::Thumb(..)) {
                 self.batch.building_backdrop_thumb = None;
             }
@@ -1132,7 +1132,7 @@ impl PrunrApp {
         let mut unreadable = 0u32;
         let mut channel_drained = false;
         for _ in 0..FILE_LOAD_DRAIN_PER_FRAME {
-            match self.batch.bg_io.file_load_rx.try_recv() {
+            match self.batch.bg_io.file_load.rx.try_recv() {
                 Ok(crate::gui::background_io::FileLoad::Image { source, name, len, dims: Some(dims) }) => {
                     self.add_imported(source, name, len, dims);
                     loaded_count += 1;
@@ -1827,7 +1827,7 @@ mod timeline_contract_tests {
         crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
         item.start_job(Some(StepKind::Process), Engine::Segment);
         let run = item.job_run().expect("a run");
-        app.batch.bg_io.filter_only_tx.send((1, run, Ok(px(5)), None)).unwrap();
+        app.batch.bg_io.filter_only.tx.send((1, run, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
         let item = &app.batch.items[0];
         assert_eq!(shown(&app), Some(5));
@@ -2314,10 +2314,10 @@ mod timeline_contract_tests {
         let new = app.batch.items[0].job_run().expect("a run");
         app.batch.items[0].chain_start_built(old, px(8));
         assert!(app.batch.items[0].job.as_ref().is_some_and(|j| j.start.is_none() || j.keep.is_none()));
-        app.batch.bg_io.filter_only_tx.send((1, old, Ok(px(6)), None)).unwrap();
+        app.batch.bg_io.filter_only.tx.send((1, old, Ok(px(6)), None)).unwrap();
         app.drain_background_channels(&ctx);
         assert!(app.batch.items[0].awaits_run(new), "the old pass lands on nothing");
-        app.batch.bg_io.filter_only_tx.send((1, new, Ok(px(5)), None)).unwrap();
+        app.batch.bg_io.filter_only.tx.send((1, new, Ok(px(5)), None)).unwrap();
         app.drain_background_channels(&ctx);
         assert_eq!(shown(&app), Some(5), "the new pass lands");
         assert!(app.batch.items[0].job.is_none());

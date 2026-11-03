@@ -12,6 +12,7 @@ use std::sync::mpsc;
 
 use prunr_core::ProcessingRecipe;
 
+use super::background_io::Chan;
 use super::inpaint_bridge::{InpaintBridgeMsg, InpaintBridgeResult, spawn_inpaint_bridge};
 use super::live_preview::LivePreview;
 use super::memory::AdmissionController;
@@ -279,25 +280,6 @@ struct RunQueue {
 }
 
 /// An in-process model run, one at a time (upscale, colorize).
-/// Both ends of the channel a background job's answers come back on.
-struct Chan<T> {
-    tx: mpsc::Sender<T>,
-    rx: mpsc::Receiver<T>,
-}
-
-impl<T> Default for Chan<T> {
-    fn default() -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self { tx, rx }
-    }
-}
-
-impl<T> Chan<T> {
-    fn drain(&self) -> Vec<T> {
-        self.rx.try_iter().collect()
-    }
-}
-
 struct RunSlot<R> {
     active: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,

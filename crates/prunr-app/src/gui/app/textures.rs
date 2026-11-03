@@ -173,7 +173,7 @@ impl PrunrApp {
             Backdrop::Transparent | Backdrop::Color(_) => return,
         };
         item.backdrop_tex_pending = Some(key);
-        let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
+        let tx = self.batch.bg_io.bg_tex_prep.tx.clone();
         let ctx = ctx.clone();
         self.batch.bg_io.decode_slots.spawn(move || {
             let _ = tx.send((item_id, key, build()));
@@ -204,7 +204,7 @@ impl PrunrApp {
         let cutout = item.result_pixels().filter(|_| effect.takes_cutout());
         let depth = item.depth.clone();
         self.batch.building_backdrop_thumb = Some(item_id);
-        let tx = self.batch.bg_io.bg_tex_prep_tx.clone();
+        let tx = self.batch.bg_io.bg_tex_prep.tx.clone();
         let ctx = ctx.clone();
         self.batch.bg_io.decode_slots.spawn(move || {
             // Answered even on a panic, or the one-at-a-time slot stays taken.

@@ -497,7 +497,7 @@ impl PrunrApp {
         // Safety: we're still in `new`, before any worker thread spawns.
         unsafe { std::env::remove_var("PRUNR_OPEN_FILE"); }
         if let Some(path) = preload {
-            import::queue_file_loads(&app.batch.bg_io.file_load_tx, vec![path]);
+            import::queue_file_loads(&app.batch.bg_io.file_load.tx, vec![path]);
         }
         // Test harness: PRUNR_OPEN_TAB opens Settings on that tab (a
         // case-sensitive `SettingsTab` label); clicks are unreliable under

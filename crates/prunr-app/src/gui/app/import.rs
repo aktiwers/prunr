@@ -50,7 +50,7 @@ impl PrunrApp {
         if let Some(first) = paths.first() {
             self.last_open_dir = first.parent().map(|p| p.to_path_buf());
         }
-        queue_file_loads(&self.batch.bg_io.file_load_tx, paths);
+        queue_file_loads(&self.batch.bg_io.file_load.tx, paths);
     }
 
     pub fn remove_selected(&mut self) {
@@ -172,12 +172,12 @@ impl PrunrApp {
         self.import_presets(presets.collect(), ctx);
 
         if !paths.is_empty() {
-            queue_file_loads(&self.batch.bg_io.file_load_tx, paths);
+            queue_file_loads(&self.batch.bg_io.file_load.tx, paths);
         }
 
         // Bytes dropped in (Wayland) import like files, off the UI thread.
         if !inline_items.is_empty() {
-            queue_bytes_loads(&self.batch.bg_io.file_load_tx, inline_items);
+            queue_bytes_loads(&self.batch.bg_io.file_load.tx, inline_items);
         }
     }
 }
@@ -290,7 +290,7 @@ mod tests {
         app.push_new_item(super::ImageSource::Bytes(std::sync::Arc::new(Vec::new())), (1, 1), "a.png".into());
         assert_eq!(app.batch.items[0].settings.bg_image_hash.map(std::num::NonZeroU64::get), Some(4242));
         app.keep_bg_images_in_step();
-        let load = app.batch.bg_io.bg_image_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("its picture loads");
+        let load = app.batch.bg_io.bg_image.rx.recv_timeout(std::time::Duration::from_secs(5)).expect("its picture loads");
         assert_eq!(load.fills, Some(4242));
     }
 

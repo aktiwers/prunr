@@ -181,50 +181,58 @@ pub(crate) enum BackdropBuilt {
     Same,
 }
 
+/// Both ends of the channel a background job's answers come back on.
+pub struct Chan<T> {
+    pub tx: mpsc::Sender<T>,
+    pub rx: mpsc::Receiver<T>,
+}
+
+impl<T> Default for Chan<T> {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { tx, rx }
+    }
+}
+
+impl<T> Chan<T> {
+    pub(crate) fn drain(&self) -> Vec<T> {
+        self.rx.try_iter().collect()
+    }
+}
+
 /// Bundles all background thread communication channels.
+#[derive(Default)]
 pub struct BackgroundIO {
     /// File paths from file dialog / drag-and-drop (loaded lazily on demand)
-    pub(crate) file_load_tx: mpsc::Sender<FileLoad>,
-    pub(crate) file_load_rx: mpsc::Receiver<FileLoad>,
-    pub thumb_tx: mpsc::Sender<ThumbMsg>,
-    pub thumb_rx: mpsc::Receiver<ThumbMsg>,
+    pub(crate) file_load: Chan<FileLoad>,
+    pub thumb: Chan<ThumbMsg>,
     /// Pre-decoded source images for instant canvas switching
-    pub decode_tx: mpsc::Sender<DecodeResult>,
-    pub decode_rx: mpsc::Receiver<DecodeResult>,
+    pub decode: Chan<DecodeResult>,
     /// A finished save.
-    pub(crate) save_done_tx: mpsc::Sender<SaveDone>,
-    pub(crate) save_done_rx: mpsc::Receiver<SaveDone>,
+    pub(crate) save_done: Chan<SaveDone>,
     /// A model or runtime removed off the UI thread: its toast text. The
     /// installed set is read again when it lands.
-    pub(crate) removed_tx: mpsc::Sender<Result<String, String>>,
-    pub(crate) removed_rx: mpsc::Receiver<Result<String, String>>,
+    pub(crate) removed: Chan<Result<String, String>>,
     /// A copy's image made off the UI thread (`None`: it could not be
     /// read), with the note to show once copied.
-    pub copy_ready_tx: mpsc::Sender<(Option<Arc<image::RgbaImage>>, Option<String>)>,
-    pub copy_ready_rx: mpsc::Receiver<(Option<Arc<image::RgbaImage>>, Option<String>)>,
+    pub copy_ready: Chan<(Option<Arc<image::RgbaImage>>, Option<String>)>,
     /// Selection Delete / Cut / Copy made off the UI thread.
-    pub(crate) selection_edit_tx: mpsc::Sender<SelectionEditDone>,
-    pub(crate) selection_edit_rx: mpsc::Receiver<SelectionEditDone>,
+    pub(crate) selection_edit: Chan<SelectionEditDone>,
     /// Pre-built ColorImages ready for GPU upload.
-    pub(crate) tex_prep_tx: mpsc::Sender<TexPrepMsg>,
-    pub(crate) tex_prep_rx: mpsc::Receiver<TexPrepMsg>,
+    pub(crate) tex_prep: Chan<TexPrepMsg>,
     /// Prepared textures uploading a few tiles per frame, with what each
     /// lands on.
     pub(crate) uploads: crate::gui::image_texture::Uploads<TexLanding>,
     /// Filter-only (model=None) Process results.
-    pub filter_only_tx: mpsc::Sender<FilterOnlyResult>,
-    pub filter_only_rx: mpsc::Receiver<FilterOnlyResult>,
+    pub filter_only: Chan<FilterOnlyResult>,
     /// A per-item bg image decoded and built off-thread; its `to_rgba8()`
     /// copy (~32 MB on a 4K bg) stays off the UI thread.
-    pub(crate) bg_tex_prep_tx: mpsc::Sender<(u64, u64, BackdropBuilt)>,
-    pub(crate) bg_tex_prep_rx: mpsc::Receiver<(u64, u64, BackdropBuilt)>,
-    pub bg_image_tx: mpsc::Sender<BgImageLoad>,
-    pub bg_image_rx: mpsc::Receiver<BgImageLoad>,
+    pub(crate) bg_tex_prep: Chan<(u64, u64, BackdropBuilt)>,
+    pub bg_image: Chan<BgImageLoad>,
     pub decode_slots: Arc<DecodeSlots>,
     /// Selection texture built off-thread whenever the selected item's
     /// texture is missing.
-    pub(crate) selection_texture_tx: mpsc::Sender<SelectionTextureResult>,
-    pub(crate) selection_texture_rx: mpsc::Receiver<SelectionTextureResult>,
+    pub(crate) selection_texture: Chan<SelectionTextureResult>,
 }
 
 /// What a prepared texture is for.
@@ -247,47 +255,8 @@ pub enum TexTarget {
 impl BackgroundIO {
     pub fn tex_prep_handles(&self) -> TexPrepHandles {
         TexPrepHandles {
-            tx: self.tex_prep_tx.clone(),
+            tx: self.tex_prep.tx.clone(),
             slots: self.decode_slots.clone(),
-        }
-    }
-}
-
-impl Default for BackgroundIO {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BackgroundIO {
-    pub fn new() -> Self {
-        let (removed_tx, removed_rx) = mpsc::channel();
-        let (file_load_tx, file_load_rx) = mpsc::channel();
-        let (thumb_tx, thumb_rx) = mpsc::channel();
-        let (decode_tx, decode_rx) = mpsc::channel();
-        let (save_done_tx, save_done_rx) = mpsc::channel();
-        let (copy_ready_tx, copy_ready_rx) = mpsc::channel();
-        let (selection_edit_tx, selection_edit_rx) = mpsc::channel();
-        let (tex_prep_tx, tex_prep_rx) = mpsc::channel();
-        let (filter_only_tx, filter_only_rx) = mpsc::channel();
-        let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
-        let (bg_image_tx, bg_image_rx) = mpsc::channel();
-        let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
-        Self {
-            removed_tx, removed_rx,
-            file_load_tx, file_load_rx,
-            thumb_tx, thumb_rx,
-            decode_tx, decode_rx,
-            save_done_tx, save_done_rx,
-            copy_ready_tx, copy_ready_rx,
-            selection_edit_tx, selection_edit_rx,
-            tex_prep_tx, tex_prep_rx,
-            uploads: Default::default(),
-            filter_only_tx, filter_only_rx,
-            bg_tex_prep_tx, bg_tex_prep_rx,
-            bg_image_tx, bg_image_rx,
-            decode_slots: Arc::default(),
-            selection_texture_tx, selection_texture_rx,
         }
     }
 
@@ -308,7 +277,7 @@ impl BackgroundIO {
         base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>,
         ctx: egui::Context,
     ) {
-        let texture_tx = self.selection_texture_tx.clone();
+        let texture_tx = self.selection_texture.tx.clone();
         rayon::spawn(move || {
             let style = key.1;
             let patch_from = |base: Option<(u64, Arc<prunr_core::selection::MaskArtifact>)>, plane: &prunr_core::selection::MaskArtifact| {
@@ -553,16 +522,16 @@ mod tests {
             Arc::new(MaskArtifact::from_cells(16, 16, v))
         };
         let (a, b) = (painted(&[5 * 16 + 5]), painted(&[5 * 16 + 5, 9 * 16 + 9]));
-        let io = BackgroundIO::new();
+        let io = BackgroundIO::default();
         let ctx = egui::Context::default();
         let wait = std::time::Duration::from_secs(10);
         io.request_selection_visualization(1, Arc::clone(&a), (1, style), None, ctx.clone());
-        let first = io.selection_texture_rx.recv_timeout(wait).expect("the first build");
+        let first = io.selection_texture.rx.recv_timeout(wait).expect("the first build");
         let SelectionImage::Full { .. } = first.image else { panic!("a first build is whole") };
         let full_a = build_selection_image(&first.shown, style);
         assert_eq!(first.shown.cells(), style.shown_region(&a).expect("an eraser").cells(), "the texture remembers the reach it drew");
         io.request_selection_visualization(1, Arc::clone(&b), (2, style), Some((1, Arc::clone(&first.shown))), ctx);
-        let second = io.selection_texture_rx.recv_timeout(wait).expect("the second build");
+        let second = io.selection_texture.rx.recv_timeout(wait).expect("the second build");
         let SelectionImage::Patch { base_hash: 1, pos, image: patch } = second.image else { panic!("a stroke patches the last reach") };
         let mut pasted = full_a;
         for (row, chunk) in patch.pixels.chunks(patch.width()).enumerate() {

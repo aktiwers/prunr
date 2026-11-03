@@ -626,7 +626,7 @@ mod landing_tests {
 
     /// Land the next prepared texture on the item, as the frame loop does.
     fn land_next_texture(app: &mut PrunrApp, ctx: &egui::Context) -> TexTarget {
-        let prep = app.batch.bg_io.tex_prep_rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
+        let prep = app.batch.bg_io.tex_prep.rx.recv_timeout(Duration::from_secs(10)).expect("a texture is prepared");
         let mut uploads = crate::gui::image_texture::Uploads::default();
         uploads.push(prep.name, prep.image.expect("prepared"), ());
         let (texture, ()) = uploads.pump(ctx, |_| true).landed.pop().expect("a small image uploads in one frame");
@@ -766,7 +766,7 @@ mod busy_pill_tests {
         let mut app = app();
         push_test_item(&mut app, 2);
         app.zoom_state.zoom = 3.0;
-        app.batch.bg_io.decode_tx.send((2, Ok(std::sync::Arc::new(image::RgbaImage::new(1, 1))))).unwrap();
+        app.batch.bg_io.decode.tx.send((2, Ok(std::sync::Arc::new(image::RgbaImage::new(1, 1))))).unwrap();
         app.drain_background_channels(&egui::Context::default());
         assert_eq!(app.zoom_state.zoom, 3.0);
     }
@@ -792,7 +792,7 @@ mod busy_pill_tests {
         push_test_item(&mut app, 2);
         app.processor.live_preview.render_now(2, crate::gui::live_preview::PreviewKind::Mask);
         app.pump_live_preview(&egui::Context::default());
-        app.batch.bg_io.decode_tx.send((2, Err("bad file".into()))).unwrap();
+        app.batch.bg_io.decode.tx.send((2, Err("bad file".into()))).unwrap();
         app.drain_background_channels(&egui::Context::default());
         app.pump_live_preview(&egui::Context::default());
         assert!(!app.batch.items[1].decode_pending, "no second decode");
