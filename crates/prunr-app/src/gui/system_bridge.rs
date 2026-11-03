@@ -12,6 +12,8 @@ use std::sync::{mpsc, Arc};
 
 use prunr_core::ExportFormat;
 
+use super::background_io::Chan;
+
 /// What a file dialog is for; its answer resumes exactly this. Images
 /// go by id: the batch can change while the dialog is up.
 #[derive(Clone, Debug, PartialEq)]
@@ -79,8 +81,7 @@ enum Clipboard {
 
 pub struct SystemBridge {
     clipboard: Clipboard,
-    copied_tx: mpsc::Sender<(CopyNote, bool)>,
-    copied_rx: mpsc::Receiver<(CopyNote, bool)>,
+    copied: Chan<(CopyNote, bool)>,
     /// The one file dialog asked for or up.
     dialog: Option<Dialog>,
     show: ShowDialog,
@@ -94,9 +95,9 @@ impl Default for SystemBridge {
 
 impl SystemBridge {
     pub fn new() -> Self {
-        let (copied_tx, copied_rx) = mpsc::channel();
+        let copied = Chan::default();
         let (jobs_tx, jobs_rx) = mpsc::channel::<(Arc<image::RgbaImage>, CopyNote)>();
-        let replies = copied_tx.clone();
+        let replies = copied.tx.clone();
         let spawned = std::thread::Builder::new().name("prunr-clipboard".into()).spawn(move || {
             // `None` on Wayland without data-control or a headless session:
             // every copy then says so, and the caller suggests saving.
@@ -119,7 +120,7 @@ impl SystemBridge {
         if let Err(err) = &spawned {
             tracing::warn!(%err, "clipboard thread did not start");
         }
-        Self { clipboard: Clipboard::Worker(jobs_tx), copied_tx, copied_rx, dialog: None, show: show_native }
+        Self { clipboard: Clipboard::Worker(jobs_tx), copied, dialog: None, show: show_native }
     }
 
     /// Ask for a file dialog starting in `start_dir`; `false` when it is
@@ -171,20 +172,20 @@ impl SystemBridge {
         match &self.clipboard {
             Clipboard::Worker(jobs) => {
                 if let Err(mpsc::SendError((_, note))) = jobs.send((rgba, note)) {
-                    let _ = self.copied_tx.send((note, false));
+                    let _ = self.copied.tx.send((note, false));
                 }
             }
             #[cfg(test)]
-            Clipboard::Accepting => { let _ = self.copied_tx.send((note, true)); }
+            Clipboard::Accepting => { let _ = self.copied.tx.send((note, true)); }
             #[cfg(test)]
-            Clipboard::Absent => { let _ = self.copied_tx.send((note, false)); }
+            Clipboard::Absent => { let _ = self.copied.tx.send((note, false)); }
         }
     }
 
     /// The copies that finished since the last call, and whether the
     /// clipboard took each.
     pub(crate) fn take_copy_outcomes(&mut self) -> Vec<(CopyNote, bool)> {
-        self.copied_rx.try_iter().collect()
+        self.copied.drain()
     }
 }
 
@@ -194,8 +195,7 @@ impl SystemBridge {
     /// The system clipboard is never touched: copies fail as with none,
     /// unless a test makes the clipboard accept them.
     pub(crate) fn new_for_test() -> Self {
-        let (copied_tx, copied_rx) = mpsc::channel();
-        Self { clipboard: Clipboard::Absent, copied_tx, copied_rx, dialog: None, show: |_, _, _, _| None }
+        Self { clipboard: Clipboard::Absent, copied: Chan::default(), dialog: None, show: |_, _, _, _| None }
     }
 
     /// Copies succeed, as with a platform clipboard.
