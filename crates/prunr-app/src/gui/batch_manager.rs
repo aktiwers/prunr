@@ -367,6 +367,17 @@ impl BatchManager {
         }
     }
 
+    /// Every image but the one at `shown` leaves the screen
+    /// (`BatchItem::leave_screen`); those `keeps_embedding` names keep
+    /// their Magic Brush embedding.
+    pub(crate) fn leave_screen_except(&mut self, shown: usize, keeps_embedding: impl Fn(u64) -> bool) {
+        for (i, item) in self.items.iter_mut().enumerate() {
+            if i != shown {
+                item.leave_screen(keeps_embedding(item.id));
+            }
+        }
+    }
+
     /// Mark the images `marks` name as saved in those states.
     pub(crate) fn mark_saved(&mut self, marks: &[crate::gui::item::SaveMark]) {
         for &mark in marks {
