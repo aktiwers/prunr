@@ -44,10 +44,10 @@ use prunr_core::{
     infer_only, postprocess_from_flat, MaskSettings, ModelKind, OrtEngine, PostprocessOpts,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}};
 use test_common::{
-    assert_golden_fixtures, ensure_ort_initialized, golden_fixtures, render_synthetic_source,
-    synthetic_specs,
+    assert_golden_fixtures, ensure_ort_initialized, golden_fixtures, list_fixture_dirs,
+    match_or_update, render_synthetic_source, synthetic_specs, GoldenRun,
 };
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/postprocess";
@@ -69,22 +69,15 @@ struct Sidecar {
 
 #[test]
 fn golden_postprocess() {
-    let bootstrap = env::var_os("BOOTSTRAP_GOLDEN").is_some();
-    let update = env::var_os("UPDATE_GOLDEN").is_some();
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let committed_root = manifest_dir.join(FIXTURE_ROOT_COMMITTED);
-    let local_root = manifest_dir.join(FIXTURE_ROOT_LOCAL);
-    fs::create_dir_all(&committed_root).expect("create committed fixture root");
-
-    if bootstrap {
-        bootstrap_committed(&committed_root);
-        bootstrap_local_real_fixtures(&local_root);
+    let run = GoldenRun::new(FIXTURE_ROOT_COMMITTED, FIXTURE_ROOT_LOCAL);
+    if run.bootstrap {
+        bootstrap_committed(&run.committed);
+        bootstrap_local_real_fixtures(&run.local);
     }
 
-    let fixtures = golden_fixtures("postprocess", &committed_root, &local_root);
+    let fixtures = golden_fixtures("postprocess", &run.committed, &run.local);
 
-    assert_golden_fixtures("postprocess", &fixtures, |f| run_fixture(f, update));
+    assert_golden_fixtures("postprocess", &fixtures, |f| run_fixture(f, run.update));
 }
 
 fn run_fixture(dir: &Path, update: bool) -> Result<(), String> {
@@ -127,36 +120,7 @@ fn run_fixture(dir: &Path, update: bool) -> Result<(), String> {
     let actual = postprocess_from_flat(&tensor, h, w, &source, &opts)
         .map_err(|e| format!("postprocess: {e:?}"))?;
 
-    if update || !expected_path.exists() {
-        actual.save(&expected_path).map_err(|e| format!("write expected: {e}"))?;
-        return Ok(());
-    }
-
-    let expected = image::open(&expected_path)
-        .map_err(|e| format!("expected decode: {e}"))?
-        .to_rgba8();
-
-    if actual.dimensions() != expected.dimensions() {
-        return Err(format!(
-            "dimension mismatch: actual {:?} vs expected {:?}",
-            actual.dimensions(),
-            expected.dimensions(),
-        ));
-    }
-
-    let aw = actual.width() as usize;
-    for (i, (a, e)) in actual.pixels().zip(expected.pixels()).enumerate() {
-        if a != e {
-            let x = i % aw;
-            let y = i / aw;
-            return Err(format!(
-                "pixel mismatch at ({x}, {y}): actual rgba{:?} vs expected rgba{:?}",
-                a.0, e.0,
-            ));
-        }
-    }
-
-    Ok(())
+    match_or_update(&actual, &expected_path, update, 0)
 }
 
 fn bytes_to_f32s_le(bytes: &[u8]) -> Vec<f32> {
@@ -303,20 +267,11 @@ fn synthesize_circle_tensor(w: usize, h: usize) -> Vec<f32> {
 /// `sidecar.json`, run Silueta CPU inference and write both. Idempotent.
 /// Local fixtures are never committed — see `.gitignore`.
 fn bootstrap_local_real_fixtures(root: &Path) {
-    if !root.is_dir() {
-        return;
-    }
-    let dirs: Vec<PathBuf> = fs::read_dir(root)
-        .ok()
-        .map(|it| {
-            it.filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .filter(|p| p.join("source.png").is_file())
-                .filter(|p| !p.join("tensor.bin").is_file() || !p.join("sidecar.json").is_file())
-                .collect()
-        })
-        .unwrap_or_default();
+    let dirs: Vec<PathBuf> = list_fixture_dirs(root)
+        .into_iter()
+        .filter(|p| p.join("source.png").is_file())
+        .filter(|p| !p.join("tensor.bin").is_file() || !p.join("sidecar.json").is_file())
+        .collect();
 
     if dirs.is_empty() {
         return;
