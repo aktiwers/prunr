@@ -368,11 +368,7 @@ fn spawn_save_single(
         let wrote = outcome.is_ok().then_some(one.mark).into_iter().collect();
         let folder = path.parent().unwrap_or(Path::new("."));
         let picked = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        let map = one.depth.map(|d| {
-            let name = DistinctNames::default().next(&picked, |name| !folder.join(depth_file_name(name)).exists());
-            d.named(&name)
-        });
-        if let Some(Err(e)) = map.map(|d| d.write(folder, &depth)) {
+        if let Some(Err(e)) = one.depth.map(|d| d.named(&picked).write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             let msg = outcome.unwrap_or_else(|failed| failed);
             outcome = Err(format!("{msg}; could not save the depth map: {e}"));
@@ -798,19 +794,21 @@ mod toast_kind_tests {
         assert_eq!(std::fs::read(dir.path().join("photo-mask.png")).unwrap(), b"kept");
     }
 
-    /// Save as names the depth map after the picked file, and replaces no
-    /// depth map already there: the dialog asked about the image only.
+    /// Save as names the depth map after the picked file, its companion:
+    /// saving to that name again replaces both, as the dialog asked.
     #[test]
     fn save_as_names_the_depth_map_after_the_picked_file() {
         let mut app = PrunrApp::new_for_test();
         app.settings.export_depth_map = true;
         with_depth_map(&mut app, 1, "IMG_0001.jpg");
         let dir = tempfile::tempdir().unwrap();
-        for _ in 0..2 {
-            app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("first.png"));
-            assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
-        }
-        assert_eq!(listing(dir.path()), ["first-2-depth.png", "first-depth.png", "first.png"]);
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("first.png"));
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        std::fs::write(dir.path().join("first-depth.png"), b"the earlier map").unwrap();
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("first.png"));
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        assert_eq!(listing(dir.path()), ["first-depth.png", "first.png"]);
+        assert!(std::fs::read(dir.path().join("first-depth.png")).unwrap().starts_with(b"\x89PNG"), "replaced");
     }
 
     #[test]
