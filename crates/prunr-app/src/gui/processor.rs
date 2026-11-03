@@ -1519,7 +1519,7 @@ impl Processor {
     ) -> u64 {
         let pending: HashMap<u64, u64> = runs.into_iter().collect();
         let total = pending.len();
-        self.take_from_older(|id| pending.contains_key(id), None);
+        self.take_from_older(|older| older.retain(|id, _| !pending.contains_key(id)), None);
         let id = self.next_batch;
         self.next_batch += 1;
         self.in_flight.push(InFlightBatch { id, recipe, pending, total });
@@ -1553,7 +1553,7 @@ impl Processor {
             debug_assert!(false, "track_streamed called without active batch");
             return;
         };
-        let mut changed = self.take_from_older(|&taken| taken == id, Some(fed));
+        let mut changed = self.take_from_older(|older| { older.remove(&id); }, Some(fed));
         if let Some(b) = self.in_flight.iter_mut().find(|b| b.id == fed) {
             if b.pending.insert(id, run).is_none() {
                 b.total += 1;
@@ -1565,11 +1565,12 @@ impl Processor {
         }
     }
 
-    /// The images `taken` by a newer run stop awaiting every batch but
-    /// `keep`, so an older run's late answer is stale. A batch left with
-    /// nothing to answer goes, unless admission feeds it (it stays open
-    /// for the images to come). True when any batch let one go.
-    fn take_from_older(&mut self, taken: impl Fn(&u64) -> bool, keep: Option<u64>) -> bool {
+    /// The images a newer run takes (`take` drops them from a batch's
+    /// pending map) stop awaiting every batch but `keep`, so an older
+    /// run's late answer is stale. A batch left with nothing to answer
+    /// goes, unless admission feeds it (it stays open for the images to
+    /// come). True when any batch let one go.
+    fn take_from_older(&mut self, take: impl Fn(&mut HashMap<u64, u64>), keep: Option<u64>) -> bool {
         let fed = self.admission_batch();
         let mut released = false;
         self.in_flight.retain_mut(|b| {
@@ -1577,7 +1578,7 @@ impl Processor {
                 return true;
             }
             let before = b.pending.len();
-            b.pending.retain(|id, _| !taken(id));
+            take(&mut b.pending);
             b.total -= before - b.pending.len();
             released |= b.pending.len() < before;
             !b.pending.is_empty() || Some(b.id) == fed
