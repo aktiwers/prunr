@@ -108,14 +108,16 @@ impl PrunrApp {
     fn push_new_item(&mut self, source: ImageSource, dims: (u32, u32), name: String) -> u64 {
         let id = self.batch.next_id;
         self.batch.next_id += 1;
-        self.batch.items.push(BatchItem::new(
+        let mut item = BatchItem::new(
             id,
             name,
             source,
             dims,
             self.settings.item_defaults_for_new_item(),
             self.settings.default_preset.clone(),
-        ));
+        );
+        item.decode_slots = Arc::clone(&self.batch.bg_io.decode_slots);
+        self.batch.items.push(item);
         id
     }
 
@@ -290,5 +292,14 @@ mod tests {
         app.keep_bg_images_in_step();
         let load = app.batch.bg_io.bg_image_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("its picture loads");
         assert_eq!(load.fills, Some(4242));
+    }
+
+    /// An image added to the batch unpacks its neighbour steps behind the
+    /// batch's decode slots, the ones its other decodes take turns at.
+    #[test]
+    fn a_new_image_warms_its_steps_behind_the_batchs_decode_slots() {
+        let mut app = super::PrunrApp::new_for_test();
+        app.push_new_item(super::ImageSource::Bytes(std::sync::Arc::new(Vec::new())), (1, 1), "a.png".into());
+        assert!(std::sync::Arc::ptr_eq(&app.batch.items[0].decode_slots, &app.batch.bg_io.decode_slots));
     }
 }

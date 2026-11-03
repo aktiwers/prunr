@@ -109,6 +109,12 @@ pub struct DecodeSlots {
     cv: Condvar,
 }
 
+impl Default for DecodeSlots {
+    fn default() -> Self {
+        Self::new(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+    }
+}
+
 impl DecodeSlots {
     pub fn new(slots: usize) -> Self {
         Self { state: Mutex::new(slots.max(1)), cv: Condvar::new() }
@@ -267,9 +273,6 @@ impl BackgroundIO {
         let (bg_tex_prep_tx, bg_tex_prep_rx) = mpsc::channel();
         let (bg_image_tx, bg_image_rx) = mpsc::channel();
         let (selection_texture_tx, selection_texture_rx) = mpsc::channel();
-        let cap = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
         Self {
             removed_tx, removed_rx,
             file_load_tx, file_load_rx,
@@ -283,7 +286,7 @@ impl BackgroundIO {
             filter_only_tx, filter_only_rx,
             bg_tex_prep_tx, bg_tex_prep_rx,
             bg_image_tx, bg_image_rx,
-            decode_slots: Arc::new(DecodeSlots::new(cap)),
+            decode_slots: Arc::default(),
             selection_texture_tx, selection_texture_rx,
         }
     }
