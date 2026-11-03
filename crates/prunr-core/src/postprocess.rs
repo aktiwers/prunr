@@ -34,7 +34,11 @@ impl<'a> PostprocessOpts<'a> {
 /// Raw ONNX output → transparent RGBA. One RGBA buffer serves both the
 /// guided filter and the final mask application.
 pub fn postprocess(raw: ArrayView4<f32>, original: &impl crate::formats::AsRgba, opts: &PostprocessOpts<'_>) -> RgbaImage {
-    let mut rgba = original.as_rgba().into_owned();
+    postprocess_rgba(raw, original.as_rgba().into_owned(), opts)
+}
+
+/// `postprocess` made in `rgba` itself.
+fn postprocess_rgba(raw: ArrayView4<f32>, mut rgba: RgbaImage, opts: &PostprocessOpts<'_>) -> RgbaImage {
     let mask = tensor_to_mask_with_rgba(raw, &rgba, opts);
     finish_into(&mut rgba, &mask, opts.mask_settings);
     rgba
@@ -83,10 +87,36 @@ pub fn postprocess_from_flat(
     original: &impl crate::formats::AsRgba,
     opts: &PostprocessOpts<'_>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
-    let (w, h) = original.size();
-    crate::pipeline::room_for_postprocess(w, h, opts.mask_settings.refine_edges)?;
-    let view = flat_view(tensor, tensor_h, tensor_w)?;
+    let view = fitting_view(tensor, tensor_h, tensor_w, original.size(), opts)?;
     Ok(postprocess(view, original, opts))
+}
+
+/// `postprocess_from_flat` for a caller done with the photo: an RGBA
+/// photo is cut in itself, any other converted to RGBA once the room
+/// check has passed and freed then. Peak working set:
+/// `postprocess_from_flat`'s less its copy of the photo (w·h·4 bytes).
+pub fn postprocess_from_flat_owned(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: DynamicImage,
+    opts: &PostprocessOpts<'_>,
+) -> Result<RgbaImage, crate::types::CoreError> {
+    let view = fitting_view(tensor, tensor_h, tensor_w, (original.width(), original.height()), opts)?;
+    Ok(postprocess_rgba(view, original.into_rgba8(), opts))
+}
+
+/// The tensor's view, once the full-size work on a `w` × `h` photo is
+/// known to fit.
+fn fitting_view<'t>(
+    tensor: &'t [f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    (w, h): (u32, u32),
+    opts: &PostprocessOpts<'_>,
+) -> Result<ArrayView4<'t, f32>, crate::types::CoreError> {
+    crate::pipeline::room_for_postprocess(w, h, opts.mask_settings.refine_edges)?;
+    flat_view(tensor, tensor_h, tensor_w)
 }
 
 /// The cut-out the line detector traces under Sketch on Subject: `opts`'
@@ -99,8 +129,25 @@ pub fn cut_for_lines(
     original: &impl crate::formats::AsRgba,
     opts: &PostprocessOpts<'_>,
 ) -> Result<RgbaImage, crate::types::CoreError> {
-    let plain = MaskSettings { effect: SubjectEffect::None, ..*opts.mask_settings };
+    let plain = without_effect(opts.mask_settings);
     postprocess_from_flat(tensor, tensor_h, tensor_w, original, &PostprocessOpts { mask_settings: &plain, ..*opts })
+}
+
+/// `cut_for_lines` for a caller done with the photo, as
+/// `postprocess_from_flat_owned`. Peak working set: that one's.
+pub fn cut_for_lines_owned(
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    original: DynamicImage,
+    opts: &PostprocessOpts<'_>,
+) -> Result<RgbaImage, crate::types::CoreError> {
+    let plain = without_effect(opts.mask_settings);
+    postprocess_from_flat_owned(tensor, tensor_h, tensor_w, original, &PostprocessOpts { mask_settings: &plain, ..*opts })
+}
+
+fn without_effect(settings: &MaskSettings) -> MaskSettings {
+    MaskSettings { effect: SubjectEffect::None, ..*settings }
 }
 
 fn flat_view(tensor: &[f32], h: usize, w: usize) -> Result<ArrayView4<'_, f32>, crate::types::CoreError> {
@@ -1173,6 +1220,45 @@ mod tests {
         });
         let traced = traced.expect("the line detector ran");
         assert_eq!((alpha(&traced, 2), alpha(&traced, 60)), (0, 255), "the strokes reach the line detector");
+    }
+
+    /// A photo handed over is cut in itself: the same pixels as a cut of
+    /// it borrowed, in every layout a decode gives, and an RGBA photo's
+    /// own buffer comes back as the cut-out.
+    #[test]
+    fn a_photo_handed_over_is_cut_in_itself_to_the_same_pixels() {
+        use crate::selection::{MaskArtifact, FULL};
+        let (w, h) = (97u32, 81u32);
+        let flat: Vec<f32> = (0..48 * 40).map(|i| (i % 48) as f32 / 48.0 * 2.0 - 0.3).collect();
+        let rgba = RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 2) as u8, (y * 3) as u8, ((x * y) % 251) as u8, if x < 20 { 0 } else if x < 40 { 128 } else { 255 }]));
+        let photos = [
+            DynamicImage::ImageRgba8(rgba.clone()),
+            DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| Rgb([(x * 2) as u8, (y * 3) as u8, ((x ^ y) % 251) as u8]))),
+            DynamicImage::ImageRgba16(image::ImageBuffer::from_fn(w, h, |x, y| image::Rgba([(x * 600) as u16, (y * 700) as u16, 1234, 65535 - (x * 300) as u16]))),
+            DynamicImage::ImageLuma8(GrayImage::from_fn(w, h, |x, y| image::Luma([((x + y) * 2) as u8]))),
+        ];
+        let strokes = MaskArtifact::from_cells(w, h, (0..w * h).map(|i| match i % w { x if x < 10 => -FULL, x if x > 80 => FULL, _ => 0 }).collect());
+        let looks = [
+            MaskSettings::default(),
+            MaskSettings { refine_edges: true, feather: 1.5, edge_shift: 1.0, ..MaskSettings::default() },
+            MaskSettings {
+                effect: SubjectEffect::Sepia,
+                decoration: crate::types::Decoration { outline_width: 2.0, shadow: crate::types::ShadowKind::Drop, ..Default::default() },
+                ..MaskSettings::default()
+            },
+        ];
+        for photo in &photos {
+            for settings in &looks {
+                let opts = PostprocessOpts::new(settings, ModelKind::Silueta).with_correction(Some(&strokes));
+                let borrowed = postprocess_from_flat(&flat, 40, 48, photo, &opts).expect("fits");
+                assert_eq!(postprocess_from_flat_owned(&flat, 40, 48, photo.clone(), &opts).expect("fits"), borrowed, "{:?} {settings:?}", photo.color());
+                let borrowed = cut_for_lines(&flat, 40, 48, photo, &opts).expect("fits");
+                assert_eq!(cut_for_lines_owned(&flat, 40, 48, photo.clone(), &opts).expect("fits"), borrowed, "{:?} {settings:?}", photo.color());
+            }
+        }
+        let at = rgba.as_ptr();
+        let cut = postprocess_from_flat_owned(&flat, 40, 48, DynamicImage::ImageRgba8(rgba), &PostprocessOpts::new(&looks[1], ModelKind::Silueta)).expect("fits");
+        assert_eq!(cut.as_ptr(), at, "cut in the photo's own buffer, no copy");
     }
 
     #[test]

@@ -576,19 +576,18 @@ pub fn run_worker() -> ! {
                                         return;
                                     }
                                 };
-                                let original = &decoded;
                                 let Ok(correction) = strokes.as_deref().map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or(())).transpose() else {
                                     fail(STROKES_UNREADABLE.into());
                                     return;
                                 };
                                 let look = look.as_ref().and_then(Look::engine);
-                                prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
+                                prunr_core::infer_after_first_look(&decoded, eng, look.as_deref(), &progress).and_then(|ir| {
                                     progress.step(prunr_core::Step::RefiningEdges);
                                     let th = ir.tensor_height;
                                     let tw = ir.tensor_width;
                                     let active_provider = ir.active_provider.clone();
-                                    let subject = prunr_core::cut_for_lines(
-                                        &ir.tensor_data, th, tw, original,
+                                    let (subject, kept) = cut_for_lines_keeping(
+                                        line_depth.is_some(), &ir.tensor_data, th, tw, decoded,
                                         &prunr_core::PostprocessOpts::new(&mask, model).with_correction(correction.as_ref()),
                                     )?;
                                     // Seg tensor captured → Tier 2 mask reruns work in
@@ -597,7 +596,7 @@ pub fn run_worker() -> ! {
                                     progress.step(prunr_core::Step::DrawingLines);
                                     // invariant: ensure_edge_engine ran above for every line mode but Off.
                                     let eng_ref = edge_eng.as_ref().unwrap();
-                                    let measured = line_depth.as_ref().and_then(|d| d.measure(original));
+                                    let measured = line_depth.as_ref().zip(kept.as_ref()).and_then(|(depth, original)| depth.measure(original));
                                     let (rgba_image, edge_res) = prunr_core::outline_subject(
                                         subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
                                     )?;
@@ -612,26 +611,24 @@ pub fn run_worker() -> ! {
                                 fail(SEG_ENGINE_MISSING.into());
                                 return;
                             };
-                            let decoded;
-                            let original: &image::DynamicImage = if let Some(ref img) = chain_img {
-                                img
-                            } else {
-                                match prunr_core::load_image_from_bytes(&img_bytes) {
-                                    Ok(img) => { decoded = img; &decoded }
+                            let original = match chain_img {
+                                Some(img) => img,
+                                None => match prunr_core::load_image_from_bytes(&img_bytes) {
+                                    Ok(img) => img,
                                     Err(e) => {
                                         fail(e.to_string());
                                         return;
                                     }
-                                }
+                                },
                             };
 
                             let look = look.as_ref().and_then(Look::engine);
-                            prunr_core::infer_after_first_look(original, eng, look.as_deref(), &progress).and_then(|ir| {
+                            prunr_core::infer_after_first_look(&original, eng, look.as_deref(), &progress).and_then(|ir| {
                                 progress.step(prunr_core::Step::RefiningEdges);
 
                                 let th = ir.tensor_height;
                                 let tw = ir.tensor_width;
-                                let rgba_image = prunr_core::postprocess_from_flat(
+                                let rgba_image = prunr_core::postprocess_from_flat_owned(
                                     &ir.tensor_data, th, tw, original,
                                     &prunr_core::PostprocessOpts::new(&mask, model),
                                 )?;
@@ -745,9 +742,9 @@ pub fn run_worker() -> ! {
                         let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
                         let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
                         progress.step(prunr_core::Step::RefiningEdges);
-                        prunr_core::postprocess_from_flat(
+                        prunr_core::postprocess_from_flat_owned(
                             &floats, tensor_height as usize, tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model),
+                            original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model),
                         ).map_err(|e| e.to_string())
                     })();
 
@@ -838,15 +835,15 @@ pub fn run_worker() -> ! {
                             .transpose()?;
 
                         progress.step(prunr_core::Step::RefiningEdges);
-                        let subject = prunr_core::cut_for_lines(
-                            &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
-                            &original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model).with_correction(correction.as_ref()),
+                        let (subject, kept) = cut_for_lines_keeping(
+                            line_depth.is_some(), &seg_data, seg_tensor_height as usize, seg_tensor_width as usize,
+                            original, &prunr_core::PostprocessOpts::new(&cmd_mask, cmd_model).with_correction(correction.as_ref()),
                         ).map_err(|e| e.to_string())?;
 
                         progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        let measured = line_depth.as_ref().and_then(|d| d.measure(&original));
+                        let measured = line_depth.as_ref().zip(kept.as_ref()).and_then(|(depth, original)| depth.measure(original));
                         prunr_core::outline_subject(subject, cmd_mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
@@ -1039,6 +1036,24 @@ impl LineDepth {
     }
 }
 
+/// The cut-out the lines trace, made in `photo` itself unless Fade with
+/// distance still measures the photo after the cut (`fades`); then the
+/// cut is made in a copy and the photo comes back beside it.
+fn cut_for_lines_keeping(
+    fades: bool,
+    tensor: &[f32],
+    tensor_h: usize,
+    tensor_w: usize,
+    photo: image::DynamicImage,
+    opts: &prunr_core::PostprocessOpts<'_>,
+) -> Result<(image::RgbaImage, Option<image::DynamicImage>), prunr_core::CoreError> {
+    if fades {
+        prunr_core::cut_for_lines(tensor, tensor_h, tensor_w, &photo, opts).map(|cut| (cut, Some(photo)))
+    } else {
+        prunr_core::cut_for_lines_owned(tensor, tensor_h, tensor_w, photo, opts).map(|cut| (cut, None))
+    }
+}
+
 /// One photo's depth map and how much its lines fade.
 struct Measured {
     map: prunr_core::depth::DepthMap,
@@ -1163,6 +1178,24 @@ mod tests {
         let fine = dir.path().join("result_2.raw");
         write_result(&fine, &rgba).unwrap();
         assert_eq!(std::fs::read(&fine).unwrap(), rgba.as_raw().as_slice());
+    }
+
+    /// The cut the lines trace is the same whether the photo is kept for
+    /// Fade with distance or cut in itself; only with Fade does the photo
+    /// come back, as it was.
+    #[test]
+    fn the_photo_outlives_the_lines_cut_only_for_fade() {
+        let rgba = image::RgbaImage::from_fn(40, 30, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 70, 255]));
+        let tensor: Vec<f32> = (0..20 * 15).map(|i| if i % 20 < 10 { 0.9 } else { 0.1 }).collect();
+        let mask = prunr_core::MaskSettings { effect: prunr_core::SubjectEffect::Invert, ..Default::default() };
+        let opts = prunr_core::PostprocessOpts::new(&mask, prunr_core::ModelKind::Silueta);
+        for photo in [image::DynamicImage::ImageRgba8(rgba.clone()), image::DynamicImage::ImageRgb8(image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8())] {
+            let expected = prunr_core::cut_for_lines(&tensor, 15, 20, &photo, &opts).unwrap();
+            let (cut, kept) = cut_for_lines_keeping(true, &tensor, 15, 20, photo.clone(), &opts).unwrap();
+            assert_eq!((cut, kept.as_ref()), (expected.clone(), Some(&photo)));
+            let (cut, kept) = cut_for_lines_keeping(false, &tensor, 15, 20, photo, &opts).unwrap();
+            assert_eq!((cut, kept), (expected, None));
+        }
     }
     use std::time::{Duration, Instant};
 
