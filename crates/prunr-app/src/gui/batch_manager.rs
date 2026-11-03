@@ -70,6 +70,16 @@ fn drop_tensors(item: &mut BatchItem) -> (usize, bool) {
     (bytes, held_cut)
 }
 
+/// The item with `id`, looked up apart from the manager so `bg_io` can be
+/// borrowed beside it.
+fn item_by_id(items: &[BatchItem], id: u64) -> Option<&BatchItem> {
+    items.iter().find(|b| b.id == id)
+}
+
+fn item_by_id_mut(items: &mut [BatchItem], id: u64) -> Option<&mut BatchItem> {
+    items.iter_mut().find(|b| b.id == id)
+}
+
 /// Maximum thumbnail edge length in pixels.
 const THUMB_MAX_PX: u32 = 160;
 
@@ -195,7 +205,7 @@ impl BatchManager {
 
     /// `None` is common: a worker event can arrive after its item was removed.
     pub(crate) fn find_by_id(&self, id: u64) -> Option<&BatchItem> {
-        self.items.iter().find(|b| b.id == id)
+        item_by_id(&self.items, id)
     }
 
     pub(crate) fn index_of(&self, id: u64) -> Option<usize> {
@@ -203,7 +213,7 @@ impl BatchManager {
     }
 
     pub(crate) fn find_by_id_mut(&mut self, id: u64) -> Option<&mut BatchItem> {
-        self.items.iter_mut().find(|b| b.id == id)
+        item_by_id_mut(&mut self.items, id)
     }
 
     /// Derives app-level state from the selected item's status.
@@ -665,6 +675,28 @@ impl BatchManager {
         }
     }
 
+    /// Uploads are throttled so a 50-image import doesn't burst every
+    /// `ctx.load_texture` into one frame; repaints while the queue is full.
+    pub(crate) fn pump_thumbnail_results(&mut self, ctx: &egui::Context) -> bool {
+        const THUMB_UPLOADS_PER_FRAME: usize = 3;
+        let mut uploaded = 0;
+        while uploaded < THUMB_UPLOADS_PER_FRAME {
+            let Ok(msg) = self.bg_io.thumb.rx.try_recv() else { break };
+            let Some(item) = self.find_by_id_mut(msg.item_id) else { continue };
+            let Some((tw, th, pixels)) = msg.image else {
+                item.thumb.failed();
+                continue;
+            };
+            let ci = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
+            item.thumb.landed(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
+            uploaded += 1;
+        }
+        if uploaded == THUMB_UPLOADS_PER_FRAME {
+            ctx.request_repaint();
+        }
+        uploaded > 0
+    }
+
     /// Evict tensor caches, oldest-loaded first, until under budget. Both
     /// caches go together: one without the other is useless. Returns how
     /// many images let go of a cut-out's mask.
@@ -718,6 +750,90 @@ impl BatchManager {
             .filter(|t| t.key.1 == style)
             .map(|t| (t.key.0, Arc::clone(&t.shown)));
         self.bg_io.request_selection_visualization(item.id, mask, key, base, ctx.clone());
+    }
+
+    /// Image textures prepared off the UI thread join the upload queue;
+    /// one whose pixels could not be read ends its request.
+    pub(crate) fn queue_prepared_textures(&mut self) {
+        while let Ok(prep) = self.bg_io.tex_prep.rx.try_recv() {
+            let Some(item) = self.find_by_id_mut(prep.item_id) else { continue };
+            let Some(image) = prep.image else {
+                item.texture_unreadable(prep.target);
+                continue;
+            };
+            let landing = super::background_io::TexLanding::Image { item_id: prep.item_id, target: prep.target, unpacked: prep.unpacked };
+            self.bg_io.uploads.push(prep.name, image, landing);
+        }
+    }
+
+    /// Selection overlays built off the UI thread: a patch lands at once,
+    /// a whole one joins the upload queue. One for a mask that has since
+    /// changed is dropped; `ensure_selection_texture` already requested
+    /// the current one.
+    pub(crate) fn queue_selection_textures(&mut self) {
+        while let Ok(result) = self.bg_io.selection_texture.rx.try_recv() {
+            let item_id = result.item_id;
+            let Some(item) = item_by_id_mut(&mut self.items, item_id) else { continue };
+            let uploads = &mut self.bg_io.uploads;
+            item.land_selection_texture(result, |image, landing| uploads.push(format!("selection_{item_id}"), image, landing));
+        }
+    }
+
+    /// Backdrop pictures built off the UI thread join the upload queue.
+    /// One that is no longer the item's backdrop (changed while it was
+    /// built) is dropped; the next kick builds the current one.
+    pub(crate) fn queue_backdrop_pictures(&mut self, ctx: &egui::Context) {
+        while let Ok((item_id, key, built)) = self.bg_io.bg_tex_prep.rx.try_recv() {
+            if matches!(built, super::background_io::BackdropBuilt::Thumb(..)) {
+                self.building_backdrop_thumb = None;
+            }
+            let Some(item) = item_by_id_mut(&mut self.items, item_id) else { continue };
+            let uploads = &mut self.bg_io.uploads;
+            if !item.land_backdrop_built(key, built, |image, landing, options| uploads.push_with(format!("backdrop_{key:x}"), image, landing, options)) {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Upload this frame's tiles of the queued textures (large pictures go
+    /// up a few tiles per frame and land whole) and install those whose
+    /// last tile went up. Returns whether an image or backdrop texture
+    /// landed.
+    pub(crate) fn pump_texture_uploads(&mut self, ctx: &egui::Context) -> bool {
+        use super::background_io::TexLanding;
+        let items = &self.items;
+        let pumped = self.bg_io.uploads.pump(ctx, |landing| item_by_id(items, landing.item_id()).is_some_and(|i| i.wants_upload(landing)));
+        for landing in pumped.dropped {
+            if let Some(item) = self.find_by_id_mut(landing.item_id()) {
+                item.upload_dropped(&landing);
+            }
+        }
+        let mut landed = false;
+        for (texture, landing) in pumped.landed {
+            match landing {
+                TexLanding::Image { item_id, target, unpacked } => {
+                    let Some(item) = self.find_by_id_mut(item_id) else { continue };
+                    item.land_texture(texture, target);
+                    if let Some(rgba) = unpacked {
+                        item.hold_unpacked_result(rgba);
+                    }
+                    landed = true;
+                }
+                TexLanding::Selection { item_id, key, shown } => {
+                    let Some(item) = self.find_by_id_mut(item_id) else { continue };
+                    item.install_selection_texture(texture, key, shown);
+                }
+                TexLanding::Backdrop { item_id, key } => {
+                    let Some(item) = self.find_by_id_mut(item_id) else { continue };
+                    landed |= item.install_backdrop(key, texture);
+                }
+                TexLanding::BackdropThumb { item_id, key } => {
+                    let Some(item) = self.find_by_id_mut(item_id) else { continue };
+                    item.install_backdrop_thumb(key, texture);
+                }
+            }
+        }
+        landed
     }
 
     /// The items a drag from row `idx` carries: every ticked one when that
