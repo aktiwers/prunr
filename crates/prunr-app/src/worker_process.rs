@@ -557,7 +557,7 @@ pub fn run_worker() -> ! {
                                 // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let measured = line_depth.as_ref().and_then(|d| d.measure(&img));
-                                prunr_core::outline_subject(img.into_rgba8(),prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
+                                prunr_core::outline_subject(img.into_rgba8(), prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
                                     .map(|(rgba_image, res)| {
                                         edge_tensor_for_cache = Some(res);
                                         ProcessResult { rgba_image, active_provider: provider.clone() }
