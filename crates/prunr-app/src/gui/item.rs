@@ -2716,7 +2716,7 @@ impl BatchItem {
     /// Strength as that step's own.
     pub(crate) fn land_colorize(&mut self, run: ColorizeCache) {
         self.finish_job_keeping(run.run);
-        self.colorize = Some(run);
+        super::reclaim::later(self.colorize.replace(run));
     }
 
     /// The kept colorize run, when it is the shown step's own.
@@ -3993,6 +3993,42 @@ mod tests {
         assert!(item.kept_colorize().is_some());
         item.invalidate_colorize_cache();
         assert!(item.kept_colorize().is_none());
+    }
+
+    /// A new colorize run hands the one it replaces to the reclaim
+    /// thread: its photo is not freed inside the frame that lands it.
+    #[test]
+    fn a_new_colorize_run_frees_the_old_one_off_the_ui_thread() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct Gate(mpsc::Receiver<()>);
+        impl Drop for Gate {
+            fn drop(&mut self) {
+                let _ = self.0.recv_timeout(Duration::from_secs(5));
+            }
+        }
+        let mut item = fixture_item(1);
+        let plane = Arc::new(vec![0.0; 2 * (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize]);
+        let model = crate::gui::settings::COLORIZER;
+        let land = |item: &mut BatchItem| {
+            item.start_job(Some(StepKind::Colorize), Engine::Colorize);
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
+            item.applied_recipe = Some(item.settings.current_recipe(model));
+            let input = Arc::new(image::RgbaImage::new(4, 4));
+            let photo = Arc::downgrade(&input);
+            item.land_colorize(ColorizeCache::new(Arc::clone(&plane), input));
+            photo
+        };
+        let first = land(&mut item);
+        let (open, gate) = mpsc::channel::<()>();
+        crate::gui::reclaim::later(Gate(gate));
+        let _second = land(&mut item);
+        assert!(first.upgrade().is_some(), "the old run waits on the reclaim thread, not freed in the frame");
+        drop(open);
+        let (done, settled) = mpsc::channel::<()>();
+        crate::gui::reclaim::later(done);
+        let _ = settled.recv_timeout(Duration::from_secs(5));
+        assert!(first.upgrade().is_none(), "and is freed there");
     }
 
     /// Process under an upscaler: nothing for the step's own upscale as
