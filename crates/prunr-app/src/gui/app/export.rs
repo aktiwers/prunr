@@ -17,7 +17,7 @@ impl PrunrApp {
     /// ticked. Save writes what the canvas shows; an untouched photo is
     /// written as it is, in the chosen format.
     pub fn can_save_intent(&self) -> bool {
-        self.batch.selected_item().is_some() || self.batch.items.iter().any(|i| i.ticked)
+        self.batch.selected_item().is_some() || self.batch.any_ticked()
     }
 
     /// "Separate layers" applies: the switch is on and the model cuts out a
@@ -32,7 +32,7 @@ impl PrunrApp {
     }
 
     pub fn handle_save_selected(&mut self) {
-        let has_selection = self.batch.items.iter().any(|i| i.ticked);
+        let has_selection = self.batch.any_ticked();
         // Layers mode always picks a folder, whatever is ticked.
         if self.saves_layers() {
             self.save_layers_to_folder(has_selection);

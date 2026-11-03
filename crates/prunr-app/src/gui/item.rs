@@ -1707,11 +1707,7 @@ impl BatchItem {
     /// next run, a preset), so the run's result still lands, on top of
     /// it. A cut keeps the strict rule: its knob changes re-cut.
     fn keeps_long_run(&self, next: &DocState) -> bool {
-        let same_pixels = match (&self.timeline.current().result, &next.result) {
-            (None, None) => true,
-            (Some(shown), Some(kept)) => Arc::ptr_eq(shown, kept),
-            _ => false,
-        };
+        let same_pixels = same_arc(self.timeline.current().result.as_ref(), next.result.as_ref());
         same_pixels && self.job_is_current() && self.job.as_ref().is_some_and(|j| j.engine != Engine::Segment && j.step.is_some())
     }
 
