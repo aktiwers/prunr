@@ -20,8 +20,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use super::background_io::Chan;
 
 use image::{GrayImage, RgbaImage};
 
@@ -338,8 +340,7 @@ pub struct LivePreview {
     in_flight: HashMap<u64, InFlight>,
     owed: HashMap<u64, Owed>,
     generation_counter: u64,
-    result_tx: mpsc::Sender<Finished>,
-    result_rx: mpsc::Receiver<Finished>,
+    result: Chan<Finished>,
     clock: Arc<dyn Clock>,
     /// The images whose latest render was refused, until a full-size
     /// render lands or their previews are cancelled.
@@ -371,14 +372,12 @@ impl Default for LivePreview {
 impl LivePreview {
     /// With an injected clock; `default()` uses `SystemClock`.
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             pending: HashMap::new(),
             in_flight: HashMap::new(),
             owed: HashMap::new(),
             generation_counter: 0,
-            result_tx: tx,
-            result_rx: rx,
+            result: Chan::default(),
             clock,
             refused: HashSet::new(),
             untold: Vec::new(),
@@ -546,7 +545,7 @@ impl LivePreview {
                 replaced.stop();
             }
 
-            let tx = self.result_tx.clone();
+            let tx = self.result.tx.clone();
             rayon::spawn(move || {
                 let has_depth = inputs.depth.is_some();
                 let plane_key = |scale: prunr_core::EdgeScale| EdgePlaneKey::new(&inputs.settings, scale, has_depth);
@@ -615,7 +614,7 @@ impl LivePreview {
     /// pending, no full-size render owed).
     pub fn drain_results(&mut self) -> Vec<PreviewResult> {
         let mut out = Vec::new();
-        while let Ok(done) = self.result_rx.try_recv() {
+        while let Ok(done) = self.result.rx.try_recv() {
             // Drop stale: if generation doesn't match the last dispatch for
             // this item, a newer tweak superseded it.
             let is_latest = self.in_flight
@@ -1559,7 +1558,7 @@ mod tests {
         // Each refusal names the memory free at the time.
         let refuse = |lp: &mut LivePreview, generation: u64| {
             in_flight(lp, 7, generation);
-            lp.result_tx.send(Finished { item_id: 7, generation, result: None, refused: Some(format!("too large, {generation} GB free")) }).unwrap();
+            lp.result.tx.send(Finished { item_id: 7, generation, result: None, refused: Some(format!("too large, {generation} GB free")) }).unwrap();
             lp.drain_results();
         };
         refuse(&mut lp, 1);
@@ -1569,7 +1568,7 @@ mod tests {
         // still refused.
         in_flight(&mut lp, 7, 3);
         let quick = PreviewResult { generation: 3, quick: true, ..PreviewResult::mask_for_test(7, Arc::new(RgbaImage::new(1, 1))) };
-        lp.result_tx.send(Finished { item_id: 7, generation: 3, result: Some(quick), refused: None }).unwrap();
+        lp.result.tx.send(Finished { item_id: 7, generation: 3, result: Some(quick), refused: None }).unwrap();
         assert_eq!(lp.drain_results().len(), 1);
         refuse(&mut lp, 4);
         assert!(lp.take_refusals().is_empty(), "a quick frame landing tells nothing new");
@@ -1587,7 +1586,7 @@ mod tests {
     /// A worker's non-final Mask result for item `id` under `generation`.
     fn send_result(lp: &LivePreview, id: u64, generation: u64) {
         let result = PreviewResult { generation, is_final: false, ..PreviewResult::mask_for_test(id, Arc::new(RgbaImage::new(1, 1))) };
-        lp.result_tx.send(Finished { item_id: id, generation, result: Some(result), refused: None }).unwrap();
+        lp.result.tx.send(Finished { item_id: id, generation, result: Some(result), refused: None }).unwrap();
     }
 
     #[test]
