@@ -94,7 +94,9 @@ pub fn postprocess_from_flat(
 /// `postprocess_from_flat` for a caller done with the photo: an RGBA
 /// photo is cut in itself, any other converted to RGBA once the room
 /// check has passed and freed then. Peak working set:
-/// `postprocess_from_flat`'s less its copy of the photo (w·h·4 bytes).
+/// `postprocess_from_flat`'s less the photo itself: w·h·4 bytes for an
+/// RGBA photo (cut in place), the decoded layout's for any other
+/// (w·h·3 for RGB).
 pub fn postprocess_from_flat_owned(
     tensor: &[f32],
     tensor_h: usize,
