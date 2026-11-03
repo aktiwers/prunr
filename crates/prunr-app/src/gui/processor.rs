@@ -341,41 +341,35 @@ impl<R> RunDone<R> {
     }
 }
 
-/// SAM 2 encoder + decoder sessions, built on first use and reused for
-/// every click until Magic Brush is deactivated: the encoder on a GPU
-/// provider when there is one, the decoder on the CPU.
-pub(crate) struct SamSessions {
-    encoder: Mutex<ort::session::Session>,
-    decoder: Mutex<ort::session::Session>,
+/// The Magic Brush's sessions, built on first use and kept until it is
+/// deactivated.
+struct WarmSam {
+    sessions: Arc<prunr_core::sam_session::Sessions>,
     /// Built under "CPU only": the other setting builds them again.
     cpu_only: bool,
-    /// Where the encoder landed. On CUDA it hands its pool back after each
-    /// encode: it held 2.1 GB of the card between photos, room an SD
-    /// erase beside it needs.
-    encoder_provider: String,
 }
 
-type SamSessionSlot = Arc<Mutex<Option<Arc<SamSessions>>>>;
+type SamSessionSlot = Arc<Mutex<Option<WarmSam>>>;
 
 /// Cached sessions, built outside the lock so a release on the GUI
 /// thread never waits on the encoder's build. A build puts the encoder
 /// on the CPU when its GPU charge does not fit what is free (`admitted`).
-fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<SamSessions>, String> {
-    let fits = |s: &&Arc<SamSessions>| s.cpu_only == cpu_only;
+fn ensure_sam_sessions(slot: &SamSessionSlot, cpu_only: bool) -> Result<Arc<prunr_core::sam_session::Sessions>, String> {
+    let fits = |s: &&WarmSam| s.cpu_only == cpu_only;
     if let Some(cached) = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(fits) {
-        return Ok(Arc::clone(cached));
+        return Ok(Arc::clone(&cached.sessions));
     }
     let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
     let on_cpu = admitted(descriptor, cpu_only)?;
     let (encoder, pick) = prunr_core::sam_session::encoder(on_cpu).inspect_err(|e| tracing::warn!(%e, "Magic Brush model did not load"))?;
     tracing::info!(provider = %pick.provider, failed = ?pick.failed, "Magic Brush sessions ready");
-    let built = Arc::new(SamSessions { encoder: Mutex::new(encoder), decoder: Mutex::new(prunr_core::sam_session::decoder()?), cpu_only, encoder_provider: pick.provider });
+    let sessions = Arc::new(prunr_core::sam_session::Sessions::new(encoder, prunr_core::sam_session::decoder()?, pick.provider));
     let mut guard = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Two clicks racing on a cold cache both build; keep whichever landed.
     if let Some(cached) = guard.as_ref().filter(fits) {
-        return Ok(Arc::clone(cached));
+        return Ok(Arc::clone(&cached.sessions));
     }
-    Ok(Arc::clone(guard.insert(built)))
+    Ok(Arc::clone(&guard.insert(WarmSam { sessions, cpu_only }).sessions))
 }
 
 /// Whether the slot holds sessions built for `cpu_only`.
@@ -385,25 +379,10 @@ fn sam_sessions_built(slot: &SamSessionSlot, cpu_only: bool) -> bool {
 
 /// The Magic Brush's sessions as the app builds them, and the provider
 /// the encoder landed on. For the bench.
-pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<(Arc<SamSessions>, String), String> {
+pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<(Arc<prunr_core::sam_session::Sessions>, String), String> {
     let sessions = ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)?;
-    let provider = sessions.encoder_provider.clone();
+    let provider = sessions.encoder_provider().to_string();
     Ok((sessions, provider))
-}
-
-/// `photo` encoded once, then each of `clicks` (fractions of its width
-/// and height) decoded: its best candidate's mask, 0 or 255 a cell, one
-/// after the other. For the bench.
-pub(crate) fn magic_brush_masks(sessions: &SamSessions, photo: &image::RgbaImage, clicks: &[(f32, f32)]) -> Result<Vec<u8>, String> {
-    let embedding = run_sam_encoder_inline(sessions, photo)?;
-    let (w, h) = photo.dimensions();
-    let mut masks = Vec::with_capacity(clicks.len() * prunr_core::sam::SAM_MASK_CELLS);
-    for &(fx, fy) in clicks {
-        let prompt = prunr_core::sam::prompt::build_click_prompt(fx * w as f32, fy * h as f32, w, h);
-        let decoded = run_sam_decoder_inline(sessions, &embedding, &prompt)?;
-        masks.extend(decoded.mask(decoded.best()).iter().map(|&logit| if logit > 0.0 { 255 } else { 0 }));
-    }
-    Ok(masks)
 }
 
 /// A Magic Brush pick from a background thread: the stroke to draw and
@@ -2051,7 +2030,7 @@ impl Processor {
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            let result = caught(|| ensure_sam_sessions(&sessions, cpu_only).and_then(|s| run_sam_encoder_inline(&s, &source)))
+            let result = caught(|| ensure_sam_sessions(&sessions, cpu_only).and_then(|s| s.encode(&source)))
                 .unwrap_or_else(Err);
             let _ = tx.send(SamEncoderResult { item_id, result });
         });
@@ -2143,7 +2122,7 @@ impl Processor {
         self.spawn_model(move || {
             let started = std::time::Instant::now();
             let result = caught(|| ensure_sam_sessions(&sessions, req.cpu_only)
-                .and_then(|s| run_sam_decoder_inline(&s, &req.embedding, &req.prompt))
+                .and_then(|s| s.decode(&req.embedding, &req.prompt))
                 .map(|out| {
                     tracing::debug!(item_id = req.item_id, decoder_ms = started.elapsed().as_millis() as u64, "SAM decoder ran");
                     super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading, edge: req.edge }
@@ -2169,122 +2148,6 @@ impl Processor {
         }
         results
     }
-}
-
-fn extract_f32(
-    outputs: &ort::session::SessionOutputs,
-    name: &str,
-    stage: &str,
-) -> Result<Vec<f32>, String> {
-    Ok(outputs[name]
-        .try_extract_array::<f32>()
-        .map_err(|e| format!("{stage}: extract {name}: {e}"))?
-        .as_standard_layout()
-        .into_owned()
-        .into_raw_vec_and_offset().0)
-}
-
-/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
-fn run_sam_encoder_inline(
-    sessions: &SamSessions,
-    source: &image::RgbaImage,
-) -> Result<prunr_core::sam::SamEmbedding, String> {
-    use ort::{inputs, value::Tensor};
-
-    // Preprocess before taking the lock: it runs on the rayon pool, and a
-    // rayon wait while holding the lock can pick up a queued encode that
-    // then blocks on this same lock. Do NOT move rayon work under it.
-    let input_vec = prunr_core::sam::preprocess::preprocess_for_sam(source);
-    let mut session = sessions.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Shape: [1, 3, 1024, 1024] — NCHW, ImageNet-normalized f32.
-    let arr = ndarray::Array4::from_shape_vec([1, 3, 1024, 1024], input_vec)
-        .map_err(|e| format!("encoder input shape: {e}"))?;
-    let tensor = Tensor::from_array(arr)
-        .map_err(|e| format!("encoder input tensor: {e}"))?;
-
-    let input_name = session.inputs()[0].name().to_string();
-    let inputs = inputs![input_name => &tensor];
-    let on_cuda = sessions.encoder_provider == prunr_core::engine::CUDA_NAME;
-    let outputs = match on_cuda.then(prunr_core::engine::shrink_cuda_pool).flatten() {
-        Some(options) => session.run_with_options(inputs, options),
-        None => session.run(inputs),
-    }
-    .map_err(|e| format!("encoder session.run: {e}"))?;
-
-    // By NAME: the export emits outputs in reverse of the documented
-    // order. Shapes: image_embed [1,256,64,64], high_res_feats_0
-    // [1,32,256,256], high_res_feats_1 [1,64,128,128].
-    let image_embed = extract_f32(&outputs, "image_embed", "encoder")?;
-    let high_res_feats_0 = extract_f32(&outputs, "high_res_feats_0", "encoder")?;
-    let high_res_feats_1 = extract_f32(&outputs, "high_res_feats_1", "encoder")?;
-
-    let embedding = prunr_core::sam::SamEmbedding {
-        image_embed,
-        high_res_feats_0,
-        high_res_feats_1,
-    };
-    embedding.validate_shapes()
-        .map_err(|e| format!("encoder output shape mismatch: {e}"))?;
-    Ok(embedding)
-}
-
-/// ORT session.run() lives here so `prunr_core::sam` stays ORT-free.
-/// One decoder input of `shape`, named in its errors.
-fn decoder_input<D: ndarray::Dimension + 'static>(
-    name: &str,
-    shape: impl ndarray::ShapeBuilder<Dim = D>,
-    data: Vec<f32>,
-) -> Result<ort::value::Tensor<f32>, String> {
-    let array = ndarray::Array::from_shape_vec(shape, data).map_err(|e| format!("decoder: {name} shape: {e}"))?;
-    ort::value::Tensor::from_array(array).map_err(|e| format!("decoder: {name} tensor: {e}"))
-}
-
-fn run_sam_decoder_inline(
-    sessions: &SamSessions,
-    embedding: &prunr_core::sam::SamEmbedding,
-    prompt: &prunr_core::sam::prompt::SamPrompt,
-) -> Result<prunr_core::sam::SamDecoderOutput, String> {
-    use ort::{inputs, value::TensorRef};
-
-    let mut session = sessions.decoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    // The 16 MB embedding is borrowed for the run — no per-click copy.
-    let embed_tensor = TensorRef::from_array_view(
-        ([1usize, 256, 64, 64], embedding.image_embed.as_slice()),
-    ).map_err(|e| format!("decoder: image_embed tensor: {e}"))?;
-    let feats0_tensor = TensorRef::from_array_view(
-        ([1usize, 32, 256, 256], embedding.high_res_feats_0.as_slice()),
-    ).map_err(|e| format!("decoder: high_res_feats_0 tensor: {e}"))?;
-    let feats1_tensor = TensorRef::from_array_view(
-        ([1usize, 64, 128, 128], embedding.high_res_feats_1.as_slice()),
-    ).map_err(|e| format!("decoder: high_res_feats_1 tensor: {e}"))?;
-
-    let n_points = prompt.point_labels.len();
-    let coords_tensor = decoder_input("point_coords", [1, n_points, 2], prompt.point_coords.clone())?;
-    let labels_tensor = decoder_input("point_labels", [1, n_points], prompt.point_labels.clone())?;
-    let mask_tensor = decoder_input("mask_input", [1, 1, 256, 256], prompt.mask_input.clone())?;
-    let has_mask_tensor = decoder_input("has_mask_input", [1], vec![prompt.has_mask_input])?;
-
-    let outputs = session.run(inputs![
-        "image_embed"       => embed_tensor,
-        "high_res_feats_0"  => feats0_tensor,
-        "high_res_feats_1"  => feats1_tensor,
-        "point_coords"      => &coords_tensor,
-        "point_labels"      => &labels_tensor,
-        "mask_input"        => &mask_tensor,
-        "has_mask_input"    => &has_mask_tensor,
-    ]).map_err(|e| format!("decoder session.run: {e}"))?;
-
-    // By name: masks [1, 3, 256, 256] and iou_predictions [1, 3].
-    let masks = extract_f32(&outputs, "masks", "decoder")?;
-    let iou_raw = extract_f32(&outputs, "iou_predictions", "decoder")?;
-
-    if iou_raw.len() != 3 {
-        return Err(format!("decoder: expected 3 IoU predictions, got {}", iou_raw.len()));
-    }
-    let iou_predictions = [iou_raw[0], iou_raw[1], iou_raw[2]];
-
-    Ok(prunr_core::sam::SamDecoderOutput { masks, iou_predictions })
 }
 
 /// The SD pipeline's request for an erase under `tuning` whose Feather
@@ -2439,9 +2302,9 @@ mod sam_dispatch_tests {
         let (w, h) = photo.dimensions();
         let cpu = ensure_sam_sessions(&SamSessionSlot::default(), true).expect("SAM 2 installed");
         let gpu = ensure_sam_sessions(&SamSessionSlot::default(), false).expect("SAM 2 installed");
-        let encode = |s: &SamSessions| {
+        let encode = |s: &prunr_core::sam_session::Sessions| {
             let started = std::time::Instant::now();
-            (run_sam_encoder_inline(s, &photo).expect("encode"), started.elapsed().as_secs_f32())
+            (s.encode(&photo).expect("encode"), started.elapsed().as_secs_f32())
         };
         let (on_cpu, cpu_s) = encode(&cpu);
         let _warm = encode(&gpu);
@@ -2450,8 +2313,8 @@ mod sam_dispatch_tests {
         for i in 0..20u32 {
             let at = |n: u32, side: u32| side as f32 * (0.1 + 0.8 * (n % 20) as f32 / 19.0);
             let prompt = prunr_core::sam::prompt::build_click_prompt(at(i * 7, w), at(i * 13, h), w, h);
-            let reference = run_sam_decoder_inline(&cpu, &on_cpu, &prompt).expect("decode");
-            let candidate = run_sam_decoder_inline(&cpu, &on_gpu, &prompt).expect("decode");
+            let reference = cpu.decode(&on_cpu, &prompt).expect("decode");
+            let candidate = cpu.decode(&on_gpu, &prompt).expect("decode");
             let pick = reference.best();
             same += usize::from(pick == candidate.best());
             let mask = |o: &prunr_core::sam::SamDecoderOutput| o.mask(pick).iter().map(|&v| v > 0.0).collect::<Vec<_>>();
@@ -2477,10 +2340,10 @@ mod sam_dispatch_tests {
         let (w, h) = photo.dimensions();
         let sessions = ensure_sam_sessions(&SamSessionSlot::default(), std::env::var_os("PRUNR_SAM_CPU").is_some()).expect("SAM 2 installed");
         let started = std::time::Instant::now();
-        let embedding = run_sam_encoder_inline(&sessions, &photo).expect("encode");
+        let embedding = sessions.encode(&photo).expect("encode");
         let encoded = started.elapsed();
         let prompt = prunr_core::sam::prompt::build_click_prompt(w as f32 / 2.0, h as f32 / 3.0, w, h);
-        let decoded = run_sam_decoder_inline(&sessions, &embedding, &prompt).expect("decode");
+        let decoded = sessions.decode(&embedding, &prompt).expect("decode");
         let positive = decoded.masks.iter().filter(|&&v| v > 0.0).count();
         eprintln!("sam encode {:.2}s decode {:.3}s iou {:?} positive {positive}",
             encoded.as_secs_f32(), (started.elapsed() - encoded).as_secs_f32(), decoded.iou_predictions);

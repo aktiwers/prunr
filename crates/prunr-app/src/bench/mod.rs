@@ -744,7 +744,7 @@ impl Run for RedrawRun {
 /// The Magic Brush as the app runs it: the encoder on the side's
 /// provider, the decoder on the CPU, a click at eight fixed places.
 struct SelectionRun<'a> {
-    sessions: std::sync::Arc<crate::gui::processor::SamSessions>,
+    sessions: std::sync::Arc<prunr_core::sam_session::Sessions>,
     pick: SessionPick,
     inputs: &'a Inputs,
 }
@@ -765,7 +765,7 @@ impl Run for SelectionRun<'_> {
     }
 
     fn run(&mut self) -> Result<Output, String> {
-        let masks = crate::gui::processor::magic_brush_masks(&self.sessions, &self.inputs.photo, &CLICKS)?;
+        let masks = self.sessions.masks(&self.inputs.photo, &CLICKS)?;
         let side = prunr_core::sam::SAM_MASK_RESOLUTION;
         // The clicks' masks stacked top to bottom.
         image::GrayImage::from_raw(side, side * CLICKS.len() as u32, masks)
