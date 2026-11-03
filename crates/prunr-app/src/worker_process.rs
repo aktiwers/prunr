@@ -467,11 +467,6 @@ pub fn run_worker() -> ! {
                     // Hoisted so every early return also cleans the chain input; missing it
                     // leaks ~50 MB in /dev/shm per cancelled or failed dispatch.
                     let chain_path = chain_input.as_ref().map(|ci| ci.path.clone());
-                    let chain_img: Option<image::DynamicImage> = chain_input.and_then(|ci| {
-                        let data = std::fs::read(&ci.path).ok()?;
-                        let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
-                        Some(image::DynamicImage::ImageRgba8(rgba))
-                    });
                     let cleanup_inputs = || {
                         cleanup_image_inputs(&ipc, &image_path, chain_path.as_deref());
                         cleanup_ipc_temps(&ipc, strokes.as_deref().as_slice());
@@ -506,6 +501,13 @@ pub fn run_worker() -> ! {
                         fail(err.message());
                         return;
                     }
+                    // Read once admitted: a run waiting its turn or cancelled
+                    // in the queue holds no copy of its start image.
+                    let chain_img: Option<image::DynamicImage> = chain_input.and_then(|ci| {
+                        let data = std::fs::read(&ci.path).ok()?;
+                        let rgba = image::RgbaImage::from_raw(ci.width, ci.height, data)?;
+                        Some(image::DynamicImage::ImageRgba8(rgba))
+                    });
                     let (progress, pulse) = ipc_progress(item_id, evt_tx.clone());
                     let progress = progress.with_cancel(cancel.flag());
                     progress.step(prunr_core::Step::ReadingImage);
