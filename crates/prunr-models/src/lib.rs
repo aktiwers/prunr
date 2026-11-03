@@ -309,10 +309,11 @@ pub struct ModelPart {
 }
 
 /// What one loaded model needs while it runs a typical input (load
-/// peaks included), on each accelerator. One field per accelerator and no
-/// `Default`: a new accelerator does not build until every model prices
-/// it. Size-dependent parts (upscale tiles, Nomos2's ways, SD's tall crop)
-/// are added by their own tested formulas on top of these.
+/// peaks included), on each accelerator. No `Default`: a model gives its
+/// CPU figure, spells out each accelerator it was measured on and fills
+/// the rest from `on_cpu`; `every_model_prices_every_accelerator` counts
+/// what is left. Size-dependent parts (upscale tiles, Nomos2's ways, SD's
+/// tall crop) are added by their own tested formulas on top of these.
 ///
 /// Err high: under-counting crashes the GUI with an OOM; over-counting
 /// only throttles admission.
@@ -369,6 +370,19 @@ impl Cost {
 }
 
 impl Needs {
+    /// Priced on the CPU only: every accelerator unmeasured.
+    pub const fn on_cpu(cpu: Cost) -> Self {
+        Self {
+            cpu,
+            mac_cpu: Priced::Unmeasured,
+            cuda: Priced::Unmeasured,
+            directml: Priced::Unmeasured,
+            coreml: Priced::Unmeasured,
+            openvino: Priced::Unmeasured,
+            migraphx: Priced::Unmeasured,
+        }
+    }
+
     /// Its needs on the provider ORT names `provider` ("CPU", "CUDA", …);
     /// an accelerator this table does not know is priced as unmeasured.
     pub fn on(&self, provider: &str) -> Priced {
@@ -394,12 +408,15 @@ impl Needs {
 
     /// Every accelerator's entry with the provider name ORT gives it.
     pub fn accelerators(&self) -> [(&'static str, Priced); 5] {
+        // No `..`: a new accelerator joins this list, and so the count of
+        // models left unmeasured on it.
+        let Self { cpu: _, mac_cpu: _, cuda, directml, coreml, openvino, migraphx } = *self;
         [
-            ("CUDA", self.cuda),
-            ("DirectML", self.directml),
-            ("CoreML", self.coreml),
-            ("OpenVINO", self.openvino),
-            ("MIGraphX", self.migraphx),
+            ("CUDA", cuda),
+            ("DirectML", directml),
+            ("CoreML", coreml),
+            ("OpenVINO", openvino),
+            ("MIGraphX", migraphx),
         ]
     }
 }
@@ -682,6 +699,15 @@ const FILL_ON_INTEL_GRAPHICS: Why = Why::Fails(
 /// memory was counted: measured or estimated per the comment beside it.
 const CARRIED: &str = "the registry's earlier single figure; not re-measured since";
 
+/// The export the ESRGAN (RRDB) 4× upscalers share.
+const RRDB_X4_KNOBS: UpscaleModelKnobs = UpscaleModelKnobs {
+    input_name: "data",
+    is_fp16: false,
+    native_scale: 4,
+    uses_window_attention: false,
+    parts: None,
+};
+
 #[derive(Debug, Clone, Copy)]
 pub struct ModelDescriptor {
     pub id: ModelId,
@@ -859,13 +885,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(850, 650, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(350, 400, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-24")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(600, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
@@ -903,13 +927,9 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
             directml: Priced::Same(Cost::measured(600, 700, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Unmeasured,
             openvino: Priced::Same(Cost::measured(800, 0, "i7-6700, 2026-10-23")),
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(700, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: true,
         tile_size_multiple: None,
@@ -946,13 +966,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(12_850, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_350, 7_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
             openvino: Priced::Same(Cost::measured(5_150, 0, "i7-6700, 2026-10-23")),
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(7_100, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -985,13 +1002,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(400, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(250, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(650, 400, "RTX 3060 12 GB, i5-11600KF, 2026-10-25")),
             directml: Priced::Same(Cost::measured(250, 300, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(400, 0, "i5-11600KF, 2026-10-25"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1028,15 +1043,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
-        needs: Needs {
-            cpu: Cost::estimate(700, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
-        },
+        needs: Needs::on_cpu(Cost::estimate(700, 0, CARRIED)),
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1072,15 +1079,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             openvino_gpu: Place::Cpu(FILL_ON_INTEL_GRAPHICS),
             ..Places::UNMEASURED
         },
-        needs: Needs {
-            cpu: Cost::estimate(700, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
-        },
+        needs: Needs::on_cpu(Cost::estimate(700, 0, CARRIED)),
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1117,13 +1116,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_000, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(750, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(350, 650, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(950, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1186,16 +1182,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // 10 GB let erases start that the memory watchdog then killed
         // halfway through the load.
         needs: Needs {
-            cpu: Cost::estimate(14000, 0, "the Fast bundle's 13.6-14.1 GB peak on OpenVINO's CPU device: same architecture and size"),
-            mac_cpu: Priced::Unmeasured,
             // Load and 512 px tiles, 25 steps, ORT 1.24.1 with the lean
             // CUDA pool: 4.87 GB of system RAM at the cold load (3.1 GB
             // after), the card's peak 7.1 GB.
             cuda: Priced::Same(Cost::measured(4_900, 7_150, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::estimate(14000, 0, "the Fast bundle's 13.6-14.1 GB peak on OpenVINO's CPU device: same architecture and size"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1257,16 +1248,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // Measured peak while the bundle loads on OpenVINO's CPU device:
         // 13.6-14.1 GB.
         needs: Needs {
-            cpu: Cost::measured(14000, 0, "i7-6700, OpenVINO CPU device, bundle load peak 13.6-14.1 GB"),
-            mac_cpu: Priced::Unmeasured,
             // Load and 512 px tiles, 8 steps at CFG 2 (two UNet passes a
             // step, its heaviest), ORT 1.24.1 with the lean CUDA pool:
             // 4.87 GB of system RAM at the cold load, the card's peak 6.8 GB.
             cuda: Priced::Same(Cost::measured(4_900, 6_800, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(14000, 0, "i7-6700, OpenVINO CPU device, bundle load peak 13.6-14.1 GB"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1347,15 +1333,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // weights widened for the CPU kernels, the VAE, activations);
         // the 4.8 GiB of mapped weight files on top are reclaimable.
         needs: Needs {
-            cpu: Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"),
-            mac_cpu: Priced::Unmeasured,
             // Load and erase, 4 steps, lean sessions: 1.45 GB of system
             // RAM (the weights go to the card), the card's peak 8.6 GB.
             cuda: Priced::Same(Cost::measured(1_500, 8_650, "RTX 3060 12 GB, i7-6700, 2026-10-21")),
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(16000, 0, "i7-6700, ORT CPU EP: 15.6 GiB anonymous peak"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1392,15 +1373,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         gpu: GpuRequirement::None,
         places: Places::UNMEASURED,
         // Auxiliary VAE — loaded with a SD bundle, never standalone.
-        needs: Needs {
-            cpu: Cost::estimate(100, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
-        },
+        needs: Needs::on_cpu(Cost::estimate(100, 0, CARRIED)),
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: None,
@@ -1442,26 +1415,18 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_350, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(350, 5_000, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(2_950, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
-        upscale: Some(UpscaleModelKnobs {
-            input_name: "data",
-            is_fp16: false,
-            native_scale: 4,
-            uses_window_attention: false,
-            parts: None,
-        }),
+        upscale: Some(RRDB_X4_KNOBS),
     },
     ModelDescriptor {
         id: ModelId::Nomos8kSchatL,
@@ -1497,15 +1462,7 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             openvino_gpu: Place::Cpu(Why::Fails("one 256 px tile ran past 40 minutes and was stopped, against the CPU's 2m 06s (HD 530, OpenVINO 1.24.1 with the Intel graphics on, 2026-10-25)")),
             ..Places::UNMEASURED
         },
-        needs: Needs {
-            cpu: Cost::estimate(1200, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
-        },
+        needs: Needs::on_cpu(Cost::estimate(1200, 0, CARRIED)),
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(16),
         recommended_tile: Some(256),
@@ -1556,13 +1513,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_800, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 1_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(300, 1_350, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(1_150, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: Some(2),
@@ -1611,26 +1565,18 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(350, 5_000, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
-        upscale: Some(UpscaleModelKnobs {
-            input_name: "data",
-            is_fp16: false,
-            native_scale: 4,
-            uses_window_attention: false,
-            parts: None,
-        }),
+        upscale: Some(RRDB_X4_KNOBS),
     },
     ModelDescriptor {
         id: ModelId::FourXNomos2RealPlksr,
@@ -1697,13 +1643,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::estimate(750, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
             cuda: Priced::Same(Cost::measured(1_550, 7_400, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::estimate(750, 0, CARRIED))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1755,26 +1696,18 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(4_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(1_200, 4_300, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(350, 5_000, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(3_000, 0, "i5-11600KF and i7-6700, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
         recommended_tile: Some(512),
         free_dims: &[("h", 2), ("w", 3)],
         attribution_required: false,
-        upscale: Some(UpscaleModelKnobs {
-            input_name: "data",
-            is_fp16: false,
-            native_scale: 4,
-            uses_window_attention: false,
-            parts: None,
-        }),
+        upscale: Some(RRDB_X4_KNOBS),
     },
     ModelDescriptor {
         id: ModelId::DdcolorTiny,
@@ -1806,13 +1739,10 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         // Measured: 1.6 GB peak RSS on the CPU EP, session load included.
         needs: Needs {
-            cpu: Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"),
             mac_cpu: Priced::Same(Cost::measured(2_500, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_050, 2_850, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(850, 2_400, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(1600, 0, "i7-6700, CPU EP, peak RSS with the session load"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1852,13 +1782,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // At its widest input, 1036×518 (a 2:1 panorama): a 3:2 photo's
         // 784×518 takes less (CPU 450, CUDA 1,000 + 700 on the card).
         needs: Needs {
-            cpu: Cost::measured(600, 0, "i5-11600KF, input 1036×518, 2026-10-31"),
             mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
             cuda: Priced::Same(Cost::measured(1_000, 900, "RTX 3060 12 GB, i5-11600KF, input 1036×518, 2026-10-31")),
             directml: Priced::Same(Cost::measured(350, 1_100, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, input 1036×518, 2026-10-31")),
             coreml: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, input 1036×518, 2026-10-31")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(600, 0, "i5-11600KF, input 1036×518, 2026-10-31"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1909,13 +1837,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         // with the CPU's masks (20 of 20 clicks, IoU 1.0, two photos), at a
         // 4.9 GB peak against 1.3 GB (2026-10-23).
         needs: Needs {
-            cpu: Cost::measured(1_150, 0, "i5-11600KF, 2026-10-23"),
             mac_cpu: Priced::Same(Cost::measured(1_300, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
             cuda: Priced::Same(Cost::measured(1_000, 2_200, "RTX 3060 12 GB, i5-11600KF, 2026-10-23")),
             directml: Priced::Same(Cost::measured(1_150, 1_300, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(4_900, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-23")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(1_150, 0, "i5-11600KF, 2026-10-23"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -1959,13 +1885,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(1_350, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_200, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(700, 1_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-25")),
             directml: Priced::Same(Cost::measured(700, 1_600, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_350, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(1_350, 0, "i5-11600KF, 2026-10-25"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -2009,13 +1933,11 @@ pub const REGISTRY: &[ModelDescriptor] = &[
             ..Places::UNMEASURED
         },
         needs: Needs {
-            cpu: Cost::measured(1_550, 0, "i5-11600KF, 2026-10-25"),
             mac_cpu: Priced::Same(Cost::measured(1_750, 0, "MacBook Air M1 16 GB, macOS 27, 2026-10-25")),
             cuda: Priced::Same(Cost::measured(800, 1_700, "RTX 3060 12 GB, i5-11600KF, 2026-10-25")),
             directml: Priced::Same(Cost::measured(600, 1_900, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
             coreml: Priced::Same(Cost::measured(1_050, 0, "MacBook Air M1 16 GB, macOS 27, ORT 1.30, 2026-10-25")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::measured(1_550, 0, "i5-11600KF, 2026-10-25"))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
@@ -2052,13 +1974,8 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         },
         // A 230 KB model at no more than 1280 px: its input is 20 MB.
         needs: Needs {
-            cpu: Cost::estimate(64, 0, CARRIED),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
             directml: Priced::Same(Cost::measured(250, 100, "RTX 3060 12 GB, i5-11600KF, Windows ML 1.30, 2026-10-28")),
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
+            ..Needs::on_cpu(Cost::estimate(64, 0, CARRIED))
         },
         parallel_jobs_pay_on_cpu: false,
         tile_size_multiple: None,
