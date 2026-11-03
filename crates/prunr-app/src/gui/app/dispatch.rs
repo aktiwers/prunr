@@ -13,10 +13,10 @@ use super::PrunrApp;
 /// bytes; `None` when it fits.
 fn too_large_to_upscale(out: (u32, u32), needed: u64, free: u64) -> Option<String> {
     (needed > free).then(|| {
-        use crate::gui::views::format_byte_size;
+        use prunr_core::memory::byte_size;
         format!(
             "Too large to upscale: {}\u{00d7}{} needs about {} of free memory, {} is free. Close other apps or undo to a smaller image.",
-            out.0, out.1, format_byte_size(needed), format_byte_size(free),
+            out.0, out.1, byte_size(needed), byte_size(free),
         )
     })
 }

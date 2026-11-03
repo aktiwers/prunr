@@ -93,8 +93,6 @@ pub(super) fn variant_index<T>(all: &[T], value: &T) -> usize {
     all.iter().position(|o| std::mem::discriminant(o) == std::mem::discriminant(value)).unwrap_or(0)
 }
 
-pub use prunr_core::memory::byte_size as format_byte_size;
-
 /// Model display name (no icon).
 pub fn model_name(model: SettingsModel) -> &'static str {
     model_info(model).name
@@ -139,15 +137,3 @@ pub fn model_blurb(model: SettingsModel) -> std::borrow::Cow<'static, str> {
     }
 }
 
-#[cfg(test)]
-mod format_byte_size_tests {
-    use super::format_byte_size;
-    #[test]
-    fn formats_units_correctly() {
-        assert_eq!(format_byte_size(0), "0 B");
-        assert_eq!(format_byte_size(512), "512 B");
-        assert_eq!(format_byte_size(2048), "2 KB");
-        assert_eq!(format_byte_size(50 * 1024 * 1024), "50 MB");
-        assert_eq!(format_byte_size(2 * 1024 * 1024 * 1024), "2.0 GB");
-    }
-}

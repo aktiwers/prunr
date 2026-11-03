@@ -278,6 +278,15 @@ pub fn card_free_mb(provider: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_byte_size_is_worded_in_its_unit() {
+        assert_eq!(byte_size(0), "0 B");
+        assert_eq!(byte_size(512), "512 B");
+        assert_eq!(byte_size(2048), "2 KB");
+        assert_eq!(byte_size(50 * 1024 * 1024), "50 MB");
+        assert_eq!(byte_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
     /// A model takes its half-precision copy only where its own weights
     /// do not fit what the card has free; with no reading, off a card, or
     /// without a copy, it keeps its own, and the card is not read then.

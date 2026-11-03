@@ -23,7 +23,7 @@ pub(crate) fn name_and_size(id: ModelId) -> String {
 
 /// A download size the way every surface shows it: "168 MB", "2.0 GB".
 pub(crate) fn size_label(mb: u32) -> String {
-    super::format_byte_size(u64::from(mb) * 1024 * 1024)
+    prunr_core::memory::byte_size(u64::from(mb) * 1024 * 1024)
 }
 
 /// "Get Depth Anything V2 Small · 94 MB", built once per model so a
