@@ -47,102 +47,58 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Four bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), TEED (lines), SAM 2.1 (Magic Brush)
-- **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
+- **Five bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), TEED (lines), SAM 2.1 (Magic Brush), YuNet (finds faces for Restore faces and Auto focus)
+- **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt (or Ctrl on Windows and Linux) subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
 - **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
 - **Line extraction** — edges/outlines via TEED at three scales, standalone or combined with background removal, with colour styles and compositions
 - **Eraser** — paint over an unwanted area and let LaMa, Big-LaMa, MI-GAN, Stable Diffusion 1.5 (with prompts) or RORem (large objects) fill it in; the footer shows how large the fill ran, Try another re-rolls a generated fill
-- **Upscale** — Real-ESRGAN, NMKD, HAT and RealPLKSR models at 2×, 3× or 4×, with denoise, sharpen, AI blend, saturation and colour match
+- **Upscale** — Real-ESRGAN, NMKD, HAT and RealPLKSR models at 2×, 3× or 4×, with denoise, sharpen, AI blend and colour match
 - **Colorize** — DDColor colours a black-and-white photo; Strength up to 150 % re-renders live
 - **Restore faces** — GFPGAN or RestoreFormer++ redraw soft, small or compressed faces on cut-outs, upscales and plain photos, blended by strength
 - **Custom backgrounds** — fill the cutout with a solid colour, a picked image (cover / contain / tile) or a blurred, lens-blurred or black-and-white version of the photo
 - **Depth effects** — Depth Anything V2 measures how near each part of the photo is: lens blur and tilt-shift, fog, aerial perspective, lines that fade with distance, select by depth, and 16-bit depth map export
-- **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel processors and graphics), automatic CPU fallback
+- **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel processors and graphics), MIGraphX (AMD on Linux), automatic CPU fallback
 - **Batch processing** — tick images and Process runs any model on each: cut-outs in parallel, upscales, colorize and erasers one after the other; switch between images while they work, chain background removal into lines or upscale
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
-- **Presets and undo** — per-model presets, Compare toggle, undo across strokes, results and presets
+- **Presets and undo** — 29 built-in showcase looks to start from, your own per-model presets (import, export), Compare toggle, undo across strokes, results and presets
 - **Drag-and-drop** — in and out of the window (drop into Finder/Explorer/Word/PowerPoint)
 - **No cloud** — everything runs locally, no telemetry, no API keys. Prunr sends nothing. One exception on Windows: DirectML, Microsoft's graphics-card library that comes with Prunr, can add which of your graphics card's features it could use to Windows' own diagnostic reports. Windows sends those only when **Send optional diagnostic data** is on (Settings › Privacy & security › Diagnostics & feedback); DirectML has no switch of its own.
 
 ## CLI
 
-The binary runs headless when given image arguments:
+The same `prunr` program processes images without opening a window when you give it image files:
 
 ```bash
 prunr photo.jpg                              # saves photo.prunr.png
 prunr *.jpg -o clean/                        # batch to a folder
-prunr -m u2net portrait.jpg                  # quality model
-prunr -j 4 *.jpg -o out/                     # 4 parallel jobs
+prunr -m u2net portrait.jpg                  # another model
+prunr photo.jpg --bg-effect lens:60          # lens-blur the photo behind the subject
+prunr --preset Studio *.jpg -o out/          # a built-in showcase from the app's Presets menu
+prunr -m none --preset "My look" photo.jpg   # your preset's whole-photo look, no cut-out
 prunr --lines logo.png                       # line extraction only
-prunr --inpaint photo.jpg --mask m.png       # erase area defined by mask
-prunr photo.jpg --bg-image studio.jpg        # bake a chosen image as the new background
-prunr --preset Portrait *.jpg -o out/        # the settings of a preset from the app
-prunr -m none --preset Dreamy photo.jpg      # a whole-photo look, no cut-out
+prunr --inpaint photo.jpg --mask m.png       # erase the area the mask marks
+prunr --upscale nomos2 --scale 4 photo.jpg   # saves photo_x4.png
 ```
 
-Every setting flag starts from Prunr's own settings for the model, or from `--preset`'s (a name from the app's Presets menu, or a preset file); a flag you give overrides it.
-
-Common flags:
-
-| Flag | Description |
-|------|-------------|
-| `-o, --output <PATH>` | Output file or directory |
-| `-m, --model <MODEL>` | `birefnet-lite` (default), `silueta`, `u2net`, or `none` (No model: a preset's whole-photo look, lines over the photo) |
-| `--preset <NAME\|FILE>` | Start from a preset; the flags below override it |
-| `-j, --jobs <N>` | Images at once (default: as the app: half the cores, 2 on a graphics card, fewer when memory is short) |
-| `-f, --force` | Overwrite existing output |
-| `--cpu` | Force CPU inference |
-| `--gamma <N>` | Removal strength; above 1 removes more |
-| `--contrast <N>` | Edge contrast (0.0–1.0); 1 is a hard edge |
-| `--edge-shift <N>` | Grow (positive) or shrink (negative) the cut-out by N pixels, up to 20 |
-| `--edge-width <N>` | How far `--refine-edges` looks from the edge, in pixels |
-| `--feather <N>` | Soften the edge by N pixels; fractions allowed |
-| `--refine-edges[=false]` | Guided filter for fine detail (hair, leaves) |
-| `--lines` | Extract lines/edges only |
-| `--lines-after-bg` | Remove the background, then draw lines on the result |
-| `--line-detail <N>` | How much detail becomes lines, 0.0–1.0; `--line-strength` still works |
-| `--line-width <N>` | Line width in pixels, 0–20 |
-| `--line-composition <M>` | With `--lines-after-bg`: `lines-only`, `subject-filled`, `engraving`, `ghost` |
-| `--line-scale <S>` | `fine`, `bold`, `fused` |
-| `--line-color <HEX>` | Paint all lines one colour |
-| `--large-image <P>` | Images above 8000 px: `process` (default, keep the original size) or `downscale` (to 4096 px) |
-| `--bg-color <HEX>` | Fill transparent background with a colour (e.g. `ffffff`) |
-| `--bg-image <PATH>` | Fill transparent background with a chosen image (wins over `--bg-color`) |
-| `--bg-image-fit <MODE>` | `cover`, `contain`, `tile` |
-| `--inpaint --mask <PATH>` | Eraser mode — fill a masked region using LaMa |
-| `--fill-scale <S>` | Eraser: `auto`, `full`, `half`, `quarter` — large areas fill more convincingly smaller |
-| `--upscale <MODEL>` | Upscale mode: `realesrgan`, `nomos`, `nomos2`, `siax`, `superscale`; saves `{stem}_x{scale}.png` |
-| `--scale <2\|3\|4>` | Upscale: how much larger |
-| `--denoise`, `--sharpen`, `--ai-blend`, `--color-match` | Upscale: the Refine knobs |
-| `--restore-faces <MODEL>`, `--face-strength <0-100>` | Redraw soft faces with `gfpgan` or `restoreformer`: after an upscale, else in the photo before the cut-out, effect and lines |
-| `--colorize`, `--color-strength <0-1.5>` | Colorize mode: colour a black-and-white photo with DDColor; saves `{stem}_color.png` |
-| `--bg-effect lens[:N]` | Lens-blur the photo behind the subject, 0–100 (needs the depth model) |
-| `--line-fade <0-100>` | Lines lighten with distance (needs the depth model) |
-| `--depth-map`, `--depth-only` | Also write `{stem}-depth.png` (16-bit, white = near); with `--depth-only`, only that |
-| `--open <PATH>` | Start the GUI with an image already loaded |
-| `--debug` | Verbose diagnostics for bug reports |
-| `--doctor` | Diagnostic dump for support tickets (hardware, ORT, models, paths) |
-| `--clear-ep-cache` | Wipe persistent EP failure cache (after driver/runtime updates) |
-| `bench` | Time every installed model on the CPU and on the GPU path, compare their outputs, write `prunr-bench.md` + `.json`; `--models a,b`, `--runs N`, `--image PATH`, `--heavy`, `--out PATH` |
-
-`prunr --help` for the full list. Magic Brush and the generative erasers are GUI features; the CLI covers background removal, lines, mask-driven erasing with LaMa, upscaling, colorizing and depth maps. On-demand models download in the app's Model Store.
+Every setting starts from Prunr's own for the model, or from `--preset`'s; a flag you give overrides it. The complete reference, every option with its values, is in [docs/CLI.md](docs/CLI.md), and in the app under Help › Command-line reference. Magic Brush and the generative erasers are app features; the command line covers background removal, lines, erasing with LaMa, upscaling, colorizing, restoring faces and depth maps. Models that are not bundled download in the app's Model Store.
 
 ## Models
 
 | Model | Size | Bundled? | Resolution | Best for |
 |-------|------|---------|-----------|----------|
 | BiRefNet-lite | ~214 MB | yes | 1024×1024 | Fine detail (hair, leaves) — **default** |
-| Silueta | ~4 MB | yes | 320×320 | Fast, clean subjects |
+| Silueta | ~42 MB | yes | 320×320 | Fast, clean subjects |
 | TEED | ~0.25 MB | yes | 640×480 and 1280×960 | Line / edge extraction |
-| SAM 2.1 Hiera Small | encoder + decoder | yes | 1024 input | Magic Brush selections |
-| U2Net | ~170 MB | **on-demand** | 320×320 | Better edges than Silueta |
+| SAM 2.1 Hiera Small | ~148 MB | yes | 1024 input | Magic Brush selections |
+| YuNet | ~0.2 MB | yes | whole photo | Finds faces for Restore faces and Auto focus |
+| U2Net | ~168 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |
 | Big-LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Sharper fills than LaMa, same architecture trained on more data |
 | MI-GAN (Eraser) | ~26 MB | **on-demand** | 512×512 (tiled) | Lightweight GAN — sharper detail, less smooth on flat backgrounds |
 | Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint with prompts — phone-app-class quality. **GPU strongly recommended.** |
 | SD 1.5 LCM Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Same, distilled to converge in 4–8 steps — the Fast quality preset |
 | TAESD | ~2.6 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
-| RORem (Eraser) | ~5.1 GB | **on-demand** | 512×512 (crop or tiled) | Removes large objects and fills with background, never with something new (SDXL, 4 steps). Needs ~15 GB of free RAM |
+| RORem (Eraser) | ~5.5 GB | **on-demand** | 512×512 (crop or tiled) | Removes large objects and fills with background, never with something new (SDXL, 4 steps). Needs ~16 GB of free RAM on the processor |
 | Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
 | 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
@@ -151,7 +107,7 @@ Common flags:
 | GFPGAN v1.4 / RestoreFormer++ | ~340 / ~295 MB | **on-demand** | 512×512 per face | Restore faces: the crispest / closest to the person's own features |
 | Depth Anything V2 Small | ~95 MB | **on-demand** | 518 short side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
 
-The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 for the common cases. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
+The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 + YuNet for the common cases. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 
 ## Hardware Acceleration
 
@@ -163,6 +119,7 @@ Prunr picks the best available backend automatically per-model. Backends bundled
 | CoreML | Apple Silicon | yes (macOS) | Neural Engine + GPU |
 | DirectML | Any DirectX 12 GPU on Windows | yes (Windows) | Built into the Windows download (the Windows ML build of ONNX Runtime 1.30); falls back to the CPU without a GPU |
 | **OpenVINO** | **Intel CPU / graphics** | **on-demand (Linux, Windows)** | Settings → Hardware → Install (50 MB on Linux, 76 MB on Windows); joins Prunr's own runtime, beside DirectML and CUDA |
+| MIGraphX | AMD graphics card | on-demand (Linux) | Settings → Hardware → Install (20 MB); a separate runtime that needs AMD's ROCm 7 with MIGraphX installed |
 | CPU | Always | yes (everywhere) | Automatic fallback |
 
 **OpenVINO is the win for Intel computers without an NVIDIA card.** On an i5-11600KF it ran the upscalers 1.5 times and Depth twice as fast as Prunr's own processor engine, with the same pictures, and it can try Intel graphics (Settings → Hardware). The first launch on Intel hardware offers it; you can also install it later from Settings → Hardware. It lives in Prunr's runtime folder (`~/.local/share/prunr/runtimes/` on Linux) and takes about 150 MB of disk on Linux, 120 MB on Windows.
@@ -178,7 +135,7 @@ To check acceleration model by model, run `prunr bench`. Each installed model ru
 The pinned toolchain (`rust-toolchain.toml`) installs itself through rustup; on Linux you also need the GTK3 development libraries.
 
 ```bash
-cargo xtask fetch-models                          # one-time model download, ~174 MB
+cargo xtask fetch-models                          # one-time download, ~1.8 GB: the bundled models and those the tests use
 cargo build --release -p prunr-app                # release binary
 cargo run --release -p prunr-app                  # build + run GUI
 
