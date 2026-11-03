@@ -101,3 +101,24 @@ fn escape_under_a_modal_it_cannot_close_cancels_nothing_behind_it() {
     app.perform(Action::Cancel, &ctx);
     assert!(app.processor.cancels.is_cancelled(1), "with no modal up Escape cancels it");
 }
+
+/// The capsule's Cancel, which shows Escape as its key, stops what Escape
+/// and the toolbar's Cancel stop: the ticked cut-outs when some are
+/// ticked, the others run on.
+#[test]
+fn the_capsules_cancel_stops_what_escape_stops() {
+    use crate::gui::dispatch_progress::{DispatchProgress, ProgressKind};
+    use crate::gui::item::BatchStatus;
+    let mut h = super::harness::loaded_with(|app| {
+        for id in [2, 3] {
+            super::fixtures::put_in(super::fixtures::push_test_item(app, id), BatchStatus::Processing);
+        }
+        app.batch.items[1].ticked = true;
+        app.processor.show_progress_for_test(DispatchProgress::new(ProgressKind::Seg, prunr_core::Step::FindingSubject.label()));
+    });
+    super::harness::click(&mut h, "Cancel");
+    let app = h.state();
+    assert!(app.processor.cancels.is_cancelled(2), "the ticked cut stops");
+    assert!(!app.processor.cancels.is_cancelled(3), "the unticked one runs on");
+    assert_eq!(app.batch.find_by_id(3).map(super::super::item::BatchItem::status), Some(BatchStatus::Processing));
+}

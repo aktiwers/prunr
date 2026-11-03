@@ -974,9 +974,23 @@ impl PrunrApp {
         }
     }
 
+    /// Stop the run a capsule of `kind` shows: the capsule's Cancel, and
+    /// Escape for the run it stops.
+    pub(crate) fn handle_capsule_cancel(&mut self, kind: super::dispatch_progress::ProgressKind) {
+        use super::dispatch_progress::{cancel_target_for, CancelTarget};
+        match cancel_target_for(kind) {
+            Some(CancelTarget::Inpaint) => self.cancel_erases(),
+            // The capsule counts the queued images too: its Cancel ends them all.
+            Some(CancelTarget::Upscale | CancelTarget::Colorize) => self.cancel_runs(),
+            Some(CancelTarget::Cuts) => self.handle_cancel_cuts(),
+            Some(CancelTarget::Faces) => self.processor.cancel_faces(),
+            None => {}
+        }
+    }
+
     /// Cancel the cuts under way or waiting: the ticked ones when any
     /// ticked image has one, else all. The toolbar's Cancel button (whose
-    /// label says which) and Escape alike.
+    /// label says which), the capsule's and Escape alike.
     pub(crate) fn handle_cancel_cuts(&mut self) {
         if self.batch.ticked_awaiting_cut().next().is_some() {
             self.handle_cancel_selected();
@@ -1107,19 +1121,32 @@ impl PrunrApp {
         if self.close_top_modal() || self.any_modal_open() {
             return;
         }
-        let finding_faces = self.processor.dispatch_progress().is_some_and(|p| p.kind == super::dispatch_progress::ProgressKind::Faces);
-        if self.processor.is_run_in_flight() {
-            self.cancel_runs();
-        } else if finding_faces {
-            self.processor.cancel_faces();
-        } else if self.processor.any_inpaint_in_flight() {
-            self.cancel_erases();
-        } else if self.batch.any_awaiting_cut() {
-            self.handle_cancel_cuts();
+        if let Some(kind) = self.run_escape_stops() {
+            self.handle_capsule_cancel(kind);
         } else if self.can_selection_action(SelectionAction::Clear) {
             if let Some(idx) = self.batch.selected_idx_clamped() {
                 self.handle_selection_action(idx, SelectionAction::Clear, ctx);
             }
+        }
+    }
+
+    /// The run Escape stops, the first under way of: an upscale or
+    /// colorize, a face search, an erase, the cut-outs.
+    fn run_escape_stops(&self) -> Option<super::dispatch_progress::ProgressKind> {
+        use super::dispatch_progress::ProgressKind;
+        let processor = &self.processor;
+        if processor.is_upscale_in_flight() {
+            Some(ProgressKind::Upscale)
+        } else if processor.is_colorize_in_flight() {
+            Some(ProgressKind::Colorize)
+        } else if processor.dispatch_progress().is_some_and(|p| p.kind == ProgressKind::Faces) {
+            Some(ProgressKind::Faces)
+        } else if processor.any_inpaint_in_flight() {
+            Some(ProgressKind::Inpaint)
+        } else if self.batch.any_awaiting_cut() {
+            Some(ProgressKind::Seg)
+        } else {
+            None
         }
     }
 

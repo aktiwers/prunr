@@ -43,7 +43,9 @@ pub enum CancelTarget {
     Inpaint,
     Upscale,
     Colorize,
-    SegBatchAndReset,
+    /// The cut-outs: the ticked ones when any ticked image awaits a cut,
+    /// else all, as the toolbar's Cancel and Escape stop.
+    Cuts,
     Faces,
 }
 
@@ -52,7 +54,7 @@ pub fn cancel_target_for(kind: ProgressKind) -> Option<CancelTarget> {
         ProgressKind::Inpaint => Some(CancelTarget::Inpaint),
         ProgressKind::Upscale => Some(CancelTarget::Upscale),
         ProgressKind::Colorize => Some(CancelTarget::Colorize),
-        ProgressKind::Seg => Some(CancelTarget::SegBatchAndReset),
+        ProgressKind::Seg => Some(CancelTarget::Cuts),
         ProgressKind::Faces => Some(CancelTarget::Faces),
         ProgressKind::Depth => None,
     }
@@ -572,12 +574,12 @@ mod tests {
     }
 
     /// Each run's Cancel stops that run. A face search and an erase run
-    /// once had a Cancel that did nothing; Seg must reset the batch, not
-    /// cancel an erase. A depth run is too short to cancel.
+    /// once had a Cancel that did nothing; Seg must stop the cut-outs, not
+    /// an erase. A depth run is too short to cancel.
     #[test]
     fn each_run_kind_cancels_its_own_run() {
         for (kind, target) in [
-            (ProgressKind::Seg, Some(CancelTarget::SegBatchAndReset)),
+            (ProgressKind::Seg, Some(CancelTarget::Cuts)),
             (ProgressKind::Inpaint, Some(CancelTarget::Inpaint)),
             (ProgressKind::Upscale, Some(CancelTarget::Upscale)),
             (ProgressKind::Colorize, Some(CancelTarget::Colorize)),
