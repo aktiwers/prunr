@@ -1288,6 +1288,9 @@ mod tests {
             return;
         }
         let Some(bytes) = prunr_models::resolve_bytes(ModelId::Silueta) else { return };
+        // Silueta's graph is cached here under MI-GAN's name: a fill of
+        // the real MI-GAN in this process would load it.
+        let _own = crate::cache::OwnCacheRoot::new("silueta-as-migan");
         #[cfg(not(target_os = "macos"))]
         let ep = EpKind::Cuda;
         #[cfg(target_os = "macos")]
