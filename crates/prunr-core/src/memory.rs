@@ -310,15 +310,7 @@ mod tests {
     use prunr_models::{Cost, Priced};
 
     fn needs(cuda: Priced) -> Needs {
-        Needs {
-            cpu: Cost::estimate(9_000, 0, "test"),
-            mac_cpu: Priced::Unmeasured,
-            cuda,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Same(Cost::estimate(3_000, 0, "test")),
-            openvino: Priced::Unmeasured,
-            migraphx: Priced::Unmeasured,
-        }
+        Needs { cuda, coreml: Priced::Same(Cost::estimate(3_000, 0, "test")), ..Needs::on_cpu(Cost::estimate(9_000, 0, "test")) }
     }
 
     /// A GPU run that does not fit goes to the CPU when the CPU's figure

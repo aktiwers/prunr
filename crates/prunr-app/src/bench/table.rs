@@ -199,15 +199,7 @@ mod tests {
 
     fn needs(there_mb: u32) -> Needs {
         let cost = |mb| Cost::measured(mb, 0, "test");
-        Needs {
-            cpu: cost(700),
-            mac_cpu: Priced::Unmeasured,
-            cuda: Priced::Unmeasured,
-            directml: Priced::Unmeasured,
-            coreml: Priced::Unmeasured,
-            openvino: Priced::Same(cost(there_mb)),
-            migraphx: Priced::Unmeasured,
-        }
+        Needs { openvino: Priced::Same(cost(there_mb)), ..Needs::on_cpu(cost(700)) }
     }
 
 
