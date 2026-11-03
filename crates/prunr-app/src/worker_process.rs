@@ -561,6 +561,7 @@ pub fn run_worker() -> ! {
                                     Err(e) => Err(e),
                                 }
                             };
+                            drop(img_bytes);
                             img_ref.and_then(|img| {
                                 progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: ensure_edge_engine ran above for every line mode but Off.
@@ -579,6 +580,7 @@ pub fn run_worker() -> ! {
                         }
                         LineMode::SubjectOutline => {
                             if let Some(img) = chain_img {
+                                drop(img_bytes);
                                 // A run on an earlier result: that image already is the
                                 // cut-out, effect included, so the lines are traced from
                                 // it directly. No seg cache — no seg tensor made it.
@@ -605,6 +607,7 @@ pub fn run_worker() -> ! {
                                         return;
                                     }
                                 };
+                                drop(img_bytes);
                                 let Ok(correction) = strokes.as_deref().map(|path| prunr_app::subprocess::ipc::read_plane(path).ok_or(())).transpose() else {
                                     fail(STROKES_UNREADABLE.into());
                                     return;
@@ -650,6 +653,7 @@ pub fn run_worker() -> ! {
                                     }
                                 },
                             };
+                            drop(img_bytes);
 
                             let look = look.as_ref().and_then(Look::engine);
                             prunr_core::infer_after_first_look(&original, eng, look.as_deref(), &progress).and_then(|ir| {
