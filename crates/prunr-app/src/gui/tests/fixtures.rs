@@ -69,6 +69,23 @@ pub(crate) fn cut_with_lines(item: &mut BatchItem) {
     item.finish_job();
 }
 
+/// Image 1 on screen, cut by Silueta with lines under `line_mode`; the
+/// worker's messages are read from the receiver.
+pub(crate) fn lined_cut_out(
+    line_mode: prunr_core::LineMode,
+) -> (PrunrApp, std::sync::mpsc::Receiver<crate::gui::worker::WorkerMessage>) {
+    let mut app = PrunrApp::new_for_test();
+    app.settings.model = crate::gui::settings::SettingsModel::Silueta;
+    let item = push_test_item(&mut app, 1);
+    item.dimensions = (2, 2);
+    item.settings.line_mode = line_mode;
+    cut_with_lines(item);
+    app.batch.select_item(0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.processor.worker_tx = tx;
+    (app, rx)
+}
+
 /// Put `item` in `status` through the transitions the app makes: Done
 /// lands the run under way on the result it holds, or makes a cut-out
 /// (`cut_out`); Processing is a cut the worker has taken; Error a failed

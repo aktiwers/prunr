@@ -997,25 +997,9 @@ mod stroke_lines_tests {
     use prunr_core::LineMode;
     use super::PrunrApp;
     use crate::gui::brush_state::CutoutAction;
-    use crate::gui::settings::SettingsModel;
-    use crate::gui::tests::fixtures::{cut_with_lines, edge_lines, push_test_item};
+    use crate::gui::tests::fixtures::{edge_lines, lined_cut_out, push_test_item};
     use crate::gui::timeline::StepKind;
     use crate::gui::worker::WorkerMessage;
-
-    /// Image 1 on screen, cut by Silueta with lines under `line_mode`; the
-    /// worker's messages are read from the receiver.
-    fn lined_cut_out(line_mode: LineMode) -> (PrunrApp, Receiver<WorkerMessage>) {
-        let mut app = PrunrApp::new_for_test();
-        app.settings.model = SettingsModel::Silueta;
-        let item = push_test_item(&mut app, 1);
-        item.dimensions = (2, 2);
-        item.settings.line_mode = line_mode;
-        cut_with_lines(item);
-        app.batch.select_item(0);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.processor.worker_tx = tx;
-        (app, rx)
-    }
 
     fn stroke(app: &mut PrunrApp, cell: i8) {
         app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![cell; 4]), StepKind::Stroke);
