@@ -3018,32 +3018,7 @@ mod tests {
     }
 
     fn fixture_recipe() -> ProcessingRecipe {
-        use prunr_core::{
-            CompositeRecipe, EdgeRecipe, EdgeScale, ComposeMode, SubjectEffect, InferenceRecipe,
-            InputTransform, LineStyle, MaskSettings, ModelKind, UpscaleRecipe,
-        };
-        ProcessingRecipe {
-            inference: InferenceRecipe {
-                model: ModelKind::Silueta,
-                uses_segmentation: true,
-                uses_edge_detection: false,
-                input_transform: InputTransform::None,
-            },
-            edge: EdgeRecipe {
-                line_strength_bits: 0.5f32.to_bits(),
-                solid_line_color: None,
-                edge_thickness: 0,
-                edge_scale: EdgeScale::Fused,
-                compose_mode: ComposeMode::LinesOnly,
-                line_style: LineStyle::Solid,
-                line_fade_pct: 0,
-            },
-            mask: (&MaskSettings { effect: SubjectEffect::None, ..Default::default() }).into(),
-            composite: CompositeRecipe::default(),
-            upscale: UpscaleRecipe::default(),
-            colorize: Default::default(),
-            depth: Default::default(),
-        }
+        crate::gui::item_settings::ItemSettings::default().current_recipe(prunr_core::ModelKind::Silueta)
     }
 
     #[test]
