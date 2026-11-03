@@ -65,27 +65,9 @@ pub(crate) fn render(
 
 fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
     let quality = brush.sd_scheduler;
-    let tuned = chip::tuned_count(SD_ADVANCED, brush, defaults);
-    let summary = chip::tuned_summary(tuned);
-    let group = GroupChip {
-        id_salt: "eraser_advanced",
-        icon: ICON_TUNE.codepoint,
-        label: "Advanced",
-        summary: &summary,
-        tooltip: "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler, seed and how it meets the photo.",
-        tuned: tuned > 0,
-        at_default: tuned == 0,
-        width: theme::POPOVER_WIDTH,
-        live: false,
-    };
-    let mut committed = false;
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            chip::reset_fields(SD_ADVANCED, brush, defaults);
-            committed = true;
-        }
-
-        committed |= fill_rows(ui, brush);
+    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler, seed and how it meets the photo.";
+    advanced_group(ui, "eraser_advanced", tooltip, SD_ADVANCED, brush, defaults, |ui, brush| {
+        let mut committed = fill_rows(ui, brush);
         committed |= chip::slider_row(ui, "Steps", &mut brush.sd_steps, quality.steps_range()).commit;
         hint(ui, "More steps refine the fill and take longer.");
         ui.add_space(theme::SPACE_XS);
@@ -118,8 +100,41 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults:
         ui.add_space(theme::SPACE_XS);
 
         committed |= generated_edge_rows(ui, brush);
-    });
-    committed
+        committed
+    })
+}
+
+/// An eraser's Advanced group over `fields`; true when a setting was
+/// committed, by its Reset or by `rows`.
+fn advanced_group(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    tooltip: &str,
+    fields: &[Field<BrushSettings>],
+    brush: &mut BrushSettings,
+    defaults: &BrushSettings,
+    rows: impl FnOnce(&mut egui::Ui, &mut BrushSettings) -> bool,
+) -> bool {
+    let tuned = chip::tuned_count(fields, brush, defaults);
+    let summary = chip::tuned_summary(tuned);
+    let group = GroupChip {
+        id_salt,
+        icon: ICON_TUNE.codepoint,
+        label: "Advanced",
+        summary: &summary,
+        tooltip,
+        tuned: tuned > 0,
+        at_default: tuned == 0,
+        width: theme::POPOVER_WIDTH,
+        live: false,
+    };
+    chip::group_chip(ui, group, |ui, reset| {
+        if reset {
+            chip::reset_fields(fields, brush, defaults);
+        }
+        rows(ui, brush) | reset
+    })
+    .unwrap_or(false)
 }
 
 const SAMPLERS: [chip::Choice<Option<SdScheduler>>; 3] = [
@@ -156,29 +171,10 @@ fn generated_edge_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
 /// LaMa, Big-LaMa and MI-GAN's Advanced group: the fill's scale and
 /// sharpness, and how it meets the photo.
 pub(crate) fn render_fill_advanced(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings) -> bool {
-    let tuned = chip::tuned_count(FILL_ADVANCED, brush, defaults);
-    let summary = chip::tuned_summary(tuned);
-    let group = GroupChip {
-        id_salt: "fill_advanced",
-        icon: ICON_TUNE.codepoint,
-        label: "Advanced",
-        summary: &summary,
-        tooltip: "The fill's scale and sharpness, and how it meets the photo around it.",
-        tuned: tuned > 0,
-        at_default: tuned == 0,
-        width: theme::POPOVER_WIDTH,
-        live: false,
-    };
-    let mut committed = false;
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            chip::reset_fields(FILL_ADVANCED, brush, defaults);
-            committed = true;
-        }
-        committed |= fill_rows(ui, brush);
-        committed |= edge_colour_row(ui, brush, false);
-    });
-    committed
+    let tooltip = "The fill's scale and sharpness, and how it meets the photo around it.";
+    advanced_group(ui, "fill_advanced", tooltip, FILL_ADVANCED, brush, defaults, |ui, brush| {
+        fill_rows(ui, brush) | edge_colour_row(ui, brush, false)
+    })
 }
 
 const FILL_SCALES: [chip::Choice<FillScale>; 4] = [
@@ -218,34 +214,17 @@ fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64
 /// RORem's Advanced group: steps, seed and the edge. Its prompt is baked
 /// in, so there is nothing else to tell it.
 pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, shown_seed: Option<u64>) -> bool {
-    let tuned = chip::tuned_count(ROREM_ADVANCED, brush, defaults);
-    let summary = chip::tuned_summary(tuned);
-    let group = GroupChip {
-        id_salt: "rorem_advanced",
-        icon: ICON_TUNE.codepoint,
-        label: "Advanced",
-        summary: &summary,
-        tooltip: "How the eraser generates the fill: its scale and sharpness, steps, seed and how it meets the photo.",
-        tuned: tuned > 0,
-        at_default: tuned == 0,
-        width: theme::POPOVER_WIDTH,
-        live: false,
-    };
-    let mut committed = false;
-    chip::group_chip(ui, group, |ui, reset| {
-        if reset {
-            chip::reset_fields(ROREM_ADVANCED, brush, defaults);
-            committed = true;
-        }
-        committed |= fill_rows(ui, brush);
+    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps, seed and how it meets the photo.";
+    advanced_group(ui, "rorem_advanced", tooltip, ROREM_ADVANCED, brush, defaults, |ui, brush| {
+        let mut committed = fill_rows(ui, brush);
         committed |= chip::slider_row(ui, "Steps", &mut brush.rorem_steps, ROREM_STEPS_RANGE).commit;
         hint(ui, "Fewer steps are faster but rougher; past 4, the number the model was trained for, the fill barely changes.");
         ui.add_space(theme::SPACE_XS);
         committed |= seed_row(ui, brush, shown_seed);
         ui.add_space(theme::SPACE_XS);
         committed |= generated_edge_rows(ui, brush);
-    });
-    committed
+        committed
+    })
 }
 
 fn render_quality_chip(
