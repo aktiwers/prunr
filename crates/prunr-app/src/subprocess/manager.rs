@@ -9,8 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use prunr_core::{ModelKind, MaskSettings, EdgeSettings};
-use crate::gui::settings::LineMode;
+use prunr_core::{ModelKind, MaskSettings, EdgeSettings, LineMode};
 use super::protocol::*;
 use super::ipc::{write_message, read_message};
 
