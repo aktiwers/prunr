@@ -90,6 +90,40 @@ pub(crate) fn sweep_dead_pid_dirs(parent: &Path, prefix: &str, self_pid: u32) {
     }
 }
 
+/// Remove what an ended run left directly inside `dir`: entries named
+/// `{name}{marker}.{pid}` of a process gone now, or `{name}{marker}` from
+/// a version that did not name its process, where `of(name)`. A link is
+/// removed, never followed.
+pub(crate) fn sweep_left_by_ended_runs(dir: &Path, marker: &str, of: impl Fn(&[u8]) -> bool) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let name = file.as_encoded_bytes();
+        let Some(at) = name.windows(marker.len()).rposition(|w| w == marker.as_bytes()) else { continue };
+        let ended = match &name[at + marker.len()..] {
+            [] => true,
+            [b'.', pid @ ..] => std::str::from_utf8(pid).ok().and_then(|p| p.parse::<u32>().ok()).is_some_and(|pid| !pid_runs(pid)),
+            _ => false,
+        };
+        if !ended || !of(&name[..at]) {
+            continue;
+        }
+        let _ = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(entry.path()),
+            _ => std::fs::remove_file(entry.path()),
+        };
+    }
+}
+
+/// `dir` and each folder directly inside it; a link to a folder elsewhere
+/// is not one of them.
+pub(crate) fn dir_and_subfolders(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    let subfolders = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path());
+    std::iter::once(dir.to_path_buf()).chain(subfolders)
+}
+
 /// Whether a process has `pid`. When unsure (a pid too large for the OS,
 /// a check that errs) it answers yes: a folder kept costs disk, one taken
 /// from a live session costs its work.

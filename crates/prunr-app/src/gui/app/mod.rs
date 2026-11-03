@@ -227,11 +227,14 @@ impl PrunrApp {
         cc.egui_ctx.set_global_style(style);
 
         // Earlier runs' files go off the window's start: a crashed session
-        // can leave gigabytes of undo states to delete. Neither touches
-        // this process's own folders.
+        // can leave gigabytes of undo states to delete, a quit mid-download
+        // half a model or an add-on. None touches this process's own files
+        // or a running instance's.
         let sweep = || {
             super::drag_export::cleanup_stale();
             super::history_disk::cleanup_stale();
+            super::download_manager::cleanup_stale();
+            crate::runtime_install::cleanup_stale();
         };
         if let Err(e) = std::thread::Builder::new().name("startup-sweep".into()).spawn(sweep) {
             tracing::warn!(%e, "could not start the sweep of earlier runs' files; they stay until the next start");
