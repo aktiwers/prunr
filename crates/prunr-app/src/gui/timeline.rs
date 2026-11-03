@@ -185,6 +185,12 @@ impl<T: Payload> Stored<T> {
         let unchanged = match &*tier {
             Tier::Compressed(b) => encoded == Encoded::Bytes(Arc::clone(b)),
             Tier::OnDisk(p) => encoded == Encoded::File(p.clone()),
+            // Another reader unpacked the same bytes first: its value is
+            // the one the cell hands out.
+            Tier::Loaded(v, e) if *e == encoded => {
+                super::reclaim::later(value);
+                return Some(Arc::clone(v));
+            }
             _ => false,
         };
         if unchanged {
@@ -798,6 +804,41 @@ mod tests {
         drop(shown);
         assert!(cell.begin_compress().is_none(), "nothing to encode");
         assert!(cell.is_compressed());
+    }
+
+    /// Decodes only once a second reader is decoding too.
+    struct MetAtDecode(u8);
+
+    static BOTH_DECODING: std::sync::Barrier = std::sync::Barrier::new(2);
+
+    impl Payload for MetAtDecode {
+        fn encode(&self) -> std::io::Result<Vec<u8>> {
+            Ok(vec![self.0])
+        }
+        fn decode(bytes: &[u8]) -> std::io::Result<Self> {
+            BOTH_DECODING.wait();
+            Ok(Self(bytes[0]))
+        }
+        fn dims(&self) -> (u32, u32) {
+            (1, 1)
+        }
+    }
+
+    /// Two readers unpacking one stored payload at once both get the one
+    /// value the cell hands out, so the next step still recognises it.
+    #[test]
+    fn readers_decoding_at_once_share_one_value() {
+        let cell = Stored::new(Arc::new(MetAtDecode(7)));
+        let value = cell.begin_compress().unwrap();
+        cell.finish_compress(value.encode());
+        drop(value);
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| cell.load().unwrap());
+            let b = s.spawn(|| cell.load().unwrap());
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(cell.holds(&a) && cell.holds(&b));
     }
 
     #[test]
