@@ -60,7 +60,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--output, -o <path>", "Where to save (file or folder)");
-                            opt_row(ui, "--model, -m <model>", "silueta, u2net, or birefnet-lite");
+                            opt_row(ui, "--model, -m <model>", "birefnet-lite (default), silueta, u2net, or none");
                             opt_row(ui, "--preset <name|file>", "Start from a preset; flags you give override it");
                             opt_row(ui, "--jobs, -j 4", "Process 4 images at once");
                             opt_row(ui, "--force, -f", "Overwrite existing files");
@@ -76,8 +76,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Fast batch: 8 parallel, overwrite allowed");
                     example_row(ui, toasts, "prunr photo.jpg --bg-color ffffff",
                         "White background instead of transparent");
-                    example_row(ui, toasts, "prunr --preset Portrait photo.jpg",
-                        "The settings of your preset Portrait");
+                    example_row(ui, toasts, "prunr --preset Studio photo.jpg",
+                        "The settings of the built-in Studio look");
                 }
 
                 CliTab::Sketch => {
@@ -202,7 +202,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .num_columns(2)
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
-                            opt_row(ui, "--upscale <model>", "realesrgan, nomos, siax or superscale: switch to Upscale mode");
+                            opt_row(ui, "--upscale <model>", "realesrgan, nomos2, siax, superscale or nomos: switch to Upscale mode");
                             opt_row(ui, "--scale <2|3|4>", "How much larger");
                             opt_row(ui, "--denoise <0-1>", "Denoise before the model");
                             opt_row(ui, "--sharpen <-1-1>", "Sharpen after the model; negative softens");
@@ -252,8 +252,9 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "birefnet-lite", "Best detail, ~214 MB, 1024\u{00d7}1024 (default)");
-                            opt_row(ui, "silueta", "Fast, ~4 MB");
-                            opt_row(ui, "u2net", "Quality, ~170 MB");
+                            opt_row(ui, "silueta", "Fast, ~42 MB");
+                            opt_row(ui, "u2net", "Quality, ~168 MB, from the Model Store");
+                            opt_row(ui, "none", "No cut-out: a preset's whole-photo look, or lines over the photo");
                         });
 
                     ui.add_space(theme::SPACE_MD);
