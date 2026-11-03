@@ -88,9 +88,7 @@ impl PrunrApp {
         let ids: Vec<u64> = self.batch.items_to_process().into_iter()
             .filter(|&id| self.batch.find_by_id(id).is_some_and(|i| self.run_may_start(i)))
             .collect();
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &ids.iter().copied().collect());
-        }
+        self.batch.share_shown_settings(&ids.iter().copied().collect());
         let refinish = if model.is_upscale() { PreviewKind::UpscaleTier2 } else { PreviewKind::ColorizeTier2 };
         let (mut runs, mut up_to_date, mut refinished) = (Vec::new(), 0, 0);
         for id in ids {
@@ -292,9 +290,7 @@ impl PrunrApp {
         // image's settings first, so one that was up to date under its own
         // reruns under these. A background image's result stays parked:
         // the run starts from its stored step.
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &candidate_ids);
-        }
+        self.batch.share_shown_settings(&candidate_ids);
 
         let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
         let action = self.settings.brush.cutout_action;
@@ -339,9 +335,7 @@ impl PrunrApp {
             .filter(|i| filter(i) && self.run_may_start(i))
             .map(|i| (i.id, i.source.clone()))
             .collect();
-        if let Some(shown) = self.batch.selected_idx_clamped() {
-            self.batch.share_settings(shown, &dispatches.iter().map(|(id, _)| *id).collect());
-        }
+        self.batch.share_shown_settings(&dispatches.iter().map(|(id, _)| *id).collect());
         for (id, source) in dispatches {
             self.processor.live_preview.cancel(id);
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
