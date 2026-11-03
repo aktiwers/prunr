@@ -1046,7 +1046,7 @@ fn render_model_credit_row(ui: &mut egui::Ui, descriptor: &prunr_models::ModelDe
 #[cfg(test)]
 mod model_credits_tests {
     use super::sort_for_model_credits;
-    use prunr_models::{ModelCategory, ModelDescriptor, ModelId, ModelSource, GpuRequirement};
+    use prunr_models::{ModelDescriptor, ModelId};
 
     fn make_descriptor(
         id: ModelId,
@@ -1054,31 +1054,9 @@ mod model_credits_tests {
         attribution_required: bool,
     ) -> ModelDescriptor {
         ModelDescriptor {
-            id,
             display_name,
-            description: "",
-            category: ModelCategory::Segmentation,
-            source: ModelSource::Bundled {
-                license: prunr_models::LicenseInfo { author: "test", license: "MIT", license_url: "", source_url: "" },
-            },
-            version: "1.0.0",
-            gpu: GpuRequirement::None,
-            places: prunr_models::Places::UNMEASURED,
-            needs: prunr_models::Needs {
-                cpu: prunr_models::Cost::estimate(100, 0, "a test fixture"),
-                mac_cpu: prunr_models::Priced::Unmeasured,
-                cuda: prunr_models::Priced::Unmeasured,
-                directml: prunr_models::Priced::Unmeasured,
-                coreml: prunr_models::Priced::Unmeasured,
-                openvino: prunr_models::Priced::Unmeasured,
-                migraphx: prunr_models::Priced::Unmeasured,
-            },
-            parallel_jobs_pay_on_cpu: false,
-            tile_size_multiple: None,
-            recommended_tile: None,
-            free_dims: &[],
             attribution_required,
-            upscale: None,
+            ..*prunr_models::descriptor(id).expect("registered")
         }
     }
 
