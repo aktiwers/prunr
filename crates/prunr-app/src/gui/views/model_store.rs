@@ -14,7 +14,7 @@ use crate::gui::download_manager::DownloadState;
 use crate::gui::hardware_cache::TestResults;
 use crate::gui::theme;
 use super::chip::{button, ButtonKind};
-use super::format_byte_size;
+use prunr_core::memory::byte_size;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CardAction {
@@ -121,7 +121,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
     // store holds the window until it ends.
     let testing = app.machine_test.as_ref().is_some_and(|t| t.only().is_some());
     let page = |ui: &mut egui::Ui| {
-        let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", format_byte_size(app.hardware_install_cache.models_on_disk));
+        let subtitle = format!("Everything runs on this computer. Download what you need. {} on disk.", byte_size(app.hardware_install_cache.models_on_disk));
         super::chip::modal_page_closable(ui, "Model Store", &subtitle, !testing, |ui| {
             super::chip::choice_buttons(ui, &FILTERS, &mut new_filter);
             ui.add_space(14.0);
@@ -455,7 +455,7 @@ fn card_meta<'a>(desc: &ModelDescriptor, installed: bool, state: &'a DownloadSta
     match state {
         DownloadState::InProgress { bytes_so_far, total_bytes } => {
             let pct = if *total_bytes > 0 { bytes_so_far * 100 / total_bytes } else { 0 };
-            (format!("{} of {} \u{00b7} {pct}%", format_byte_size(*bytes_so_far), format_byte_size(*total_bytes)), theme::TEXT_SECONDARY, None)
+            (format!("{} of {} \u{00b7} {pct}%", byte_size(*bytes_so_far), byte_size(*total_bytes)), theme::TEXT_SECONDARY, None)
         }
         DownloadState::Queued => ("Queued".into(), theme::TEXT_SECONDARY, None),
         DownloadState::Verifying => ("Verifying\u{2026}".into(), theme::TEXT_SECONDARY, None),

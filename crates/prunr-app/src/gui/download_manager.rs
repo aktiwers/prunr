@@ -477,8 +477,8 @@ fn space_refusal(needed: u64, free: u64) -> Option<String> {
     (free < needed.saturating_add(SPARE)).then(|| {
         format!(
             "Not enough disk space: it needs {}, and {} is free.",
-            crate::gui::views::format_byte_size(needed),
-            crate::gui::views::format_byte_size(free),
+            prunr_core::memory::byte_size(needed),
+            prunr_core::memory::byte_size(free),
         )
     })
 }
