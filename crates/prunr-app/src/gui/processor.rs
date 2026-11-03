@@ -1510,14 +1510,7 @@ impl Processor {
     ) -> u64 {
         let pending: HashMap<u64, u64> = runs.into_iter().collect();
         let total = pending.len();
-        // A batch admission still feeds stays open for the images to come.
-        let fed = self.admission_batch();
-        self.in_flight.retain_mut(|b| {
-            let before = b.pending.len();
-            b.pending.retain(|id, _| !pending.contains_key(id));
-            b.total -= before - b.pending.len();
-            !b.pending.is_empty() || Some(b.id) == fed
-        });
+        self.take_from_older(|id| pending.contains_key(id), None);
         let id = self.next_batch;
         self.next_batch += 1;
         self.in_flight.push(InFlightBatch { id, recipe, pending, total });
@@ -1542,22 +1535,45 @@ impl Processor {
     }
 
     /// Add a streamed item to the batch admission feeds (without one, the
-    /// newest batch). Release builds no-op on a missing batch so a late
+    /// newest batch); like an image taken at dispatch, it no longer awaits
+    /// an older batch. Release builds no-op on a missing batch so a late
     /// delivery can't take down a real one.
     pub(crate) fn track_streamed(&mut self, id: u64, run: u64) {
-        let fed = match self.admission_batch() {
-            Some(batch) => self.in_flight.iter_mut().find(|b| b.id == batch),
-            None => self.in_flight.last_mut(),
+        let fed = self.admission_batch().or_else(|| self.in_flight.last().map(|b| b.id));
+        let Some(fed) = fed.filter(|&fed| self.in_flight.iter().any(|b| b.id == fed)) else {
+            debug_assert!(false, "track_streamed called without active batch");
+            return;
         };
-        match fed {
-            Some(b) => {
-                if b.pending.insert(id, run).is_none() {
-                    b.total += 1;
-                    self.report_seg_count();
-                }
+        let mut changed = self.take_from_older(|&taken| taken == id, Some(fed));
+        if let Some(b) = self.in_flight.iter_mut().find(|b| b.id == fed) {
+            if b.pending.insert(id, run).is_none() {
+                b.total += 1;
+                changed = true;
             }
-            None => debug_assert!(false, "track_streamed called without active batch"),
         }
+        if changed {
+            self.report_seg_count();
+        }
+    }
+
+    /// The images `taken` by a newer run stop awaiting every batch but
+    /// `keep`, so an older run's late answer is stale. A batch left with
+    /// nothing to answer goes, unless admission feeds it (it stays open
+    /// for the images to come). True when any batch let one go.
+    fn take_from_older(&mut self, taken: impl Fn(&u64) -> bool, keep: Option<u64>) -> bool {
+        let fed = self.admission_batch();
+        let mut released = false;
+        self.in_flight.retain_mut(|b| {
+            if Some(b.id) == keep {
+                return true;
+            }
+            let before = b.pending.len();
+            b.pending.retain(|id, _| !taken(id));
+            b.total -= before - b.pending.len();
+            released |= b.pending.len() < before;
+            !b.pending.is_empty() || Some(b.id) == fed
+        });
+        released
     }
 
     pub(crate) fn note_failed_rerun(&mut self) {
@@ -3040,6 +3056,26 @@ mod tests {
         assert_eq!(p.current_dispatch_progress(), Some((0, 1)), "the queued one still shows");
         assert_eq!(p.finish_batch(queued), vec![6]);
         assert_eq!(p.current_dispatch_progress(), None);
+    }
+
+    /// An image a newer batch admits once there is room awaits that batch
+    /// only, as one it takes at dispatch does: the older batch's late
+    /// answer for it is stale (it frees no share of the newer run's
+    /// budget), and the older batch's end does not name it.
+    #[test]
+    fn an_image_admitted_later_no_longer_awaits_an_older_batch() {
+        let mut p = fixture();
+        let older = p.track_dispatch(fixture_recipe(), [(1, 10), (2, 11)]);
+        let (first, _rx) = p.open_admission(controller(1, &[(3, 1), (1, 1)]), |id| Some(test_work(id)));
+        assert_eq!(first.iter().map(|w| w.id).collect::<Vec<_>>(), vec![3], "image 1 waits for room");
+        let fed = p.track_dispatch(fixture_recipe(), first.iter().map(|w| (w.id, w.run)));
+        p.admission_feeds(fed);
+        assert!(p.take_recipe(fed, 3).is_some());
+        let admitted = p.release_and_admit(3, |id| Some(WorkItem { run: 20, ..test_work(id) }));
+        assert_eq!(admitted.sent, vec![(1, 20)]);
+        assert_eq!(p.take_recipe(older, 1), None, "the older batch's answer for it is stale");
+        assert_eq!(p.finish_batch(older), vec![2], "the older batch's end names only its own image");
+        assert_eq!(p.take_recipe(fed, 1).map(|(_, run)| run), Some(20), "the newer batch's answer lands");
     }
 
     #[test]
