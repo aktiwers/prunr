@@ -313,6 +313,7 @@ impl PrunrApp {
         let item = &self.batch.items[idx];
         let Some(shown) = item.selection_mask.clone() else { return };
         let base = item.edit_pixels();
+        let from = item.result_pixels();
         let (item_id, version) = (item.id, item.timeline.version());
         let tx = self.batch.bg_io.selection_edit_tx.clone();
         std::thread::spawn(move || {
@@ -326,21 +327,32 @@ impl PrunrApp {
                 shown.alpha_cut(&mut edited);
                 edited
             });
-            let _ = tx.send(crate::gui::background_io::SelectionEditDone { item_id, version, copy, cut });
+            let _ = tx.send(crate::gui::background_io::SelectionEditDone { item_id, version, from, copy, cut });
         });
     }
 
     /// A selection edit made off the UI thread lands: its copy goes to
     /// the clipboard, and its cut becomes the result, one undo step, when
-    /// the image is still in the state the edit started from.
+    /// the image is still in the state and shows the pixels the edit
+    /// started from.
     pub(super) fn land_selection_edit(&mut self, done: crate::gui::background_io::SelectionEditDone, ctx: &egui::Context) {
-        let crate::gui::background_io::SelectionEditDone { item_id, version, copy, cut } = done;
+        let crate::gui::background_io::SelectionEditDone { item_id, version, from, copy, cut } = done;
+        // A live render fills in the shown step without a new version.
+        let still_shown = |item: &BatchItem| match (from.as_ref(), item.result_pixels()) {
+            (None, None) => true,
+            (Some(made_from), Some(shown)) => made_from.same_as(&shown),
+            _ => false,
+        };
+        let unchanged = self.batch.find_by_id(item_id).is_some_and(|item| item.timeline.version() == version && still_shown(item));
+        // When a render replaced them, this can be the last handle on the
+        // pixels the edit was made from.
+        crate::gui::reclaim::later(from);
         if let Some((rgba, note)) = copy {
             self.system.copy_image(Arc::new(rgba), note);
         }
         let Some(cut) = cut else { return };
         let Some(idx) = self.batch.index_of(item_id) else { return };
-        if self.batch.items[idx].timeline.version() != version {
+        if !unchanged {
             tracing::info!(item_id, "selection cut dropped: the image changed while it was made");
             self.toasts.warning("The image changed while the area was being cut, so it was not cut. Try again.");
             return;
@@ -837,6 +849,48 @@ mod selection_action_tests {
         let item = &app.batch.items[0];
         assert!(item.result_rgba.as_ref().zip(before.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b)), "the image stays as it is");
         assert_eq!(item.timeline.undo_steps(), 2, "no Edit step from the stale cut");
+    }
+
+    /// A live render that fills in the shown step while the area is being
+    /// cut wins: the cut, made from the pixels the render replaced, is
+    /// dropped as a cut for a state left behind is.
+    #[test]
+    fn a_selection_cut_from_pixels_a_live_render_replaced_is_dropped() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        use crate::gui::live_preview::PreviewResult;
+        let ctx = egui::Context::default();
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        item.set_on_screen(true);
+        app.batch.items.push(item);
+        app.handle_selection_action(0, SelectionAction::Delete, &ctx);
+        let rendered = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 9, 9, 255])));
+        let version = app.batch.items[0].timeline.version();
+        app.apply_completed_previews(&ctx, vec![PreviewResult { version, ..PreviewResult::mask_for_test(42, Arc::clone(&rendered)) }]);
+        assert_eq!(app.batch.items[0].timeline.version(), version, "a fill-in takes no step");
+        land_edit(&mut app);
+        let item = &app.batch.items[0];
+        assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &rendered)), "the render stays");
+        assert_eq!(item.timeline.undo_steps(), 0, "no Edit step from the stale cut");
+        assert_eq!(app.toasts.last_for_test().map(|(level, _)| level), Some("warning"));
+    }
+
+    /// The image going to the background while its area is cut keeps the
+    /// same pixels, packed: the cut still lands.
+    #[test]
+    fn a_selection_cut_lands_on_its_pixels_parked_meanwhile() {
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        app.batch.items.push(item);
+        app.handle_selection_action(0, SelectionAction::Delete, &egui::Context::default());
+        assert!(app.batch.items[0].park_result());
+        land_edit(&mut app);
+        let item = &app.batch.items[0];
+        assert!(item.result_rgba.as_ref().is_some_and(|r| r.pixels().all(|px| px.0[3] == 0)), "the area is cut");
+        assert_eq!(item.timeline.undo_steps(), 1);
     }
 }
 

@@ -334,10 +334,12 @@ const MIN_OUTLINE_SCREEN_PX: f32 = 1.5;
 
 /// A selection Delete / Cut / Copy made off the UI thread: the copy for
 /// the clipboard and the cut image, for the item at the timeline version
-/// it started from.
+/// and on the result it started from.
 pub(crate) struct SelectionEditDone {
     pub(crate) item_id: u64,
     pub(crate) version: u64,
+    /// `None`: made from the photo.
+    pub(crate) from: Option<crate::gui::item::Pixels>,
     pub(crate) copy: Option<(image::RgbaImage, crate::gui::system_bridge::CopyNote)>,
     pub(crate) cut: Option<image::RgbaImage>,
 }
