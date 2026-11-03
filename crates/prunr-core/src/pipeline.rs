@@ -45,7 +45,9 @@ pub fn process_image_with_mask(
 /// the result. Measured on Silueta from 12 to 75 MP (RTX 3060 box): a
 /// cut-out 7.7 bytes, with lines 11.5, with Refine edges 42 (its guided
 /// filter holds float planes of the whole photo; lines then add nothing
-/// to the peak). Rounded up for peaks the 20 ms samples missed.
+/// to the peak). Rounded up for peaks the 20 ms samples missed. The
+/// worker's cut of a photo it hands over holds one RGBA buffer fewer
+/// than these figures, which were measured before it did.
 const CUTOUT_BYTES_PER_PX: u64 = 10;
 const LINES_BYTES_PER_PX: u64 = 14;
 const REFINED_BYTES_PER_PX: u64 = 48;
