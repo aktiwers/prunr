@@ -1,13 +1,57 @@
-//! Removing what is installed: models, runtimes and their caches. Each
-//! runs on a worker; the toast and the installed set follow when it lands.
+//! What Settings › Hardware asks for, and removing what is installed:
+//! models, runtimes and their caches. Each removal runs on a worker; the
+//! toast and the installed set follow when it lands.
 
 use std::path::{Path, PathBuf};
 
 use prunr_models::{ModelId, ModelSource};
 
 use super::PrunrApp;
+use crate::gui::views::settings::HardwareSectionIntent;
+use crate::runtime_install::InstallTarget;
 
 impl PrunrApp {
+    pub(super) fn apply_hardware_intent(&mut self, intent: HardwareSectionIntent, ctx: &egui::Context) {
+        match intent {
+            HardwareSectionIntent::StartInstall(rt) => self.request_install(InstallTarget::Runtime(rt)),
+            HardwareSectionIntent::CancelInstall => {
+                if let Some(p) = self.runtime_install.as_ref() {
+                    p.cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            HardwareSectionIntent::Uninstall(rt) => self.uninstall_runtime(rt, ctx),
+            HardwareSectionIntent::PreferRuntime(choice) => {
+                match crate::runtime_install::prefer(choice) {
+                    Ok(()) if self.hardware_install_cache.loaded_runtime != Some(choice) => {
+                        self.toasts.info(format!("Restart Prunr to switch to {}", choice.name()));
+                    }
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.toasts.error(format!("Could not choose {}: {}", choice.name(), prunr_core::plain::reason(e)));
+                    }
+                }
+                self.refresh_install_cache();
+            }
+            HardwareSectionIntent::IntelGpu(on) => match prunr_core::ort_runtime::intel_gpu_file() {
+                Some(file) => {
+                    queue_intel_gpu(file, on);
+                    // The queued write may not have landed, so a fresh read
+                    // could show the old state.
+                    self.hardware_install_cache.intel_gpu = on;
+                    self.toasts.info("Restart Prunr to apply");
+                }
+                None => {
+                    self.toasts.error("Could not change the Intel graphics setting: no user data folder");
+                }
+            },
+            HardwareSectionIntent::GetNvidiaLibraries => self.request_install(InstallTarget::NvidiaLibraries),
+            HardwareSectionIntent::ClearCompiledCache => self.clear_compiled_cache(),
+            HardwareSectionIntent::ForgetGpuFailures => self.forget_gpu_failures(ctx),
+            HardwareSectionIntent::TestThisComputer => self.handle_machine_test_intent(ctx),
+            HardwareSectionIntent::ForgetTest => self.forget_machine_test(ctx),
+        }
+    }
+
     /// Remove a downloaded model's weights. Gigabytes take a while to
     /// unlink.
     pub(crate) fn remove_model(&mut self, id: ModelId, ctx: &egui::Context) {
@@ -82,6 +126,15 @@ impl PrunrApp {
     }
 }
 
+/// The switch is the file's presence.
+fn queue_intel_gpu(file: PathBuf, on: bool) {
+    if on {
+        crate::gui::disk_queue::write(file, Vec::new());
+    } else {
+        crate::gui::disk_queue::remove(file);
+    }
+}
+
 /// What a download of `source` put in the models folder `dir`: its weights
 /// (a file, or a bundle's folder) and a single file's half-precision
 /// companion. `None` for a built-in model.
@@ -130,5 +183,25 @@ mod tests {
         assert!(!path.exists(), "one whose half-precision file never came is removed");
         let lama = prunr_models::descriptor(ModelId::LaMaFp32).expect("in the registry").source;
         assert_eq!(downloaded_files(lama, dir.path()).map(|(_, companion)| companion), Some(None), "a model without one");
+    }
+
+    /// The switch goes through the ordered disk queue: on makes the file
+    /// (and its folder), off removes it, and turning it off when never on
+    /// is fine.
+    #[test]
+    fn the_intel_gpu_switch_turns_on_and_off() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("store").join(prunr_core::ort_runtime::INTEL_GPU_FILE);
+        let set = |on| {
+            super::queue_intel_gpu(file.clone(), on);
+            crate::gui::disk_queue::flush();
+        };
+        set(false);
+        assert!(!file.exists(), "off when never chosen");
+        set(true);
+        assert!(file.is_file());
+        set(true);
+        set(false);
+        assert!(!file.exists());
     }
 }

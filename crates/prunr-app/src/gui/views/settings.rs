@@ -113,10 +113,14 @@ const CONTROL_GUESS: f32 = 160.0;
 const SIDEBAR_FILL: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 31);
 const PAGE_MARGIN: egui::Margin = egui::Margin { left: 24, right: 24, top: 18, bottom: 20 };
 
-pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
+/// What the Settings window asks of the app once it is drawn.
+pub(crate) struct SettingsChange {
+    pub hardware_intent: Option<HardwareSectionIntent>,
+    pub closed: bool,
+}
+
+pub(crate) fn render(ctx: &egui::Context, app: &mut PrunrApp) -> SettingsChange {
     let mut hardware_intent: Option<HardwareSectionIntent> = None;
-    let keep_sd_before = app.settings.keep_sd_loaded;
-    let processor_before = app.settings.processor;
     let closed = theme::bare_modal_window(ctx, "settings", "Settings", theme::SETTINGS_MODAL_SIZE, |ui| {
         theme::apply_modal_visuals(ui);
         let height = ui.available_height();
@@ -148,71 +152,7 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) {
         });
         close
     });
-
-    if let Some(intent) = hardware_intent {
-        dispatch_hardware_intent(app, intent, ctx);
-    }
-    // Turning the switch off frees the resident bundle now, not on the
-    // next stroke.
-    if keep_sd_before && !app.settings.keep_sd_loaded {
-        app.processor.release_inpaint_subprocess();
-    }
-    if app.settings.processor != processor_before {
-        app.apply_processor();
-    }
-    if closed {
-        app.close_settings();
-    }
-}
-
-fn dispatch_hardware_intent(app: &mut PrunrApp, intent: HardwareSectionIntent, ctx: &egui::Context) {
-    match intent {
-        HardwareSectionIntent::StartInstall(rt) => app.request_install(InstallTarget::Runtime(rt)),
-        HardwareSectionIntent::CancelInstall => {
-            if let Some(p) = app.runtime_install.as_ref() {
-                p.cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        HardwareSectionIntent::Uninstall(rt) => app.uninstall_runtime(rt, ctx),
-        HardwareSectionIntent::PreferRuntime(choice) => {
-            match crate::runtime_install::prefer(choice) {
-                Ok(()) if app.hardware_install_cache.loaded_runtime != Some(choice) => {
-                    app.toasts.info(format!("Restart Prunr to switch to {}", choice.name()));
-                }
-                Ok(()) => {}
-                Err(e) => {
-                    app.toasts.error(format!("Could not choose {}: {}", choice.name(), prunr_core::plain::reason(e)));
-                }
-            }
-            app.refresh_install_cache();
-        }
-        HardwareSectionIntent::IntelGpu(on) => match prunr_core::ort_runtime::intel_gpu_file() {
-            Some(file) => {
-                queue_intel_gpu(file, on);
-                // The queued write may not have landed, so a fresh read
-                // could show the old state.
-                app.hardware_install_cache.intel_gpu = on;
-                app.toasts.info("Restart Prunr to apply");
-            }
-            None => {
-                app.toasts.error("Could not change the Intel graphics setting: no user data folder");
-            }
-        },
-        HardwareSectionIntent::GetNvidiaLibraries => app.request_install(InstallTarget::NvidiaLibraries),
-        HardwareSectionIntent::ClearCompiledCache => app.clear_compiled_cache(),
-        HardwareSectionIntent::ForgetGpuFailures => app.forget_gpu_failures(ctx),
-        HardwareSectionIntent::TestThisComputer => app.handle_machine_test_intent(ctx),
-        HardwareSectionIntent::ForgetTest => app.forget_machine_test(ctx),
-    }
-}
-
-/// The switch is the file's presence.
-fn queue_intel_gpu(file: std::path::PathBuf, on: bool) {
-    if on {
-        crate::gui::disk_queue::write(file, Vec::new());
-    } else {
-        crate::gui::disk_queue::remove(file);
-    }
+    SettingsChange { hardware_intent, closed }
 }
 
 fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionIntent> {
@@ -1106,28 +1046,5 @@ mod jobs_hint_tests {
             assert!(hint.contains(d.display_name), "{hint:?} names {}", d.display_name);
         }
         assert!(!hint.contains("BiRefNet"), "{hint:?} reads as if only BiRefNet took one at a time");
-    }
-}
-
-#[cfg(test)]
-mod intel_gpu_tests {
-    /// The switch goes through the ordered disk queue: on makes the file
-    /// (and its folder), off removes it, and turning it off when never on
-    /// is fine.
-    #[test]
-    fn the_intel_gpu_switch_turns_on_and_off() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("store").join(prunr_core::ort_runtime::INTEL_GPU_FILE);
-        let set = |on| {
-            super::queue_intel_gpu(file.clone(), on);
-            crate::gui::disk_queue::flush();
-        };
-        set(false);
-        assert!(!file.exists(), "off when never chosen");
-        set(true);
-        assert!(file.is_file());
-        set(true);
-        set(false);
-        assert!(!file.exists());
     }
 }

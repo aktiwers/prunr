@@ -691,6 +691,30 @@ impl PrunrApp {
         self.settings.model.is_inpaint().then(|| item.verdict(Need::PaintedRegion, role).reason()).flatten()
     }
 
+    /// Act on what the Settings window asked for, and on the switches it
+    /// changed from how they stood before it was drawn.
+    fn apply_settings_change(
+        &mut self,
+        change: settings::SettingsChange,
+        (keep_sd_before, processor_before): (bool, super::settings::ComputeMode),
+        ctx: &egui::Context,
+    ) {
+        if let Some(intent) = change.hardware_intent {
+            self.apply_hardware_intent(intent, ctx);
+        }
+        // Turning the switch off frees the resident bundle now, not on the
+        // next stroke.
+        if keep_sd_before && !self.settings.keep_sd_loaded {
+            self.processor.release_inpaint_subprocess();
+        }
+        if self.settings.processor != processor_before {
+            self.apply_processor();
+        }
+        if change.closed {
+            self.close_settings();
+        }
+    }
+
     pub(crate) fn close_settings(&mut self) {
         self.show_settings = false;
         // Don't carry the half-clicked reset confirm across modal opens.
@@ -1501,7 +1525,9 @@ impl PrunrApp {
             self.show_pipeline_flow = false;
         }
         if self.show_settings {
-            settings::render(ctx, self);
+            let before = (self.settings.keep_sd_loaded, self.settings.processor);
+            let change = settings::render(ctx, self);
+            self.apply_settings_change(change, before, ctx);
         }
         if self.model_store.is_some() && model_store::render(ctx, self) {
             self.model_store = None;
