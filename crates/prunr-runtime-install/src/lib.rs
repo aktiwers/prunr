@@ -468,7 +468,7 @@ fn download_wheel_attempt(
     info: &WheelInfo,
     hooks: &mut DownloadHooks<'_>,
     path: &Path,
-) -> Result<Vec<u8>, DlError> {
+) -> Result<[u8; 32], DlError> {
     let client = http_client(concat!("prunr-runtime-install/", env!("CARGO_PKG_VERSION")))
         .map_err(|e| DlError::fatal(format!("HTTP client: {}", with_causes(&e))))?;
     let response = client.get(&info.url).send().map_err(|e| DlError::request(&e))?;
@@ -479,33 +479,48 @@ fn download_wheel_attempt(
     }
     let total = response.content_length().unwrap_or(info.size_bytes);
 
-    let mut response = response;
     let file = std::fs::File::create(path).map_err(|e| DlError::fatal(format!("create {}: {e}", path.display())))?;
     let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
-    let mut hasher = Sha256::new();
-    let mut chunk = [0u8; 64 * 1024];
-    let mut done: u64 = 0;
+    let write_error = |e: std::io::Error| DlError::fatal(format!("write {}: {e}", path.display()));
     let mut last_pct: u64 = u64::MAX;
-    loop {
-        if hooks.cancel.load(Ordering::Relaxed) {
-            return Err(DlError::cancelled());
-        }
-        let n = match response.read(&mut chunk) {
-            Ok(n) => n,
-            Err(e) => return Err(DlError::broke_off(&e)),
-        };
-        if n == 0 { break; }
-        hasher.update(&chunk[..n]);
-        out.write_all(&chunk[..n]).map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
-        done += n as u64;
+    let digest = stream_hashed(response, &mut out, &hooks.cancel, write_error, |done| {
         let pct = if total > 0 { done * 100 / total } else { 0 };
         if pct != last_pct {
             last_pct = pct;
             (hooks.progress)(done, total);
         }
+    })?;
+    out.flush().map_err(write_error)?;
+    Ok(digest)
+}
+
+/// Stream `reader` into `writer` in 64 KiB chunks, hashing what is written
+/// and checking `cancel` before each read; `on_chunk` gets the bytes
+/// written so far after each chunk, and `write_error` words a failed
+/// write. The SHA-256 digest. The caller flushes `writer`.
+pub fn stream_hashed(
+    mut reader: impl Read,
+    mut writer: impl Write,
+    cancel: &AtomicBool,
+    write_error: impl Fn(std::io::Error) -> DlError,
+    mut on_chunk: impl FnMut(u64),
+) -> Result<[u8; 32], DlError> {
+    let mut hasher = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return Err(DlError::cancelled());
+        }
+        let n = reader.read(&mut chunk).map_err(|e| DlError::broke_off(&e))?;
+        if n == 0 {
+            return Ok(hasher.finalize().into());
+        }
+        writer.write_all(&chunk[..n]).map_err(&write_error)?;
+        hasher.update(&chunk[..n]);
+        done += n as u64;
+        on_chunk(done);
     }
-    out.flush().map_err(|e| DlError::fatal(format!("write {}: {e}", path.display())))?;
-    Ok(hasher.finalize().to_vec())
 }
 
 /// Run `attempt` up to `max_attempts` times. Returns immediately on
@@ -1193,6 +1208,32 @@ mod tests {
     #[test]
     fn verify_digest_rejects_wrong_digest() {
         assert!(verify_digest(&Sha256::digest(b"hello world"), &"00".repeat(32)).is_err());
+    }
+
+    /// A stream is written whole and hashed as it is written, counted after
+    /// each 64 KiB chunk; a cancel stops it before the first read, and a
+    /// failed write reads as the caller words it.
+    #[test]
+    fn a_stream_is_written_hashed_and_counted_per_chunk() {
+        let body: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let (mut written, mut counts) = (Vec::new(), Vec::new());
+        let digest = stream_hashed(&body[..], &mut written, &AtomicBool::new(false), |e| DlError::fatal(e.to_string()), |done| counts.push(done)).unwrap();
+        assert_eq!(written, body);
+        assert_eq!(digest[..], Sha256::digest(&body)[..]);
+        assert_eq!(counts, [65_536, 131_072, 196_608, 200_000]);
+
+        let cancelled = stream_hashed(&body[..], std::io::sink(), &AtomicBool::new(true), |e| DlError::fatal(e.to_string()), |_| panic!("nothing is read"));
+        assert_eq!(cancelled.unwrap_err().message, "cancelled");
+
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(std::io::Error::other("no space")) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let failed = stream_hashed(&body[..], Full, &AtomicBool::new(false), |e| DlError::fatal(format!("write x: {e}")), |_| {});
+        let failed = failed.unwrap_err();
+        assert_eq!(failed.message, "write x: no space");
+        assert!(!failed.is_retryable());
     }
 
     #[test]

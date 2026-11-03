@@ -4444,7 +4444,6 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
- "sha2",
  "sysinfo",
  "tempfile",
  "tracing",

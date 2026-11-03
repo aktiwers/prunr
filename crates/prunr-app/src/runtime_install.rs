@@ -218,7 +218,7 @@ impl RuntimeId {
     pub fn download_label(self, here: OnDisk) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
         let copies: u64 = if here.small_card_copies { 0 } else { self.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum() };
-        let addon = self.addon().map(|addon| Cow::Owned(crate::gui::views::format_byte_size(addon.size_bytes + copies)));
+        let addon = self.addon().map(|addon| Cow::Owned(prunr_core::memory::byte_size(addon.size_bytes + copies)));
         match self {
             Self::OpenVino => addon.unwrap_or(Cow::Borrowed("80 MB")),
             Self::Cuda => addon.filter(|_| here.nvidia_libraries).unwrap_or(Cow::Borrowed("about 2 GB")),
@@ -776,7 +776,7 @@ fn fetch_small_card_copies(
             let _ = tx.send(InstallEvent::Downloading { bytes_so_far: done + so_far, total_bytes: total });
         };
         let placed = path.parent().map_or(Ok(()), std::fs::create_dir_all).map_err(|e| e.to_string()).and_then(|()| {
-            crate::gui::download_manager::download_to_file(copy.url, path, copy.sha256, Arc::clone(cancel), &on_progress, &|| ()).map_err(|e| e.message)
+            crate::download::download_to_file(copy.url, path, copy.sha256, Arc::clone(cancel), &on_progress, &|| ()).map_err(|e| e.message)
         });
         if let Err(e) = placed {
             tracing::warn!(file = %path.display(), %e, "a small-card copy did not download; its model keeps its own weights");
@@ -1100,8 +1100,8 @@ mod tests {
         let Some(addon) = RuntimeId::Cuda.addon() else { return };
         let here = |small_card_copies| OnDisk { nvidia_libraries: true, small_card_copies };
         let copies: u64 = RuntimeId::Cuda.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum();
-        assert_eq!(RuntimeId::Cuda.download_label(here(false)), crate::gui::views::format_byte_size(addon.size_bytes + copies));
-        assert_eq!(RuntimeId::Cuda.download_label(here(true)), crate::gui::views::format_byte_size(addon.size_bytes));
+        assert_eq!(RuntimeId::Cuda.download_label(here(false)), prunr_core::memory::byte_size(addon.size_bytes + copies));
+        assert_eq!(RuntimeId::Cuda.download_label(here(true)), prunr_core::memory::byte_size(addon.size_bytes));
     }
 
     /// CUDA's texts speak of DirectML only where it runs beside it.
