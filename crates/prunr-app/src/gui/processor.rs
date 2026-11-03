@@ -377,12 +377,9 @@ fn sam_sessions_built(slot: &SamSessionSlot, cpu_only: bool) -> bool {
     slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|s| s.cpu_only == cpu_only)
 }
 
-/// The Magic Brush's sessions as the app builds them, and the provider
-/// the encoder landed on. For the bench.
-pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<(Arc<prunr_core::sam_session::Sessions>, String), String> {
-    let sessions = ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)?;
-    let provider = sessions.encoder_provider().to_string();
-    Ok((sessions, provider))
+/// The Magic Brush's sessions as the app builds them. For the bench.
+pub(crate) fn magic_brush_sessions(cpu_only: bool) -> Result<Arc<prunr_core::sam_session::Sessions>, String> {
+    ensure_sam_sessions(&SamSessionSlot::default(), cpu_only)
 }
 
 /// A Magic Brush pick from a background thread: the stroke to draw and
