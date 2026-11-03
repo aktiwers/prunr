@@ -71,10 +71,10 @@ impl PrunrApp {
         std::thread::spawn(self.landing(ctx, remove));
     }
 
-    /// `change`, its toast text landing through `bg_io.removed_rx`, which
+    /// `change`, its toast text landing through `bg_io.removed.rx`, which
     /// reads the installed set again.
     fn landing(&self, ctx: &egui::Context, change: impl FnOnce() -> Result<String, String> + Send + 'static) -> impl FnOnce() + Send + 'static {
-        let (done, ctx) = (self.batch.bg_io.removed_tx.clone(), ctx.clone());
+        let (done, ctx) = (self.batch.bg_io.removed.tx.clone(), ctx.clone());
         move || {
             let _ = done.send(change());
             ctx.request_repaint();

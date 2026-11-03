@@ -85,7 +85,7 @@ impl PrunrApp {
             ));
         }
         self.toasts.info("Saving layers\u{2026}");
-        let tx = self.batch.bg_io.save_done_tx.clone();
+        let tx = self.batch.bg_io.save_done.tx.clone();
         spawn_save_layers(folder, jobs, format, tx);
     }
 
@@ -124,7 +124,7 @@ impl PrunrApp {
             None if path.extension().is_some_and(|e| e.is_empty()) => (path.with_extension(preferred.extension()), preferred, false),
             None => (path.with_added_extension(preferred.extension()), preferred, false),
         };
-        let tx = self.batch.bg_io.save_done_tx.clone();
+        let tx = self.batch.bg_io.save_done.tx.clone();
         self.toasts.info("Saving\u{2026}");
         spawn_save_single(path, one, format, asked, tx);
     }
@@ -160,7 +160,7 @@ impl PrunrApp {
         }
         let count = items.len();
         self.toasts.info(format!("Saving {}\u{2026}", crate::gui::views::fmt::count(count, "image", "images")));
-        let tx = self.batch.bg_io.save_done_tx.clone();
+        let tx = self.batch.bg_io.save_done.tx.clone();
         spawn_save_batch(folder, items, self.settings.export_format, Arc::clone(&self.batch.bg_io.decode_slots), tx);
     }
 
@@ -308,7 +308,7 @@ impl PrunrApp {
             self.system.copy_image(rgba, crate::gui::system_bridge::CopyNote::Image { hint: multi_hint });
             return;
         }
-        let tx = self.batch.bg_io.copy_ready_tx.clone();
+        let tx = self.batch.bg_io.copy_ready.tx.clone();
         std::thread::spawn(move || {
             let image = result.load().map(|rgba| bg.bake(&rgba, &ExportDepth::default()));
             let _ = tx.send((image, multi_hint));

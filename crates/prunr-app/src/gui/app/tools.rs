@@ -315,7 +315,7 @@ impl PrunrApp {
         let base = item.edit_pixels();
         let from = item.result_pixels();
         let (item_id, version) = (item.id, item.timeline.version());
-        let tx = self.batch.bg_io.selection_edit_tx.clone();
+        let tx = self.batch.bg_io.selection_edit.tx.clone();
         std::thread::spawn(move || {
             let Some(base) = base.load() else {
                 tracing::warn!(item_id, "selection edit skipped: the image could not be read");
@@ -706,7 +706,7 @@ mod selection_action_tests {
     /// frame loop does: the job, then its copy's outcome.
     fn land_edit(app: &mut super::PrunrApp) {
         let ctx = egui::Context::default();
-        let done = app.batch.bg_io.selection_edit_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        let done = app.batch.bg_io.selection_edit.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
         app.land_selection_edit(done, &ctx);
         for (note, took) in app.system.take_copy_outcomes() {
             app.on_copy_done(note, took);
@@ -772,7 +772,7 @@ mod selection_action_tests {
         app.batch.items.push(item);
 
         app.handle_selection_action(0, SelectionAction::Cut, &egui::Context::default());
-        let done = app.batch.bg_io.selection_edit_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        let done = app.batch.bg_io.selection_edit.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
         let (copy, _) = done.copy.as_ref().expect("a copy");
         assert_eq!(copy.dimensions(), (5, 8), "the columns the selection reaches, every row");
         assert_eq!(copy.get_pixel(1, 7).0, [1, 7, 0, 255], "a selected pixel of the upscale, where it is");

@@ -180,7 +180,7 @@ impl BatchManager {
             items: Vec::new(),
             selected_index: 0,
             next_id: 0,
-            bg_io: BackgroundIO::new(),
+            bg_io: BackgroundIO::default(),
             last_history_sweep: std::time::Instant::now(),
             demoting: Arc::default(),
             selection_queue: super::selection_queue::SelectionQueue::new(),
@@ -433,7 +433,7 @@ impl BatchManager {
         }
     }
 
-    /// Decode source bytes on a background thread into `bg_io.decode_rx`. A
+    /// Decode source bytes on a background thread into `bg_io.decode.rx`. A
     /// failure travels as `Err` so the item stops waiting for a decode.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
         self.spawn_decode(item_id, move || Ok(bytes));
@@ -448,7 +448,7 @@ impl BatchManager {
     }
 
     fn spawn_decode(&self, item_id: u64, bytes: impl FnOnce() -> Result<Arc<Vec<u8>>, String> + Send + 'static) {
-        let tx = self.bg_io.decode_tx.clone();
+        let tx = self.bg_io.decode.tx.clone();
         // A slot past `available_parallelism()` waits, so a 50-image
         // Process All doesn't hold 50 × ~80 MB transient peaks.
         self.bg_io.decode_slots.spawn(move || {
@@ -564,9 +564,9 @@ impl BatchManager {
     }
 
     /// Load and hash a background picture off the UI thread, picked by
-    /// the user or one that `fills` names; it lands on `bg_io.bg_image_rx`.
+    /// the user or one that `fills` names; it lands on `bg_io.bg_image.rx`.
     pub(crate) fn request_bg_image(&self, item_id: u64, path: PathBuf, fills: Option<u64>) {
-        let tx = self.bg_io.bg_image_tx.clone();
+        let tx = self.bg_io.bg_image.tx.clone();
         self.bg_io.decode_slots.spawn(move || {
             let result = prunr_core::load_image_from_path(&path)
                 .map(|img| {
@@ -579,7 +579,7 @@ impl BatchManager {
     }
 
     /// Filter-only Process off the UI thread; the result lands on
-    /// `bg_io.filter_only_rx`.
+    /// `bg_io.filter_only.rx`.
     pub(crate) fn request_filter_only(
         &self,
         item_id: u64,
@@ -588,7 +588,7 @@ impl BatchManager {
         base: Option<super::worker::RunImage>,
         effect: prunr_core::SubjectEffect,
     ) {
-        let tx = self.bg_io.filter_only_tx.clone();
+        let tx = self.bg_io.filter_only.tx.clone();
         let source = source.clone();
         self.bg_io.decode_slots.spawn(move || {
             let load = || source.load_bytes().map_err(super::item::source_unreadable);
@@ -626,7 +626,7 @@ impl BatchManager {
         source: &ImageSource,
         result: Option<super::item::Pixels>,
     ) {
-        let tx = self.bg_io.thumb_tx.clone();
+        let tx = self.bg_io.thumb.tx.clone();
         if let Some(result) = result {
             self.bg_io.decode_slots.spawn(move || {
                 // A parked result unpacks here, off the UI thread.
@@ -1359,7 +1359,7 @@ mod tests {
     fn a_source_that_cannot_be_read_lands_as_a_failed_decode() {
         let bm = fixture();
         bm.request_decode_source(5, &ImageSource::file("/nonexistent/prunr-test/missing.jpg".into()));
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(5)).expect("an answer comes back");
+        let (id, result) = bm.bg_io.decode.rx.recv_timeout(Duration::from_secs(5)).expect("an answer comes back");
         assert_eq!(id, 5);
         assert!(result.is_err());
     }
@@ -1370,8 +1370,8 @@ mod tests {
         let png = Arc::new(one_pixel_png());
         bm.request_decode_bytes(42, png);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
-            .expect("decode_tx must produce a result within 2s");
+        let (id, result) = bm.bg_io.decode.rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode.tx must produce a result within 2s");
         assert_eq!(id, 42);
         let rgba = result.expect("valid PNG must decode");
         assert_eq!(rgba.dimensions(), (1, 1));
@@ -1384,8 +1384,8 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_decode_source(99, &source);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
-            .expect("decode_tx must produce a result within 2s");
+        let (id, result) = bm.bg_io.decode.rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode.tx must produce a result within 2s");
         assert_eq!(id, 99);
         assert!(result.is_ok());
     }
@@ -1410,13 +1410,13 @@ mod tests {
         let paths = HashMap::from([(hash, path)]);
         assert!(!bm.keep_bg_images_in_step(&paths));
         assert!(!bm.keep_bg_images_in_step(&paths), "loading: not asked again");
-        let load = bm.bg_io.bg_image_rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
-        assert!(bm.bg_io.bg_image_rx.recv_timeout(Duration::from_millis(200)).is_err(), "one load");
+        let load = bm.bg_io.bg_image.rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
+        assert!(bm.bg_io.bg_image.rx.recv_timeout(Duration::from_millis(200)).is_err(), "one load");
         bm.land_bg_image(load);
         let first = bm.items[0].bg_image.clone().expect("filled");
         assert!(bm.items.iter().all(|item| item.bg_image.as_ref().is_some_and(|b| Arc::ptr_eq(b, &first))), "one picture, shared");
         bm.keep_bg_images_in_step(&paths);
-        assert!(bm.bg_io.bg_image_rx.recv_timeout(Duration::from_millis(200)).is_err(), "in step: nothing to load");
+        assert!(bm.bg_io.bg_image.rx.recv_timeout(Duration::from_millis(200)).is_err(), "in step: nothing to load");
     }
 
     /// A picture with no known file is dropped from every image that
@@ -1480,7 +1480,7 @@ mod tests {
         let path = dir.path().join("bg.png");
         std::fs::write(&path, one_pixel_png()).unwrap();
         bm.request_bg_image(5, path.clone(), None);
-        let load = bm.bg_io.bg_image_rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
+        let load = bm.bg_io.bg_image.rx.recv_timeout(Duration::from_secs(2)).expect("lands within 2 s");
         assert_eq!((load.item_id, load.fills, load.path), (5, None, path));
         let (img, hash) = load.result.expect("decodes");
         assert_eq!(hash, crate::gui::item::bg_image_content_hash(&img));
@@ -1495,8 +1495,8 @@ mod tests {
         let garbage = Arc::new(b"not an image".to_vec());
         bm.request_decode_bytes(7, garbage);
 
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(Duration::from_secs(2))
-            .expect("decode_tx must produce a result within 2s");
+        let (id, result) = bm.bg_io.decode.rx.recv_timeout(Duration::from_secs(2))
+            .expect("decode.tx must produce a result within 2s");
         assert_eq!(id, 7);
         let err = result.expect_err("garbage bytes must produce Err");
         assert!(err.starts_with("Could not read the image"), "{err}");
@@ -1509,8 +1509,8 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
         bm.request_thumbnail(7, &source, Some(crate::gui::item::Pixels::Resident(result)));
 
-        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
-            .expect("thumb_tx must produce a result within 2s");
+        let msg = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2))
+            .expect("thumb.tx must produce a result within 2s");
         assert_eq!(msg.item_id, 7);
         let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 200x200 fits within 160x160 → scaled to 160x160.
@@ -1524,8 +1524,8 @@ mod tests {
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_thumbnail(8, &source, None);
 
-        let msg = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2))
-            .expect("thumb_tx must produce a result within 2s");
+        let msg = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2))
+            .expect("thumb.tx must produce a result within 2s");
         assert_eq!(msg.item_id, 8);
         let (w, h, pixels) = msg.image.expect("a thumbnail");
         // 1x1 fits trivially → stays 1x1.
@@ -1539,7 +1539,7 @@ mod tests {
     fn a_thumbnail_that_cannot_be_made_still_answers() {
         let bm = fixture();
         bm.request_thumbnail(9, &ImageSource::Bytes(Arc::new(b"not an image".to_vec())), None);
-        let answer = bm.bg_io.thumb_rx.recv_timeout(Duration::from_secs(2)).expect("no answer: the request never ends");
+        let answer = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2)).expect("no answer: the request never ends");
         assert_eq!(answer.item_id, 9);
         assert!(answer.image.is_none());
     }
@@ -1631,15 +1631,15 @@ mod tests {
         assert_eq!(got.len(), 3);
     }
     /// Filter-only Process must be off the UI thread — decodes + applies
-    /// the subject effect on a background thread; UI learns via `filter_only_rx`.
+    /// the subject effect on a background thread; UI learns via `bg_io.filter_only.rx`.
     #[test]
     fn request_filter_only_emits_processed_rgba_to_filter_only_rx() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
         bm.request_filter_only(7, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
-            .expect("filter_only_tx must produce a result within 2s");
+        let (id, _, result, _) = bm.bg_io.filter_only.rx.recv_timeout(Duration::from_secs(2))
+            .expect("filter_only.tx must produce a result within 2s");
         assert_eq!(id, 7);
         let rgba = result.expect("default SubjectEffect on a 1x1 source must succeed");
         assert_eq!(rgba.dimensions(), (1, 1));
@@ -1656,8 +1656,8 @@ mod tests {
         ));
         bm.request_filter_only(11, 0, &source, None, prunr_core::SubjectEffect::default());
 
-        let (id, _, result, _) = bm.bg_io.filter_only_rx.recv_timeout(Duration::from_secs(2))
-            .expect("filter_only_tx must produce a result within 2s");
+        let (id, _, result, _) = bm.bg_io.filter_only.rx.recv_timeout(Duration::from_secs(2))
+            .expect("filter_only.tx must produce a result within 2s");
         assert_eq!(id, 11);
         assert!(result.is_err(), "missing file must surface as Err, not stall");
     }
@@ -1816,7 +1816,7 @@ mod tests {
     fn a_decode_that_panics_still_answers() {
         let bm = fixture();
         bm.spawn_decode(1, || panic!("a malformed file"));
-        let (id, result) = bm.bg_io.decode_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("an answer");
+        let (id, result) = bm.bg_io.decode.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("an answer");
         assert_eq!(id, 1);
         assert!(result.is_err());
     }
