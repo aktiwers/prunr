@@ -9,8 +9,8 @@
 #![allow(dead_code)] // Each test binary uses a subset; suppress per-binary warnings.
 
 use image::{GrayImage, ImageBuffer, Luma, Rgba, RgbaImage};
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 /// Returns Ok(()) when ORT is loaded and ready for `OrtEngine::new_*`.
 pub fn ensure_ort_initialized() -> Result<(), String> {
@@ -43,7 +43,32 @@ pub fn skip_if_model_missing(label: &str, id: prunr_models::ModelId) -> bool {
 
 // ---------- golden harness driver (shared by both golden tiers) ----------
 
-fn list_fixture_dirs(root: &Path) -> Vec<PathBuf> {
+/// A golden tier's switches (`BOOTSTRAP_GOLDEN`, `UPDATE_GOLDEN`) and its
+/// fixture roots under the crate; `new` creates the committed root.
+pub struct GoldenRun {
+    pub bootstrap: bool,
+    pub update: bool,
+    pub committed: PathBuf,
+    pub local: PathBuf,
+}
+
+impl GoldenRun {
+    pub fn new(committed_rel: &str, local_rel: &str) -> Self {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let run = Self {
+            bootstrap: env::var_os("BOOTSTRAP_GOLDEN").is_some(),
+            update: env::var_os("UPDATE_GOLDEN").is_some(),
+            committed: manifest_dir.join(committed_rel),
+            local: manifest_dir.join(local_rel),
+        };
+        fs::create_dir_all(&run.committed).expect("create committed fixture root");
+        run
+    }
+}
+
+/// The folders directly under `root`, in directory order; none when it
+/// cannot be read.
+pub fn list_fixture_dirs(root: &Path) -> Vec<PathBuf> {
     fs::read_dir(root)
         .map(|it| {
             it.filter_map(Result::ok)
@@ -72,6 +97,71 @@ pub fn golden_fixtures(tier: &str, committed_root: &Path, local_root: &Path) -> 
         );
     }
     fixtures
+}
+
+/// Writes `actual` to `expected_path` when `update` is set or no reference
+/// is there yet; otherwise fails when any channel of any pixel differs from
+/// the reference by more than `max_diff`.
+pub fn match_or_update(actual: &RgbaImage, expected_path: &Path, update: bool, max_diff: u8) -> Result<(), String> {
+    if update || !expected_path.exists() {
+        actual.save(expected_path).map_err(|e| format!("write expected: {e}"))?;
+        return Ok(());
+    }
+
+    let expected = image::open(expected_path)
+        .map_err(|e| format!("expected decode: {e}"))?
+        .to_rgba8();
+
+    compare_pixels(actual, &expected, max_diff)
+}
+
+fn compare_pixels(actual: &RgbaImage, expected: &RgbaImage, max_diff: u8) -> Result<(), String> {
+    if actual.dimensions() != expected.dimensions() {
+        return Err(format!(
+            "dimension mismatch: actual {:?} vs expected {:?}",
+            actual.dimensions(),
+            expected.dimensions(),
+        ));
+    }
+
+    let aw = actual.width() as usize;
+    let mut max_observed: u8 = 0;
+    let mut diff_pixels: usize = 0;
+    let mut first_mismatch: Option<String> = None;
+
+    for (i, (a, e)) in actual.pixels().zip(expected.pixels()).enumerate() {
+        let mut pixel_max: u8 = 0;
+        for c in 0..4 {
+            let d = a.0[c].abs_diff(e.0[c]);
+            if d > pixel_max {
+                pixel_max = d;
+            }
+        }
+        if pixel_max > max_diff {
+            if first_mismatch.is_none() {
+                let x = i % aw;
+                let y = i / aw;
+                first_mismatch = Some(format!(
+                    "first mismatch at ({x}, {y}): actual rgba{:?} vs expected rgba{:?}",
+                    a.0, e.0,
+                ));
+            }
+            if pixel_max > max_observed {
+                max_observed = pixel_max;
+            }
+            diff_pixels += 1;
+        }
+    }
+
+    if max_observed > max_diff {
+        let total = actual.width() as usize * actual.height() as usize;
+        return Err(format!(
+            "{}; {diff_pixels}/{total} pixels differ; max channel diff {max_observed} \
+             (threshold {max_diff})",
+            first_mismatch.as_deref().unwrap_or("(no first-mismatch recorded)"),
+        ));
+    }
+    Ok(())
 }
 
 /// Runs every fixture, then panics listing each `[id] error` together.
