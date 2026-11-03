@@ -811,6 +811,18 @@ impl Pixels {
             Self::Source(source) => source.decode_rgba(),
         }
     }
+
+    /// The same image by allocation: one handle, or a stored image and
+    /// the value it hands out. Never unpacks.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Resident(a), Self::Resident(b)) => Arc::ptr_eq(a, b),
+            (Self::Parked(a), Self::Parked(b)) => Arc::ptr_eq(a, b),
+            (Self::Resident(value), Self::Parked(stored)) | (Self::Parked(stored), Self::Resident(value)) => stored.holds(value),
+            (Self::Source(a), Self::Source(b)) => a.same_as(b),
+            _ => false,
+        }
+    }
 }
 
 /// A painted region an erase fills: the one on screen, or a step's,
