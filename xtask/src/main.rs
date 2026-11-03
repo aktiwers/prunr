@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -249,8 +249,7 @@ fn fetch_models() -> anyhow::Result<()> {
             );
         }
 
-        let mut file = std::fs::File::create(&dest)?;
-        file.write_all(&bytes)?;
+        std::fs::write(&dest, &bytes)?;
         println!("  Saved to {}", dest.display());
 
         if embedded(spec.id) {
@@ -529,7 +528,7 @@ fn render_golden_diff() -> anyhow::Result<()> {
                     before.dimensions(),
                     after.dimensions()
                 );
-                let triptych = compose_dim_mismatch(&before, &after);
+                let triptych = side_by_side(&[&before, &after]);
                 let out_path = phase_out.join(format!("{id}.png"));
                 triptych.save(&out_path)?;
                 total_changed += 1;
@@ -538,7 +537,7 @@ fn render_golden_diff() -> anyhow::Result<()> {
 
             let (w, h) = (before.width(), before.height());
             let diff = scaled_abs_diff(&before, &after);
-            let triptych = compose_triptych(&before, &after, &diff);
+            let triptych = side_by_side(&[&before, &after, &diff]);
             let out_path = phase_out.join(format!("{id}.png"));
             triptych.save(&out_path)?;
             let max_diff = max_channel_diff(&before, &after);
@@ -612,42 +611,17 @@ fn max_channel_diff(a: &image::RgbaImage, b: &image::RgbaImage) -> u8 {
     a.pixels().zip(b.pixels()).map(|(pa, pb)| pixel_max_diff(pa, pb)).max().unwrap_or(0)
 }
 
-/// Lay out three same-size images horizontally with thin separators.
-fn compose_triptych(
-    before: &image::RgbaImage,
-    after: &image::RgbaImage,
-    diff: &image::RgbaImage,
-) -> image::RgbaImage {
-    let (w, h) = before.dimensions();
-    let mut out = image::ImageBuffer::from_pixel(w * 3 + PANEL_SEP * 2, h, PANEL_BG);
-    blit(&mut out, before, 0, 0);
-    blit(&mut out, after, w + PANEL_SEP, 0);
-    blit(&mut out, diff, (w + PANEL_SEP) * 2, 0);
-    out
-}
-
-fn compose_dim_mismatch(
-    before: &image::RgbaImage,
-    after: &image::RgbaImage,
-) -> image::RgbaImage {
-    let (bw, bh) = before.dimensions();
-    let (aw, ah) = after.dimensions();
-    let mut out = image::ImageBuffer::from_pixel(bw + aw + PANEL_SEP, bh.max(ah), PANEL_BG);
-    blit(&mut out, before, 0, 0);
-    blit(&mut out, after, bw + PANEL_SEP, 0);
-    out
-}
-
-fn blit(dst: &mut image::RgbaImage, src: &image::RgbaImage, dx: u32, dy: u32) {
-    let (sw, sh) = src.dimensions();
-    let (dw, dh) = dst.dimensions();
-    let xe = (dx + sw).min(dw);
-    let ye = (dy + sh).min(dh);
-    for y in dy..ye {
-        for x in dx..xe {
-            let p = *src.get_pixel(x - dx, y - dy);
-            dst.put_pixel(x, y, p);
-        }
+/// Lay out images left to right, top-aligned, with thin separators.
+fn side_by_side(panels: &[&image::RgbaImage]) -> image::RgbaImage {
+    let seps = PANEL_SEP * (panels.len() as u32).saturating_sub(1);
+    let w = panels.iter().map(|p| p.width()).sum::<u32>() + seps;
+    let h = panels.iter().map(|p| p.height()).max().unwrap_or(0);
+    let mut out = image::ImageBuffer::from_pixel(w, h, PANEL_BG);
+    let mut x = 0;
+    for panel in panels {
+        image::imageops::replace(&mut out, *panel, i64::from(x), 0);
+        x += panel.width() + PANEL_SEP;
     }
+    out
 }
 
