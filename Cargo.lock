@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-app"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -4460,7 +4460,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-core"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "dirs",
@@ -4495,7 +4495,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-models"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "serde",
@@ -4505,7 +4505,7 @@ dependencies = [
 
 [[package]]
 name = "prunr-runtime-install"
-version = "0.4.8"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "hex",
