@@ -880,7 +880,7 @@ fn extract_into_place(archive: impl std::io::Read + std::io::Seek, target_dir: &
 /// An empty hidden folder beside `target`, for an install to fill before
 /// it moves into place.
 fn fresh_staging(target: &Path) -> Result<PathBuf, String> {
-    let staging = beside(target, "staging")?;
+    let staging = beside(target, STAGING)?;
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| format!("clean staging dir: {e}"))?;
     }
@@ -891,17 +891,40 @@ fn fresh_staging(target: &Path) -> Result<PathBuf, String> {
 /// The file a wheel for `target` downloads to, beside it; the folder
 /// they share is made first, as the first install meets none.
 fn spool_for(target: &Path) -> Result<PathBuf, String> {
-    let spool = beside(target, "wheel")?;
+    let spool = beside(target, SPOOL)?;
     if let Some(dir) = spool.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
     Ok(spool)
 }
 
-/// `.{name}.{what}` beside `target`, named after it.
+/// `.{name}{what}.{pid}` beside `target`, named after it and this
+/// process: an earlier run's goes at the next start (`cleanup_stale`),
+/// a running instance's stays.
 fn beside(target: &Path, what: &str) -> Result<PathBuf, String> {
     let name = target.file_name().ok_or("install dir has no name")?.to_string_lossy();
-    Ok(target.with_file_name(format!(".{name}.{what}")))
+    Ok(target.with_file_name(format!(".{name}{what}.{}", std::process::id())))
+}
+
+const STAGING: &str = ".staging";
+const SPOOL: &str = ".wheel";
+
+/// Remove the downloads and half-unpacked installs an earlier run left
+/// beside the runtimes and in them (the NVIDIA libraries' own): the app
+/// closed mid-install kept up to gigabytes until that runtime was
+/// installed again.
+pub fn cleanup_stale() {
+    if let Some(store) = prunr_models::runtime_store_dir() {
+        sweep_install_leftovers(&store);
+    }
+}
+
+fn sweep_install_leftovers(store: &Path) {
+    for dir in crate::fs_util::dir_and_subfolders(store) {
+        for what in [STAGING, SPOOL] {
+            crate::fs_util::sweep_left_by_ended_runs(&dir, what, |of| of.starts_with(b"."));
+        }
+    }
 }
 
 /// Replace `target` with the whole `staging` folder, carrying the `kept`
@@ -1064,6 +1087,39 @@ mod tests {
         for text in [cuda.not_installed(true, OnDisk::default()), cuda.not_installed(false, nvidia_here), cuda.first_launch_prompt_body(OnDisk::default()), cuda.installed_line().to_string()] {
             assert_eq!(text.contains("DirectML"), beside, "{text}");
         }
+    }
+
+    /// An install cut short (the app closed mid-download or mid-unpack)
+    /// leaves its download and its half-unpacked folder, beside the
+    /// runtime and inside CUDA's for the NVIDIA libraries: the next start
+    /// removes them. A running instance's and the installs stay.
+    #[test]
+    fn an_install_cut_short_is_swept_at_the_next_start() {
+        let store = tempfile::tempdir().unwrap();
+        let cuda = store.path().join("cuda-addon-0.2.0-linux-x64");
+        let openvino = store.path().join("openvino-addon-1.8.1-linux-x64");
+        let nvidia = cuda.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR);
+        for dir in [&nvidia, &openvino] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("libonnxruntime.so"), b"installed").unwrap();
+        }
+        let dead = crate::fs_util::a_free_pid();
+        let staging_of = |target: &Path, pid: u32| target.with_file_name(format!(".{}{STAGING}.{pid}", target.file_name().unwrap().to_string_lossy()));
+        let spool_of = |target: &Path, pid: u32| target.with_file_name(format!(".{}{SPOOL}.{pid}", target.file_name().unwrap().to_string_lossy()));
+        let left = [staging_of(&cuda, dead), staging_of(&nvidia, dead)];
+        for dir in &left {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("half.so"), b"half").unwrap();
+        }
+        let spools = [spool_of(&openvino, dead), spool_of(&nvidia, dead)];
+        let running = [super::spool_for(&openvino).unwrap(), super::fresh_staging(&openvino).unwrap()];
+        for spool in spools.iter().chain(&running[..1]) {
+            std::fs::write(spool, b"part of a wheel").unwrap();
+        }
+        sweep_install_leftovers(store.path());
+        assert!(left.iter().chain(&spools).all(|p| !p.exists()), "an earlier run's leftovers go");
+        assert!(running.iter().all(|p| p.exists()), "a running install's stay");
+        assert!([nvidia.join("libonnxruntime.so"), openvino.join("libonnxruntime.so")].iter().all(|p| p.exists()), "the installs stay");
     }
 
     /// The first install on a computer meets no runtime folder yet: the

@@ -554,9 +554,11 @@ fn space_refusal(needed: u64, free: u64) -> Option<String> {
 /// would keep whatever the other made of it.
 fn partial_path(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
-    s.push(format!(".partial.{}", std::process::id()));
+    s.push(format!("{PARTIAL}.{}", std::process::id()));
     PathBuf::from(s)
 }
+
+const PARTIAL: &str = ".partial";
 
 /// Remove the partials of `dest` an earlier run left (quit mid-download
 /// keeps gigabytes), sparing one a running instance is writing now: the
@@ -564,21 +566,22 @@ fn partial_path(dest: &Path) -> PathBuf {
 /// version's) is no live download's.
 fn sweep_stale_partials(dest: &Path) {
     let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else { return };
-    let mut prefix = name.to_owned();
-    prefix.push(".partial");
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let file = entry.file_name();
-        let Some(suffix) = file.as_encoded_bytes().strip_prefix(prefix.as_encoded_bytes()) else { continue };
-        let abandoned = match suffix {
-            [] => true,
-            [b'.', pid @ ..] => std::str::from_utf8(pid).ok().and_then(|p| p.parse::<u32>().ok())
-                .is_some_and(|pid| !crate::fs_util::pid_runs(pid)),
-            _ => false,
-        };
-        if abandoned {
-            let _ = std::fs::remove_file(entry.path());
-        }
+    crate::fs_util::sweep_left_by_ended_runs(dir, PARTIAL, |of| of == name.as_encoded_bytes());
+}
+
+/// Remove every partial an earlier run left in the model store: one from a
+/// quit mid-download stayed for good when that model was never fetched
+/// again.
+pub(crate) fn cleanup_stale() {
+    if let Some(store) = prunr_models::on_demand_dir() {
+        sweep_store_partials(&store);
+    }
+}
+
+/// `cleanup_stale` in `store` and each bundle's folder in it.
+fn sweep_store_partials(store: &Path) {
+    for dir in crate::fs_util::dir_and_subfolders(store) {
+        crate::fs_util::sweep_left_by_ended_runs(&dir, PARTIAL, |_| true);
     }
 }
 
@@ -778,6 +781,51 @@ mod tests {
         sweep_stale_partials(&dest);
         assert!(left.iter().all(|p| !p.exists()), "an earlier run's partials go");
         assert!(kept.iter().all(|p| p.exists()), "a live download and other models' files stay");
+    }
+
+    /// At start every model's partial an earlier run left goes, a bundle's
+    /// too, even for a model never fetched again; a running instance's
+    /// download and the installed models stay.
+    #[test]
+    fn the_start_sweeps_every_abandoned_partial_in_the_store() {
+        let store = tempfile::tempdir().unwrap();
+        let bundle = store.path().join("sd15-inpaint-fp16-1.0.0");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let file = |path: PathBuf| {
+            std::fs::write(&path, b"x").unwrap();
+            path
+        };
+        let dead = crate::fs_util::a_free_pid();
+        let live = std::process::id();
+        let left = [
+            file(store.path().join(format!("big_lama.onnx.partial.{dead}"))),
+            file(store.path().join("migan.onnx.partial")),
+            file(bundle.join(format!("unet.onnx.partial.{dead}"))),
+        ];
+        let kept = [
+            file(store.path().join(format!("u2net.onnx.partial.{live}"))),
+            file(store.path().join("u2net-1.0.0.onnx")),
+            file(bundle.join("unet.onnx")),
+            file(bundle.join(format!("vae.onnx.partial.{live}"))),
+        ];
+        sweep_store_partials(store.path());
+        assert!(left.iter().all(|p| !p.exists()), "an earlier run's partials go");
+        assert!(kept.iter().all(|p| p.exists()), "a running download and the installed models stay");
+    }
+
+    /// A model folder linked from elsewhere (a developer's export) is not
+    /// swept: what lies there is not the store's.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_does_not_follow_a_linked_folder() {
+        let store = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let theirs = elsewhere.path().join(format!("unet.onnx.partial.{}", crate::fs_util::a_free_pid()));
+        std::fs::write(&theirs, b"x").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), store.path().join("rorem-4s-fp16-1.0.0")).unwrap();
+        sweep_store_partials(store.path());
+        assert!(theirs.exists());
+        assert!(store.path().join("rorem-4s-fp16-1.0.0").exists(), "the link itself stays");
     }
 
     // ── Queue behaviour ───────────────────────────────────────────────────
