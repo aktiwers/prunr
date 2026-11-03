@@ -111,11 +111,21 @@ pub fn run(only: &[String], on: &mut dyn FnMut(Told)) {
 /// right one leaves it unmeasured, so it runs there. The run also builds
 /// what the accelerator compiles, so the first real run starts sooner.
 pub fn check(id: ModelId, on: &mut dyn FnMut(Told)) {
-    if let Some((column, place)) = checked(id) {
+    if let Some((column, place)) = while_installed(id, prunr_models::is_available, checked) {
         tracing::info!(model = ?id, ?column, kind = ?place.kind, text = %place, "the check keeps the model off the accelerator");
         prunr_core::ep_compat::set_measured(id, column, place);
     }
     on(Told::Finished { left_out: Vec::new() });
+}
+
+/// What `check` finds of `id`, kept only while it is `installed`: a model
+/// removed since its download fails to open for want of its files, which
+/// says nothing of the accelerator.
+fn while_installed<T>(id: ModelId, installed: impl Fn(ModelId) -> bool, check: impl FnOnce(ModelId) -> Option<T>) -> Option<T> {
+    if !installed(id) {
+        return None;
+    }
+    check(id).filter(|_| installed(id))
 }
 
 fn checked(id: ModelId) -> Option<(Column, prunr_core::ep_compat::Measured)> {
@@ -210,6 +220,21 @@ mod tests {
         assert_eq!(step(1, 0, 3).fraction(), 0.0);
         assert!((step(1, 1, 2).fraction() - 0.125).abs() < 1e-6);
         assert!((step(4, 2, 3).fraction() - (3.0 + 2.0 / 3.0) / 4.0).abs() < 1e-6);
+    }
+
+    /// A check of a model removed since its download, before it ran or
+    /// while it ran, records nothing: its run failed for want of the
+    /// files, and that kept the model off the accelerator once downloaded
+    /// again.
+    #[test]
+    fn a_check_of_a_removed_model_records_nothing() {
+        use prunr_core::ep_compat::{Measured, PlaceKind};
+        let failed_open = || Some((Column::Cuda, Measured::new(PlaceKind::Fails, "model file not found")));
+        let not_run = |_| -> Option<(Column, Measured)> { panic!("a model not installed is not run") };
+        assert_eq!(while_installed(ModelId::U2net, |_| false, not_run), None);
+        let there_at_the_start = std::cell::Cell::new(true);
+        assert_eq!(while_installed(ModelId::U2net, |_| there_at_the_start.replace(false), |_| failed_open()), None, "removed while it ran");
+        assert_eq!(while_installed(ModelId::U2net, |_| true, |_| failed_open()), failed_open(), "an installed model's finding stands");
     }
 
     /// Each event survives the line it travels on.
