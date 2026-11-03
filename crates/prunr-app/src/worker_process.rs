@@ -749,9 +749,9 @@ pub fn run_worker() -> ! {
                     let (progress, _pulse) = ipc_progress(item_id, evt_tx.clone());
 
                     let tensor_result = (|| -> Result<image::RgbaImage, String> {
-                        let raw_bytes = std::fs::read(&tensor_path)
-                            .map_err(|e| format!("Failed to read tensor: {e}"))?;
-                        let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
+                        let floats = prunr_app::subprocess::ipc::le_bytes_to_f32s(
+                            &std::fs::read(&tensor_path).map_err(|e| format!("Failed to read tensor: {e}"))?,
+                        );
                         let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
                         progress.step(prunr_core::Step::RefiningEdges);
                         prunr_core::postprocess_from_flat_owned(
@@ -815,9 +815,9 @@ pub fn run_worker() -> ! {
                     // back as tensor_cache — the parent's read_raw_seg_tensor
                     // reads-and-deletes it. So here we `read`, not `read_and_delete`.
                     let produce = (|| -> Result<(image::RgbaImage, prunr_core::EdgeInferenceResult), String> {
-                        let raw_bytes = std::fs::read(&seg_tensor_path)
-                            .map_err(|e| format!("Failed to read seg tensor: {e}"))?;
-                        let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(&raw_bytes);
+                        let seg_data = prunr_app::subprocess::ipc::le_bytes_to_f32s(
+                            &std::fs::read(&seg_tensor_path).map_err(|e| format!("Failed to read seg tensor: {e}"))?,
+                        );
 
                         let original = prunr_app::subprocess::ipc::read_photo(&photo, item_id)?;
                         let correction = strokes.as_deref()
