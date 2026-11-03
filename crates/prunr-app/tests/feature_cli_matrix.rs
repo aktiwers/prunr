@@ -11,7 +11,6 @@
 //! `golden_e2e`'s posture). Each invocation costs ~1-2s on Silueta;
 //! the full matrix runs in <30s.
 
-use image::ImageEncoder;
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -34,11 +33,7 @@ fn write_fixture_png(dir: &std::path::Path) -> std::path::PathBuf {
         }
     }
     let path = dir.join("input.png");
-    let file = std::fs::File::create(&path).expect("create input.png");
-    let writer = std::io::BufWriter::new(file);
-    image::codecs::png::PngEncoder::new(writer)
-        .write_image(&img, 64, 64, image::ExtendedColorType::Rgba8)
-        .expect("write input.png");
+    img.save(&path).expect("write input.png");
     path
 }
 
@@ -51,12 +46,17 @@ fn write_bg_image_fixture(dir: &std::path::Path) -> std::path::PathBuf {
         }
     }
     let path = dir.join("bg.png");
-    let file = std::fs::File::create(&path).expect("create bg.png");
-    let writer = std::io::BufWriter::new(file);
-    image::codecs::png::PngEncoder::new(writer)
-        .write_image(&img, 128, 128, image::ExtendedColorType::Rgba8)
-        .expect("write bg.png");
+    img.save(&path).expect("write bg.png");
     path
+}
+
+/// The run failed for want of something this machine lacks, not a bug:
+/// the ORT runtime ("ONNX Runtime not found") or a model that's marked
+/// OnDemand and not installed locally ("is not installed"). Anything else
+/// is a real test failure — Silueta is bundled, so there's no excuse for
+/// a model error beyond a registry regression.
+fn prerequisite_missing(stderr: &str) -> bool {
+    ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s))
 }
 
 /// Run the CLI binary with the given args. The CLI's `-o` flag is
@@ -71,13 +71,7 @@ fn run_cli(input: &std::path::Path, out_dir: &std::path::Path, extra: &[&str]) -
     let out = cmd.output().expect("spawn prunr binary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() {
-        // SKIP signals: missing ORT runtime ("ONNX Runtime not found")
-        // or a model that's marked OnDemand and not installed locally
-        // ("is not installed"). Anything else is a real test failure —
-        // Silueta is bundled, so there's no excuse for a model error
-        // beyond a registry regression.
-        let skip_signals = ["ONNX Runtime not found", "is not installed"];
-        if skip_signals.iter().any(|s| stderr.contains(s)) {
+        if prerequisite_missing(&stderr) {
             return Err("SKIP: prerequisite not available".to_string());
         }
         panic!(
@@ -97,63 +91,48 @@ fn assert_output_decodes(path: &std::path::Path, label: &str) {
     assert!(w > 0 && h > 0, "{label}: zero-dim output ({w}x{h})");
 }
 
+/// One matrix row in a fresh folder: the CLI run with `extra` on the
+/// fixture writes an output that decodes, or the row skips.
+fn assert_row(label: &str, extra: &[&str]) {
+    let dir = tempdir().expect("tempdir");
+    assert_row_in(dir.path(), label, extra);
+}
+
+/// The row in `dir`, for flags that name a file written there first.
+fn assert_row_in(dir: &std::path::Path, label: &str, extra: &[&str]) {
+    let input = write_fixture_png(dir);
+    let output = match run_cli(&input, dir, extra) {
+        Ok(p) => p,
+        Err(skip) => { eprintln!("[cli_{}] {skip}", label.replace('-', "_")); return; }
+    };
+    assert_output_decodes(&output, label);
+}
+
 #[test]
 fn cli_default_flags_produce_valid_output() {
-    let dir = tempdir().expect("tempdir");
-    let input = write_fixture_png(dir.path());
-    let output = match run_cli(&input, dir.path(), &[]) {
-        Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_default] {skip}"); return; }
-    };
-    assert_output_decodes(&output, "default");
+    assert_row("default", &[]);
 }
 
 #[test]
 fn cli_silueta_model_flag() {
-    let dir = tempdir().expect("tempdir");
-    let input = write_fixture_png(dir.path());
-    let output = match run_cli(&input, dir.path(), &["-m", "silueta"]) {
-        Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_silueta] {skip}"); return; }
-    };
-    assert_output_decodes(&output, "silueta");
+    assert_row("silueta", &["-m", "silueta"]);
 }
 
 #[test]
 fn cli_lines_only_flag() {
-    let dir = tempdir().expect("tempdir");
-    let input = write_fixture_png(dir.path());
-    let output = match run_cli(&input, dir.path(), &["--lines"]) {
-        Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_lines] {skip}"); return; }
-    };
-    assert_output_decodes(&output, "lines");
+    assert_row("lines", &["--lines"]);
 }
 
 #[test]
 fn cli_bg_color_flag() {
-    let dir = tempdir().expect("tempdir");
-    let input = write_fixture_png(dir.path());
-    let output = match run_cli(&input, dir.path(), &["--bg-color", "ff00ff", "-m", "silueta"]) {
-        Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_bg_color] {skip}"); return; }
-    };
-    assert_output_decodes(&output, "bg-color");
+    assert_row("bg-color", &["--bg-color", "ff00ff", "-m", "silueta"]);
 }
 
 #[test]
 fn cli_bg_image_with_fit_flag() {
     let dir = tempdir().expect("tempdir");
-    let input = write_fixture_png(dir.path());
     let bg = write_bg_image_fixture(dir.path());
-    let output = match run_cli(
-        &input, dir.path(),
-        &["--bg-image", bg.to_str().unwrap(), "--bg-image-fit", "tile", "-m", "silueta"],
-    ) {
-        Ok(p) => p,
-        Err(skip) => { eprintln!("[cli_bg_image] {skip}"); return; }
-    };
-    assert_output_decodes(&output, "bg-image");
+    assert_row_in(dir.path(), "bg-image", &["--bg-image", bg.to_str().unwrap(), "--bg-image-fit", "tile", "-m", "silueta"]);
 }
 
 #[test]
@@ -210,7 +189,7 @@ fn cli_batch_goes_on_after_an_image_fails() {
     let broken = dir.path().join("broken.png");
     std::fs::write(&broken, &bytes[..bytes.len() / 2]).expect("write broken.png");
     let (code, stderr) = run_cli_batch(&[&broken, &good], dir.path(), &["-m", "silueta", "-j", "1"], std::time::Duration::from_secs(120));
-    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+    if prerequisite_missing(&stderr) {
         eprintln!("[cli_batch_error] SKIP: prerequisite not available");
         return;
     }
@@ -227,7 +206,7 @@ fn an_input_that_is_not_an_image_says_so() {
     let notes = dir.path().join("notes.png");
     std::fs::write(&notes, b"not an image").expect("write notes.png");
     let (code, stderr) = run_cli_batch(&[&notes, &good], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
-    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+    if prerequisite_missing(&stderr) {
         eprintln!("[cli_not_an_image] SKIP: prerequisite not available");
         return;
     }
@@ -246,7 +225,7 @@ fn cli_processes_a_file_whose_name_is_not_utf8() {
     let odd = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9.png"));
     std::fs::copy(&good, &odd).expect("copy to a non-UTF-8 name");
     let (code, stderr) = run_cli_batch(&[&odd], dir.path(), &["-m", "silueta"], std::time::Duration::from_secs(120));
-    if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+    if prerequisite_missing(&stderr) {
         eprintln!("[cli_non_utf8] SKIP: prerequisite not available");
         return;
     }
@@ -272,7 +251,7 @@ fn cli_batch_leaves_no_ipc_files() {
         let pid = child.id();
         let out = child.wait_with_output().expect("wait on prunr");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if ["ONNX Runtime not found", "is not installed"].iter().any(|s| stderr.contains(s)) {
+        if prerequisite_missing(&stderr) {
             eprintln!("[cli_ipc_files] SKIP: prerequisite not available");
             return;
         }
