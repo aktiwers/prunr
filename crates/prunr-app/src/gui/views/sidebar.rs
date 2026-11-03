@@ -440,29 +440,16 @@ fn paint_status_indicator(
             ui.painter().circle_filled(dot, size, theme::ACCENT);
             true
         }
-        BatchStatus::Done => {
-            let pos = Pos2::new(item_rect.max.x - 10.0, item_rect.max.y - 10.0);
-            ui.painter().text(
-                pos,
-                egui::Align2::CENTER_CENTER,
-                ICON_CHECK.codepoint,
-                egui::FontId::proportional(14.0),
-                theme::ACCENT_GREEN,
-            );
-            false
-        }
-        BatchStatus::Error(_) => {
-            let pos = Pos2::new(item_rect.max.x - 10.0, item_rect.max.y - 10.0);
-            ui.painter().text(
-                pos,
-                egui::Align2::CENTER_CENTER,
-                ICON_ERROR.codepoint,
-                egui::FontId::proportional(14.0),
-                theme::DESTRUCTIVE,
-            );
-            false
-        }
+        BatchStatus::Done => paint_corner_icon(ui, item_rect, ICON_CHECK.codepoint, theme::ACCENT_GREEN),
+        BatchStatus::Error(_) => paint_corner_icon(ui, item_rect, ICON_ERROR.codepoint, theme::DESTRUCTIVE),
     }
+}
+
+/// A still status icon in the bottom-right corner: it never needs a repaint.
+fn paint_corner_icon(ui: &egui::Ui, item_rect: Rect, icon: &str, color: Color32) -> bool {
+    let pos = Pos2::new(item_rect.max.x - 10.0, item_rect.max.y - 10.0);
+    ui.painter().text(pos, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(14.0), color);
+    false
 }
 
 /// Delete (top-right) and Save (bottom-left, Done-only) buttons shown on
