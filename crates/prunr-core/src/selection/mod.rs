@@ -52,6 +52,11 @@ impl CellRect {
         Self { x0: self.x0.min(o.x0), y0: self.y0.min(o.y0), x1: self.x1.max(o.x1), y1: self.y1.max(o.y1) }
     }
 
+    /// The same cells as an (x, y, w, h) box.
+    pub(crate) fn to_bbox(self) -> crate::inpaint::Bbox {
+        crate::inpaint::Bbox { x: self.x0, y: self.y0, w: self.width(), h: self.height() }
+    }
+
     /// Grown by `margin` on every side, clamped to a `w × h` plane.
     pub fn grown(self, margin: u32, w: u32, h: u32) -> Self {
         Self {

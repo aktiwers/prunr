@@ -48,6 +48,7 @@ use rand_distr::{Distribution, StandardNormal};
 
 use crate::engine::{EpKind, EpSite, Miss, SessionPick, Weights};
 use crate::inpaint_blend::Band;
+use crate::selection::CellRect;
 use crate::sysmem::process_rss_mb;
 use crate::types::CoreError;
 
@@ -532,9 +533,9 @@ struct TileWindow {
 /// (no out-of-bounds access at composite time) — for image axes
 /// shorter than SD_TILE, the tile width/height collapses to the image
 /// extent and `pad_mirrored` handles the rest at the ORT boundary.
-fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
-    let span_x = bbox.x_max - bbox.x_min + 1;
-    let span_y = bbox.y_max - bbox.y_min + 1;
+fn tile_bbox(bbox: &CellRect, img_w: u32, img_h: u32) -> Vec<TileWindow> {
+    let span_x = bbox.width();
+    let span_y = bbox.height();
 
     let n_x = tile_count(span_x);
     let n_y = tile_count(span_y);
@@ -548,8 +549,8 @@ fn tile_bbox(bbox: &MaskBbox, img_w: u32, img_h: u32) -> Vec<TileWindow> {
     let mut tiles = Vec::with_capacity((n_x as usize) * (n_y as usize));
     for j in 0..n_y {
         for i in 0..n_x {
-            let x_raw = bbox.x_min + i * TILE_STEP_PX;
-            let y_raw = bbox.y_min + j * TILE_STEP_PX;
+            let x_raw = bbox.x0 + i * TILE_STEP_PX;
+            let y_raw = bbox.y0 + j * TILE_STEP_PX;
             let x = x_raw.min(max_anchor_x);
             let y = y_raw.min(max_anchor_y);
             tiles.push(TileWindow {
@@ -614,17 +615,6 @@ fn edge_alpha(pos: u32, length: u32, feather_lo: bool, feather_hi: bool) -> f32 
     a_lo.min(a_hi)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MaskBbox {
-    x_min: u32, y_min: u32, x_max: u32, y_max: u32,
-}
-
-impl MaskBbox {
-    pub(crate) fn to_bbox(self) -> crate::inpaint::Bbox {
-        crate::inpaint::Bbox { x: self.x_min, y: self.y_min, w: self.x_max - self.x_min + 1, h: self.y_max - self.y_min + 1 }
-    }
-}
-
 /// Pieces of a mask closer than this are one region: a slatted bench or
 /// a fence selected by Magic Brush is hundreds of pieces split by the
 /// gaps between slats, and filling each on its own ran hundreds of crops.
@@ -632,14 +622,14 @@ pub(crate) const REGION_GAP: u32 = 64;
 
 /// The regions a fill plans for: the mask's pieces (`mask_components`),
 /// those within `REGION_GAP` of each other grouped under one bbox.
-pub(crate) fn mask_regions(mask: &GrayImage) -> Vec<MaskBbox> {
+pub(crate) fn mask_regions(mask: &GrayImage) -> Vec<CellRect> {
     group_near(mask_components(mask), REGION_GAP)
 }
 
-fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
-    let near = |a: &MaskBbox, b: &MaskBbox| {
-        a.x_min <= b.x_max.saturating_add(gap) && b.x_min <= a.x_max.saturating_add(gap)
-            && a.y_min <= b.y_max.saturating_add(gap) && b.y_min <= a.y_max.saturating_add(gap)
+fn group_near(mut regions: Vec<CellRect>, gap: u32) -> Vec<CellRect> {
+    let near = |a: &CellRect, b: &CellRect| {
+        a.x0 <= b.x1.saturating_add(gap) && b.x0 <= a.x1.saturating_add(gap)
+            && a.y0 <= b.y1.saturating_add(gap) && b.y0 <= a.y1.saturating_add(gap)
     };
     // Grouping can bring a bbox near one already passed, so repeat until
     // a pass groups nothing.
@@ -651,8 +641,7 @@ fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
             while j < regions.len() {
                 if near(&regions[i], &regions[j]) {
                     let b = regions.swap_remove(j);
-                    let a = &mut regions[i];
-                    *a = MaskBbox { x_min: a.x_min.min(b.x_min), y_min: a.y_min.min(b.y_min), x_max: a.x_max.max(b.x_max), y_max: a.y_max.max(b.y_max) };
+                    regions[i] = regions[i].union(b);
                     grouped = true;
                 } else {
                     j += 1;
@@ -676,7 +665,7 @@ fn group_near(mut regions: Vec<MaskBbox>, gap: u32) -> Vec<MaskBbox> {
 /// the stack. `visited` is sized to the outer bbox of all painted
 /// pixels (via `inpaint::mask_bbox`), not the full image — a 100-px
 /// stroke in a 4K image needs ~10 KB of scratch instead of 16 MB.
-pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
+pub(crate) fn mask_components(mask: &GrayImage) -> Vec<CellRect> {
     let (w, _h) = mask.dimensions();
     let raw = mask.as_raw();
     let Some(outer) = crate::inpaint::mask_bbox(mask, IN_HOLE + 1, 0) else {
@@ -697,12 +686,9 @@ pub(crate) fn mask_components(mask: &GrayImage) -> Vec<MaskBbox> {
             }
             visited[lidx] = true;
             queue.push_back((sx, sy));
-            let mut bbox = MaskBbox { x_min: sx, y_min: sy, x_max: sx, y_max: sy };
+            let mut bbox = CellRect { x0: sx, y0: sy, x1: sx, y1: sy };
             while let Some((x, y)) = queue.pop_front() {
-                if x < bbox.x_min { bbox.x_min = x; }
-                if x > bbox.x_max { bbox.x_max = x; }
-                if y < bbox.y_min { bbox.y_min = y; }
-                if y > bbox.y_max { bbox.y_max = y; }
+                bbox = bbox.union(CellRect { x0: x, y0: y, x1: x, y1: y });
                 if x > outer.x {
                     push_if_unvisited(x - 1, y, map, raw, &mut visited, &mut queue);
                 }
@@ -787,7 +773,7 @@ impl RegionPlan {
     }
 }
 
-fn plan_region(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> RegionPlan {
+fn plan_region(bbox: &CellRect, img_w: u32, img_h: u32, max_side: u32) -> RegionPlan {
     match compute_sd_crop(bbox, img_w, img_h, max_side) {
         Some((x, y, w, h)) => RegionPlan::Crop { x, y, w, h },
         None => RegionPlan::Tiles(tile_bbox(bbox, img_w, img_h)),
@@ -806,15 +792,15 @@ fn crop_side(span: u32, max_side: u32) -> Option<u32> {
 /// long side was measured; a 768² crop goes to tiles). For images
 /// smaller than the crop on an axis, the crop shrinks to that dimension
 /// (`pad_mirrored` pads it back).
-fn compute_sd_crop(bbox: &MaskBbox, img_w: u32, img_h: u32, max_side: u32) -> Option<(u32, u32, u32, u32)> {
-    let cw = crop_side(bbox.x_max - bbox.x_min + 1, max_side)?;
-    let ch = crop_side(bbox.y_max - bbox.y_min + 1, max_side)?;
+fn compute_sd_crop(bbox: &CellRect, img_w: u32, img_h: u32, max_side: u32) -> Option<(u32, u32, u32, u32)> {
+    let cw = crop_side(bbox.width(), max_side)?;
+    let ch = crop_side(bbox.height(), max_side)?;
     if cw > SD_TILE && ch > SD_TILE {
         return None;
     }
     let (cw, ch) = (cw.min(img_w), ch.min(img_h));
-    let cx_centre = (bbox.x_min + bbox.x_max) / 2;
-    let cy_centre = (bbox.y_min + bbox.y_max) / 2;
+    let cx_centre = (bbox.x0 + bbox.x1) / 2;
+    let cy_centre = (bbox.y0 + bbox.y1) / 2;
     let x = cx_centre.saturating_sub(cw / 2).min(img_w - cw);
     let y = cy_centre.saturating_sub(ch / 2).min(img_h - ch);
     Some((x, y, cw, ch))
@@ -3614,12 +3600,40 @@ mod tests {
         assert_eq!(mask_components(&m).len(), 21);
         let regions = mask_regions(&m);
         assert_eq!(regions.len(), 2, "{regions:?}");
-        assert!(regions.iter().any(|r| r.x_min == 100 && r.x_max == 100 + 19 * 20 + 11));
+        assert!(regions.iter().any(|r| r.x0 == 100 && r.x1 == 100 + 19 * 20 + 11));
+    }
+
+    /// Each region's box holds every pixel of its pieces, at the image's
+    /// edges too; pieces that a merge brings near an earlier one join it.
+    #[test]
+    fn mask_regions_box_every_piece_they_group() {
+        let regions = |(w, h): (u32, u32), on: &[(u32, u32)]| {
+            let mut m = GrayImage::new(w, h);
+            for &(x, y) in on {
+                m.put_pixel(x, y, Luma([255]));
+            }
+            mask_regions(&m).into_iter().map(|r| r.to_bbox()).collect::<Vec<_>>()
+        };
+        let bbox = |x, y, w, h| crate::inpaint::Bbox { x, y, w, h };
+        assert!(regions((300, 200), &[]).is_empty(), "an empty mask");
+        assert_eq!(
+            regions((300, 200), &[(0, 0), (299, 0), (0, 199), (299, 199)]),
+            [bbox(0, 0, 1, 1), bbox(299, 0, 1, 1), bbox(0, 199, 1, 1), bbox(299, 199, 1, 1)],
+            "one pixel in each corner, in scan order",
+        );
+        assert_eq!(regions((16, 16), &[(5, 0), (5, 1), (5, 2), (4, 2), (3, 2)]), [bbox(3, 0, 3, 3)], "a piece reaching left of where the scan met it");
+        let block = |x0: u32, y0: u32| (y0..y0 + 10).flat_map(move |y| (x0..x0 + 10).map(move |x| (x, y)));
+        let chain: Vec<_> = block(0, 0).chain(block(60, 0)).chain(block(120, 0)).collect();
+        assert_eq!(regions((300, 200), &chain), [bbox(0, 0, 130, 10)], "a chain of near pieces");
+        let late: Vec<_> = block(0, 0).chain(block(120, 50)).chain(block(50, 120)).collect();
+        assert_eq!(regions((300, 200), &late), [bbox(0, 0, 130, 130)], "two far pieces grouped near the first");
+        let edge: Vec<_> = block(290, 190).chain(block(0, 95)).collect();
+        assert_eq!(regions((300, 200), &edge), [bbox(0, 95, 10, 10), bbox(290, 190, 10, 10)], "pieces at the left and bottom-right edges");
     }
 
     #[test]
     fn tile_bbox_single_for_small_component() {
-        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 300, y_max: 300 };
+        let bbox = CellRect { x0: 100, y0: 100, x1: 300, y1: 300 };
         let tiles = tile_bbox(&bbox, 4096, 4096);
         assert_eq!(tiles.len(), 1);
         let t = &tiles[0];
@@ -3632,7 +3646,7 @@ mod tests {
         // 1500×400 bbox → 4 tiles wide × 1 tile tall (400 ≤ SD_TILE).
         // span 1500, step 384, tile 512: tiles at 0, 384, 768, 1152;
         // last tile reaches 1664 ≥ span, so 4 tiles cover it.
-        let bbox = MaskBbox { x_min: 100, y_min: 100, x_max: 1599, y_max: 499 };
+        let bbox = CellRect { x0: 100, y0: 100, x1: 1599, y1: 499 };
         let tiles = tile_bbox(&bbox, 4096, 4096);
         assert_eq!(tiles.len(), 4, "expected 4 tiles, got {}", tiles.len());
         // Middle tiles feather on both horizontal edges.
@@ -3688,14 +3702,14 @@ mod tests {
     #[test]
     fn tall_regions_get_one_crop_up_to_the_max_side() {
         // 328×607: one 512-wide, 768-tall crop when tall crops are on.
-        let bbox = MaskBbox { x_min: 1564, y_min: 470, x_max: 1891, y_max: 1076 };
+        let bbox = CellRect { x0: 1564, y0: 470, x1: 1891, y1: 1076 };
         assert_eq!(compute_sd_crop(&bbox, 4096, 4096, SD_TILE), None, "tiles without tall crops");
         let (x, y, w, h) = compute_sd_crop(&bbox, 4096, 4096, SD_CROP_MAX).unwrap();
         assert_eq!((w, h), (512, 768));
         assert_eq!((x, y), (1727 - 256, 773 - 384));
-        let wide = MaskBbox { x_min: 0, y_min: 0, x_max: 800, y_max: 100 };
+        let wide = CellRect { x0: 0, y0: 0, x1: 800, y1: 100 };
         assert_eq!(compute_sd_crop(&wide, 4096, 4096, SD_CROP_MAX), None, "beyond the max side");
-        let square = MaskBbox { x_min: 0, y_min: 0, x_max: 600, y_max: 600 };
+        let square = CellRect { x0: 0, y0: 0, x1: 600, y1: 600 };
         assert_eq!(compute_sd_crop(&square, 4096, 4096, SD_CROP_MAX), None, "one long side only");
         assert!(matches!(plan_region(&square, 4096, 4096, SD_CROP_MAX), RegionPlan::Tiles(t) if t.len() == 4));
         assert_eq!(plan_region(&bbox, 4096, 4096, SD_CROP_MAX).tile_count(), 1);
@@ -3715,7 +3729,7 @@ mod tests {
             let fit = Fit { long: side, short: one_crop_side(false) };
             assert_eq!(FillScale::Auto.factor((side, 100), fit), 1.0, "tall {tall}");
             assert!(FillScale::Auto.factor((side + 1, 100), fit) < 1.0, "tall {tall}");
-            let area = MaskBbox { x_min: 1000, y_min: 1000, x_max: 1000 + side - 1, y_max: 1099 };
+            let area = CellRect { x0: 1000, y0: 1000, x1: 1000 + side - 1, y1: 1099 };
             let (_, _, w, _) = compute_sd_crop(&area, 4096, 4096, max_side).expect("one crop");
             assert_eq!(w, side + CROP_CONTEXT, "tall {tall}");
         }
@@ -3933,7 +3947,7 @@ mod tests {
             }
             mask_components(&m)
         };
-        let bbox = |x_min, y_min, x_max, y_max| MaskBbox { x_min, y_min, x_max, y_max };
+        let bbox = |x0, y0, x1, y1| CellRect { x0, y0, x1, y1 };
         assert!(comps((64, 64), &[]).is_empty(), "an empty mask");
         let two = comps((64, 64), &[(5, 5, 255), (6, 5, 255), (5, 6, 255), (50, 55, 255), (51, 55, 255)]);
         assert_eq!(two, [bbox(5, 5, 6, 6), bbox(50, 55, 51, 55)], "disjoint, in scan order");
@@ -3957,8 +3971,8 @@ mod tests {
     /// photo; a photo smaller than a tile is the whole crop.
     #[test]
     fn compute_sd_crop_centres_on_the_region_inside_the_photo() {
-        let crop = |(x_min, y_min, x_max, y_max): (u32, u32, u32, u32), w: u32, h: u32| {
-            compute_sd_crop(&MaskBbox { x_min, y_min, x_max, y_max }, w, h, SD_TILE).expect("a crop")
+        let crop = |(x0, y0, x1, y1): (u32, u32, u32, u32), w: u32, h: u32| {
+            compute_sd_crop(&CellRect { x0, y0, x1, y1 }, w, h, SD_TILE).expect("a crop")
         };
         let c = 1050 - SD_TILE / 2;
         assert_eq!(crop((1000, 1000, 1100, 1100), 4096, 4096), (c, c, SD_TILE, SD_TILE), "centred on (1050, 1050)");
