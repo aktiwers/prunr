@@ -1086,7 +1086,7 @@ pub(crate) struct BatchItem {
     /// The timeline revision the last save wrote.
     saved: Option<u64>,
     /// Why the last run or decode failed; cleared by the next run.
-    failure: Option<String>,
+    failure: Option<Arc<str>>,
     pub(crate) ticked: bool,
     /// Per-image processing settings. Edited via the adjustments toolbar.
     pub(crate) settings: super::item_settings::ItemSettings,
@@ -1522,7 +1522,7 @@ impl BatchItem {
             return BatchStatus::Done;
         }
         match &self.failure {
-            Some(why) => BatchStatus::Error(why.clone()),
+            Some(why) => BatchStatus::Error(Arc::clone(why)),
             None => BatchStatus::Pending,
         }
     }
@@ -1574,7 +1574,7 @@ impl BatchItem {
     /// The run or read failed with `why`: nothing is awaited any more.
     pub(crate) fn fail(&mut self, why: String) {
         self.job = None;
-        self.failure = Some(prunr_core::plain::reason(why));
+        self.failure = Some(prunr_core::plain::reason(why).into());
         self.record_unlanded_look();
     }
 
@@ -2078,7 +2078,7 @@ impl BatchItem {
             }
             Err(msg) => {
                 self.decode_failed = true;
-                self.failure = Some(prunr_core::plain::reason(msg));
+                self.failure = Some(prunr_core::plain::reason(msg).into());
                 false
             }
         }
@@ -3551,7 +3551,7 @@ pub(crate) enum BatchStatus {
     Pending,
     Processing,
     Done,
-    Error(String),
+    Error(Arc<str>),
 }
 
 #[cfg(test)]
@@ -4404,6 +4404,16 @@ mod tests {
         assert_eq!(item.status(), BatchStatus::Error("bad file".into()));
     }
 
+    /// A failed image's status shares its failure text: the readers that
+    /// build the status every frame copy nothing.
+    #[test]
+    fn a_failed_status_shares_its_text() {
+        let mut item = fixture_item(1);
+        item.fail("bad file".into());
+        let (BatchStatus::Error(a), BatchStatus::Error(b)) = (item.status(), item.status()) else { panic!("{:?}", item.status()) };
+        assert_eq!(a.as_ptr(), b.as_ptr(), "one text, not a copy per read");
+    }
+
     /// A selection overlay built for a mask the image has since replaced
     /// is dropped; the one for the shown mask is kept.
     #[test]
@@ -4823,7 +4833,7 @@ mod tests {
         );
 
         assert!(provider.is_none());
-        assert!(matches!(item.status(), BatchStatus::Error(ref e) if e == "boom"));
+        assert!(matches!(item.status(), BatchStatus::Error(ref e) if &**e == "boom"));
         assert!(item.cached_tensor.is_none());
         assert!(item.cached_edge_tensors.is_none());
         assert!(item.applied_recipe.is_none(),
