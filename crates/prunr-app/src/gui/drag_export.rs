@@ -490,6 +490,9 @@ pub(crate) struct DragKey {
     step: Option<std::sync::Weak<super::timeline::Stored<image::RgbaImage>>>,
     bg_image: Option<std::sync::Weak<super::item::BgImage>>,
     backdrop: Option<u64>,
+    /// The faces Restore faces blends in: on a photo not processed yet
+    /// they land without a new result.
+    faces: Option<std::sync::Weak<Vec<prunr_core::face::RestoredFace>>>,
     layers: Option<LayerKey>,
 }
 
@@ -512,6 +515,7 @@ impl DragKey {
             step: item.timeline.current().result.as_ref().map(Arc::downgrade),
             bg_image: item.named_bg_image().map(Arc::downgrade),
             backdrop: item.backdrop_key(),
+            faces: item.faces_input(super::item::FaceStage::Photo).map(|f| Arc::downgrade(&f.key.faces)),
             layers: split.then(|| LayerKey {
                 action,
                 selection: item.selection_hash,
@@ -535,6 +539,7 @@ impl DragKey {
             && same(&self.step, &other.step)
             && same(&self.bg_image, &other.bg_image)
             && self.backdrop == other.backdrop
+            && same(&self.faces, &other.faces)
             && match (&self.layers, &other.layers) {
                 (None, None) => true,
                 (Some(a), Some(b)) => {
@@ -792,6 +797,25 @@ mod tests {
         item.settings.bg = None;
         item.result_rgba = Some(Arc::new(image::RgbaImage::new(4, 4)));
         assert!(!key.matches(&DragKey::of(&item, spec(false))), "a new result");
+    }
+
+    /// Faces restored on a photo not processed yet show on the canvas and
+    /// in Save and Copy, so files written before they landed are stale.
+    #[test]
+    fn restored_faces_landing_stale_the_drag_key() {
+        use crate::gui::brush_state::CutoutAction;
+        use crate::gui::item::{BatchItem, FacePhoto, FaceStage, FoundFaces, ImageSource};
+        let spec = DragSpec { split: false, action: CutoutAction::Restore };
+        let mut item = BatchItem::new(3, "faces.jpg".to_string(), ImageSource::Bytes(Arc::new(Vec::new())), (4, 4), ItemSettings::default(), String::new());
+        let source = Arc::new(image::RgbaImage::new(4, 4));
+        item.source_rgba = Some(Arc::clone(&source));
+        item.settings.faces.on = true;
+        let key = DragKey::of(&item, spec);
+        let model = item.settings.faces.model.id();
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Original(source), found_at: std::time::Instant::now(), model, faces: Arc::default(), failed: false, stopped: false });
+        assert!(item.faces_input(FaceStage::Photo).is_some(), "the canvas blends them in");
+        assert!(!key.matches(&DragKey::of(&item, spec)), "faces restored since");
+        assert!(DragKey::of(&item, spec).matches(&DragKey::of(&item, spec)), "the same faces");
     }
 
     /// An image off screen holds its result only on its step, so a new
