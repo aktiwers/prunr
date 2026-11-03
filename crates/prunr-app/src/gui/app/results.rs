@@ -2597,6 +2597,47 @@ mod timeline_contract_tests {
         }
     }
 
+    /// Cancel an image of a batch the worker has not reached yet (the
+    /// model loads, or an earlier batch runs), then Process another: the
+    /// waiting batch still skips the cancelled image. Processing that
+    /// image again runs it.
+    #[test]
+    fn a_cancel_still_reaches_its_batch_after_the_next_process() {
+        use crate::gui::worker::WorkerMessage;
+        type Stop = fn(&mut PrunrApp);
+        let stops: [(&str, Stop); 2] = [
+            ("Cancel selected", PrunrApp::handle_cancel_selected),
+            ("removing it", |app| app.remove_images(&[1], false)),
+        ];
+        for (how, stop) in stops {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            for id in [1, 2] {
+                push_test_item(&mut app, id).dimensions = (4, 4);
+            }
+            app.batch.select_item(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            let process = |app: &mut PrunrApp, id: u64| {
+                app.process_items(|i| i.id == id, Some(StepKind::Process));
+                match rx.try_recv() {
+                    Ok(WorkerMessage::BatchProcess { cancels, .. }) => cancels,
+                    _ => panic!("{how}: a batch is sent"),
+                }
+            };
+            let first = process(&mut app, 1);
+            app.batch.items[0].ticked = true;
+            stop(&mut app);
+            assert!(first.is_cancelled(1), "{how}: the cancel reaches the waiting batch");
+            let second = process(&mut app, 2);
+            assert!(first.is_cancelled(1), "{how}: the next Process does not take it back");
+            assert!(!first.is_cancelled(2) && !second.is_cancelled(2), "{how}: the other image runs");
+            if app.batch.find_by_id(1).is_some() {
+                assert!(!process(&mut app, 1).is_cancelled(1), "{how}: Process again runs the image");
+            }
+        }
+    }
+
     /// A result for a state the image has since left (a knob change while
     /// it ran) cannot land; the image shows its current state again
     /// instead of staying "Processing" with nothing under way.

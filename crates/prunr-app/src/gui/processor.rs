@@ -5,8 +5,8 @@
 //! Does NOT own the worker bridge thread (only its channel ends) or
 //! `BatchManager`, which methods borrow per call.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 
@@ -24,10 +24,31 @@ pub struct CancelRegistry {
     /// a Cancel All the running batch has not seen yet.
     global: Arc<AtomicU64>,
     since: u64,
+    per_item: Arc<ItemCancels>,
+    /// The per-image cancels of earlier dispatches, live while a batch
+    /// still holds them: a cancel reaches a batch a later reset left behind.
+    earlier: Arc<Mutex<Vec<Weak<ItemCancels>>>>,
+}
+
+/// One dispatch's per-image cancels.
+#[derive(Default)]
+struct ItemCancels {
     // Short-circuit for the common zero-cancel case: `is_cancelled` skips the
     // mutex entirely unless some per-item entry has been requested.
-    has_per_item: Arc<AtomicBool>,
-    per_item: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    any: AtomicBool,
+    ids: Mutex<HashSet<u64>>,
+}
+
+impl ItemCancels {
+    fn cancel(&self, item_id: u64) {
+        self.ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(item_id);
+        self.any.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self, item_id: u64) -> bool {
+        self.any.load(Ordering::Acquire)
+            && self.ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&item_id)
+    }
 }
 
 impl CancelRegistry {
@@ -35,8 +56,8 @@ impl CancelRegistry {
         Self {
             global: Arc::new(AtomicU64::new(0)),
             since: 0,
-            has_per_item: Arc::new(AtomicBool::new(false)),
-            per_item: Arc::new(Mutex::new(HashMap::new())),
+            per_item: Arc::default(),
+            earlier: Arc::default(),
         }
     }
 
@@ -45,14 +66,7 @@ impl CancelRegistry {
     }
 
     pub(crate) fn is_cancelled(&self, item_id: u64) -> bool {
-        if self.is_global_cancelled() {
-            return true;
-        }
-        if !self.has_per_item.load(Ordering::Acquire) {
-            return false;
-        }
-        let guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.get(&item_id).is_some_and(|f| f.load(Ordering::Acquire))
+        self.is_global_cancelled() || self.per_item.is_cancelled(item_id)
     }
 
     pub(crate) fn request_global_cancel(&self) {
@@ -60,21 +74,22 @@ impl CancelRegistry {
     }
 
     pub(crate) fn request_item_cancel(&self, item_id: u64) {
-        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.entry(item_id)
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .store(true, Ordering::Release);
-        self.has_per_item.store(true, Ordering::Release);
+        self.per_item.cancel(item_id);
+        let mut earlier = self.earlier.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        earlier.retain(|held| held.upgrade().map(|cancels| cancels.cancel(item_id)).is_some());
     }
 
-    /// A fresh start for the next dispatch: Cancel Alls before now no
-    /// longer count for this handle (or its clones made after), while a
-    /// batch already holding a clone still sees them.
+    /// A fresh start for the next dispatch: cancels before now no longer
+    /// count for this handle (or its clones made after), while a batch
+    /// already holding a clone still sees them, and the cancels after.
     pub(crate) fn reset(&mut self) {
         self.since = self.global.load(Ordering::Acquire);
-        let mut guard = self.per_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.clear();
-        self.has_per_item.store(false, Ordering::Release);
+        let left = std::mem::take(&mut self.per_item);
+        let mut earlier = self.earlier.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        earlier.retain(|held| held.strong_count() > 0);
+        if Arc::strong_count(&left) > 1 {
+            earlier.push(Arc::downgrade(&left));
+        }
     }
 }
 
@@ -2918,6 +2933,27 @@ mod tests {
         assert!(next.is_global_cancelled(), "and a later Cancel All reaches it");
     }
 
+    /// An image's cancel, then Process before the batch holding it looked:
+    /// the new dispatch's reset must not take the cancel back from that
+    /// batch, and a later cancel reaches every batch still running.
+    #[test]
+    fn a_reset_never_takes_back_an_image_cancel_a_running_batch_has_not_seen() {
+        let mut r = CancelRegistry::new();
+        let running = r.clone();
+        r.request_item_cancel(4);
+        r.reset();
+        assert!(running.is_cancelled(4), "the running batch still sees its image's cancel");
+        assert!(!r.is_cancelled(4), "the next dispatch runs that image");
+        let next = r.clone();
+        r.request_item_cancel(5);
+        assert!(running.is_cancelled(5) && next.is_cancelled(5), "a later cancel reaches both");
+        assert!(!running.is_cancelled(6) && !next.is_cancelled(6), "and only that image");
+        drop(running);
+        r.reset();
+        r.request_item_cancel(7);
+        assert!(next.is_cancelled(7), "a batch that ended drops out; the rest still hear");
+    }
+
     #[test]
     fn cancel_registry_reset_clears_all_flags() {
         let mut r = CancelRegistry::new();
@@ -3186,10 +3222,10 @@ mod tests {
         // Poison the inner mutex from a panicking thread.
         let p = r.per_item.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = p.lock().unwrap();
+            let _guard = p.ids.lock().unwrap();
             panic!("deliberate poison");
         }).join();
-        // has_per_item is still false → no lock taken → no panic propagation.
+        // `any` is still false → no lock taken → no panic propagation.
         assert!(!r.is_cancelled(42));
     }
 }
