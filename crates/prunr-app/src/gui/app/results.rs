@@ -2507,15 +2507,7 @@ mod timeline_contract_tests {
         use crate::gui::worker::WorkerMessage;
         use prunr_core::selection::{MaskArtifact, FULL};
         let ctx = egui::Context::default();
-        let mut app = PrunrApp::new_for_test();
-        app.settings.model = SettingsModel::Silueta;
-        let item = push_test_item(&mut app, 1);
-        item.dimensions = (2, 2);
-        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
-        crate::gui::tests::fixtures::cut_with_lines(item);
-        app.batch.select_item(0);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.processor.worker_tx = tx;
+        let (mut app, rx) = crate::gui::tests::fixtures::lined_cut_out(prunr_core::LineMode::SubjectOutline);
         let steps = app.batch.items[0].timeline.undo_steps();
 
         app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), StepKind::Stroke);
@@ -2549,15 +2541,7 @@ mod timeline_contract_tests {
         use crate::gui::worker::WorkerMessage;
         use prunr_core::selection::{MaskArtifact, FULL};
         let ctx = egui::Context::default();
-        let mut app = PrunrApp::new_for_test();
-        app.settings.model = SettingsModel::Silueta;
-        let item = push_test_item(&mut app, 1);
-        item.dimensions = (2, 2);
-        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
-        crate::gui::tests::fixtures::cut_with_lines(item);
-        app.batch.select_item(0);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.processor.worker_tx = tx;
+        let (mut app, rx) = crate::gui::tests::fixtures::lined_cut_out(prunr_core::LineMode::SubjectOutline);
         app.set_tool(Some(crate::gui::brush_state::Tool::Paint));
         app.commit_selection_and_dispatch(1, MaskArtifact::from_cells(2, 2, vec![FULL; 4]), StepKind::Stroke);
         app.set_tool(None);
@@ -2585,15 +2569,7 @@ mod timeline_contract_tests {
         use crate::gui::worker::WorkerMessage;
         use prunr_core::selection::{MaskArtifact, FULL};
         let ctx = egui::Context::default();
-        let mut app = PrunrApp::new_for_test();
-        app.settings.model = SettingsModel::Silueta;
-        let item = push_test_item(&mut app, 1);
-        item.dimensions = (2, 2);
-        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
-        crate::gui::tests::fixtures::cut_with_lines(item);
-        app.batch.select_item(0);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.processor.worker_tx = tx;
+        let (mut app, rx) = crate::gui::tests::fixtures::lined_cut_out(prunr_core::LineMode::SubjectOutline);
         let lines_run = |rx: &std::sync::mpsc::Receiver<WorkerMessage>| rx.try_iter().find_map(|message| match message {
             WorkerMessage::BatchProcess { batch, add_edge_items, .. } if add_edge_items.len() == 1 && add_edge_items[0].correction.is_some() => Some(batch),
             _ => None,
