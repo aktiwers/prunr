@@ -135,19 +135,21 @@ impl PreviewKind {
 /// (`prunr_core::upscale::refine`), then the restored faces. Faces go in
 /// last: AI blend would mix them back toward the plain enlargement, and
 /// Sharpen would sharpen redrawn detail.
-pub(crate) fn finish_upscale(
-    raw: &Arc<RgbaImage>,
+pub fn finish_upscale(
+    raw: Arc<RgbaImage>,
     input: &RgbaImage,
     reference: Option<Arc<prunr_core::upscale::Reference>>,
     knobs: &prunr_core::upscale::Refine,
     faces: Option<&FacedKey>,
 ) -> (Arc<RgbaImage>, Option<Arc<prunr_core::upscale::Reference>>) {
-    let (shown, reference) = prunr_core::upscale::refine(raw, input, reference, knobs);
+    let (shown, reference) = prunr_core::upscale::refine(&raw, input, reference, knobs);
     let shown = match faces {
         // The faces were found in `raw`; over a refined image the blend
         // takes the photo under each face from it, or it would undo Refine.
         Some(f) => {
-            let refined = !Arc::ptr_eq(&shown, raw);
+            let refined = !Arc::ptr_eq(&shown, &raw);
+            // A raw no one else holds is faced in place, not copied.
+            drop(raw);
             let mut faced = Arc::unwrap_or_clone(shown);
             if refined {
                 prunr_core::face::compose_faces_onto(&mut faced, &f.faces, f.blend);
@@ -1145,7 +1147,7 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
-        let (shown, reference) = finish_upscale(&full, &upscale.input, upscale.reference, &knobs, faces);
+        let (shown, reference) = finish_upscale(full, &upscale.input, upscale.reference, &knobs, faces);
         let built_reference = reference.filter(|_| !had_reference);
         return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::default() };
     }
@@ -2072,16 +2074,16 @@ mod tests {
         let input = RgbaImage::from_pixel(2, 2, image::Rgba([20, 20, 220, 255]));
         let knobs = |ai_blend, color_match| prunr_core::upscale::Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend, color_match };
 
-        let (shown, reference) = finish_upscale(&raw, &input, None, &knobs(1.0, false), None);
+        let (shown, reference) = finish_upscale(Arc::clone(&raw), &input, None, &knobs(1.0, false), None);
         assert!(Arc::ptr_eq(&shown, &raw), "nothing on: the raw output itself");
         assert!(reference.is_none(), "and no reference built");
 
-        let (shown, reference) = finish_upscale(&raw, &input, None, &knobs(0.0, false), None);
+        let (shown, reference) = finish_upscale(Arc::clone(&raw), &input, None, &knobs(0.0, false), None);
         assert_eq!(shown.get_pixel(4, 4).0, [20, 20, 220, 255], "all blend: the enlarged input");
         let reference = reference.expect("built for AI blend");
         assert_eq!(reference.dimensions(), raw.dimensions());
 
-        let (_, reused) = finish_upscale(&raw, &input, Some(Arc::clone(&reference)), &knobs(0.5, true), None);
+        let (_, reused) = finish_upscale(Arc::clone(&raw), &input, Some(Arc::clone(&reference)), &knobs(0.5, true), None);
         assert!(Arc::ptr_eq(&reused.expect("kept"), &reference), "a kept reference is reused");
     }
 
