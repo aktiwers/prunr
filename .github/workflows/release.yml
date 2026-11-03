@@ -171,7 +171,11 @@ jobs:
           cp assets/prunr-256.png AppDir/usr/share/icons/hicolor/256x256/apps/prunr.png
           cp assets/prunr-256.png AppDir/prunr.png
           cp assets/prunr.desktop AppDir/
-          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          # The AppImage starts AppRun; through the link the binary's real
+          # path is usr/bin/prunr, so it finds runtime/ beside it.
+          ln -s usr/bin/prunr AppDir/AppRun
+          # A fixed release: the continuous build changes under us.
+          wget -q https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir/ Prunr-x86_64.AppImage
 
