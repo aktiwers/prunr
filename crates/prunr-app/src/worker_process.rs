@@ -186,12 +186,42 @@ fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>, on_cpu: bool) -
     Ok(())
 }
 
-/// The cache files written for a result that could not be written: the
+/// What an `ImageDone` hands over beside its result.
+#[derive(Default)]
+struct ResultExtras {
+    active_provider: String,
+    tensor_cache: Option<TensorCacheFile>,
+    edge_cache: Option<EdgeCacheFile>,
+    spare_scales: Option<u64>,
+}
+
+/// The `ImageDone` for `rgba` written as `item_id`'s result. A write that
+/// fails is the error, and the cache files `extras` names go with it: the
 /// answer is an error, so nothing would read or remove them.
-fn remove_cache_files(tensor: Option<&TensorCacheFile>, edge: Option<&EdgeCacheFile>) {
-    for path in tensor.map(|f| &f.path).into_iter().chain(edge.map(|f| &f.path)) {
-        let _ = std::fs::remove_file(path);
+fn result_event(ipc: &std::path::Path, item_id: u64, rgba: image::RgbaImage, extras: ResultExtras) -> Result<SubprocessEvent, String> {
+    let (width, height) = rgba.dimensions();
+    let result_path = IpcKind::Result.path_for(ipc, item_id);
+    let written = write_result(&result_path, &rgba);
+    // Free the ~50 MB result before posting the event; under N jobs it would
+    // otherwise hold N×50 MB until the next dispatch.
+    drop(rgba);
+    let ResultExtras { active_provider, tensor_cache, edge_cache, spare_scales } = extras;
+    match written {
+        Ok(()) => Ok(SubprocessEvent::ImageDone { item_id, result_path, width, height, active_provider, tensor_cache, edge_cache, spare_scales }),
+        Err(error) => {
+            for path in tensor_cache.map(|f| f.path).into_iter().chain(edge_cache.map(|f| f.path)) {
+                cleanup_ipc_temps(ipc, &[&path]);
+            }
+            Err(error)
+        }
     }
+}
+
+/// Answer a run cancelled before it started and leave the in-flight
+/// count; its inputs are removed first.
+fn cancelled(evt_tx: &mpsc::Sender<SubprocessEvent>, in_flight: &std::sync::atomic::AtomicUsize, item_id: u64) {
+    let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error: CANCELLED_ERR_MSG.into() });
+    in_flight.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// The detector's planes the run made, written to `path`; `None` when
@@ -651,7 +681,7 @@ pub fn run_worker() -> ! {
 
                     let mut spare_token = None;
                     let answered = match result {
-                        Ok(pr) => {
+                        Ok(ProcessResult { rgba_image, active_provider }) => {
                             let tensor_cache = tensor_for_cache.as_ref().and_then(|(tdata, height, width)| {
                                 let path = IpcKind::Tensor.path_for(&ipc, item_id);
                                 match std::fs::write(&path, prunr_app::subprocess::ipc::f32s_as_le_bytes(tdata)) {
@@ -667,31 +697,13 @@ pub fn run_worker() -> ! {
                                 .and_then(|res| write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, res));
                             let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
-                            let (w, h) = (pr.rgba_image.width(), pr.rgba_image.height());
-                            let active_provider = pr.active_provider.clone();
-                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
-                            let written = write_result(&result_path, &pr.rgba_image);
-                            // Free the ~50 MB result before posting the event; under N jobs it would
-                            // otherwise hold N×50 MB until the next dispatch.
-                            drop(pr);
-                            match written {
-                                Ok(()) => {
+                            let extras = ResultExtras { active_provider, tensor_cache, edge_cache, spare_scales };
+                            match result_event(&ipc, item_id, rgba_image, extras) {
+                                Ok(done) => {
                                     spare_token = spare_scales;
-                                    SubprocessEvent::ImageDone {
-                                        item_id,
-                                        result_path,
-                                        width: w,
-                                        height: h,
-                                        active_provider,
-                                        tensor_cache,
-                                        edge_cache,
-                                        spare_scales,
-                                    }
+                                    done
                                 }
-                                Err(error) => {
-                                    remove_cache_files(tensor_cache.as_ref(), edge_cache.as_ref());
-                                    SubprocessEvent::ImageError { item_id, error }
-                                }
+                                Err(error) => SubprocessEvent::ImageError { item_id, error },
                             }
                         }
                         Err(e) => SubprocessEvent::ImageError { item_id, error: e.to_string() },
@@ -724,10 +736,7 @@ pub fn run_worker() -> ! {
                 pool.spawn(move || {
                     if cancel.is_cancelled() {
                         cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
-                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                            item_id, error: CANCELLED_ERR_MSG.into(),
-                        });
-                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        cancelled(&evt_tx, &in_flight, item_id);
                         return;
                     }
                     // Conservative weight — postprocess upscales tensor to original resolution
@@ -747,28 +756,9 @@ pub fn run_worker() -> ! {
                         ).map_err(|e| e.to_string())
                     })();
 
-                    let answered = match tensor_result {
-                        Ok(rgba) => {
-                            let (w, h) = (rgba.width(), rgba.height());
-                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
-                            let written = write_result(&result_path, &rgba);
-                            drop(rgba);
-                            match written {
-                                Ok(()) => SubprocessEvent::ImageDone {
-                                    item_id,
-                                    result_path,
-                                    width: w,
-                                    height: h,
-                                    active_provider: String::new(),
-                                    tensor_cache: None,
-                                    edge_cache: None,
-                                    spare_scales: None,
-                                },
-                                Err(error) => SubprocessEvent::ImageError { item_id, error },
-                            }
-                        }
-                        Err(e) => SubprocessEvent::ImageError { item_id, error: e },
-                    };
+                    let answered = tensor_result
+                        .and_then(|rgba| result_event(&ipc, item_id, rgba, ResultExtras::default()))
+                        .unwrap_or_else(|error| SubprocessEvent::ImageError { item_id, error });
 
                     cleanup_ipc_temps(&ipc, &[&tensor_path, photo.path()]);
                     let _ = evt_tx.send(answered);
@@ -810,10 +800,7 @@ pub fn run_worker() -> ! {
                     if cancel.is_cancelled() {
                         cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
                         cleanup_image_inputs(&ipc, photo.path(), strokes.as_deref());
-                        let _ = evt_tx.send(SubprocessEvent::ImageError {
-                            item_id, error: CANCELLED_ERR_MSG.into(),
-                        });
-                        in_flight.fetch_sub(1, Ordering::AcqRel);
+                        cancelled(&evt_tx, &in_flight, item_id);
                         return;
                     }
                     let sem_guard = sem.acquire(10);
@@ -850,33 +837,24 @@ pub fn run_worker() -> ! {
                     let mut spare_token = None;
                     let answered = match produce {
                         Ok((rgba, edge_res)) => {
-                            let (w, h) = (rgba.width(), rgba.height());
-                            let result_path = IpcKind::Result.path_for(&ipc, item_id);
-
                             let edge_cache = write_edge_cache(IpcKind::Edge.path_for(&ipc, item_id), item_id, &edge_res);
                             let spare_scales = owed_spare_token(edge_cache.is_some(), &spare, &on_screen, item_id);
 
-                            let written = write_result(&result_path, &rgba);
-                            drop(rgba);
-                            if let Err(error) = written {
-                                remove_cache_files(None, edge_cache.as_ref());
-                                cleanup_ipc_temps(&ipc, &[&seg_tensor_path]);
-                                SubprocessEvent::ImageError { item_id, error }
-                            } else {
-                                spare_token = spare_scales;
-                                SubprocessEvent::ImageDone {
-                                    item_id,
-                                    result_path,
-                                    width: w,
-                                    height: h,
-                                    // Empty active_provider — seg didn't run this
-                                    // tier; parent treats it like a Tier 2 rerun
-                                    // and keeps the existing backend label.
-                                    active_provider: String::new(),
-                                    tensor_cache: Some(TensorCacheFile { path: seg_tensor_path.clone(), height: seg_tensor_height, width: seg_tensor_width }),
-                                    edge_cache,
-                                    spare_scales,
+                            let extras = ResultExtras {
+                                // Empty active_provider — seg didn't run this
+                                // tier; parent treats it like a Tier 2 rerun
+                                // and keeps the existing backend label.
+                                active_provider: String::new(),
+                                tensor_cache: Some(TensorCacheFile { path: seg_tensor_path.clone(), height: seg_tensor_height, width: seg_tensor_width }),
+                                edge_cache,
+                                spare_scales,
+                            };
+                            match result_event(&ipc, item_id, rgba, extras) {
+                                Ok(done) => {
+                                    spare_token = spare_scales;
+                                    done
                                 }
+                                Err(error) => SubprocessEvent::ImageError { item_id, error },
                             }
                         }
                         Err(e) => {
@@ -1107,10 +1085,31 @@ mod tests {
         let (tensor, edge) = (dir.path().join("t.bin"), dir.path().join("e.bin"));
         std::fs::write(&tensor, b"t").unwrap();
         std::fs::write(&edge, b"e").unwrap();
-        let tensor_file = TensorCacheFile { path: tensor.clone(), height: 1, width: 1 };
-        let edge_file = EdgeCacheFile { path: edge.clone(), height: 1, width: 1, scales: Vec::new() };
-        remove_cache_files(Some(&tensor_file), Some(&edge_file));
+        std::fs::create_dir(IpcKind::Result.path_for(dir.path(), 3)).unwrap();
+        let extras = ResultExtras {
+            tensor_cache: Some(TensorCacheFile { path: tensor.clone(), height: 1, width: 1 }),
+            edge_cache: Some(EdgeCacheFile { path: edge.clone(), height: 1, width: 1, scales: Vec::new() }),
+            ..ResultExtras::default()
+        };
+        let err = result_event(dir.path(), 3, image::RgbaImage::new(2, 2), extras).unwrap_err();
+        assert!(err.starts_with("Failed to write result"), "{err}");
         assert!(!tensor.exists() && !edge.exists());
+    }
+
+    /// A written result is handed over whole, with what was made beside it.
+    #[test]
+    fn a_written_result_is_handed_over_with_its_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let rgba = image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 4]));
+        let edge = EdgeCacheFile { path: dir.path().join("e.bin"), height: 1, width: 1, scales: Vec::new() };
+        let extras = ResultExtras { active_provider: "CPU".into(), edge_cache: Some(edge), spare_scales: Some(9), ..ResultExtras::default() };
+        let Ok(SubprocessEvent::ImageDone { item_id: 5, result_path, width: 3, height: 2, active_provider, tensor_cache: None, edge_cache: Some(edge), spare_scales: Some(9) }) =
+            result_event(dir.path(), 5, rgba.clone(), extras)
+        else {
+            panic!("the result was not handed over as it was made");
+        };
+        assert_eq!((active_provider.as_str(), edge.path), ("CPU", dir.path().join("e.bin")));
+        assert_eq!(std::fs::read(&result_path).unwrap(), rgba.as_raw().as_slice());
     }
 
     /// A stroke whose work panics still answers, in the eraser's own
