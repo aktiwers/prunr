@@ -940,28 +940,6 @@ impl PrunrApp {
         self.status.text = msg;
     }
 
-    /// Uploads are throttled so a 50-image import doesn't burst every
-    /// `ctx.load_texture` into one frame; repaints while the queue is full.
-    fn pump_thumbnail_results(&mut self, ctx: &egui::Context) -> bool {
-        const THUMB_UPLOADS_PER_FRAME: usize = 3;
-        let mut uploaded = 0;
-        while uploaded < THUMB_UPLOADS_PER_FRAME {
-            let Ok(msg) = self.batch.bg_io.thumb.rx.try_recv() else { break };
-            let Some(item) = self.batch.find_by_id_mut(msg.item_id) else { continue };
-            let Some((tw, th, pixels)) = msg.image else {
-                item.thumb.failed();
-                continue;
-            };
-            let ci = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
-            item.thumb.landed(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
-            uploaded += 1;
-        }
-        if uploaded == THUMB_UPLOADS_PER_FRAME {
-            ctx.request_repaint();
-        }
-        uploaded > 0
-    }
-
     /// Returns whether anything landed on an image this frame.
     pub(crate) fn drain_background_channels(&mut self, ctx: &egui::Context) -> bool {
         let mut landed = false;
@@ -988,15 +966,7 @@ impl PrunrApp {
             self.show_original = false;
         }
 
-        while let Ok(prep) = self.batch.bg_io.tex_prep.rx.try_recv() {
-            let Some(item) = self.batch.find_by_id_mut(prep.item_id) else { continue };
-            let Some(image) = prep.image else {
-                item.texture_unreadable(prep.target);
-                continue;
-            };
-            let landing = crate::gui::background_io::TexLanding::Image { item_id: prep.item_id, target: prep.target, unpacked: prep.unpacked };
-            self.batch.bg_io.uploads.push(prep.name, image, landing);
-        }
+        self.batch.queue_prepared_textures();
 
         let mut filter_only_arrived = false;
         let mut filtered = Vec::new();
@@ -1056,18 +1026,9 @@ impl PrunrApp {
             landed = true;
         }
 
-        landed |= self.pump_thumbnail_results(ctx);
+        landed |= self.batch.pump_thumbnail_results(ctx);
         self.batch.compress_history_off_thread();
-
-        // A result for a mask that has since changed is dropped;
-        // `ensure_selection_texture` already requested the current one.
-        let mut to_upload = Vec::new();
-        while let Ok(result) = self.batch.bg_io.selection_texture.rx.try_recv() {
-            let item_id = result.item_id;
-            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            item.land_selection_texture(result, |image, landing| to_upload.push((format!("selection_{item_id}"), image, landing, egui::TextureOptions::LINEAR)));
-        }
-
+        self.batch.queue_selection_textures();
 
         while let Ok(load) = self.batch.bg_io.bg_image.rx.try_recv() {
             self.land_bg_image(load);
@@ -1076,57 +1037,10 @@ impl PrunrApp {
         }
         self.keep_bg_images_in_step();
 
-        // A picture that is no longer the item's backdrop (changed while it
-        // was built) is dropped; the next kick builds the current one.
-        while let Ok((item_id, key, built)) = self.batch.bg_io.bg_tex_prep.rx.try_recv() {
-            if matches!(built, crate::gui::background_io::BackdropBuilt::Thumb(..)) {
-                self.batch.building_backdrop_thumb = None;
-            }
-            let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-            if !item.land_backdrop_built(key, built, |image, landing, options| to_upload.push((format!("backdrop_{key:x}"), image, landing, options))) {
-                ctx.request_repaint();
-            }
-        }
-        for (name, image, landing, options) in to_upload {
-            self.batch.bg_io.uploads.push_with(name, image, landing, options);
-        }
-
-        // Large pictures upload a few tiles per frame and land whole.
-        let mut uploads = std::mem::take(&mut self.batch.bg_io.uploads);
-        let pumped = uploads.pump(ctx, |landing| {
-            self.batch.find_by_id(landing.item_id()).is_some_and(|i| i.wants_upload(landing))
-        });
-        self.batch.bg_io.uploads = uploads;
-        for landing in pumped.dropped {
-            if let Some(item) = self.batch.find_by_id_mut(landing.item_id()) {
-                item.upload_dropped(&landing);
-            }
-        }
-        for (texture, landing) in pumped.landed {
-            use crate::gui::background_io::TexLanding;
-            match landing {
-                TexLanding::Image { item_id, target, unpacked } => {
-                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                    item.land_texture(texture, target);
-                    if let Some(rgba) = unpacked {
-                        item.hold_unpacked_result(rgba);
-                    }
-                    landed = true;
-                }
-                TexLanding::Selection { item_id, key, shown } => {
-                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                    item.install_selection_texture(texture, key, shown);
-                }
-                TexLanding::Backdrop { item_id, key } => {
-                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                    landed |= item.install_backdrop(key, texture);
-                }
-                TexLanding::BackdropThumb { item_id, key } => {
-                    let Some(item) = self.batch.find_by_id_mut(item_id) else { continue };
-                    item.install_backdrop_thumb(key, texture);
-                }
-            }
-        }
+        self.batch.queue_backdrop_pictures(ctx);
+        // After every queue above: a texture that arrived this frame starts
+        // uploading this frame.
+        landed |= self.batch.pump_texture_uploads(ctx);
         let id_floor = self.batch.next_id;
         let mut loaded_count = 0u32;
         let mut unreadable = 0u32;
@@ -3527,5 +3441,64 @@ mod download_tests {
         app.pump_download_manager(&ctx);
         assert!(app.hardware_install_cache.has_installed(ModelId::Silueta), "read again");
         assert_eq!(app.hardware_install_cache.has_installed(id), prunr_models::is_available(id));
+    }
+}
+
+/// What the frame's drain does with textures built off the UI thread.
+#[cfg(test)]
+mod texture_landing_tests {
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+    use super::PrunrApp;
+    use crate::gui::background_io::{BackdropBuilt, SelectionImage, SelectionStyle, SelectionTextureResult, TexPrepMsg, TexTarget, ThumbMsg};
+    use crate::gui::image_texture::PreparedImage;
+    use crate::gui::tests::fixtures::{bg_picture, push_test_item};
+
+    fn prepared() -> PreparedImage {
+        PreparedImage::from_rgba(&image::RgbaImage::new(2, 2))
+    }
+
+    /// A photo texture, a selection overlay and a backdrop picture built
+    /// before a frame all go up on that frame: each joins the upload queue
+    /// before the queue uploads.
+    #[test]
+    fn textures_built_before_a_frame_land_on_it() {
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        let style = SelectionStyle::with_fill(0.5);
+        let mask = Arc::new(prunr_core::selection::MaskArtifact::from_cells(2, 2, vec![1; 4]));
+        let item = push_test_item(&mut app, 1);
+        item.source_tex_pending = true;
+        item.selection_mask = Some(Arc::clone(&mask));
+        item.selection_hash = Some(7);
+        item.selection_tex_pending = Some((7, style));
+        item.settings.bg_image_hash = NonZeroU64::new(9);
+        item.hold_bg_image(bg_picture(9));
+        let key = item.backdrop_key().expect("a picture backdrop");
+        let io = &app.batch.bg_io;
+        io.tex_prep.tx.send(TexPrepMsg { item_id: 1, name: "source".into(), image: Some(prepared()), target: TexTarget::Source, unpacked: None }).unwrap();
+        io.selection_texture.tx.send(SelectionTextureResult { item_id: 1, image: SelectionImage::Full { image: prepared() }, key: (7, style), shown: mask }).unwrap();
+        io.bg_tex_prep.tx.send((1, key, BackdropBuilt::Picture(Some(prepared()), None, None))).unwrap();
+        assert!(app.drain_background_channels(&ctx), "the frame says something landed");
+        let item = &app.batch.items[0];
+        assert!(item.source_texture.is_some(), "the photo");
+        assert!(item.selection_texture.is_some(), "the selection overlay");
+        assert!(item.backdrop_texture_for(key).is_some(), "the backdrop picture");
+    }
+
+    /// Thumbnails go up three a frame; the rest wait for the next.
+    #[test]
+    fn thumbnails_go_up_three_a_frame() {
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        for id in 1..=4 {
+            push_test_item(&mut app, id);
+            app.batch.bg_io.thumb.tx.send(ThumbMsg { item_id: id, image: Some((1, 1, vec![0; 4])) }).unwrap();
+        }
+        let up = |app: &PrunrApp| app.batch.items.iter().filter(|i| i.thumb.texture().is_some()).count();
+        app.drain_background_channels(&ctx);
+        assert_eq!(up(&app), 3);
+        app.drain_background_channels(&ctx);
+        assert_eq!(up(&app), 4);
     }
 }
