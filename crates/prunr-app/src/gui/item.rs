@@ -2420,12 +2420,29 @@ impl BatchItem {
         self.step(Timeline::next, Timeline::redo)
     }
 
-    /// Move to the step `target` names, unless its saved state is gone.
-    fn step(&mut self, target: fn(&Timeline) -> Option<&DocState>, moved: fn(&mut Timeline) -> Option<StepKind>) -> Result<StepKind, StepRefused> {
+    /// Whether `undo_step` would move, without moving.
+    pub(crate) fn undo_target(&self) -> Result<(), StepRefused> {
+        self.step_target(Timeline::previous).map(|_| ())
+    }
+
+    /// Whether `redo_step` would move, without moving.
+    pub(crate) fn redo_target(&self) -> Result<(), StepRefused> {
+        self.step_target(Timeline::next).map(|_| ())
+    }
+
+    /// The step `target` names, unless there is none or its saved state
+    /// is gone.
+    fn step_target(&self, target: fn(&Timeline) -> Option<&DocState>) -> Result<&DocState, StepRefused> {
         let to = target(&self.timeline).ok_or(StepRefused::Nothing)?;
         if !to.readable() {
             return Err(StepRefused::Lost);
         }
+        Ok(to)
+    }
+
+    /// Move to the step `target` names, unless its saved state is gone.
+    fn step(&mut self, target: fn(&Timeline) -> Option<&DocState>, moved: fn(&mut Timeline) -> Option<StepKind>) -> Result<StepKind, StepRefused> {
+        let to = self.step_target(target)?;
         let keeps_run = self.move_keeps_run(to);
         let kind = moved(&mut self.timeline).ok_or(StepRefused::Nothing)?;
         // The run goes on, its preview with it.
