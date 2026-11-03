@@ -2,6 +2,7 @@
 //! every file the app writes over.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Write `path` through a temp file beside it, renamed into place once
 /// whole and on disk: a reader never sees half a file, and a write that
@@ -12,8 +13,10 @@ pub fn write_replacing(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    // Saves run on their own threads; two to one path must not share a temp file.
+    static NEXT_PART: AtomicU64 = AtomicU64::new(0);
     let mut part = path.as_os_str().to_owned();
-    part.push(format!(".{}.part", std::process::id()));
+    part.push(format!(".{}.{}.part", std::process::id(), NEXT_PART.fetch_add(1, Ordering::Relaxed)));
     let part = PathBuf::from(part);
     let file = match std::fs::File::create(&part) {
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && path.is_file() => {
@@ -204,6 +207,25 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"the new file");
         write_bytes_replacing(&tmp.path().join("fresh.png"), b"made").unwrap();
         assert_eq!(std::fs::read(tmp.path().join("fresh.png")).unwrap(), b"made");
+    }
+
+    /// A second save to the same path while the first is still writing
+    /// writes its own temp file: both land whole, the later rename wins.
+    #[test]
+    fn two_writes_to_one_path_do_not_share_a_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("photo.png");
+        let outer = write_replacing(&path, |w| {
+            std::io::Write::write_all(w, b"first half, ")?;
+            std::io::Write::flush(w)?;
+            write_bytes_replacing(&path, b"the other save").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"the other save");
+            std::io::Write::write_all(w, b"second half")
+        });
+        outer.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first half, second half");
+        let left: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("photo.png")], "no temp file left");
     }
 
     #[test]
