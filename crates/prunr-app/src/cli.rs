@@ -1038,8 +1038,8 @@ impl UpscaleJob<'_> {
         let needed = prunr_core::upscale::needed_bytes(self.model, model_input.width(), model_input.height(), self.scale.factor());
         let free = prunr_app::hardware::available_ram_bytes_now();
         if needed > free {
-            use crate::gui::views::format_byte_size;
-            return Err(format!("too large to upscale: needs about {} of free memory, {} is free", format_byte_size(needed), format_byte_size(free)));
+            use prunr_core::memory::byte_size;
+            return Err(format!("too large to upscale: needs about {} of free memory, {} is free", byte_size(needed), byte_size(free)));
         }
         let progress = prunr_core::Progress::none();
         let (model, factor, engine, on_cpu) = (self.model, self.scale.factor(), self.engine, &mut self.on_cpu);

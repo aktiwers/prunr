@@ -1,4 +1,5 @@
 pub mod bench;
+pub mod download;
 pub mod fs_util;
 pub mod gui;
 pub mod hardware;
