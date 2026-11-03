@@ -16,6 +16,7 @@
 //! - At app start, instances no longer running lose their folders, and the
 //!   one shared folder of earlier versions its entries older than 10 min.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -116,20 +117,40 @@ fn source_stem(source_filename: &str) -> &str {
 /// do: a repeat becomes `stem-2`, `stem-3`…, its extension kept, so the
 /// files one save writes from them never share a name.
 pub(crate) fn distinct_filenames<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut taken = std::collections::HashSet::new();
+    let mut taken = TakenStems::default();
     filenames.into_iter().map(|name| {
-        let stem = source_stem(name);
-        let mut candidate = stem.to_string();
-        let mut n = 1;
-        while !taken.insert(candidate.to_lowercase()) {
-            n += 1;
-            candidate = format!("{stem}-{n}");
-        }
+        // Made from a `&str`: lossless.
+        let candidate = taken.take(OsStr::new(source_stem(name))).to_string_lossy().into_owned();
         match Path::new(name).extension() {
             Some(ext) => format!("{candidate}.{}", ext.to_string_lossy()),
             None => candidate,
         }
     }).collect()
+}
+
+/// The stems the files of one save are named by so far, so that no two
+/// share one, ignoring case as Windows and macOS do.
+#[derive(Default)]
+pub struct TakenStems(std::collections::HashSet<OsString>);
+
+impl TakenStems {
+    /// `stem`, or `stem-2`, `stem-3`… when that is taken; taken from now on.
+    pub fn take(&mut self, stem: &OsStr) -> OsString {
+        let mut candidate = stem.to_os_string();
+        let mut n = 1;
+        while !self.0.insert(folded(&candidate)) {
+            n += 1;
+            candidate = stem.to_os_string();
+            candidate.push(format!("-{n}"));
+        }
+        candidate
+    }
+}
+
+/// `name` in lower case; a name that is not UTF-8 as it is, the same as
+/// another only byte for byte.
+fn folded(name: &OsStr) -> OsString {
+    name.to_str().map_or_else(|| name.to_os_string(), |s| s.to_lowercase().into())
 }
 
 /// `<source-stem>.prunr.<ext>`, the name a saved or dragged result gets.
