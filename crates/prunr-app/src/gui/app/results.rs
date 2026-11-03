@@ -357,7 +357,18 @@ impl PrunrApp {
                     self.toasts.error(format!("Could not download {name}: {}", prunr_core::plain::reason(error)));
                     self.refresh_install_cache();
                 }
-                DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } | DownloadEvent::Cancelled { .. } => {}
+                DownloadEvent::Cancelled { id } => {
+                    // Cancelled while its half-precision file came, a model
+                    // keeps its own, checked as any new download.
+                    let was_installed = self.hardware_install_cache.has_installed(id);
+                    self.refresh_install_cache();
+                    if !was_installed && self.hardware_install_cache.has_installed(id) {
+                        if let Some(column) = self.download_check_column(id) {
+                            self.download_manager.queue_check(id, column);
+                        }
+                    }
+                }
+                DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}
             }
         }
         ctx.request_repaint();
@@ -3528,5 +3539,27 @@ mod install_tests {
             let told_again = app.toasts.len_for_test() > before + 1;
             assert_eq!(told_again, kind == "success" || says.starts_with("Could"), "{says}: a failed start is not said twice");
         }
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use crate::gui::download_manager::DownloadEvent;
+    use prunr_models::ModelId;
+
+    /// A download cancelled while its half-precision file came keeps the
+    /// model's own file: the store reads what is installed again, where it
+    /// showed Download for an installed model.
+    #[test]
+    fn a_cancelled_download_reads_what_is_installed_again() {
+        let ctx = egui::Context::default();
+        let mut app = crate::gui::app::PrunrApp::new_for_test();
+        app.hardware_install_cache = Default::default();
+        let id = ModelId::RealEsrganX4Plus;
+        app.download_manager.begin_for_test(id);
+        app.download_manager.sender_for_test()(DownloadEvent::Cancelled { id });
+        app.pump_download_manager(&ctx);
+        assert!(app.hardware_install_cache.has_installed(ModelId::Silueta), "read again");
+        assert_eq!(app.hardware_install_cache.has_installed(id), prunr_models::is_available(id));
     }
 }

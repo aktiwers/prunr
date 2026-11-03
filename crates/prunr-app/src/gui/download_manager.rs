@@ -177,9 +177,10 @@ impl DownloadManager {
         move |event| drop(tx.send(event))
     }
 
-    /// No-op when the model is already installed / in progress / queued.
+    /// No-op when the model is already installed with every file it
+    /// downloads, or in progress / queued.
     pub(crate) fn start_download(&mut self, id: ModelId) {
-        if prunr_models::is_available(id) {
+        if prunr_models::is_available(id) && !prunr_models::lacks_fp16_companion(id) {
             self.states.insert(id, DownloadState::Done);
             return;
         }
@@ -280,12 +281,11 @@ impl DownloadManager {
         fp16: Option<OnDemandVariant>,
     ) {
         let Some(dir) = self.prepare_dir(id, None) else { return };
-        let dest = dir.join(filename);
-        let fp16_dest = fp16.as_ref().map(|v| dir.join(v.filename));
+        let own = Fetch { url, sha256, dest: dir.join(filename), bytes: u64::from(size_mb) * 1024 * 1024 };
+        let companion = fp16.map(|v| Fetch { url: v.url, sha256: v.sha256, dest: dir.join(v.filename), bytes: v.size_bytes() });
+        let single = Single::new(own, companion);
         // Main file + optional fp16 companion count as one download, one bar.
-        let main_bytes = (size_mb as u64) * 1024 * 1024;
-        let fp16_bytes = fp16.as_ref().map(|v| (v.size_mb as u64) * 1024 * 1024).unwrap_or(0);
-        let total = main_bytes + fp16_bytes;
+        let total = single.total();
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
@@ -293,41 +293,7 @@ impl DownloadManager {
                 let _ = tx.send(failure_event(id, why, &cancel));
                 return;
             }
-            let on_progress_main = {
-                let tx = tx.clone();
-                move |bytes_so_far: u64, _part_total: u64| {
-                    let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
-                }
-            };
-            if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &verifying(&tx, id, fp16.is_none())) {
-                let _ = tx.send(failure_event(id, e.message, &cancel));
-                return;
-            }
-
-            let mut note = None;
-            if let (Some(variant), Some(dest_fp16)) = (fp16.as_ref(), fp16_dest.as_ref()) {
-                let on_progress_fp16 = {
-                    let tx = tx.clone();
-                    move |part_so_far: u64, _part_total: u64| {
-                        let _ = tx.send(DownloadEvent::Progress {
-                            id, bytes_so_far: main_bytes + part_so_far, total,
-                        });
-                    }
-                };
-                if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &verifying(&tx, id, true)) {
-                    // fp16 companion failed: keep the main fp32 install
-                    // and surface a non-fatal warning. Without the fp16
-                    // file on disk the engine loads the fp32 weights.
-                    tracing::warn!(
-                        ?id,
-                        error = %e.message,
-                        "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
-                    );
-                    note = Some("Its faster half-precision file did not download, so it runs at full precision. Download it again to get it.".to_string());
-                }
-            }
-
-            let _ = tx.send(DownloadEvent::Complete { id, note });
+            let _ = tx.send(single.run(id, &tx, &cancel, download_to_file));
         });
     }
 
@@ -416,6 +382,77 @@ impl DownloadManager {
         let _ = self.progress_tx.send(DownloadEvent::Failed { id, error });
     }
 }
+
+/// One file of a download: from `url` to `dest`, checked against `sha256`.
+struct Fetch {
+    url: &'static str,
+    sha256: &'static str,
+    dest: PathBuf,
+    bytes: u64,
+}
+
+/// A single-file download: the model's own file, then its half-precision
+/// companion where it has one.
+struct Single {
+    /// `None` when it is in place: only the companion did not come.
+    own: Option<Fetch>,
+    companion: Option<Fetch>,
+}
+
+impl Single {
+    fn new(own: Fetch, companion: Option<Fetch>) -> Self {
+        Self { own: Some(own).filter(|own| !own.dest.is_file()), companion }
+    }
+
+    fn total(&self) -> u64 {
+        self.own.iter().chain(&self.companion).map(|f| f.bytes).sum()
+    }
+
+    /// Fetch each file in turn with `fetch` (`download_to_file`, or a
+    /// test's); how the download ends.
+    fn run(
+        &self,
+        id: ModelId,
+        tx: &Waking,
+        cancel: &Arc<AtomicBool>,
+        fetch: impl Fn(&str, &Path, &str, Arc<AtomicBool>, &dyn Fn(u64, u64), &dyn Fn()) -> Result<(), DlError>,
+    ) -> DownloadEvent {
+        let total = self.total();
+        let mut done = 0;
+        if let Some(own) = &self.own {
+            let on_progress = |bytes_so_far: u64, _part_total: u64| {
+                let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
+            };
+            if let Err(e) = fetch(own.url, &own.dest, own.sha256, Arc::clone(cancel), &on_progress, &verifying(tx, id, self.companion.is_none())) {
+                return failure_event(id, e.message, cancel);
+            }
+            done = own.bytes;
+        }
+        let Some(companion) = &self.companion else { return DownloadEvent::Complete { id, note: None } };
+        let on_progress = |part_so_far: u64, _part_total: u64| {
+            let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far: done + part_so_far, total });
+        };
+        match fetch(companion.url, &companion.dest, companion.sha256, Arc::clone(cancel), &on_progress, &verifying(tx, id, true)) {
+            Ok(()) => DownloadEvent::Complete { id, note: None },
+            // Fetched alone, or cancelled: it ends as that, the model's own
+            // file staying installed.
+            Err(e) if self.own.is_none() || cancel.load(Ordering::Acquire) => failure_event(id, e.message, cancel),
+            Err(e) => {
+                // fp16 companion failed: keep the main fp32 install
+                // and surface a non-fatal warning. Without the fp16
+                // file on disk the engine loads the fp32 weights.
+                tracing::warn!(
+                    ?id,
+                    error = %e.message,
+                    "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
+                );
+                DownloadEvent::Complete { id, note: Some(COMPANION_FAILED.to_string()) }
+            }
+        }
+    }
+}
+
+const COMPANION_FAILED: &str = "Its faster half-precision file did not download, so it runs at full precision. Download it again to get it.";
 
 /// How a download that stopped early ends: cancelled by the user, or failed.
 fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEvent {
@@ -826,6 +863,82 @@ mod tests {
         sweep_store_partials(store.path());
         assert!(theirs.exists());
         assert!(store.path().join("rorem-4s-fp16-1.0.0").exists(), "the link itself stays");
+    }
+
+    // ── Single-file downloads ─────────────────────────────────────────────
+
+    fn file_in(dir: &Path, name: &'static str, mb: u64) -> Fetch {
+        Fetch { url: name, sha256: "", dest: dir.join(name), bytes: mb * 1024 * 1024 }
+    }
+
+    /// Run `single` against a network that answers each url with
+    /// `answer`: the urls it asked for, and how it ended.
+    fn run_offline(single: &Single, cancel: &Arc<AtomicBool>, answer: impl Fn(&str, &AtomicBool) -> Result<(), DlError>) -> (Vec<String>, DownloadEvent) {
+        let dm = fixture();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ended = single.run(ModelId::RealEsrganX4Plus, &dm.progress_tx, cancel, |url, _, _, cancel, _, _| {
+            asked.borrow_mut().push(url.to_string());
+            answer(url, &cancel)
+        });
+        (asked.into_inner(), ended)
+    }
+
+    /// A model whose own file is in place (its half-precision file failed
+    /// or was cancelled) fetches only the half-precision file, its bar
+    /// counting that file alone.
+    #[test]
+    fn with_its_own_file_in_place_only_the_half_precision_file_is_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = file_in(dir.path(), "x4.onnx", 64);
+        std::fs::write(&own.dest, b"fp32").unwrap();
+        let single = Single::new(own, Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
+        assert_eq!(single.total(), 33 * 1024 * 1024);
+        let (asked, ended) = run_offline(&single, &Arc::default(), |_, _| Ok(()));
+        assert_eq!(asked, ["x4_fp16.onnx"]);
+        assert!(matches!(ended, DownloadEvent::Complete { note: None, .. }), "{ended:?}");
+    }
+
+    /// A cancel while the half-precision file comes ends as a cancel, not
+    /// as "ready" with a note that the file failed; the model's own file,
+    /// fetched first, stays.
+    #[test]
+    fn a_cancel_during_the_half_precision_file_ends_as_a_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = Single::new(file_in(dir.path(), "x4.onnx", 64), Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (asked, ended) = run_offline(&single, &cancel, |url, cancel| {
+            if url == "x4_fp16.onnx" {
+                cancel.store(true, Ordering::Release);
+                return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
+            }
+            Ok(())
+        });
+        assert_eq!(asked, ["x4.onnx", "x4_fp16.onnx"]);
+        assert!(matches!(ended, DownloadEvent::Cancelled { .. }), "{ended:?}");
+    }
+
+    /// A half-precision file that fails within a whole download leaves the
+    /// model ready and says to download it again; fetched alone, its
+    /// failure is a failed download, which the card offers to try again,
+    /// and the next try brings it.
+    #[test]
+    fn a_failed_half_precision_file_can_be_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, companion) = (|| file_in(dir.path(), "x4.onnx", 64), || Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
+        let refused = |url: &str, _: &AtomicBool| if url == "x4_fp16.onnx" { Err(DlError::fatal("The download was refused (404 Not Found)")) } else { Ok(()) };
+        let (_, ended) = run_offline(&Single::new(own(), companion()), &Arc::default(), refused);
+        assert!(matches!(&ended, DownloadEvent::Complete { note: Some(note), .. } if note == COMPANION_FAILED), "{ended:?}");
+
+        std::fs::write(own().dest, b"fp32").unwrap();
+        let alone = Single::new(own(), companion());
+        let (_, ended) = run_offline(&alone, &Arc::default(), refused);
+        let mut dm = fixture();
+        dm.begin_for_test(ModelId::RealEsrganX4Plus);
+        dm.apply_event(&ended);
+        assert!(matches!(dm.state(ModelId::RealEsrganX4Plus), DownloadState::Failed { .. }), "{ended:?}");
+        let (asked, ended) = run_offline(&alone, &Arc::default(), |_, _| Ok(()));
+        assert_eq!(asked, ["x4_fp16.onnx"], "the try again fetches it alone");
+        assert!(matches!(ended, DownloadEvent::Complete { note: None, .. }), "{ended:?}");
     }
 
     // ── Queue behaviour ───────────────────────────────────────────────────

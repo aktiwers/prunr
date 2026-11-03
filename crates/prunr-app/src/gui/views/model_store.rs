@@ -49,6 +49,20 @@ pub(crate) fn card_action(
     }
 }
 
+/// What a card offers for the half-precision file its installed model
+/// lacks: Download, or Try again once it failed; nothing while a download
+/// of the model runs, which the footer shows.
+pub(crate) fn companion_action(installed: bool, lacking: bool, download_state: &DownloadState) -> Option<CardAction> {
+    if !(installed && lacking) {
+        return None;
+    }
+    match download_state {
+        DownloadState::Failed { .. } => Some(CardAction::Retry),
+        DownloadState::Idle | DownloadState::Done => Some(CardAction::Download),
+        DownloadState::InProgress { .. } | DownloadState::Queued | DownloadState::Verifying => None,
+    }
+}
+
 /// What a click on a card asks for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Click {
@@ -127,10 +141,12 @@ pub fn render(ctx: &egui::Context, app: &mut PrunrApp) -> bool {
                         let row = i / 3;
                         let state = app.download_manager.state(desc.id);
                         let height = last.get(row).copied().unwrap_or(0.0);
+                        let installed = app.hardware_install_cache.has_installed(desc.id);
                         let card = Card {
                             desc,
-                            installed: app.hardware_install_cache.has_installed(desc.id),
+                            installed,
                             state: &state,
+                            companion: companion_action(installed, app.hardware_install_cache.lacks_companion(desc.id), &state),
                             test: card_test(app, &results, idle, desc.id),
                             provider: &provider,
                             engines: &results.engines_said,
@@ -251,6 +267,8 @@ struct Card<'a> {
     desc: &'a ModelDescriptor,
     installed: bool,
     state: &'a DownloadState,
+    /// What it offers for a half-precision file it lacks.
+    companion: Option<CardAction>,
     test: CardTest<'a>,
     /// The runtime's provider, for the hardware advisory.
     provider: &'a str,
@@ -262,7 +280,7 @@ struct Card<'a> {
 /// here, or Test; and a footer with its size and what can be done with
 /// it. The name row opens the licence, author and source in place.
 fn render_card(ui: &mut egui::Ui, card: &Card<'_>, size: egui::Vec2) -> (Option<Click>, f32) {
-    let Card { desc, installed, state, test, provider, engines } = *card;
+    let Card { desc, installed, state, companion, test, provider, engines } = *card;
     let action = card_action(desc, installed, state);
     let advisory = desc.hardware_advisory(provider);
     let border = if installed {
@@ -311,6 +329,9 @@ fn render_card(ui: &mut egui::Ui, card: &Card<'_>, size: egui::Vec2) -> (Option<
             if let Some(click) = test_line(ui, desc, test, engines) {
                 clicked = Some(click);
             }
+            if let Some(click) = companion.and_then(|action| companion_line(ui, desc, action, test)) {
+                clicked = Some(click);
+            }
             let downloading = matches!(state, DownloadState::InProgress { .. });
             let footer = FOOTER_HEIGHT + if downloading { BAR_HEIGHT + ui.spacing().item_spacing.y } else { 0.0 };
             let content = ui.min_rect().height() + theme::SPACE_XS + footer;
@@ -338,7 +359,7 @@ fn render_card(ui: &mut egui::Ui, card: &Card<'_>, size: egui::Vec2) -> (Option<
                             _ => ButtonKind::Secondary,
                         };
                         let reason = match test {
-                            CardTest::Testing { .. } => Some("Waits until its test is done."),
+                            CardTest::Testing { .. } => Some(WAITS_FOR_TEST),
                             _ => (!action_enabled(action)).then_some(advisory.unwrap_or("Nothing to do yet.")),
                         };
                         let resp = super::chip::gated(ui, reason, |ui| button(ui, kind, label));
@@ -403,6 +424,28 @@ fn test_line(ui: &mut egui::Ui, desc: &ModelDescriptor, test: CardTest, engines:
     }
     clicked
 }
+
+/// A card's line for the half-precision file its installed model lacks:
+/// "Half-precision file missing." with Download, or Try again.
+fn companion_line(ui: &mut egui::Ui, desc: &ModelDescriptor, action: CardAction, test: CardTest) -> Option<Click> {
+    let (ModelSource::OnDemand { fp16: Some(file), .. }, Some(label)) = (desc.source, button_label(action)) else { return None };
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Half-precision file missing.").size(theme::FONT_SIZE_SECONDARY).color(theme::ADVISORY_TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let reason = matches!(test, CardTest::Testing { .. }).then_some(WAITS_FOR_TEST);
+            let resp = super::chip::gated(ui, reason, |ui| button(ui, ButtonKind::Secondary, label));
+            let body = format!("Downloads its half-precision file ({}), which runs faster on a graphics card.", super::get_model::size_label(file.size_mb));
+            let resp = super::chip::tooltip(resp, label, &body, None);
+            if super::chip::named_with(resp, || format!("Download the half-precision file of {}", desc.display_name)).clicked() {
+                clicked = Some(Click::Footer(action));
+            }
+        });
+    });
+    clicked
+}
+
+const WAITS_FOR_TEST: &str = "Waits until its test is done.";
 
 /// The footer's text: the size, or what the download is doing.
 /// The card's footer line, its colour, and what its hover says (why a
@@ -628,6 +671,26 @@ mod tests {
         ] {
             let a = card_action(&d, installed, &state);
             assert_eq!((a, action_enabled(a)), (action, enabled), "installed={installed} {state:?}");
+        }
+    }
+
+    /// An installed model missing its half-precision file offers it on its
+    /// card: Download, Try again once it failed, nothing while a download
+    /// of it runs; a model not installed, or not missing one, offers none.
+    #[test]
+    fn a_card_offers_a_missing_half_precision_file() {
+        let failed = DownloadState::Failed { error: "404".into() };
+        for (installed, lacking, state, offer) in [
+            (true, true, DownloadState::Idle, Some(CardAction::Download)),
+            (true, true, DownloadState::Done, Some(CardAction::Download)),
+            (true, true, failed.clone(), Some(CardAction::Retry)),
+            (true, true, DownloadState::InProgress { bytes_so_far: 1, total_bytes: 9 }, None),
+            (true, true, DownloadState::Queued, None),
+            (true, true, DownloadState::Verifying, None),
+            (true, false, DownloadState::Idle, None),
+            (false, true, failed, None),
+        ] {
+            assert_eq!(companion_action(installed, lacking, &state), offer, "installed={installed} lacking={lacking} {state:?}");
         }
     }
 
