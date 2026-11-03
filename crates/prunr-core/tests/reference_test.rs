@@ -10,7 +10,7 @@ mod test_common;
 use prunr_core::{
     ModelKind, OrtEngine,
     DOWNSCALE_TARGET,
-    process_image, batch_process,
+    process_image,
     downscale_image,
 };
 use image::{DynamicImage, RgbaImage};
@@ -306,36 +306,4 @@ fn test_downscale_image_preserves_aspect_ratio() {
         (aspect_original - aspect_scaled).abs() < 0.02,
         "Aspect ratio changed too much: {aspect_original:.3} → {aspect_scaled:.3}"
     );
-}
-
-// ============================================================
-// Batch API
-// ============================================================
-
-#[test]
-fn test_batch_process_multiple_images() {
-    if skip_if_no_ort("test_batch_process_multiple_images") { return; }
-    let image_path_1 = test_images_dir().join("car-1.jpg");
-    let image_path_2 = test_images_dir().join("car-2.jpg");
-
-    if !image_path_1.exists() || !image_path_2.exists() {
-        eprintln!("Skipping batch test: test images not found");
-        return;
-    }
-
-    let img1 = std::fs::read(&image_path_1).unwrap();
-    let img2 = std::fs::read(&image_path_2).unwrap();
-    let images: Vec<&[u8]> = vec![img1.as_slice(), img2.as_slice()];
-
-    let results = batch_process(
-        &images,
-        ModelKind::Silueta,
-        1,
-        |_| prunr_core::Progress::none(),
-    );
-
-    assert_eq!(results.len(), 2, "batch_process must return one result per input");
-    for (i, r) in results.iter().enumerate() {
-        assert!(r.is_ok(), "Batch result {} failed: {:?}", i, r);
-    }
 }

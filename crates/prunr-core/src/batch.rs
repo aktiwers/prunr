@@ -1,11 +1,8 @@
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 
 use crate::{
     engine::OrtEngine,
-    pipeline::process_image_with_mask,
-    progress::Progress,
-    types::{CoreError, MaskSettings, ModelKind, ProcessResult},
+    types::{CoreError, ModelKind},
 };
 
 /// How many engines a batch builds for `jobs` on `provider`, the one the
@@ -71,76 +68,6 @@ pub fn ort_intra_threads(rayon_workers: usize) -> usize {
     (cpus / workers).max(1)
 }
 
-fn build_batch_pool(jobs: usize) -> rayon::ThreadPool {
-    ThreadPoolBuilder::new()
-        .num_threads(jobs.max(1))
-        .build()
-        .expect("Failed to build rayon batch thread pool")
-}
-
-/// Process multiple images in parallel using a rayon thread pool.
-///
-/// # Arguments
-/// - `images`: image bytes (PNG, JPEG, WebP, BMP)
-/// - `jobs`: Desired parallelism; the pool is sized by `engine_pool_size`.
-/// - `progress_for`: the progress handle for image `idx`.
-///
-/// Returns one entry per input image, in input order. The rayon pool is
-/// sized to the engine count, so engines see no Mutex contention.
-pub fn batch_process<F>(
-    images: &[&[u8]],
-    model: ModelKind,
-    jobs: usize,
-    progress_for: F,
-) -> Vec<Result<ProcessResult, CoreError>>
-where
-    F: Fn(usize) -> Progress + Send + Sync,
-{
-    batch_process_with_mask(images, model, jobs, &MaskSettings::default(), false, progress_for)
-}
-
-/// Like `batch_process` but with custom mask settings.
-pub fn batch_process_with_mask<F>(
-    images: &[&[u8]],
-    model: ModelKind,
-    jobs: usize,
-    mask: &MaskSettings,
-    cpu_only: bool,
-    progress_for: F,
-) -> Vec<Result<ProcessResult, CoreError>>
-where
-    F: Fn(usize) -> Progress + Send + Sync,
-{
-    if images.is_empty() {
-        return Vec::new();
-    }
-
-    let engines = match create_engine_pool(model, jobs, cpu_only) {
-        Ok(e) => e,
-        Err(e) => return images.iter().map(|_| Err(CoreError::Model(e.to_string()))).collect(),
-    };
-    let pool_size = engines.len();
-    let pool = build_batch_pool(pool_size);
-
-    let mut results: Vec<Result<ProcessResult, CoreError>> =
-        (0..images.len()).map(|_| Err(CoreError::Model("not processed".into()))).collect();
-
-    // Results go straight into their slots: no second N × ProcessResult
-    // buffer, each holding a full RGBA.
-    pool.install(|| {
-        results
-            .par_iter_mut()
-            .zip(images.par_iter())
-            .enumerate()
-            .for_each(|(idx, (slot, img_bytes))| {
-                let engine = &engines[idx % engines.len()];
-                *slot = process_image_with_mask(img_bytes, engine, mask, &progress_for(idx));
-            });
-    });
-
-    results
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,16 +95,5 @@ mod tests {
         assert!(ort_intra_threads(0) >= 1);
         assert!(ort_intra_threads(1) >= 1);
         assert_eq!(ort_intra_threads(4), (num_cpus::get() / 4).max(1));
-    }
-
-    #[test]
-    fn test_batch_process_empty_input() {
-        let results = batch_process(
-            &[],
-            ModelKind::Silueta,
-            1,
-            |_| Progress::none(),
-        );
-        assert!(results.is_empty());
     }
 }
