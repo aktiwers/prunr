@@ -926,34 +926,9 @@ mod tests {
 
     #[test]
     fn cache_impact_for_recipe_diff_covers_common_knobs() {
-        use prunr_core::{ComposeMode, EdgeScale, SubjectEffect, InputTransform, LineStyle, ModelKind};
-        use prunr_core::{CompositeRecipe, EdgeRecipe, InferenceRecipe, MaskSettings, UpscaleRecipe};
+        use prunr_core::{InputTransform, ModelKind};
 
-        let base = ProcessingRecipe {
-            inference: InferenceRecipe {
-                model: ModelKind::Silueta,
-                uses_segmentation: true,
-                uses_edge_detection: false,
-                input_transform: InputTransform::None,
-            },
-            edge: EdgeRecipe {
-                line_strength_bits: 0.5f32.to_bits(),
-                solid_line_color: None,
-                edge_thickness: 0,
-                edge_scale: EdgeScale::Fused,
-                compose_mode: ComposeMode::LinesOnly,
-                line_style: LineStyle::Solid,
-                line_fade_pct: 0,
-            },
-            mask: (&MaskSettings {
-                effect: SubjectEffect::None,
-                ..Default::default()
-            }).into(),
-            composite: CompositeRecipe::default(),
-            upscale: UpscaleRecipe::default(),
-            colorize: Default::default(),
-            depth: Default::default(),
-        };
+        let base = crate::gui::item_settings::ItemSettings::default().current_recipe(ModelKind::Silueta);
 
         assert_eq!(
             cache_impact_for_recipe_diff(&base, &base),
