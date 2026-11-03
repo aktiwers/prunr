@@ -91,16 +91,6 @@ jobs:
         timeout-minutes: 40
         run: cargo xtask fetch-models
 
-      - name: Compress models to .zst (if needed)
-        shell: bash
-        run: |
-          for f in models/*.onnx; do
-            if [ -f "$f" ] && [ ! -f "$f.zst" ]; then
-              echo "Compressing $f ..."
-              zstd -19 "$f" -o "$f.zst"
-            fi
-          done
-
       # Saved here, not when the job ends: a cache saved only by a job that
       # passes is never saved by one failing later, which then misses (and
       # downloads everything) on every run.
