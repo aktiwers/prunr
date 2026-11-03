@@ -21,6 +21,13 @@ fn zst_sibling(onnx_path: &Path) -> PathBuf {
     onnx_path.with_extension("onnx.zst")
 }
 
+/// Whether the app embeds `id`, and so needs its `.zst`. An on-demand
+/// model's would go unread: compressing each at level 19 took minutes
+/// and ran the release's model step out of time.
+fn embedded(id: prunr_models::ModelId) -> bool {
+    prunr_models::descriptor(id).is_some_and(|d| d.source.is_bundled())
+}
+
 /// Copy `src` to where the app downloads `id`, so dev runs take the
 /// production OnDemand path. Bundled and multi-part models are skipped.
 fn mirror_to_user_data_dir(src: &Path, id: prunr_models::ModelId) -> anyhow::Result<()> {
@@ -246,12 +253,14 @@ fn fetch_models() -> anyhow::Result<()> {
         file.write_all(&bytes)?;
         println!("  Saved to {}", dest.display());
 
-        compress_to_zst(&dest, &bytes)?;
+        if embedded(spec.id) {
+            compress_to_zst(&dest, &bytes)?;
+        }
         mirror_to_user_data_dir(&dest, spec.id)?;
     }
 
     // Recompress a stale or missing .zst (e.g. fetched by an older xtask).
-    for spec in MODELS {
+    for spec in MODELS.iter().filter(|spec| embedded(spec.id)) {
         let dest = Path::new(MODELS_DIR).join(spec.name);
         if !dest.exists() { continue; }
         let zst_path = zst_sibling(&dest);
