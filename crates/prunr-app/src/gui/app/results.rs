@@ -2891,6 +2891,33 @@ mod timeline_contract_tests {
         assert!(app.batch.items[1].job.is_none());
     }
 
+    /// A run held back while admission feeds a batch (an image imported
+    /// with auto-process on, a knob's re-run) goes with that batch's
+    /// Cancel: no later, unrelated event starts it.
+    #[test]
+    fn cancel_drops_the_runs_held_for_the_batch_being_admitted() {
+        use crate::gui::memory::{AdmissionController, ImageMemCost};
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        push_test_item(&mut app, 2).dimensions = (4, 4);
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([1, 9].map(|item_id| ImageMemCost { item_id, total: 1 }).into());
+        let work = |id| Some(crate::gui::worker::WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None, correction: None });
+        let (first, _rx) = app.processor.open_admission(ctrl, work);
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
+        let fed = app.processor.track_dispatch(recipe, first.iter().map(|w| (w.id, w.run)));
+        app.processor.admission_feeds(fed);
+        app.process_items(|i| i.id == 2, Some(StepKind::Process));
+        assert!(app.batch.items[1].job.is_none(), "held while admission feeds");
+
+        app.handle_cancel_all_and_reset();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        // Another run's answer, later: it frees its share and runs what was held.
+        app.admission_release_and_admit(1);
+        assert!(app.batch.items[1].job.is_none(), "the held run went with the Cancel");
+        assert!(rx.try_recv().is_err(), "no batch is sent");
+    }
+
     /// A Process result from where its model runs here leaves the app's
     /// accelerator and the Parallel jobs you set alone. Silueta cannot run
     /// on OpenVINO and reports the CPU by design; its result used to

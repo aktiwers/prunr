@@ -934,12 +934,14 @@ impl PrunrApp {
     }
 
     /// Cancel-All from the toolbar / Escape: request the global cancel,
-    /// clear admission, abandon every cut (waiting ones too), and
-    /// surface "Cancelled" in the status bar. Single source of truth so
-    /// the toolbar button and the keyboard shortcut don't drift.
+    /// clear admission and the runs held for it, abandon every cut
+    /// (waiting ones too), and surface "Cancelled" in the status bar.
+    /// Single source of truth so the toolbar button and the keyboard
+    /// shortcut don't drift.
     pub fn handle_cancel_all_and_reset(&mut self) {
         self.handle_cancel();
         self.processor.clear_admission();
+        self.processor.drop_deferred_runs();
         self.batch.abandon_cuts();
         // The capsule reads the slot, not the app state, so the reset
         // has to clear it.

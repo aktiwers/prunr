@@ -1626,6 +1626,14 @@ impl Processor {
         self.deferred_runs.push((ids, step));
     }
 
+    /// Cancel: the re-runs kept for when admission is through never run.
+    pub(crate) fn drop_deferred_runs(&mut self) {
+        let dropped = std::mem::take(&mut self.deferred_runs);
+        if !dropped.is_empty() {
+            tracing::info!(count = dropped.len(), "held runs dropped: the batch they waited for was cancelled");
+        }
+    }
+
     /// The re-runs kept while admission fed a batch, once it no longer does.
     pub(crate) fn take_deferred_runs(&mut self) -> Vec<(Vec<u64>, Option<super::timeline::StepKind>)> {
         if self.admission_still_feeding() {
