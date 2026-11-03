@@ -424,7 +424,7 @@ pub fn process_inpaint_with(
     // A scaled-down region's Feather band is that much narrower.
     let out = crate::inpaint::fill_at_scale(image, mask, req.soft_edge_band.as_deref(), req.fill_scale, fit(&req), progress, |img, m, band, at, progress| {
         let scaled = SdInpaintRequest { soft_edge_px: req.soft_edge_px * at, soft_edge_band: None, ..req.clone() };
-        paint_regions(&bundle, &vae, &img, m, band, &scaled, progress)
+        paint_regions(&bundle, &vae, img, m, band, &scaled, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     tracing::info!(
@@ -440,7 +440,7 @@ pub fn process_inpaint_with(
 fn paint_regions(
     bundle: &SdSession,
     vae: &VaeBackend,
-    image: &RgbaImage,
+    image: Cow<'_, RgbaImage>,
     mask: &GrayImage,
     band: Option<&GrayImage>,
     req: &SdInpaintRequest,
@@ -454,9 +454,10 @@ fn paint_regions(
 
 /// `paint_regions` with the filler passed in: `fill` gets each crop or
 /// tile, its mask and per-pixel band, and a handle framed on where it
-/// sits, so what it reports of its own pixels lands there.
+/// sits, so what it reports of its own pixels lands there. The regions
+/// are painted into `image` itself when it is handed over.
 fn paint_regions_with(
-    image: &RgbaImage,
+    image: Cow<'_, RgbaImage>,
     mask: &GrayImage,
     band: Option<&GrayImage>,
     max_side: u32,
@@ -481,7 +482,7 @@ fn paint_regions_with(
         progress.outer(idx, outer_total, Unit::Crop);
         progress.tile(idx, false);
     };
-    let mut out = image.clone();
+    let mut out = image.into_owned();
     for (component, plan) in components.iter().zip(&plans) {
         if progress.is_cancelled() { return Err(CoreError::Cancelled); }
         if let RegionPlan::Tiles(tiles) = plan {
@@ -3252,7 +3253,7 @@ mod tests {
             mask.put_pixel(x, y, Luma([255]));
         }
         let sink = Arc::new(RecordingSink::default());
-        paint_regions_with(&image, &mask, None, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
+        paint_regions_with(Cow::Borrowed(&image), &mask, None, SD_TILE, &Progress::new(sink.clone()).with_tile_previews(600), fake_fill).expect("paint");
         // At half size: the strip's three tiles at x 0, 384, 688, then the
         // square's crop at (688, 388).
         assert_eq!(places(&sink.updates()), vec![
@@ -3271,7 +3272,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let fit = crate::inpaint::Fit { long: 448, short: 448 };
         crate::inpaint::fill_at_scale(&photo, &hole, None, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, band, _, p| {
-            paint_regions_with(&img, m, band, SD_TILE, p, fake_fill)
+            paint_regions_with(img, m, band, SD_TILE, p, fake_fill)
         }).expect("fill");
         let found = places(&sink.updates());
         assert_eq!(found.len(), 1, "{found:?}");
