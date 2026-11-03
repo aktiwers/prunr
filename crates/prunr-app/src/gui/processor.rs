@@ -1634,6 +1634,15 @@ impl Processor {
         }
     }
 
+    /// A Cancel of `ids`: the re-runs kept for them never run; those kept
+    /// for other images still go once admission is through.
+    pub(crate) fn drop_deferred_runs_of(&mut self, ids: &[u64]) {
+        for (held, _) in &mut self.deferred_runs {
+            held.retain(|id| !ids.contains(id));
+        }
+        self.deferred_runs.retain(|(held, _)| !held.is_empty());
+    }
+
     /// The re-runs kept while admission fed a batch, once it no longer does.
     pub(crate) fn take_deferred_runs(&mut self) -> Vec<(Vec<u64>, Option<super::timeline::StepKind>)> {
         if self.admission_still_feeding() {
