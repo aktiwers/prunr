@@ -1014,6 +1014,7 @@ impl PrunrApp {
         for id in &targets {
             self.processor.cancels.request_item_cancel(*id);
         }
+        self.processor.drop_deferred_runs_of(&targets);
         // The image shows its state again at once; a late answer from the
         // cancelled run finds it no longer processing, and a newer batch
         // running it again takes it from the cancelled one's.

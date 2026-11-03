@@ -2955,6 +2955,40 @@ mod timeline_contract_tests {
         assert!(rx.try_recv().is_err(), "no batch is sent");
     }
 
+    /// Cancel selected drops the runs held back for the images it stops,
+    /// and only those: another image's held run still goes once admission
+    /// is through.
+    #[test]
+    fn cancel_selected_drops_only_its_images_held_runs() {
+        use crate::gui::memory::{AdmissionController, ImageMemCost};
+        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+        for id in [2, 3] {
+            push_test_item(&mut app, id).dimensions = (4, 4);
+        }
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue([1, 9].map(|item_id| ImageMemCost { item_id, total: 1 }).into());
+        let work = |id| Some(crate::gui::worker::WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None, correction: None });
+        let (first, _rx) = app.processor.open_admission(ctrl, work);
+        let recipe = app.batch.items[0].settings.current_recipe(prunr_core::ModelKind::BiRefNetLite);
+        let fed = app.processor.track_dispatch(recipe, first.iter().map(|w| (w.id, w.run)));
+        app.processor.admission_feeds(fed);
+        let stopped = &mut app.batch.items[1];
+        stopped.ticked = true;
+        stopped.start_cut(Some(StepKind::Process), crate::gui::item::Cutter::Model(prunr_core::ModelKind::BiRefNetLite));
+        for id in [2, 3] {
+            app.process_items(|i| i.id == id, None);
+        }
+        assert!(app.batch.items[2].job.is_none(), "held while admission feeds");
+
+        app.handle_cancel_selected();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        // The batch's last image goes: admission is through and what was held runs.
+        app.admission_release_and_admit(1);
+        assert!(app.batch.items[1].job.is_none(), "the cancelled image's held run went with its Cancel");
+        assert!(app.batch.items[2].job.is_some(), "the other image's held run goes");
+    }
+
     /// A Process result from where its model runs here leaves the app's
     /// accelerator and the Parallel jobs you set alone. Silueta cannot run
     /// on OpenVINO and reports the CPU by design; its result used to
