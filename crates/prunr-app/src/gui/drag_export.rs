@@ -113,19 +113,25 @@ fn source_stem(source_filename: &str) -> &str {
         .unwrap_or("image")
 }
 
-/// `filenames` with each stem once, ignoring case as Windows and macOS
-/// do: a repeat becomes `stem-2`, `stem-3`…, its extension kept, so the
-/// files one save writes from them never share a name.
-pub(crate) fn distinct_filenames<'a>(filenames: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut taken = TakenStems::default();
-    filenames.into_iter().map(|name| {
-        // Made from a `&str`: lossless.
-        let candidate = taken.take(OsStr::new(source_stem(name))).to_string_lossy().into_owned();
-        match Path::new(name).extension() {
-            Some(ext) => format!("{candidate}.{}", ext.to_string_lossy()),
-            None => candidate,
-        }
-    }).collect()
+/// The names one save gives its images, each stem once, ignoring case as
+/// Windows and macOS do: a repeat, or a stem whose files the folder holds
+/// already, becomes `stem-2`, `stem-3`…, its extension kept, so a save
+/// never writes two images to one file, nor over a file that was there.
+#[derive(Default)]
+pub(crate) struct DistinctNames(TakenStems);
+
+impl DistinctNames {
+    /// The name for the next image called `filename`: the first not taken
+    /// in this save whose files `free` says the folder does not hold.
+    pub(crate) fn next(&mut self, filename: &str, free: impl Fn(&str) -> bool) -> String {
+        let extension = Path::new(filename).extension().map(|ext| ext.to_string_lossy());
+        // Stems made from a `&str`: lossless.
+        let named = |stem: &OsStr| match &extension {
+            Some(ext) => format!("{}.{ext}", stem.to_string_lossy()),
+            None => stem.to_string_lossy().into_owned(),
+        };
+        named(&self.0.take_where(OsStr::new(source_stem(filename)), |stem| free(&named(stem))))
+    }
 }
 
 /// The stems the files of one save are named by so far, so that no two
@@ -136,14 +142,25 @@ pub struct TakenStems(std::collections::HashSet<OsString>);
 impl TakenStems {
     /// `stem`, or `stem-2`, `stem-3`… when that is taken; taken from now on.
     pub fn take(&mut self, stem: &OsStr) -> OsString {
-        let mut candidate = stem.to_os_string();
+        self.take_where(stem, |_| true)
+    }
+
+    /// The first of `stem`, `stem-2`, `stem-3`… not taken that `free`
+    /// accepts; taken from now on.
+    pub fn take_where(&mut self, stem: &OsStr, free: impl Fn(&OsStr) -> bool) -> OsString {
         let mut n = 1;
-        while !self.0.insert(folded(&candidate)) {
+        loop {
+            let mut candidate = stem.to_os_string();
+            if n > 1 {
+                candidate.push(format!("-{n}"));
+            }
+            let key = folded(&candidate);
+            if !self.0.contains(&key) && free(&candidate) {
+                self.0.insert(key);
+                return candidate;
+            }
             n += 1;
-            candidate = stem.to_os_string();
-            candidate.push(format!("-{n}"));
         }
-        candidate
     }
 }
 
@@ -193,7 +210,7 @@ impl LayerKind {
     }
 }
 
-fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
+pub(crate) fn make_layer_filename(source_filename: &str, kind: LayerKind) -> String {
     format!("{}-{}.png", source_stem(source_filename), kind.suffix())
 }
 
@@ -239,19 +256,14 @@ impl LayerJob {
         &self.filename
     }
 
-    /// The job writing its files under `filename`'s stem.
-    pub(crate) fn named(self, filename: String) -> Self {
-        Self { filename, ..self }
-    }
-
     /// The item kept what layers are made from (they were dropped under
     /// memory pressure, or the image was never processed).
     pub(crate) fn has_layers(&self) -> bool {
         self.seg.is_some() || self.edges.is_some()
     }
 
-    /// Every layer it has as `(filename, PNG bytes)`; empty without any.
-    pub(crate) fn render_bytes(&self, depth: &ExportDepth) -> Vec<(String, Vec<u8>)> {
+    /// Every layer it has as `(kind, PNG bytes)`; empty without any.
+    pub(crate) fn render_bytes(&self, depth: &ExportDepth) -> Vec<(LayerKind, Vec<u8>)> {
         let Some(src) = LayerSource::of(self) else { return Vec::new() };
         let seg = self.seg.as_ref().and_then(CompressedTensor::bundle);
         LayerKind::ALL.iter()
@@ -260,7 +272,7 @@ impl LayerJob {
                 let layer = render_layer(self, kind, &src, seg.as_ref(), depth)?;
                 let mut bytes = Vec::with_capacity(layer.raw_len() / 2);
                 layer.encode_kept_into(&mut bytes).ok()?;
-                Some((make_layer_filename(&self.filename, kind), bytes))
+                Some((kind, bytes))
             })
             .collect()
     }
@@ -723,17 +735,17 @@ mod tests {
         let job = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Erase);
         assert!(job.has_layers());
         let files = std::thread::spawn(move || job.render_bytes(&Default::default())).join().expect("render thread");
-        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["photo-subject.png", "photo-mask.png"]);
+        let kinds: Vec<LayerKind> = files.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, [LayerKind::Subject, LayerKind::Mask]);
         assert!(files.iter().all(|(_, bytes)| bytes.starts_with(b"\x89PNG")));
-        for (name, bytes) in &files {
+        for (kind, bytes) in &files {
             let mut kept = Vec::new();
             match image::load_from_memory(bytes).expect("png") {
                 image::DynamicImage::ImageLuma8(gray) => prunr_core::encode_gray_png_kept_into(&gray, &mut kept),
                 other => prunr_core::ExportFormat::Png.encode_into(&other.to_rgba8(), &mut kept),
             }
             .expect("encode");
-            assert!(*bytes == kept, "{name} is compressed like Save");
+            assert!(*bytes == kept, "{kind:?} is compressed like Save");
         }
     }
 
@@ -753,7 +765,7 @@ mod tests {
         item.edits = Some(Arc::new(prunr_core::selection::MaskArtifact::from_cells(8, 8, erased_left)));
 
         let files = LayerJob::of(&item, crate::gui::brush_state::CutoutAction::Select).render_bytes(&Default::default());
-        let (_, mask) = files.iter().find(|(n, _)| n == "photo-mask.png").expect("a mask layer");
+        let (_, mask) = files.iter().find(|(kind, _)| *kind == LayerKind::Mask).expect("a mask layer");
         let mask = image::load_from_memory(mask).expect("png").to_luma8();
         assert_eq!(mask.get_pixel(0, 4)[0], 0, "the erased half is gone");
         assert_eq!(mask.get_pixel(7, 4)[0], 255, "the rest stays");

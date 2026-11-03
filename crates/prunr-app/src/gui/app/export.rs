@@ -7,7 +7,8 @@ use std::sync::{mpsc, Arc};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::gui::drag_export_state::DragExportState;
 use crate::gui::background_io::SaveDone;
-use crate::gui::item::{BatchItem, ExportDepth, SaveMark};
+use crate::gui::drag_export::{export_name, make_layer_filename, DistinctNames, LayerKind};
+use crate::gui::item::{depth_file_name, BatchItem, ExportDepth, SaveMark};
 use crate::gui::system_bridge::DialogRequest;
 use super::PrunrApp;
 
@@ -63,13 +64,11 @@ impl PrunrApp {
     /// layers' data is gone, so every target lands at least one file.
     pub(super) fn on_save_layers_picked(&mut self, targets: &[u64], folder: PathBuf) {
         let format = self.settings.export_format;
-        let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
-        let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
-        let jobs: Vec<LayerSave> = found.iter().zip(names)
-            .map(|(item, name)| LayerSave {
+        let jobs: Vec<LayerSave> = targets.iter().filter_map(|id| self.batch.find_by_id(*id))
+            .map(|item| LayerSave {
                 mark: item.save_mark(),
-                depth: self.settings.export_depth_map.then(|| item.depth_export().named(&name)),
-                layers: crate::gui::drag_export::LayerJob::of(item, self.settings.brush.cutout_action).named(name),
+                depth: self.settings.export_depth_map.then(|| item.depth_export()),
+                layers: crate::gui::drag_export::LayerJob::of(item, self.settings.brush.cutout_action),
                 composite: (item.export_image(), item.export_bg()),
             })
             .collect();
@@ -141,16 +140,14 @@ impl PrunrApp {
     /// Encode + write run on a background thread.
     pub(super) fn on_save_selected_picked(&mut self, targets: &[u64], folder: PathBuf) {
         let with_depth = self.settings.export_depth_map;
-        let found: Vec<_> = targets.iter().filter_map(|id| self.batch.find_by_id(*id)).collect();
-        let names = crate::gui::drag_export::distinct_filenames(found.iter().map(|item| item.filename.as_str()));
-        let items: Vec<BatchSave> = found.iter().zip(names)
-            .map(|(item, filename)| {
+        let items: Vec<BatchSave> = targets.iter().filter_map(|id| self.batch.find_by_id(*id))
+            .map(|item| {
                 let result = item.export_image();
                 let (w, h) = result.pixels.decoded_dims().unwrap_or(item.dimensions);
                 BatchSave {
                     mark: item.save_mark(),
-                    depth: with_depth.then(|| item.depth_export().named(&filename)),
-                    filename,
+                    depth: with_depth.then(|| item.depth_export()),
+                    filename: item.filename.clone(),
                     result,
                     bg: item.export_bg(),
                     pixel_count: u64::from(w) * u64::from(h),
@@ -370,7 +367,12 @@ fn spawn_save_single(
         };
         let wrote = outcome.is_ok().then_some(one.mark).into_iter().collect();
         let folder = path.parent().unwrap_or(Path::new("."));
-        if let Some(Err(e)) = one.depth.map(|d| d.write(folder, &depth)) {
+        let picked = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+        let map = one.depth.map(|d| {
+            let name = DistinctNames::default().next(&picked, |name| !folder.join(depth_file_name(name)).exists());
+            d.named(&name)
+        });
+        if let Some(Err(e)) = map.map(|d| d.write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             let msg = outcome.unwrap_or_else(|failed| failed);
             outcome = Err(format!("{msg}; could not save the depth map: {e}"));
@@ -443,27 +445,36 @@ fn spawn_save_layers(folder: PathBuf, jobs: Vec<LayerSave>, format: prunr_core::
     std::thread::spawn(move || {
         let mut tally = SaveTally::default();
         let mut wrote = Vec::new();
+        let mut names = DistinctNames::default();
         let depth = ExportDepth::default();
+        // `None`: the composite, for an image without layers.
+        let file_name = |name: &str, kind: Option<LayerKind>| kind.map_or_else(|| export_name(name, format), |kind| make_layer_filename(name, kind));
         for job in jobs {
             let failed_before = tally.failed;
-            let mut files = job.layers.render_bytes(&depth);
+            let mut files: Vec<_> = job.layers.render_bytes(&depth).into_iter().map(|(kind, bytes)| (Some(kind), bytes)).collect();
             if files.is_empty() {
                 let (image, bg) = &job.composite;
                 let composite = image.load()
                     .ok_or_else(|| format!("{} could not be read", job.layers.filename()))
                     .and_then(|rgba| format.encode(&bg.bake(&rgba, &depth)).map_err(|e| e.to_string()));
                 match composite {
-                    Ok(bytes) => files.push((crate::gui::drag_export::export_name(job.layers.filename(), format), bytes)),
+                    Ok(bytes) => files.push((None, bytes)),
                     Err(why) => tally.count(Err(why)),
                 }
             }
-            for (name, bytes) in files {
-                tally.count(crate::fs_util::write_bytes_replacing(&folder.join(&name), &bytes).map_err(|e| format!("{name}: {e}")));
+            let name = names.next(job.layers.filename(), |name| {
+                files.iter().map(|(kind, _)| file_name(name, *kind))
+                    .chain(job.depth.is_some().then(|| depth_file_name(name)))
+                    .all(|file| !folder.join(file).exists())
+            });
+            for (kind, bytes) in files {
+                let file = file_name(&name, kind);
+                tally.count(crate::fs_util::write_bytes_replacing(&folder.join(&file), &bytes).map_err(|e| format!("{file}: {e}")));
             }
             if tally.failed == failed_before {
                 wrote.push(job.mark);
             }
-            save_depth_beside(job.depth.as_ref(), &folder, &depth, &mut tally);
+            save_depth_beside(job.depth.map(|d| d.named(&name)).as_ref(), &folder, &depth, &mut tally);
         }
         let _ = tx.send(SaveDone { outcome: tally.summary("file", "files"), wrote });
     });
@@ -530,6 +541,15 @@ fn spawn_save_batch(
     tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
+        let mut names = DistinctNames::default();
+        let items: Vec<BatchSave> = items.into_iter().map(|item| {
+            let filename = names.next(&item.filename, |name| {
+                std::iter::once(export_name(name, format))
+                    .chain(item.depth.is_some().then(|| depth_file_name(name)))
+                    .all(|file| !folder.join(file).exists())
+            });
+            BatchSave { depth: item.depth.map(|d| d.named(&filename)), filename, ..item }
+        }).collect();
         let largest = items.iter().map(|item| item.pixel_count).max().unwrap_or(0);
         let writers = crate::gui::drag_export_state::writers();
         let at_once = saves_at_once(largest, prunr_core::sysmem::room_for_buffers_bytes(), writers);
@@ -723,6 +743,74 @@ mod toast_kind_tests {
         app.on_save_image_picked(1, prunr_core::ExportFormat::Png, photo.clone());
         assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
         assert!(std::fs::read(&photo).unwrap().starts_with(b"\x89PNG"), "the name the dialog asked about");
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    fn with_depth_map(app: &mut PrunrApp, id: u64, filename: &str) {
+        done_item(app, id);
+        let item = app.batch.items.last_mut().expect("just pushed");
+        item.filename = filename.into();
+        item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(1, 1, vec![0.5])));
+    }
+
+    /// A save into a folder never replaces a file already there: an image
+    /// whose result or depth map name is taken moves on to `-2`, its files
+    /// together.
+    #[test]
+    fn a_save_into_a_folder_replaces_no_file_there() {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.export_depth_map = true;
+        with_depth_map(&mut app, 1, "photo.jpg");
+        with_depth_map(&mut app, 2, "other.jpg");
+        let dir = tempfile::tempdir().unwrap();
+        for kept in ["photo.prunr.png", "other-depth.png"] {
+            std::fs::write(dir.path().join(kept), b"kept").unwrap();
+        }
+        app.on_save_selected_picked(&[1, 2], dir.path().to_path_buf());
+        assert_eq!(save_toast(&mut app).0, "success");
+        assert_eq!(listing(dir.path()), [
+            "other-2-depth.png", "other-2.prunr.png", "other-depth.png",
+            "photo-2-depth.png", "photo-2.prunr.png", "photo.prunr.png",
+        ]);
+        for kept in ["photo.prunr.png", "other-depth.png"] {
+            assert_eq!(std::fs::read(dir.path().join(kept)).unwrap(), b"kept", "{kept}");
+        }
+    }
+
+    /// Layers saved into a folder replace no file there either.
+    #[test]
+    fn a_layers_save_into_a_folder_replaces_no_file_there() {
+        let mut app = PrunrApp::new_for_test();
+        done_item(&mut app, 1);
+        let item = app.batch.items.last_mut().expect("just pushed");
+        item.filename = "photo.jpg".into();
+        item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("photo-mask.png"), b"kept").unwrap();
+        app.on_save_layers_picked(&[1], dir.path().to_path_buf());
+        assert_eq!(save_toast(&mut app).0, "success");
+        assert_eq!(listing(dir.path()), ["photo-2-mask.png", "photo-2-subject.png", "photo-mask.png"]);
+        assert_eq!(std::fs::read(dir.path().join("photo-mask.png")).unwrap(), b"kept");
+    }
+
+    /// Save as names the depth map after the picked file, and replaces no
+    /// depth map already there: the dialog asked about the image only.
+    #[test]
+    fn save_as_names_the_depth_map_after_the_picked_file() {
+        let mut app = PrunrApp::new_for_test();
+        app.settings.export_depth_map = true;
+        with_depth_map(&mut app, 1, "IMG_0001.jpg");
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("first.png"));
+            assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        }
+        assert_eq!(listing(dir.path()), ["first-2-depth.png", "first-depth.png", "first.png"]);
     }
 
     #[test]

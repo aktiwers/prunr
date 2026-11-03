@@ -163,10 +163,10 @@ fn a_save_marks_what_it_wrote() {
         item.ticked = true;
     }
     assert_eq!(app.batch.unsaved_count(), 2);
+    // A name longer than file systems take: image 2's write fails.
+    app.batch.items[1].filename = format!("{}.png", "x".repeat(250));
     app.handle_save_selected();
     let dir = tempfile::tempdir().unwrap();
-    // A folder where image 2's file would go: its write fails.
-    std::fs::create_dir(dir.path().join("test2.prunr.png")).unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
     let done = app.batch.bg_io.save_done_rx.recv_timeout(LANDS_WITHIN).expect("save done");
     assert!(done.outcome.is_err(), "one file failed");
