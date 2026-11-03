@@ -3525,7 +3525,7 @@ mod install_tests {
             (InstallEvent::Done { install_dir: path.clone(), started: Some(Ok(())) }, "success", "installed: models it runs faster use it now"),
             (InstallEvent::Done { install_dir: path.clone(), started: Some(Err("no card".into())) }, "error", "installed, but it could not start: no card"),
             (InstallEvent::Failed { error: "offline".into() }, "error", "Could not install"),
-            (InstallEvent::Cancelled, "info", "CUDA install cancelled"),
+            (InstallEvent::Cancelled, "info", "install cancelled"),
         ] {
             let mut app = crate::gui::app::PrunrApp::new_for_test();
             let (tx, rx) = std::sync::mpsc::channel();
