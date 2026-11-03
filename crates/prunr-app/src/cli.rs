@@ -361,14 +361,8 @@ impl CliUpscaler {
     }
 
     fn model_id(self) -> prunr_models::ModelId {
-        use prunr_models::ModelId;
-        match self {
-            Self::Realesrgan => ModelId::RealEsrganX4Plus,
-            Self::Nomos => ModelId::Nomos8kSchatL,
-            Self::Siax => ModelId::FourXNmkdSiaxCx,
-            Self::Superscale => ModelId::FourXNmkdSuperscale,
-            Self::Nomos2 => ModelId::FourXNomos2RealPlksr,
-        }
+        // settings_model gives only upscale models, and each names a model.
+        self.settings_model().to_model_id().expect("every upscaler names a model")
     }
 }
 
@@ -2046,6 +2040,13 @@ mod tests {
     /// The image settings a run with `args` uses.
     fn settings(args: &[&str]) -> crate::gui::item_settings::ItemSettings {
         cli(args).run_settings().expect("settings").item
+    }
+
+    #[test]
+    fn every_upscaler_names_a_model() {
+        for upscaler in <super::CliUpscaler as clap::ValueEnum>::value_variants() {
+            upscaler.model_id();
+        }
     }
 
     /// `-m none` runs No model's settings; Subject lines, with no subject
