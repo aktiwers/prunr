@@ -355,9 +355,7 @@ impl PrunrApp {
                         self.toasts.info(note);
                     }
                     self.refresh_install_cache();
-                    if let Some(column) = self.download_check_column(id) {
-                        self.download_manager.queue_check(id, column);
-                    }
+                    self.queue_download_check(id);
                 }
                 DownloadEvent::Failed { id, error } => {
                     let name = prunr_models::display_name(id);
@@ -370,9 +368,7 @@ impl PrunrApp {
                     let was_installed = self.hardware_install_cache.has_installed(id);
                     self.refresh_install_cache();
                     if !was_installed && self.hardware_install_cache.has_installed(id) {
-                        if let Some(column) = self.download_check_column(id) {
-                            self.download_manager.queue_check(id, column);
-                        }
+                        self.queue_download_check(id);
                     }
                 }
                 DownloadEvent::Progress { .. } | DownloadEvent::Verifying { .. } => {}

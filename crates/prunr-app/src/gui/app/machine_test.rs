@@ -129,6 +129,13 @@ impl PrunrApp {
         crate::bench::here::column_of(id).filter(|&column| needs_check(id, column))
     }
 
+    /// A downloaded model's check, queued when it needs one.
+    pub(crate) fn queue_download_check(&mut self, id: ModelId) {
+        if let Some(column) = self.download_check_column(id) {
+            self.download_manager.queue_check(id, column);
+        }
+    }
+
     /// Each frame: a download's check, started while nothing else uses the
     /// machine; a model it keeps off the accelerator is said once.
     pub(crate) fn pump_download_checks(&mut self, ctx: &egui::Context) {
