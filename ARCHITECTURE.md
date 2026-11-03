@@ -217,7 +217,7 @@ Each image has one timeline (`gui/timeline.rs`): the states it has been in and a
 
 ### Magic Brush (SAM 2.1)
 
-SAM 2.1 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure; the two CPU sessions (~180 MB) live on `Processor`, built on the rayon pool at startup and kept resident.
+SAM 2.1 Hiera Small ships bundled as an encoder + decoder pair (category `Selection`); it authors selections and never enters the background-removal pipeline. `prunr_core::sam` is pure and `prunr_core::sam_session` runs the encoder and decoder; `Processor` holds the two sessions (~180 MB; the encoder on a graphics card that runs it, else the processor), built on the rayon pool at startup and kept resident.
 
 **Encoder.** The selected image is encoded in the background once its source is decoded and it has stayed on screen for 250 ms (paging past images must not queue an encode each; an encode cannot be cancelled), even before the tool is on: refused below ~800 MB free RAM, cached as `BatchItem.magic_brush_embedding` (16 MB). The shown image keeps its embedding, and with the tool on so does the one shown before it, so flipping between two stays instant; a refused speculative encode is not retried. Until the shown image has an embedding the tool reads as Preparing and holds clicks.
 
