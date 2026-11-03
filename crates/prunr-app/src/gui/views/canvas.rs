@@ -128,16 +128,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         let elsewhere = progress.on.filter(|_| !here).and_then(|id| app.batch.find_by_id(id)).map(|i| i.filename.as_str());
         let preview = app.batch.selected_item().filter(|_| here).and_then(|i| i.tile_preview.as_ref()).map(|t| t.id());
         if super::progress_widget::render(ui, canvas_rect, img_rect.filter(|_| here), &progress, preview, elsewhere) {
-            use crate::gui::dispatch_progress::{cancel_target_for, CancelTarget};
-            if let Some(target) = cancel_target_for(progress.kind) {
-                match target {
-                    CancelTarget::Inpaint => app.cancel_erases(),
-                    // The capsule counts the queued images too: its Cancel ends them all.
-                    CancelTarget::Upscale | CancelTarget::Colorize => app.cancel_runs(),
-                    CancelTarget::SegBatchAndReset => app.handle_cancel_all_and_reset(),
-                    CancelTarget::Faces => app.processor.cancel_faces(),
-                }
-            }
+            app.handle_capsule_cancel(progress.kind);
         }
         ui.ctx().request_repaint_after(theme::WORK_FRAME);
     } else if let Some(label) = app.busy_pill(std::time::Instant::now()) {
