@@ -332,7 +332,7 @@ impl HardwareInstallCache {
     }
 
     /// Whether `id`'s half-precision companion is missing, as read at the
-    /// last refresh (`prunr_models::lacks_fp16_companion`).
+    /// last refresh.
     pub fn lacks_companion(&self, id: prunr_models::ModelId) -> bool {
         registry_bit(self.lacking_companions, id)
     }
