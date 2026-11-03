@@ -41,8 +41,9 @@ impl PrunrApp {
         (with_region, without)
     }
 
-    /// Start the next queued upscale, colorize or erase when the slot is free,
-    /// with the shown image's settings, as a batch of cut-outs runs.
+    /// Start the next queued upscale, colorize or erase when the slot is
+    /// free, with the settings Process gave its image, as a batch of
+    /// cut-outs runs.
     pub(super) fn dispatch_next_queued_run(&mut self) {
         // An image gone, or one without a run, passes its turn on: nothing
         // else would call this again. One turn per queued image per call.
@@ -58,9 +59,6 @@ impl PrunrApp {
             // Its image changed while it waited (a run started on it, its
             // region was cleared): it passes its turn.
             let started = refusal == Some(None) && {
-                if let Some(shown) = self.batch.selected_idx_clamped() {
-                    self.batch.share_settings(shown, &HashSet::from([item_id]));
-                }
                 if self.settings.model.is_inpaint() {
                     self.batch.index_of(item_id).is_some_and(|idx| self.dispatch_inpaint_for_item(idx))
                 } else if self.settings.model.is_colorize() {
@@ -568,6 +566,50 @@ mod process_targets_tests {
         app.processor.queue_runs(vec![2, 1]);
         app.pump_inpaint_results(&ctx);
         assert_eq!(app.processor.next_queued_run(), None, "neither image had a region: both turns passed");
+    }
+
+    /// Queued erases and upscales keep the settings Process gave them: the
+    /// image shown when their turn comes is not what they run with.
+    #[test]
+    fn a_queued_run_keeps_the_settings_process_gave_it() {
+        const ASKED: [u8; 4] = [10, 20, 30, 255];
+        const SHOWN_LATER: [u8; 4] = [200, 0, 0, 255];
+        let setup = |model: SettingsModel| {
+            let mut app = two_images(model);
+            push_test_item(&mut app, 3).settings.bg = Some(SHOWN_LATER);
+            for item in &mut app.batch.items[..2] {
+                item.ticked = true;
+            }
+            app.batch.items[0].settings.bg = Some(ASKED);
+            app
+        };
+
+        let mut app = setup(SettingsModel::Inpaint);
+        for item in &mut app.batch.items[..2] {
+            item.commit_selection_mask(mask(), StepKind::Stroke);
+        }
+        app.handle_process_intent();
+        assert!(app.processor.is_inpaint_in_flight(1), "the first erases, the second waits");
+        app.batch.select_item(2);
+        app.processor.set_inpaint_in_flight_for_test(1, false);
+        app.dispatch_next_queued_run();
+        assert!(app.processor.is_inpaint_in_flight(2), "the second's turn came");
+        assert_eq!(app.batch.items[1].settings.bg, Some(ASKED), "erase: the settings it had at Process");
+
+        let mut app = setup(SettingsModel::RealEsrganUpscale);
+        for item in &mut app.batch.items[..2] {
+            // Too large to upscale in free memory: each turn ends at once, nothing runs.
+            item.dimensions = (60_000, 60_000);
+        }
+        app.processor.set_upscale_in_flight_for_test(true);
+        app.process_kept_run_items();
+        app.batch.select_item(2);
+        app.processor.set_upscale_in_flight_for_test(false);
+        app.dispatch_next_queued_run();
+        assert_eq!(app.processor.next_queued_run(), None, "both turns came");
+        for item in &app.batch.items[..2] {
+            assert_eq!(item.settings.bg, Some(ASKED), "upscale of {}: the settings it had at Process", item.id);
+        }
     }
 
     /// A batch tells the worker which image on screen shows a first look;

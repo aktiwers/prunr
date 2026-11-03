@@ -617,9 +617,13 @@ impl PrunrApp {
         if without > 0 {
             self.toasts.info(format!("{} had no painted region", super::views::fmt::count(without, "image", "images")));
         }
+        let ids: Vec<u64> = with_region.iter().map(|&idx| self.batch.items[idx].id).collect();
+        if let Some(shown) = self.batch.selected_idx_clamped() {
+            self.batch.share_settings(shown, &ids.iter().copied().collect());
+        }
         // One image at a time through the run queue: a fill's working set
         // can be most of the machine's RAM.
-        self.processor.queue_runs(with_region.iter().map(|&idx| self.batch.items[idx].id).collect());
+        self.processor.queue_runs(ids);
         self.dispatch_next_queued_run();
     }
 
