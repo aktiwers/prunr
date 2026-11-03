@@ -62,8 +62,8 @@ impl CellRect {
         Self {
             x0: self.x0.saturating_sub(margin),
             y0: self.y0.saturating_sub(margin),
-            x1: (self.x1 + margin).min(w - 1),
-            y1: (self.y1 + margin).min(h - 1),
+            x1: self.x1.saturating_add(margin).min(w - 1),
+            y1: self.y1.saturating_add(margin).min(h - 1),
         }
     }
 }
@@ -87,7 +87,7 @@ pub fn fill_band(cell: u8) -> u8 {
 
 /// The bounding rectangle of the cells of a `w`-wide plane `pred`
 /// accepts; `None` when it accepts none.
-fn bounds_of<T: Copy + Sync>(plane: &[T], w: usize, pred: impl Fn(T) -> bool + Sync) -> Option<CellRect> {
+pub(crate) fn bounds_of<T: Copy + Sync>(plane: &[T], w: usize, pred: impl Fn(T) -> bool + Sync) -> Option<CellRect> {
     if w == 0 {
         return None;
     }

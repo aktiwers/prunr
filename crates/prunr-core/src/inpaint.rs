@@ -999,41 +999,9 @@ fn tile_fill_preview(mut photo: RgbaImage, painted: &RgbaImage, mask: &GrayImage
 /// `min_value = 1` finds any nonzero pixel; `128` is the binary-mask
 /// threshold.
 pub(crate) fn mask_bbox(mask: &GrayImage, min_value: u8, margin: u32) -> Option<Bbox> {
-    use rayon::prelude::*;
-    let raw = mask.as_raw();
-    let w = mask.width() as usize;
-    let h = mask.height() as usize;
-    let merged = (0..h)
-        .into_par_iter()
-        .filter_map(|y| {
-            let row = &raw[y * w..(y + 1) * w];
-            let mut min_x = usize::MAX;
-            let mut max_x = 0usize;
-            let mut any = false;
-            for (x, &v) in row.iter().enumerate() {
-                if v >= min_value {
-                    if !any { min_x = x; }
-                    max_x = x;
-                    any = true;
-                }
-            }
-            if any { Some((min_x, y, max_x, y)) } else { None }
-        })
-        .reduce_with(|a, b| {
-            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
-        })?;
-    let (min_x, min_y, max_x, max_y) = merged;
-    let m = margin as usize;
-    let bx = min_x.saturating_sub(m);
-    let by = min_y.saturating_sub(m);
-    let bx_end = (max_x + m + 1).min(w);
-    let by_end = (max_y + m + 1).min(h);
-    Some(Bbox {
-        x: bx as u32,
-        y: by as u32,
-        w: (bx_end - bx) as u32,
-        h: (by_end - by) as u32,
-    })
+    let (w, h) = mask.dimensions();
+    let plane = &mask.as_raw()[..w as usize * h as usize];
+    crate::selection::bounds_of(plane, w as usize, |v| v >= min_value).map(|r| r.grown(margin, w, h).to_bbox())
 }
 
 fn accumulate_tile(
@@ -1851,6 +1819,13 @@ mod tests {
         assert_eq!(mask_bbox(&GrayImage::from_pixel(32, 32, Luma([255])), 1, 0), bbox(0, 0, 32, 32));
         let low = mask(32, 32, &[(10, 10, 100)]);
         assert!(mask_bbox(&low, 1, 0).is_some() && mask_bbox(&low, 128, 0).is_none(), "100 counts at 1, not at 128");
+        assert_eq!(mask_bbox(&mask(32, 32, &[(31, 31, 255)]), 128, 4), bbox(27, 27, 5, 5), "the margin clips at the far corner");
+        let bottom_right: Vec<_> = (60..64).flat_map(|y| (50..64).map(move |x| (x, y, 255))).collect();
+        assert_eq!(mask_bbox(&mask(64, 64, &bottom_right), 128, 3), bbox(47, 57, 17, 7), "padded only where the image goes on");
+        assert_eq!(mask_bbox(&GrayImage::from_pixel(1, 1, Luma([255])), 1, 5), bbox(0, 0, 1, 1), "a one-pixel image");
+        assert_eq!(mask_bbox(&mask(32, 32, &[(10, 10, 255)]), 1, u32::MAX), bbox(0, 0, 32, 32), "a margin past every edge");
+        assert_eq!(mask_bbox(&GrayImage::new(0, 8), 1, 0), None, "no columns");
+        assert_eq!(mask_bbox(&GrayImage::new(8, 0), 1, 0), None, "no rows");
     }
 
     /// No amount, no mask, or a mask of another size: the image as it was.
