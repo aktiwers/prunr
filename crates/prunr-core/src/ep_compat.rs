@@ -274,12 +274,14 @@ impl std::fmt::Display for Measured {
 }
 
 
+/// Tests, the app's too, keep their findings in a file of their own: a
+/// test that runs a model would otherwise rewrite where the user's models run.
 fn cache_path() -> Option<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Some(std::env::temp_dir().join(format!("prunr-test-ep-compat-{}.json", std::process::id())))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         prunr_models::data_dir().map(|d| d.join("ep_compat.json"))
     }
