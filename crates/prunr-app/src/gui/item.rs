@@ -158,7 +158,7 @@ pub(crate) struct DepthExport {
 }
 
 /// The depth map's file name for an image named `filename`.
-fn depth_file_name(filename: &str) -> String {
+pub(crate) fn depth_file_name(filename: &str) -> String {
     let stem = std::path::Path::new(filename).file_stem().map_or_else(|| filename.into(), |s| s.to_string_lossy());
     prunr_core::depth::map_file_name(&stem)
 }
