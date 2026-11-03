@@ -118,13 +118,16 @@ impl PrunrApp {
         };
         let depth = self.settings.export_depth_map.then(|| item.depth_export());
         let one = SaveOne { mark: item.save_mark(), image: item.export_image(), bg: item.export_bg(), depth };
-        let (path, format) = match prunr_core::ExportFormat::from_path(&path) {
-            Some(f) => (path, f),
-            None => (path.with_extension(preferred.extension()), preferred),
+        // The dialog asked before replacing the name picked, not one with
+        // an extension added to it.
+        let (path, format, asked) = match prunr_core::ExportFormat::from_path(&path) {
+            Some(f) => (path, f, true),
+            None if path.extension().is_some_and(|e| e.is_empty()) => (path.with_extension(preferred.extension()), preferred, false),
+            None => (path.with_added_extension(preferred.extension()), preferred, false),
         };
         let tx = self.batch.bg_io.save_done_tx.clone();
         self.toasts.info("Saving\u{2026}");
-        spawn_save_single(path, one, format, tx);
+        spawn_save_single(path, one, format, asked, tx);
     }
 
     /// One or more sidebar checkboxes selected — ask for a folder;
@@ -343,14 +346,22 @@ struct SaveOne {
 }
 
 /// Encode + write one image on a background thread, then send the
-/// toast text on `tx`.
+/// toast text on `tx`. A file at `path` the dialog never `asked` about
+/// is not replaced.
 fn spawn_save_single(
     path: PathBuf,
     one: SaveOne,
     format: prunr_core::ExportFormat,
+    asked: bool,
     tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
+        if !asked && path.exists() {
+            let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+            let outcome = Err(format!("Not saved: {name} is already there. Save again and pick that name to replace it."));
+            let _ = tx.send(SaveDone { outcome, wrote: Vec::new() });
+            return;
+        }
         let depth = ExportDepth::default();
         let mut outcome = match one.image.load().map(|rgba| write_composite(&path, &rgba, &one.bg, format, &depth)) {
             Some(Ok(())) => Ok("Saved".to_string()),
@@ -687,6 +698,31 @@ mod toast_kind_tests {
         let (level, caption) = save_toast(&mut app);
         assert_eq!(level, "error");
         assert!(caption.starts_with("Could not save: "), "{caption}");
+    }
+
+    /// A name picked without an image extension gets one added, never its
+    /// last part replaced, and a file the dialog never asked about is not
+    /// replaced; a name with one is written as picked.
+    #[test]
+    fn save_as_adds_the_extension_and_replaces_no_file_unasked() {
+        let mut app = PrunrApp::new_for_test();
+        done_item(&mut app, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("cat.png");
+        std::fs::write(&photo, b"the photo").unwrap();
+
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("cat.prunr"));
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        assert!(std::fs::read(dir.path().join("cat.prunr.png")).unwrap().starts_with(b"\x89PNG"));
+        assert_eq!(std::fs::read(&photo).unwrap(), b"the photo", "the last part kept, not replaced");
+
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("cat"));
+        assert_eq!(save_toast(&mut app), ("error", "Not saved: cat.png is already there. Save again and pick that name to replace it.".to_string()));
+        assert_eq!(std::fs::read(&photo).unwrap(), b"the photo", "never asked about");
+
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, photo.clone());
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        assert!(std::fs::read(&photo).unwrap().starts_with(b"\x89PNG"), "the name the dialog asked about");
     }
 
     #[test]
