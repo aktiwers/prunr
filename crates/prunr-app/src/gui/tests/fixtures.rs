@@ -89,7 +89,7 @@ pub(crate) fn put_in(item: &mut BatchItem, status: crate::gui::item::BatchStatus
             }
         }
         BatchStatus::Done => cut_out(item, prunr_core::ModelKind::Silueta),
-        BatchStatus::Error(why) => item.fail(why),
+        BatchStatus::Error(why) => item.fail(why.to_string()),
     }
 }
 
