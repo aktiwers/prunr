@@ -1019,7 +1019,7 @@ pub fn run_remove(args: &Cli) -> i32 {
 }
 
 /// One upscale as the app runs it: denoise, the model (on the processor
-/// when the card runs out of memory), Refine, faces.
+/// when the card runs out of memory), then `finish_upscale_run`.
 struct UpscaleJob<'a> {
     engine: &'a prunr_core::OrtEngine,
     /// Built the first time the card runs out of memory.
@@ -1057,14 +1057,25 @@ impl UpscaleJob<'_> {
             upscale(cpu)
         })
         .map_err(|e| format!("upscale failed: {e}"))?;
-        let (shown, _) = prunr_core::upscale::refine(&std::sync::Arc::new(raw), &model_input, None, &self.refine);
-        let mut out = std::sync::Arc::unwrap_or_clone(shown);
-        if let Some(faces) = self.faces.as_mut() {
-            let found = restore_faces(faces, &out)?;
-            prunr_core::face::compose_faces_into(&mut out, &found, faces.1);
-        }
-        Ok(out)
+        finish_upscale_run(raw, &model_input, &self.refine, self.faces.as_mut())
     }
+}
+
+/// The model's output finished as the app finishes it: the faces found in
+/// `raw` and restored, Refine, then the faces blended in.
+fn finish_upscale_run(
+    raw: image::RgbaImage,
+    model_input: &image::RgbaImage,
+    refine: &prunr_core::upscale::Refine,
+    faces: Option<&mut CliFaces>,
+) -> Result<image::RgbaImage, String> {
+    use crate::gui::live_preview::{finish_upscale, FacedKey};
+    let raw = std::sync::Arc::new(raw);
+    let faces = faces
+        .map(|faces| restore_faces(faces, &raw).map(|found| FacedKey { faces: std::sync::Arc::new(found), blend: faces.1 }))
+        .transpose()?;
+    let (shown, _) = finish_upscale(raw, model_input, None, refine, faces.as_ref());
+    Ok(std::sync::Arc::unwrap_or_clone(shown))
 }
 
 /// The mode flags set on the command line; at most one may be.
@@ -2172,6 +2183,52 @@ mod tests {
         assert_eq!((faces("restoreformer").on, faces("restoreformer").strength_pct), (true, 35));
         assert_eq!(faces("gfpgan").strength_pct, 70);
         assert_eq!(settings(&["--upscale", "nomos", "--preset", preset, "--restore-faces", "gfpgan", "--face-strength", "20"]).faces.strength_pct, 20, "a flag still wins");
+    }
+
+    /// Without faces an upscale saves the model's output after Refine,
+    /// pixel for pixel; at Prunr's settings, as it came.
+    #[test]
+    fn an_upscale_without_faces_is_the_models_output_refined() {
+        use std::sync::Arc;
+        let raw = image::RgbaImage::from_fn(16, 12, |x, y| image::Rgba([(x * 15) as u8, (y * 20) as u8, ((x * y) % 255) as u8, 255]));
+        let input = image::RgbaImage::from_fn(8, 6, |x, y| image::Rgba([(x * 30) as u8, (y * 40) as u8, 90, 255]));
+        let knobs = |flags: &[&str]| settings(&[&["--upscale", "realesrgan"][..], flags].concat()).upscale_refine();
+        let on = knobs(&["--sharpen", "0.5", "--ai-blend", "0.7", "--color-match"]);
+        let (refined, _) = prunr_core::upscale::refine(&Arc::new(raw.clone()), &input, None, &on);
+        assert_ne!(*refined, raw, "Refine changes it");
+        assert_eq!(super::finish_upscale_run(raw.clone(), &input, &on, None), Ok(Arc::unwrap_or_clone(refined)));
+        assert_eq!(super::finish_upscale_run(raw.clone(), &input, &knobs(&[]), None), Ok(raw), "Prunr's settings change nothing");
+    }
+
+    /// With Restore faces an upscale's faces are found in the model's
+    /// output and blended in after Refine, as the app finishes it: on the
+    /// portrait `PRUNR_FACE_PHOTO` names, taken as the model's output.
+    #[test]
+    fn an_upscale_restores_the_faces_of_the_models_output_as_the_app_does() {
+        let Some(path) = std::env::var_os("PRUNR_FACE_PHOTO") else {
+            eprintln!("[upscale faces] SKIP: set PRUNR_FACE_PHOTO to a portrait");
+            return;
+        };
+        if let Err(why) = prunr_core::ort_runtime::runtime_for_tests() {
+            eprintln!("[upscale faces] SKIP: {why}");
+            return;
+        }
+        let flags = |restorer| ["--upscale", "realesrgan", "--cpu", "--restore-faces", restorer];
+        let Some(flags) = ["gfpgan", "restoreformer"].map(flags).into_iter().find(|f| settings(f).faces.wanted().is_some_and(prunr_models::is_available)) else {
+            eprintln!("[upscale faces] SKIP: no face model installed");
+            return;
+        };
+        let s = settings(&flags);
+        let mut faces = super::load_faces(&cli(&flags), &s).ok().flatten().expect("the face model loads");
+        let raw = prunr_core::load_image_from_path(std::path::Path::new(&path)).expect("the portrait loads").to_rgba8();
+        let input = image::imageops::resize(&raw, raw.width() / 2, raw.height() / 2, image::imageops::FilterType::Triangle);
+        let knobs = s.upscale_refine();
+
+        let found = super::restore_faces(&mut faces, &raw).expect("restored");
+        assert!(!found.is_empty(), "a face in the portrait");
+        let key = crate::gui::live_preview::FacedKey { faces: std::sync::Arc::new(found), blend: s.faces.blend() };
+        let (apps, _) = crate::gui::live_preview::finish_upscale(std::sync::Arc::new(raw.clone()), &input, None, &knobs, Some(&key));
+        assert!(super::finish_upscale_run(raw, &input, &knobs, Some(&mut faces)).expect("finished") == *apps, "the app's pixels");
     }
 
     #[test]
