@@ -492,6 +492,27 @@ fn a_store_card_s_details_open_in_place() {
     assert_eq!(toggle, Some(Some(true)), "the card opened");
 }
 
+/// An installed model whose half-precision file did not come offers it on
+/// its card, named, beside Remove; one that has its file offers none.
+#[test]
+fn a_store_card_offers_a_missing_half_precision_file() {
+    use prunr_models::ModelId;
+    let mut h = harness();
+    {
+        let app = h.state_mut();
+        app.hardware_install_cache = crate::gui::hardware_cache::HardwareInstallCache::all_installed().lacking_companion(ModelId::RealEsrganX4Plus);
+        app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Upscale) });
+    }
+    settle(&mut h);
+    assert_all_controls_named(&h, "the Model Store with a half-precision file missing");
+    let present = names(&h);
+    let offer = |id| format!("Download the half-precision file of {}", prunr_models::display_name(id));
+    assert!(present.contains(&offer(ModelId::RealEsrganX4Plus)), "{present:?}");
+    assert!(present.contains(&format!("Remove {}", prunr_models::display_name(ModelId::RealEsrganX4Plus))), "Remove stays");
+    assert!(!present.contains(&offer(ModelId::RealEsrganX2Plus)), "one that has its file offers none");
+    assert!(texts(&h).iter().any(|t| t == "Half-precision file missing."));
+}
+
 /// The Model Store offers Test on an installed model this computer never
 /// measured or measured on some accelerators only, and none on a measured
 /// one, nor on one a test would not time here; while a model's own test runs, its card has Cancel and no window

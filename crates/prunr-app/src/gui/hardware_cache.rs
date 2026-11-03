@@ -41,6 +41,8 @@ pub(crate) struct HardwareInstallCache {
     models: u32,
     /// Bit `i` set when `REGISTRY[i]` is on disk (or bundled).
     registry: u128,
+    /// Bit `i` set when `REGISTRY[i]` lacks its half-precision companion.
+    lacking_companions: u128,
     /// Bytes the downloaded models take, multi-part bundles included.
     pub models_on_disk: u64,
 }
@@ -276,11 +278,15 @@ fn update_bit(runtime: RuntimeId) -> u8 {
     1 << runtime as u8
 }
 
-fn registry_bits() -> u128 {
+fn registry_bits(holds: impl Fn(prunr_models::ModelId) -> bool) -> u128 {
     debug_assert!(prunr_models::REGISTRY.len() <= 128, "the registry outgrew its bit set");
     prunr_models::REGISTRY.iter().enumerate()
-        .filter(|(_, d)| prunr_models::is_available(d.id))
+        .filter(|(_, d)| holds(d.id))
         .fold(0, |bits, (i, _)| bits | 1 << i)
+}
+
+fn registry_bit(bits: u128, id: prunr_models::ModelId) -> bool {
+    prunr_models::REGISTRY.iter().position(|d| d.id == id).is_some_and(|i| bits & (1 << i) != 0)
 }
 
 impl HardwareInstallCache {
@@ -306,7 +312,8 @@ impl HardwareInstallCache {
             depth: prunr_models::is_available(prunr_core::depth::MODEL.into()),
             models: model_bits(crate::gui::settings::SettingsModel::ALL.iter()
                 .filter(|m| m.to_model_id().is_none_or(prunr_models::is_available))),
-            registry: registry_bits(),
+            registry: registry_bits(prunr_models::is_available),
+            lacking_companions: registry_bits(prunr_models::lacks_fp16_companion),
             models_on_disk: prunr_models::on_demand_dir().map_or(0, |dir| disk_usage_in(&dir)),
         };
         installs.addon_waits = RuntimeId::addons().any(|rt| installs.has_runtime(rt)) && !prunr_core::ort_runtime::hosts_addons();
@@ -321,7 +328,19 @@ impl HardwareInstallCache {
 
     /// Whether `id`'s weights are installed, as read at the last refresh.
     pub fn has_installed(&self, id: prunr_models::ModelId) -> bool {
-        prunr_models::REGISTRY.iter().position(|d| d.id == id).is_some_and(|i| self.registry & (1 << i) != 0)
+        registry_bit(self.registry, id)
+    }
+
+    /// Whether `id`'s half-precision companion is missing, as read at the
+    /// last refresh (`prunr_models::lacks_fp16_companion`).
+    pub fn lacks_companion(&self, id: prunr_models::ModelId) -> bool {
+        registry_bit(self.lacking_companions, id)
+    }
+
+    /// As if `id`'s half-precision companion had not come.
+    #[cfg(test)]
+    pub(crate) fn lacking_companion(self, id: prunr_models::ModelId) -> Self {
+        Self { lacking_companions: self.lacking_companions | registry_bits(|m| m == id), ..self }
     }
 
     /// Every model and runtime present, for tests that drive runs; a
@@ -348,6 +367,7 @@ impl HardwareInstallCache {
             depth: true,
             models: model_bits(&crate::gui::settings::SettingsModel::ALL),
             registry: u128::MAX,
+            lacking_companions: 0,
             models_on_disk: 0,
         }
     }

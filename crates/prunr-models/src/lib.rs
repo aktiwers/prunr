@@ -2525,6 +2525,12 @@ pub fn has_fp16_variant(id: ModelId) -> bool {
     variant_path(id, "fp16").is_some()
 }
 
+/// `id` downloads a half-precision companion (`OnDemand`'s `fp16`) that
+/// is not on disk: it failed, was cancelled, or never came.
+pub fn lacks_fp16_companion(id: ModelId) -> bool {
+    matches!(descriptor(id).map(|d| d.source), Some(ModelSource::OnDemand { fp16: Some(_), .. })) && !has_fp16_variant(id)
+}
+
 /// Whether the INT8 copy of `id` is on disk, without reading it.
 pub fn has_int8_variant(id: ModelId) -> bool {
     variant_path(id, "int8").is_some()
