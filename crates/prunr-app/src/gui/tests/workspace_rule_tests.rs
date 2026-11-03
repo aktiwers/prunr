@@ -289,8 +289,10 @@ const USER_TEXT_ALLOWED: [(&str, &str); 1] = [
 ];
 
 /// The GUI's sources, every user-text rule's one scope.
-fn is_gui_source(rel: &str) -> bool {
-    rel.starts_with("prunr-app/src/gui/") && !USER_TEXT_ALLOWED.iter().any(|(f, _)| rel == *f)
+fn shows_user_text(rel: &str) -> bool {
+    // The download and install errors reach the Model Store and Settings as toasts.
+    let shown = rel.starts_with("prunr-app/src/gui/") || matches!(rel, "prunr-app/src/download.rs" | "prunr-app/src/runtime_install.rs");
+    shown && !USER_TEXT_ALLOWED.iter().any(|(f, _)| rel == *f)
 }
 
 fn literals(line: &str) -> impl Iterator<Item = &str> {
@@ -302,7 +304,7 @@ fn literals(line: &str) -> impl Iterator<Item = &str> {
 #[test]
 fn user_text_has_no_engineering_words() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+    for (rel, text) in workspace_sources().filter(|(rel, _)| shows_user_text(rel)) {
         for (n, literal) in user_literals(text) {
             if let Some(word) = crate::gui::automation::checks::engineering_word(literal) {
                 found.push(format!("{rel}:{n}: \"{literal}\" says {word:?}"));
@@ -323,7 +325,7 @@ fn user_text_writes_only_glyphs_the_fonts_have() {
     let (body, mono) = (egui::FontId::proportional(14.0), egui::FontId::monospace(14.0));
     let lacks = |c: char| lacks_in(&body, c);
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+    for (rel, text) in workspace_sources().filter(|(rel, _)| shows_user_text(rel)) {
         for (n, literal) in user_literals(text) {
             if let Some(c) = unescaped(literal).find(|&c| lacks(c)) {
                 found.push(format!("{rel}:{n}: \"{literal}\" writes {c:?}, which the fonts lack"));
@@ -365,7 +367,7 @@ fn unescaped(literal: &str) -> impl Iterator<Item = char> + '_ {
 #[test]
 fn user_text_names_no_keys_by_hand() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel) && !rel.ends_with("/shortcuts.rs")) {
+    for (rel, text) in workspace_sources().filter(|(rel, _)| shows_user_text(rel) && !rel.ends_with("/shortcuts.rs")) {
         for (n, literal) in user_literals(text) {
             let words = literal.split(|c: char| !c.is_alphanumeric() && c != '+');
             let named = words.into_iter().find(|w| {
@@ -385,7 +387,7 @@ fn user_text_names_no_keys_by_hand() {
 #[test]
 fn user_text_has_no_three_dots_or_plural_brackets() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+    for (rel, text) in workspace_sources().filter(|(rel, _)| shows_user_text(rel)) {
         for (n, literal) in user_literals(text) {
             if crate::gui::automation::checks::typography(literal).is_some() {
                 found.push(format!("{rel}:{n}: \"{literal}\": use an ellipsis character / fmt::count"));
@@ -400,7 +402,7 @@ fn user_text_has_no_three_dots_or_plural_brackets() {
 #[test]
 fn user_text_uses_us_spelling() {
     let mut found = Vec::new();
-    for (rel, text) in workspace_sources().filter(|(rel, _)| is_gui_source(rel)) {
+    for (rel, text) in workspace_sources().filter(|(rel, _)| shows_user_text(rel)) {
         for (n, literal) in user_literals(text) {
             if let Some(word) = crate::gui::automation::checks::british_word(literal) {
                 found.push(format!("{rel}:{n}: \"{literal}\" spells {word:?}"));
