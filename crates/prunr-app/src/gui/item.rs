@@ -1057,6 +1057,9 @@ pub(crate) struct BatchItem {
     /// unpacked off the UI thread and held so they stay unpacked: either
     /// shows without decoding first. Costs up to two images of RAM.
     pub(crate) warm_steps: Arc<std::sync::Mutex<[Option<WarmStep>; 2]>>,
+    /// The slots its warm-ups unpack behind: the batch's, shared with its
+    /// other decodes, once the image is in the batch.
+    pub(crate) decode_slots: Arc<super::background_io::DecodeSlots>,
     /// The image is the one on screen: only it keeps steps warm, so a
     /// batch reprocessing in the background holds no extra images.
     pub(crate) on_screen: bool,
@@ -1778,8 +1781,8 @@ impl BatchItem {
     }
 
     /// Unpack the images and planes of the steps either side of the shown
-    /// one on a worker and hold them; drop whatever was held for other
-    /// steps.
+    /// one behind the decode slots and hold them; drop whatever was held
+    /// for other steps.
     fn warm_neighbour_steps(&self) {
         if !self.on_screen {
             return;
@@ -1794,7 +1797,13 @@ impl BatchItem {
                 Some(key) => {
                     held[at] = Some(WarmStep { step: key.clone(), image: None, planes: [None, None] });
                     drop(held);
-                    std::thread::spawn(move || {
+                    self.decode_slots.spawn(move || {
+                        // Held Ctrl+Z moves on faster than steps unpack: a
+                        // step no longer wanted by the time a slot frees is
+                        // left packed.
+                        if !slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[at].as_ref().is_some_and(|w| w.step.same(&key)) {
+                            return;
+                        }
                         let image = key.result.as_ref().and_then(|r| r.load());
                         let planes = key.planes.clone().map(|p| p.and_then(|p| p.load()));
                         let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3212,6 +3221,7 @@ impl BatchItem {
             subject: None,
             tile_preview: None,
             warm_steps: Arc::default(),
+            decode_slots: Arc::default(),
             on_screen: false,
             found_faces: None,
             faces_pending: None,
@@ -3815,6 +3825,42 @@ mod tests {
         assert_eq!(warm.get_pixel(0, 0).0, [9, 9, 9, 255]);
         let ahead = item.timeline.next().and_then(|s| s.result.as_ref()).and_then(|r| r.load()).expect("next result");
         assert!(Arc::ptr_eq(&warm, &ahead), "redo reads the held image");
+    }
+
+    /// Warm-ups unpack behind the decode slots: none runs while every slot
+    /// is taken, and one whose step a later move no longer wants leaves
+    /// that step packed once it gets a slot.
+    #[test]
+    fn warm_ups_wait_for_a_decode_slot_and_a_superseded_one_unpacks_nothing() {
+        let mut item = fixture_item(1);
+        item.decode_slots = Arc::new(super::super::background_io::DecodeSlots::new(1));
+        for v in [1, 2, 3] {
+            item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([v, v, v, 255]))));
+            item.commit(StepKind::Process);
+        }
+        for job in item.timeline.stored_images().filter_map(|c| c.compress_job()).collect::<Vec<_>>() {
+            job();
+        }
+        let step = |i: usize| item.timeline.stored_images().nth(i).cloned().expect("a stored step");
+        let (first, second) = (step(0), step(1));
+        assert!(first.is_compressed() && second.is_compressed());
+
+        let every_slot = item.decode_slots.acquire();
+        item.set_on_screen(true);
+        let _ = item.undo_step();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let warm = |item: &BatchItem, at: usize| item.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[at].as_ref().and_then(|w| w.image.clone());
+        assert!(warm(&item, BACK).is_none() && warm(&item, AHEAD).is_none(), "no warm-up runs without a slot");
+        assert!(first.is_compressed() && second.is_compressed(), "nothing unpacked");
+
+        drop(every_slot);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (warm(&item, BACK).is_none() || warm(&item, AHEAD).is_none()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(warm(&item, BACK).expect("the step undo returns to warms up").get_pixel(0, 0).0, [1, 1, 1, 255]);
+        assert!(warm(&item, AHEAD).is_some(), "the step redo goes to warms up");
+        assert!(second.is_compressed(), "the warm-up the undo superseded left its step packed");
     }
 
     /// A cut-out made from an edited photo (an object erased first) gets
