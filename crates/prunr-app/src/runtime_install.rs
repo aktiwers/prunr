@@ -630,14 +630,16 @@ fn run_install(
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let _ = tx.send(InstallEvent::Preparing);
-    // Uninstalled while loaded and still here: installing keeps it.
     if let Some(mark) = rt.removal_mark().filter(|mark| mark.is_file()) {
-        std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
-        let copies = small_card_copies_missing(rt);
-        fetch_small_card_copies(&copies, tx, &cancel, (0, copies.iter().map(|(_, copy)| copy.size_bytes()).sum()));
         let install_dir = rt.checked_install_dir()?;
-        let _ = tx.send(InstallEvent::Done { install_dir, started: rt.addon_kind().map(start_addon) });
-        return Ok(());
+        let kept = keeps_marked_install(&install_dir, rt.addon_kind().is_some_and(Addon::registered))?;
+        std::fs::remove_file(&mark).map_err(|e| format!("keep {}: {e}", rt.display_name()))?;
+        if kept {
+            let copies = small_card_copies_missing(rt);
+            fetch_small_card_copies(&copies, tx, &cancel, (0, copies.iter().map(|(_, copy)| copy.size_bytes()).sum()));
+            let _ = tx.send(InstallEvent::Done { install_dir, started: rt.addon_kind().map(start_addon) });
+            return Ok(());
+        }
     }
     let wheel = match rt.addon() {
         Some(addon) => addon.download(),
@@ -689,6 +691,18 @@ fn run_install(
 
     let _ = tx.send(InstallEvent::Done { install_dir, started });
     Ok(())
+}
+
+/// What an install does with its folder `dir`, marked to go: keeps it
+/// where the add-on is `loaded` (uninstalled in this run, nothing deleted
+/// yet); otherwise an earlier run's removal stopped part-way and what is
+/// left may lack any file, so it goes before a fresh install. Whether it
+/// is kept.
+fn keeps_marked_install(dir: &Path, loaded: bool) -> Result<bool, String> {
+    if !loaded && dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+    }
+    Ok(loaded)
 }
 
 /// Tell this process where the installed add-ons are, before it loads any
@@ -1167,6 +1181,24 @@ mod tests {
         assert!(!store.path().join(".cuda-addon-0.2.0-windows-x64.remove").exists(), "its mark too");
         assert!(store.path().join("cuda-1.24.1-windows-x64").exists(), "not marked: kept");
         assert!(store.path().join("other").exists() && store.path().join(".other.remove").exists(), "not an add-on: kept");
+    }
+
+    /// An install over an add-on whose removal at an earlier start
+    /// stopped part-way (a file locked) starts afresh: what is left goes,
+    /// where the install said it was done over a folder missing its
+    /// libraries. One uninstalled while loaded in this run is kept as it is.
+    #[test]
+    fn an_install_over_a_half_removed_add_on_starts_afresh() {
+        let store = tempfile::tempdir().unwrap();
+        let dir = store.path().join("cuda-addon-0.2.0-windows-x64");
+        let library = dir.join(prunr_core::ort_runtime::NVIDIA_LIBS_DIR).join("cudnn64_9.dll");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, b"downloaded").unwrap();
+        assert_eq!(keeps_marked_install(&dir, true), Ok(true));
+        assert!(library.exists(), "kept as it is");
+        assert_eq!(keeps_marked_install(&dir, false), Ok(false), "a fresh install follows");
+        assert!(!dir.exists(), "what the earlier removal left goes");
+        assert_eq!(keeps_marked_install(&dir, false), Ok(false), "nothing left is fine too");
     }
 
     /// CUDA's small-card copies go at the next start with CUDA's own
