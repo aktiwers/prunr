@@ -171,11 +171,17 @@ impl PreparedImage {
         let raw = rgba.as_raw();
         let color = |p: &[u8]| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]);
         Self::cut(w, h, |[x0, y0], [gw, gh]| {
-            let mut pixels = vec![Color32::TRANSPARENT; gw * gh];
-            pixels.par_chunks_exact_mut(gw).enumerate().for_each(|(row, out)| {
+            let len = gw * gh;
+            let mut pixels = Vec::with_capacity(len);
+            pixels.spare_capacity_mut()[..len].par_chunks_exact_mut(gw).enumerate().for_each(|(row, out)| {
                 let src = &raw[((y0 + row) * w + x0) * 4..][..gw * 4];
-                out.iter_mut().zip(src.chunks_exact(4)).for_each(|(o, p)| *o = color(p));
+                out.iter_mut().zip(src.chunks_exact(4)).for_each(|(o, p)| {
+                    o.write(color(p));
+                });
             });
+            // SAFETY: the first `len` slots are `gh` rows of `gw`, and each
+            // row's `gw` slots were written from its `gw * 4` source bytes.
+            unsafe { pixels.set_len(len) };
             egui::ColorImage::new([gw, gh], pixels)
         })
     }
@@ -333,6 +339,32 @@ mod tests {
         let direct = PreparedImage::from_rgba(&rgba);
         assert_eq!(direct.tiles.len(), 3);
         assert!(copied.tiles.iter().zip(&direct.tiles).all(|(a, b)| a.texture.size == b.texture.size && a.texture.pixels == b.texture.pixels));
+    }
+
+    /// Tiles written straight into their buffers hold the very pixels and
+    /// places the tiles of a prefilled buffer held, edge and corner tiles
+    /// included.
+    #[test]
+    fn tiles_written_in_place_match_the_prefilled_ones() {
+        use rayon::prelude::*;
+        for (w, h, count) in [(7, 5, 1), (TILE_SIDE + 3, TILE_SIDE + 1, 4)] {
+            let rgba = image::RgbaImage::from_fn(w as u32, h as u32, |x, y| image::Rgba([x as u8, y as u8, (x ^ y) as u8, (x * 7 + y * 13) as u8]));
+            let raw = rgba.as_raw();
+            let prefilled = PreparedImage::cut(w, h, |[x0, y0], [gw, gh]| {
+                let mut pixels = vec![Color32::TRANSPARENT; gw * gh];
+                pixels.par_chunks_exact_mut(gw).enumerate().for_each(|(row, out)| {
+                    let src = &raw[((y0 + row) * w + x0) * 4..][..gw * 4];
+                    out.iter_mut().zip(src.chunks_exact(4)).for_each(|(o, p)| *o = Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]));
+                });
+                egui::ColorImage::new([gw, gh], pixels)
+            });
+            let direct = PreparedImage::from_rgba(&rgba);
+            assert_eq!((direct.tiles.len(), prefilled.tiles.len()), (count, count), "{w}x{h}");
+            for (a, b) in prefilled.tiles.iter().zip(&direct.tiles) {
+                assert_eq!((a.origin, a.part, a.texture_uv, a.texture.size), (b.origin, b.part, b.texture_uv, b.texture.size), "{w}x{h}");
+                assert!(a.texture.pixels == b.texture.pixels, "{w}x{h}: the tile at {:?}", a.origin);
+            }
+        }
     }
 
     /// A large image is cut into tiles that cover it exactly, each within
