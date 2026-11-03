@@ -3346,10 +3346,11 @@ impl BatchItem {
     }
 
     /// What export puts behind this item's result: only shared handles,
-    /// so it can travel to a save thread and bake there.
+    /// so it can travel to a save thread and bake there. Nothing goes
+    /// behind the photo before a result, as on the canvas.
     pub(crate) fn export_bg(&self) -> ExportBg {
         ExportBg {
-            backdrop: self.settings.backdrop(),
+            backdrop: if self.has_result() { self.settings.backdrop() } else { super::item_settings::Backdrop::Transparent },
             image: self.named_bg_image().cloned(),
             fit: self.settings.bg_image_fit,
             photo: self.backdrop_photo(),
@@ -3863,6 +3864,21 @@ mod tests {
         assert!(second.is_compressed(), "the warm-up the undo superseded left its step packed");
     }
 
+    /// An image not processed yet shows the photo alone, so Save and Copy
+    /// write it without the backdrop its settings name; once it has a
+    /// result, the backdrop goes behind that.
+    #[test]
+    fn an_image_without_a_result_exports_without_a_backdrop() {
+        let mut item = fixture_item(1);
+        let photo = Arc::new(image::RgbaImage::new(4, 2));
+        item.source_rgba = Some(Arc::clone(&photo));
+        item.settings.bg = Some([255, 0, 0, 255]);
+        assert!(item.export_bg().is_empty(), "the canvas draws no backdrop");
+        assert!(Arc::ptr_eq(&item.export_bg().bake(&photo, &ExportDepth::default()), &photo), "nothing baked");
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
+        assert!(!item.export_bg().is_empty(), "the result's backdrop");
+    }
+
     /// A cut-out made from an edited photo (an object erased first) gets
     /// its effect background from that edited photo, not the original,
     /// on screen and in export alike.
@@ -3871,6 +3887,7 @@ mod tests {
         use crate::gui::timeline::{Origin, Stored};
         let mut item = fixture_item(1);
         item.source_rgba = Some(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([250, 250, 250, 255]))));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         let erased = Stored::new(Arc::new(image::RgbaImage::from_pixel(4, 2, image::Rgba([10, 10, 10, 255]))));
         item.timeline.current_mut().origin = Some(Origin::new(Engine::Segment, Some(erased)));
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
@@ -3893,6 +3910,7 @@ mod tests {
         let mut item = fixture_item(1);
         let photo = image::RgbaImage::from_fn(4, 2, |x, _| image::Rgba([200, 100, x as u8 * 50, 255]));
         item.source_rgba = Some(Arc::new(photo));
+        crate::gui::tests::fixtures::put_in(&mut item, BatchStatus::Done);
         item.settings.bg_effect = prunr_core::BgEffect::DesaturatedSource;
         let line = image::Rgba([255, 0, 0, 255]);
         let result = Arc::new(image::RgbaImage::from_fn(4, 2, |x, _| if x == 0 { line } else { image::Rgba([0, 0, 0, 0]) }));
