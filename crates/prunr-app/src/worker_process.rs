@@ -166,6 +166,17 @@ fn close_events(evt_tx: mpsc::Sender<SubprocessEvent>, writer: std::thread::Join
     let _ = writer.join();
 }
 
+/// While held, `item_id` reports its model loading when the run `builds`
+/// one: a compile can run minutes, and a worker that reports nothing that
+/// long is taken for hung by the parent's watchdog and killed.
+fn loading_reports(builds: bool, item_id: u64, events: &mpsc::Sender<SubprocessEvent>) -> Option<Pulse> {
+    builds.then(|| {
+        let events = events.clone();
+        let loading = prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel);
+        Pulse::start(PULSE_EVERY, move || events.send(SubprocessEvent::Report { item_id, update: loading.clone() }).is_ok())
+    })
+}
+
 /// The edge detector, built on first need: on the GPU unless `on_cpu`.
 fn ensure_edge_engine(edge_engine: &mut Option<Arc<EdgeEngine>>, on_cpu: bool) -> Result<(), String> {
     if edge_engine.is_none() {
@@ -412,15 +423,9 @@ pub fn run_worker() -> ! {
             SubprocessCommand::ProcessImage { item_id, image_path, chain_input, correction } => {
                 let strokes = correction.map(|file| file.0);
                 let built = (|| -> Result<(), String> {
-                    // A model built here (a compile can run minutes) says so
-                    // as it goes, or the parent's hang watchdog kills it.
                     let builds = (line_mode != LineMode::Off && edge_engine.is_none())
                         || (line_mode.cuts_out() && engines.is_empty());
-                    let _loading = builds.then(|| {
-                        let events = evt_tx.clone();
-                        let loading = prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel);
-                        Pulse::start(PULSE_EVERY, move || events.send(SubprocessEvent::Report { item_id, update: loading.clone() }).is_ok())
-                    });
+                    let _loading = loading_reports(builds, item_id, &evt_tx);
                     if line_mode != LineMode::Off {
                         ensure_edge_engine(&mut edge_engine, on_cpu)?;
                     }
@@ -782,7 +787,11 @@ pub fn run_worker() -> ! {
                 mask: cmd_mask, correction,
             } => {
                 let strokes = correction.map(|file| file.0);
-                if let Err(error) = ensure_edge_engine(&mut edge_engine, on_cpu) {
+                let built = {
+                    let _loading = loading_reports(edge_engine.is_none(), item_id, &evt_tx);
+                    ensure_edge_engine(&mut edge_engine, on_cpu)
+                };
+                if let Err(error) = built {
                     cleanup_ipc_temps(&ipc_dir, &[&seg_tensor_path]);
                     cleanup_image_inputs(&ipc_dir, photo.path(), strokes.as_deref());
                     let _ = evt_tx.send(SubprocessEvent::ImageError { item_id, error });
@@ -1121,6 +1130,19 @@ mod tests {
             }
         };
         assert_eq!(end, RecvTimeoutError::Disconnected, "it stops with the build");
+    }
+
+    /// A run that builds a model (the cut-out's, or the line model's for a
+    /// Sketch re-run) reports its image's model loading; one with nothing
+    /// to build reports nothing.
+    #[test]
+    fn a_run_that_builds_a_model_reports_it_loading() {
+        let (tx, rx) = mpsc::channel();
+        let reports = loading_reports(true, 7, &tx);
+        let report = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("a report while building");
+        assert!(matches!(report, SubprocessEvent::Report { item_id: 7, update: prunr_core::ProgressUpdate::Step(prunr_core::Step::LoadingModel) }));
+        drop(reports);
+        assert!(loading_reports(false, 8, &tx).is_none());
     }
 
     /// A result that cannot be written is an error for the parent, with no
