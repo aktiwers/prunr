@@ -768,6 +768,14 @@ impl BatchManager {
         item.land_selection_state(cleared, None, Some(super::timeline::StepKind::Selection), Some(Made::One(SelectionMade::Clear)))
     }
 
+    /// Give the images in `ids` the shown image's settings: Process
+    /// applies what is shown to the images it runs on.
+    pub fn share_shown_settings(&mut self, ids: &HashSet<u64>) {
+        if let Some(shown) = self.selected_idx_clamped() {
+            self.share_settings(shown, ids);
+        }
+    }
+
     /// Give the images in `ids` the settings of the image at `from`, with
     /// its background picture: a run applies what is shown to the batch.
     pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
