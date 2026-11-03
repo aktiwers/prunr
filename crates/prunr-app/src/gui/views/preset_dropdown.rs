@@ -23,9 +23,9 @@ fn button_label(settings: &Settings, current: &ItemSettings, applied_preset: &st
     if !exists {
         return format!("Custom  {}", ICON_EDIT.codepoint);
     }
-    let resolved = settings.resolve_preset(applied_preset, None);
-    let item_diverged = *current != resolved.item_settings;
-    let brush_diverged = settings.brush != resolved.brush;
+    let preset = settings.preset(applied_preset);
+    let item_diverged = *current != preset.item_settings(settings.model);
+    let brush_diverged = settings.brush != *preset.brush(settings.model, None);
     let is_modified = item_diverged || brush_diverged;
     let state_icon = if is_modified { ICON_EDIT.codepoint } else { ICON_CHECK.codepoint };
     format!("{applied_preset}  {state_icon}")
