@@ -2194,6 +2194,43 @@ mod timeline_contract_tests {
         assert_eq!(app.batch.items[0].status(), BatchStatus::Pending);
     }
 
+    /// An Undo or Redo with no step to move to leaves the image's run and
+    /// its live preview going: the image stays where it was, so they
+    /// still belong to it.
+    #[test]
+    fn an_undo_or_redo_that_cannot_move_stops_nothing() {
+        use crate::gui::item::Cutter;
+        use crate::gui::views::shortcuts::Action;
+        type Setup = fn(&mut crate::gui::item::BatchItem);
+        let cases: [(&str, Action, Setup); 3] = [
+            ("Redo on the newest step", Action::Redo, |_| {}),
+            ("Undo on the first step", Action::Undo, |_| {}),
+            ("Undo onto a step whose saved state is gone", Action::Undo, |item| {
+                let plane = |v: i8| Arc::new(prunr_core::selection::MaskArtifact::from_cells(2, 2, vec![v; 4]));
+                item.commit_selection_mask(plane(1), StepKind::Stroke);
+                let earlier = item.timeline.current().selection.clone().expect("a selection step");
+                item.commit_selection_mask(plane(2), StepKind::Stroke);
+                earlier.compress_job().expect("only the timeline holds it")();
+                assert!(earlier.demote_to_disk());
+                std::fs::remove_file(earlier.disk_path().expect("on disk")).unwrap();
+            }),
+        ];
+        for (what, action, setup) in cases {
+            let ctx = egui::Context::default();
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            let item = push_test_item(&mut app, 1);
+            setup(item);
+            item.start_cut(Some(StepKind::Process), Cutter::Model(prunr_core::ModelKind::Silueta));
+            app.batch.select_item(0);
+            app.processor.live_preview.render_now(1, crate::gui::live_preview::PreviewKind::Mask);
+            app.step_items(&ctx, action, &[1]);
+            assert!(!app.processor.cancels.is_cancelled(1), "{what}: the run goes on");
+            assert!(app.batch.items[0].job.is_some(), "{what}: the image still awaits it");
+            assert!(app.processor.live_preview.works_on(1), "{what}: its preview too");
+        }
+    }
+
     /// A ticked image off screen that Process re-runs under the shown
     /// image's settings gets its own undo step, as the shown one does:
     /// undoing it brings back the settings and the result it had. Both

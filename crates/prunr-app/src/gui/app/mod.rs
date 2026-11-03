@@ -763,10 +763,12 @@ impl PrunrApp {
 
     /// Undo / redo the images `ids`.
     pub(super) fn step_items(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action, ids: &[u64]) {
+        use crate::gui::item::StepRefused;
         use crate::gui::views::shortcuts::Action;
-        let (step, keeps_run, verb, nothing): (crate::gui::item::StepFn, fn(&BatchItem) -> bool, _, _) = match action {
-            Action::Redo => (BatchItem::redo_step, BatchItem::redo_keeps_run, "redone", "Nothing to redo"),
-            _ => (BatchItem::undo_step, BatchItem::undo_keeps_run, "undone", "Nothing to undo"),
+        type Target = fn(&BatchItem) -> Result<(), StepRefused>;
+        let (step, target, keeps_run, verb, nothing): (crate::gui::item::StepFn, Target, fn(&BatchItem) -> bool, _, _) = match action {
+            Action::Redo => (BatchItem::redo_step, BatchItem::redo_target, BatchItem::redo_keeps_run, "redone", "Nothing to redo"),
+            _ => (BatchItem::undo_step, BatchItem::undo_target, BatchItem::undo_keeps_run, "undone", "Nothing to undo"),
         };
         let mut stepped = Vec::new();
         let mut lost = false;
@@ -777,6 +779,11 @@ impl PrunrApp {
             if action != Action::Redo && self.batch.items[idx].job.is_some() {
                 self.batch.items[idx].record_unlanded_look();
             }
+            // An image that does not move keeps its run and its preview.
+            if let Err(refused) = target(&self.batch.items[idx]) {
+                lost |= refused == StepRefused::Lost;
+                continue;
+            }
             // A run belongs to the state being left, but strokes painted
             // while it runs keep it.
             if !keeps_run(&self.batch.items[idx]) {
@@ -786,7 +793,7 @@ impl PrunrApp {
             let kind = match step(&mut self.batch.items[idx]) {
                 Ok(kind) => kind,
                 Err(refused) => {
-                    lost |= refused == crate::gui::item::StepRefused::Lost;
+                    lost |= refused == StepRefused::Lost;
                     continue;
                 }
             };
