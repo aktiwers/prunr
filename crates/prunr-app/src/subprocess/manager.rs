@@ -351,8 +351,27 @@ impl SubprocessManager {
         self.stdin_writer.flush()
     }
 
-    /// Write tensor + image to temp files, then dispatch the caller-built command.
+    /// Write tensor + image to temp files, then dispatch the caller-built
+    /// command. A send that fails removes both files.
     fn send_with_tensor_and_image(
+        &mut self,
+        item_id: u64,
+        tensor: &TensorView<'_>,
+        tensor_kind: super::protocol::IpcKind,
+        photo: &Photo,
+        image_kind: super::protocol::IpcKind,
+        build_cmd: impl FnOnce(std::path::PathBuf, PhotoFile) -> SubprocessCommand,
+    ) -> Result<(), SendError> {
+        let sent = self.write_and_send_with_tensor(item_id, tensor, tensor_kind, photo, image_kind, build_cmd);
+        // Nothing will read what was written: a tensor and a photo of up
+        // to tens of MB, in a RAM-backed folder.
+        if sent.is_err() {
+            remove_inputs(item_id, &[tensor_kind, image_kind]);
+        }
+        sent
+    }
+
+    fn write_and_send_with_tensor(
         &mut self,
         item_id: u64,
         tensor: &TensorView<'_>,
@@ -410,7 +429,7 @@ impl SubprocessManager {
             },
         );
         if sent.is_err() {
-            remove_inputs(item_id, &[super::protocol::IpcKind::Correction, super::protocol::IpcKind::Seg, super::protocol::IpcKind::Input]);
+            remove_inputs(item_id, &[super::protocol::IpcKind::Correction]);
         }
         sent
     }
@@ -761,6 +780,36 @@ mod tests {
         }
         let why = send_init(child, &mut stdin, &SubprocessCommand::Shutdown).expect_err("the pipe is closed");
         assert!(why.starts_with("Prunr was updated while it was open"), "{why}");
+    }
+
+    /// A re-run that could not be handed to the worker leaves none of its
+    /// temp files (tensor, photo, strokes) in the RAM-backed folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_rerun_send_leaves_no_temp_files() {
+        let child = Command::new("sh").args(["-c", "exit 0"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut sub = SubprocessManager::for_test(child);
+        // A test spawning beside this one holds a copy of the pipe from its
+        // fork to its exec; once a write finds the pipe closed, it stays so.
+        while std::io::Write::write(sub.stdin_writer.get_mut(), &[0]).is_ok() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let data = [0.5f32; 4];
+        let tensor = TensorView { data: &data, height: 2, width: 2, model: ModelKind::Silueta };
+        let photo = Photo::Encoded(std::sync::Arc::new(vec![1, 2, 3]));
+        let plane = prunr_core::selection::MaskArtifact::from_cells(2, 2, vec![1; 4]);
+        let left = |id: u64, kinds: &[IpcKind]| -> Vec<IpcKind> {
+            kinds.iter().copied().filter(|k| k.path_for(ipc_temp_dir(), id).exists()).collect()
+        };
+
+        let tier2 = 9_100_001;
+        assert!(sub.send_repostprocess(tier2, &tensor, &photo, MaskSettings::default()).is_err());
+        assert_eq!(left(tier2, &[IpcKind::Tensor, IpcKind::Orig]), []);
+
+        let add_edge = 9_100_002;
+        assert!(sub.send_add_edge_inference(add_edge, &tensor, &photo, MaskSettings::default(), Some(&plane)).is_err());
+        assert_eq!(left(add_edge, &[IpcKind::Seg, IpcKind::Input, IpcKind::Correction]), []);
     }
 
     /// The worker runs from this process's own binary, which on Linux an
