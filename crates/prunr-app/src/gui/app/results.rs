@@ -309,6 +309,13 @@ impl PrunrApp {
                     tracing::warn!(target = name, %error, "install failed");
                     (Err(format!("Could not install {name}: {error}")), false)
                 }
+                InstallEvent::Cancelled => {
+                    tracing::info!(target = name, "install cancelled");
+                    self.toasts.info(format!("{name} install cancelled"));
+                    self.runtime_install = None;
+                    self.refresh_install_cache();
+                    return;
+                }
                 _ => continue,
             };
             self.toasts.outcome(outcome);
@@ -3508,7 +3515,7 @@ mod install_tests {
 
     /// Every way an install ends is told once and closes the install: a
     /// runtime loads from the next start, an add-on is in use at once or
-    /// says why it is not.
+    /// says why it is not, and a cancel is no error.
     #[test]
     fn every_install_end_is_told_once() {
         let ctx = egui::Context::default();
@@ -3518,6 +3525,7 @@ mod install_tests {
             (InstallEvent::Done { install_dir: path.clone(), started: Some(Ok(())) }, "success", "installed: models it runs faster use it now"),
             (InstallEvent::Done { install_dir: path.clone(), started: Some(Err("no card".into())) }, "error", "installed, but it could not start: no card"),
             (InstallEvent::Failed { error: "offline".into() }, "error", "Could not install"),
+            (InstallEvent::Cancelled, "info", "CUDA install cancelled"),
         ] {
             let mut app = crate::gui::app::PrunrApp::new_for_test();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -3537,7 +3545,7 @@ mod install_tests {
             let failure = prunr_core::engine::GpuStartFailure::cuda_for_test("no card");
             app.tell_gpu_start_failures(prunr_core::engine::GpuStartFailure::by_stack(&[&failure]));
             let told_again = app.toasts.len_for_test() > before + 1;
-            assert_eq!(told_again, kind == "success" || says.starts_with("Could"), "{says}: a failed start is not said twice");
+            assert_eq!(told_again, kind != "error" || says.starts_with("Could"), "{says}: a failed start is not said twice");
         }
     }
 }
