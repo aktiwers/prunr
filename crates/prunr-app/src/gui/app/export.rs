@@ -353,9 +353,9 @@ fn spawn_save_single(
     tx: mpsc::Sender<SaveDone>,
 ) {
     std::thread::spawn(move || {
+        let picked = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         if !asked && path.exists() {
-            let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-            let outcome = Err(format!("Not saved: {name} is already there. Save again and pick that name to replace it."));
+            let outcome = Err(format!("Not saved: {picked} is already there. Save again and pick that name to replace it."));
             let _ = tx.send(SaveDone { outcome, wrote: Vec::new() });
             return;
         }
@@ -367,14 +367,23 @@ fn spawn_save_single(
         };
         let wrote = outcome.is_ok().then_some(one.mark).into_iter().collect();
         let folder = path.parent().unwrap_or(Path::new("."));
-        let picked = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        if let Some(Err(e)) = one.depth.map(|d| d.named(&picked).write(folder, &depth)) {
+        if let Some(Err(e)) = one.depth.map(|d| d.named(&untagged(&picked, format)).write(folder, &depth)) {
             tracing::warn!(%e, "depth map save failed");
             let msg = outcome.unwrap_or_else(|failed| failed);
             outcome = Err(format!("{msg}; could not save the depth map: {e}"));
         }
         let _ = tx.send(SaveDone { outcome, wrote });
     });
+}
+
+/// `picked` without the `.prunr` tag of a result's name: the suggested
+/// `IMG.prunr.png` keeps its depth map at `IMG-depth.png`, as a save of
+/// several names it.
+fn untagged(picked: &str, format: prunr_core::ExportFormat) -> String {
+    let suffix = format.result_suffix();
+    picked.len().checked_sub(suffix.len())
+        .filter(|&at| at > 0 && picked.is_char_boundary(at) && picked[at..].eq_ignore_ascii_case(&suffix))
+        .map_or_else(|| picked.to_string(), |at| format!("{}.{}", &picked[..at], format.extension()))
 }
 
 /// Bake `bg` behind `rgba`, encode as `format` and write it to `path`.
@@ -809,6 +818,11 @@ mod toast_kind_tests {
         assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
         assert_eq!(listing(dir.path()), ["first-depth.png", "first.png"]);
         assert!(std::fs::read(dir.path().join("first-depth.png")).unwrap().starts_with(b"\x89PNG"), "replaced");
+
+        let dir = tempfile::tempdir().unwrap();
+        app.on_save_image_picked(1, prunr_core::ExportFormat::Png, dir.path().join("IMG_0001.prunr.png"));
+        assert_eq!(save_toast(&mut app), ("success", "Saved".to_string()));
+        assert_eq!(listing(dir.path()), ["IMG_0001-depth.png", "IMG_0001.prunr.png"], "the suggested name's map, as a save of several names it");
     }
 
     #[test]
