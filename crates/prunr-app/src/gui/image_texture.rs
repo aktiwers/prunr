@@ -163,8 +163,8 @@ pub(crate) struct PreparedImage {
 }
 
 impl PreparedImage {
-    /// Each tile's pixels converted straight from the image's rows, the
-    /// tiles in parallel.
+    /// Each tile's pixels converted straight from the image's rows, a
+    /// tile's rows in parallel.
     pub(crate) fn from_rgba(rgba: &image::RgbaImage) -> Self {
         use rayon::prelude::*;
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
