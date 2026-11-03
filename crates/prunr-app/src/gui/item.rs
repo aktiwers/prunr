@@ -1776,6 +1776,37 @@ impl BatchItem {
         }
     }
 
+    /// Another image is shown: this one drops the decoded tensors kept for
+    /// slider drags and what is rebuilt when it is shown again, and a
+    /// processed one releases its full-resolution result (`park_result`);
+    /// the timeline keeps it compressed.
+    pub(crate) fn leave_screen(&mut self, keep_embedding: bool) {
+        self.drop_hot_tensors();
+        self.drop_upscale_reference();
+        self.reveal = None;
+        self.subject = None;
+        // The photo with faces blended in, one image of RAM; the faces
+        // themselves (a few MB) stay, so it is rebuilt without a search.
+        // Likewise the photo with the Depth chip's look; the map stays.
+        // Freed off the UI thread.
+        self.face_preview = None;
+        super::reclaim::later((self.faced_photo.take(), self.depth_photo.take(), self.quick_photo.take()));
+        // Up to two images; warmed again when the image is shown.
+        self.set_on_screen(false);
+        // A full-size picture made from the photo; rebuilt when shown.
+        if matches!(self.settings.backdrop(), super::item_settings::Backdrop::Effect(_)) {
+            self.backdrop_texture = None;
+        }
+        // 16 MB each: the shown image keeps its embedding, and with the
+        // tool on so does the one shown before it.
+        if !keep_embedding {
+            self.magic_brush_embedding = None;
+        }
+        if self.park_result() {
+            self.release_result_texture();
+        }
+    }
+
     /// Unpack the images and planes of the steps either side of the shown
     /// one behind the decode slots and hold them; drop whatever was held
     /// for other steps.

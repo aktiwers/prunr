@@ -58,39 +58,10 @@ impl PrunrApp {
         self.ensure_magic_embedding_for_selected(ctx);
     }
 
-    /// For every item that is not selected: drop the decoded tensors kept
-    /// for slider drags, and release the full-resolution result of Done
-    /// items (`BatchItem::park_result`); the timeline keeps it compressed.
+    /// Every item that is not selected leaves the screen
+    /// (`BatchItem::leave_screen`).
     pub(super) fn evict_background_item_caches(&mut self, selected_idx: usize) {
-        for (i, item) in self.batch.items.iter_mut().enumerate() {
-            if i == selected_idx {
-                continue;
-            }
-            item.drop_hot_tensors();
-            item.drop_upscale_reference();
-            item.reveal = None;
-            item.subject = None;
-            // The photo with faces blended in, one image of RAM; the faces
-            // themselves (a few MB) stay, so it is rebuilt without a search.
-            // Likewise the photo with the Depth chip's look; the map stays.
-            // Freed off the UI thread.
-            item.face_preview = None;
-            crate::gui::reclaim::later((item.faced_photo.take(), item.depth_photo.take(), item.quick_photo.take()));
-            // Up to two images; warmed again when the image is shown.
-            item.set_on_screen(false);
-            // A full-size picture made from the photo; rebuilt when shown.
-            if matches!(item.settings.backdrop(), crate::gui::item_settings::Backdrop::Effect(_)) {
-                item.backdrop_texture = None;
-            }
-            // 16 MB each: the shown image keeps its embedding, and with the
-            // tool on so does the one shown before it.
-            if !self.magic_brush_state.keeps_embedding(item.id) {
-                item.magic_brush_embedding = None;
-            }
-            if item.park_result() {
-                item.release_result_texture();
-            }
-        }
+        self.batch.leave_screen_except(selected_idx, |id| self.magic_brush_state.keeps_embedding(id));
         if crate::gui::memory::under_memory_pressure() {
             self.free_off_screen_photos();
         }
