@@ -931,16 +931,17 @@ impl Cli {
     }
 
     /// The stem each input's files are named by: its own, or `stem-2`,
-    /// `stem-3`… when an earlier input's go into the same folder by it, as
-    /// the app names the files of a save of several.
+    /// `stem-3`… when an earlier input's go into the same folder by a name
+    /// this file system holds as the same.
     fn result_stems(&self) -> Vec<std::ffi::OsString> {
-        let mut taken: std::collections::HashMap<PathBuf, crate::gui::drag_export::TakenStems> = Default::default();
+        use crate::gui::drag_export::TakenStems;
+        let mut taken: std::collections::HashMap<PathBuf, TakenStems> = Default::default();
         self.inputs.iter().map(|input| {
             let beside = || input.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
             let folder = self.output.as_deref().unwrap_or_else(beside);
             // One folder however it is written: `a`, `./a`, a link to it.
             let folder = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
-            taken.entry(folder).or_default().take(input.file_stem().unwrap_or_default())
+            taken.entry(folder).or_insert_with(TakenStems::as_this_file_system).take(input.file_stem().unwrap_or_default())
         }).collect()
     }
 
@@ -2365,7 +2366,10 @@ mod tests {
         use std::path::{Path, PathBuf};
         let args = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args).copied());
         let paths = |a: &[&str]| args(a).result_paths();
-        assert_eq!(paths(&["x/a.jpg", "y/A.png", "y/b.png", "-o", "out"]), ["out/a.prunr.png", "out/A-2.prunr.png", "out/b.prunr.png"].map(PathBuf::from));
+        // Windows and macOS see `a` and `A` as one name; Linux as two files.
+        let second = if cfg!(any(windows, target_os = "macos")) { "out/A-2.prunr.png" } else { "out/A.prunr.png" };
+        assert_eq!(paths(&["x/a.jpg", "y/A.png", "y/b.png", "-o", "out"]), ["out/a.prunr.png", second, "out/b.prunr.png"].map(PathBuf::from));
+        assert_eq!(paths(&["x/a.jpg", "y/a.png", "-o", "out"]), ["out/a.prunr.png", "out/a-2.prunr.png"].map(PathBuf::from));
         assert_eq!(paths(&["x/a.jpg", "y/a.png"]), ["x/a.prunr.png", "y/a.prunr.png"].map(PathBuf::from), "beside inputs in two folders");
         assert_eq!(paths(&["a.jpg", "./a.png"]), ["a.prunr.png", "./a-2.prunr.png"].map(PathBuf::from), "one folder however it is written");
         let both = args(&["x/a.jpg", "x/a.png", "--depth-map"]);

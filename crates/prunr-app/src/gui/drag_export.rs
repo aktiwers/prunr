@@ -137,9 +137,18 @@ impl DistinctNames {
 /// The stems the files of one save are named by so far, so that no two
 /// share one, ignoring case as Windows and macOS do.
 #[derive(Default)]
-pub struct TakenStems(std::collections::HashSet<OsString>);
+pub struct TakenStems {
+    taken: std::collections::HashSet<OsString>,
+    exact_case: bool,
+}
 
 impl TakenStems {
+    /// Stems told apart as this computer's file system tells names apart:
+    /// by case on Linux, where `a` and `A` are two files.
+    pub fn as_this_file_system() -> Self {
+        Self { taken: Default::default(), exact_case: !cfg!(any(windows, target_os = "macos")) }
+    }
+
     /// `stem`, or `stem-2`, `stem-3`… when that is taken; taken from now on.
     pub fn take(&mut self, stem: &OsStr) -> OsString {
         self.take_where(stem, |_| true)
@@ -154,9 +163,9 @@ impl TakenStems {
             if n > 1 {
                 candidate.push(format!("-{n}"));
             }
-            let key = folded(&candidate);
-            if !self.0.contains(&key) && free(&candidate) {
-                self.0.insert(key);
+            let key = if self.exact_case { candidate.clone() } else { folded(&candidate) };
+            if !self.taken.contains(&key) && free(&candidate) {
+                self.taken.insert(key);
                 return candidate;
             }
             n += 1;
