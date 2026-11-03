@@ -754,7 +754,8 @@ const CLICKS: [(f32, f32); 8] = [(0.5, 0.5), (0.2, 0.3), (0.8, 0.3), (0.3, 0.8),
 
 impl<'a> SelectionRun<'a> {
     fn open(inputs: &'a Inputs, cpu_only: bool) -> Result<Self, String> {
-        let (sessions, provider) = crate::gui::processor::magic_brush_sessions(cpu_only)?;
+        let sessions = crate::gui::processor::magic_brush_sessions(cpu_only)?;
+        let provider = sessions.encoder_provider().to_string();
         Ok(Self { sessions, pick: SessionPick { provider, ..SessionPick::default() }, inputs })
     }
 }
