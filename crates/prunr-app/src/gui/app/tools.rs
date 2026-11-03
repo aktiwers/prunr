@@ -1165,6 +1165,29 @@ mod stroke_lines_tests {
         }
     }
 
+    /// Each stroke's lines run ends quietly beside an image that failed
+    /// before: that failure is not told again after every stroke.
+    #[test]
+    fn a_lines_run_does_not_tell_an_older_failure_again() {
+        use crate::gui::brush_state::Tool;
+        let (mut app, rx) = lined_cut_out(LineMode::SubjectOutline);
+        crate::gui::tests::fixtures::put_in(push_test_item(&mut app, 2), crate::gui::item::BatchStatus::Error("an earlier run failed".into()));
+        for cell in [FULL, -FULL] {
+            app.set_tool(Some(Tool::Paint));
+            stroke(&mut app, cell);
+            app.set_tool(None);
+            let batch = rx.try_iter().find_map(|message| match message {
+                WorkerMessage::BatchProcess { batch, .. } => Some(batch),
+                _ => None,
+            }).expect("a lines run");
+            let toasts = app.toasts.len_for_test();
+            let traced = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(2, 2), active_provider: String::new() };
+            app.on_batch_item_done(&egui::Context::default(), batch, 1, Ok(traced), None, edge_lines(&prunr_core::EdgeScale::ALL, None));
+            app.on_batch_complete(batch);
+            assert_eq!(app.toasts.len_for_test(), toasts, "stroke {cell}: nothing told");
+        }
+    }
+
     /// A stroke that lands while the lines run is under way starts no
     /// second run beside it: the image's one run goes on, and its result
     /// is the older strokes', which no longer lands.

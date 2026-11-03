@@ -17,6 +17,16 @@ pub(super) enum RunLost {
     Unanswered,
 }
 
+/// How a cut's answer left its image, for the end of its batch to tell.
+enum CutLanding {
+    Landed,
+    /// The image shows this error.
+    Failed(String),
+    /// Nothing to tell: a cancel, an answer no longer awaited, or a re-run
+    /// that failed on an image keeping its result (told as it failed).
+    Untold,
+}
+
 /// Per-frame cap on `processor.worker_rx` messages, so a heavy batch keeps
 /// the UI responsive; the rest drain next frame.
 const WORKER_POLL_PER_FRAME: usize = 8;
@@ -697,8 +707,10 @@ impl PrunrApp {
         if let Some(item) = self.batch.find_by_id(item_id).filter(|i| i.awaits_run(run)) {
             // A run nobody asked for (a brush's retrace) lands unannounced.
             let asked = !item.job.as_ref().is_some_and(|j| j.quiet);
-            if self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot) && asked {
-                self.processor.note_landed(batch);
+            match self.land_cut(ctx, item_id, result, seg, edges, recipe_snapshot) {
+                CutLanding::Landed if asked => self.processor.note_landed(batch),
+                CutLanding::Failed(why) => self.processor.note_failed(batch, why),
+                CutLanding::Landed | CutLanding::Untold => {}
             }
         } else {
             tracing::info!(item_id, run, "a cut's answer for a run no longer awaited dropped");
@@ -716,7 +728,7 @@ impl PrunrApp {
         seg: Option<crate::gui::worker::CompressedTensor>,
         edges: Option<crate::gui::worker::CompressedEdgeTensors>,
         recipe_snapshot: prunr_core::ProcessingRecipe,
-    ) -> bool {
+    ) -> CutLanding {
         let is_selected = self.batch.is_selected(item_id);
         // A cancelled run leaves the item on the state it shows.
         if matches!(result.as_ref(), Err(e) if crate::subprocess::protocol::is_cancel_error(e)) {
@@ -726,13 +738,13 @@ impl PrunrApp {
                 }
             }
             self.refresh_batch_progress_status();
-            return false;
+            return CutLanding::Untold;
         }
 
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return CutLanding::Untold };
         // A cancelled run's item already shows its state again.
         if !item.is_cutting() {
-            return false;
+            return CutLanding::Untold;
         }
         if !item.job_is_current() {
             // Nobody asked for a quiet run: a later edit simply supersedes it.
@@ -742,7 +754,7 @@ impl PrunrApp {
             } else {
                 self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
             }
-            return false;
+            return CutLanding::Untold;
         }
         let succeeded = result.is_ok();
         if succeeded {
@@ -764,7 +776,12 @@ impl PrunrApp {
             self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
             self.processor.note_failed_rerun();
         }
-        let Some(item) = self.batch.find_by_id_mut(item_id) else { return succeeded };
+        let landing = match item.error() {
+            Some(why) => CutLanding::Failed(why.to_owned()),
+            None if succeeded => CutLanding::Landed,
+            None => CutLanding::Untold,
+        };
+        let Some(item) = self.batch.find_by_id_mut(item_id) else { return landing };
         // A stable completion signal for debug logs and external observers.
         tracing::info!(item_id, status = ?item.status(), "item processing complete");
 
@@ -791,7 +808,7 @@ impl PrunrApp {
             dropped += self.batch.evict_all_tensors();
         }
         self.tell_dropped_cutouts(dropped);
-        succeeded
+        landing
     }
 
     /// Answer `item_id` from a batch just sent with its own settings.
@@ -849,7 +866,7 @@ impl PrunrApp {
     /// nothing under way; an image of a batch queued behind this one is
     /// left to its own batch.
     pub(super) fn on_batch_complete(&mut self, batch: u64) {
-        self.processor.batch_ended(batch);
+        let failed = self.processor.batch_ended(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         // The images admission still held for this batch will not run.
         never_answered.extend(self.processor.end_admission_with(batch));
@@ -860,19 +877,18 @@ impl PrunrApp {
         for item_id in unanswered {
             self.end_run_without_result(item_id, "processing", RunLost::Unanswered);
         }
-        let counts = self.batch.status_counts();
         let still_processing = self.batch.any_awaiting_asked_cut();
         let landed = if still_processing { 0 } else { self.processor.take_untold() };
         let failed_reruns = self.processor.take_failed_reruns();
-        if failed_reruns > 0 && counts.errored == 0 {
+        if failed_reruns > 0 && failed.is_none() {
             // Each one was toasted as it failed.
             self.status.text = format!("{} could not be processed again", crate::gui::views::fmt::count(failed_reruns as usize, "image", "images"));
-        } else if counts.errored > 0 {
-            let first_err = self.batch.first_error_message().unwrap_or("unknown error");
-            let msg = if counts.errored == 1 {
+        } else if let Some(failed) = failed {
+            let first_err = failed.first;
+            let msg = if failed.count == 1 {
                 format!("Could not process the image: {first_err}")
             } else {
-                format!("Could not process {} \u{2014} first: {first_err}", crate::gui::views::fmt::count(counts.errored, "image", "images"))
+                format!("Could not process {} \u{2014} first: {first_err}", crate::gui::views::fmt::count(failed.count, "image", "images"))
             };
             self.status.text = msg.clone();
             self.toasts.warning(msg);
@@ -2635,6 +2651,38 @@ mod timeline_contract_tests {
             if app.batch.find_by_id(1).is_some() {
                 assert!(!process(&mut app, 1).is_cancelled(1), "{how}: Process again runs the image");
             }
+        }
+    }
+
+    /// The end of a batch tells what that batch did: an image that failed
+    /// in an earlier run does not turn "All done" into its error, and a
+    /// failure in the batch is told as its own.
+    #[test]
+    fn a_batchs_end_tells_only_its_own_images() {
+        use crate::gui::worker::WorkerMessage;
+        type Answer = Result<prunr_core::ProcessResult, String>;
+        let failure = "the model could not start";
+        let answers: [(&str, Answer, (&str, String)); 2] = [
+            ("a result", Ok(prunr_core::ProcessResult { rgba_image: (*px(5)).clone(), active_provider: String::new() }),
+                ("success", "All done \u{2014} 1 image processed".into())),
+            ("a failure", Err(failure.into()),
+                ("warning", format!("Could not process the image: {}", prunr_core::plain::reason(failure)))),
+        ];
+        for (what, answer, (level, text)) in answers {
+            let ctx = egui::Context::default();
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            crate::gui::tests::fixtures::put_in(push_test_item(&mut app, 1), BatchStatus::Error("an earlier run failed".into()));
+            push_test_item(&mut app, 2).dimensions = (4, 4);
+            app.batch.select_item(1);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            app.process_items(|i| i.id == 2, Some(StepKind::Process));
+            let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("{what}: a batch is sent") };
+            app.on_batch_item_done(&ctx, batch, 2, answer, None, None);
+            app.on_batch_complete(batch);
+            assert_eq!(app.toasts.last_for_test(), Some((level, text.as_str())), "{what}");
+            assert_eq!(app.status.text, text, "{what}");
         }
     }
 

@@ -433,11 +433,6 @@ impl BatchManager {
         }
     }
 
-    /// First error message across errored items, for a batch-failure toast.
-    pub(crate) fn first_error_message(&self) -> Option<&str> {
-        self.items.iter().find_map(BatchItem::error)
-    }
-
     /// Decode source bytes on a background thread into `bg_io.decode_rx`. A
     /// failure travels as `Err` so the item stops waiting for a decode.
     pub(crate) fn request_decode_bytes(&self, item_id: u64, bytes: Arc<Vec<u8>>) {
@@ -1262,14 +1257,6 @@ mod tests {
         let report = batch_of(vec![BatchStatus::Done]).progress();
         assert_eq!(report.stage, "Finishing up");
         assert!((report.pct - 1.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn first_error_message_returns_first_errored_item() {
-        use BatchStatus::*;
-        let bm = batch_of(vec![Done, Error("first problem".into()), Error("second problem".into())]);
-        assert_eq!(bm.first_error_message(), Some("first problem"));
-        assert_eq!(batch_of(vec![Done]).first_error_message(), None);
     }
 
     // ── enforce_tensor_budget / evict_all_tensors ───────────────────────

@@ -478,6 +478,12 @@ pub(crate) struct DepthResult {
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
+/// The images a batch failed on: how many, and the first one's error.
+pub(crate) struct BatchFailures {
+    pub(crate) count: usize,
+    pub(crate) first: String,
+}
+
 /// What `release_and_admit` did with the images that fit.
 #[derive(Default, Debug)]
 pub(crate) struct Admitted {
@@ -884,6 +890,8 @@ pub(crate) struct Processor {
     in_flight: Vec<InFlightBatch>,
     /// How many results each batch landed, until it ends.
     landed: HashMap<u64, usize>,
+    /// The images each batch failed on, until it ends.
+    failed: HashMap<u64, BatchFailures>,
     /// What the warm worker holds (MB), as the bridge last told.
     pub(crate) warm_held_mb: u64,
     /// Results of batches that ended while work asked for still ran, until
@@ -980,6 +988,7 @@ impl Processor {
             deferred_runs: Vec::new(),
             in_flight: Vec::new(),
             landed: HashMap::new(),
+            failed: HashMap::new(),
             warm_held_mb: 0,
             untold: 0,
             next_batch: 0,
@@ -1648,14 +1657,24 @@ impl Processor {
         *self.landed.entry(id).or_default() += 1;
     }
 
-    /// Batch `id` ended: what it landed waits to be told.
-    pub(crate) fn batch_ended(&mut self, id: u64) {
-        self.untold += self.landed.remove(&id).unwrap_or(0);
+    /// Batch `id` failed an image, which now shows `why`.
+    pub(crate) fn note_failed(&mut self, id: u64, why: String) {
+        self.failed.entry(id)
+            .and_modify(|f| f.count += 1)
+            .or_insert(BatchFailures { count: 1, first: why });
     }
 
-    /// Batch `id` was dropped: what it landed is not told.
+    /// Batch `id` ended: what it landed waits to be told; what it failed
+    /// on is told now.
+    pub(crate) fn batch_ended(&mut self, id: u64) -> Option<BatchFailures> {
+        self.untold += self.landed.remove(&id).unwrap_or(0);
+        self.failed.remove(&id)
+    }
+
+    /// Batch `id` was dropped: what it landed or failed on is not told.
     pub(crate) fn batch_dropped(&mut self, id: u64) {
         self.landed.remove(&id);
+        self.failed.remove(&id);
     }
 
     /// The results ended batches landed, not told yet.
