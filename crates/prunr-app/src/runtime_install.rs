@@ -21,6 +21,7 @@ pub enum InstallEvent {
     /// why it could not; a runtime loads from the next start (`None`).
     Done { install_dir: PathBuf, started: Option<Result<(), String>> },
     Failed { error: String },
+    Cancelled,
 }
 
 impl InstallEvent {
@@ -39,6 +40,7 @@ impl InstallEvent {
             InstallEvent::Extracting => "Extracting…".to_string(),
             InstallEvent::Done { .. } => "Installed".to_string(),
             InstallEvent::Failed { error } => format!("Failed: {error}"),
+            InstallEvent::Cancelled => "Cancelled".to_string(),
         }
     }
 }
@@ -503,21 +505,31 @@ pub struct InstallHandle {
     pub cancel: Arc<AtomicBool>,
 }
 
-/// Final event is either `Done` or `Failed`; channel closes after.
+/// Final event is `Done`, `Failed` or `Cancelled`; channel closes after.
 pub fn start_install(target: InstallTarget) -> InstallHandle {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_thread = Arc::clone(&cancel);
     std::thread::spawn(move || {
         let installed = match target {
-            InstallTarget::Runtime(rt) => run_install(rt, &tx, cancel_for_thread),
-            InstallTarget::NvidiaLibraries => run_nvidia_install(&tx, cancel_for_thread),
+            InstallTarget::Runtime(rt) => run_install(rt, &tx, Arc::clone(&cancel_for_thread)),
+            InstallTarget::NvidiaLibraries => run_nvidia_install(&tx, Arc::clone(&cancel_for_thread)),
         };
-        if let Err(e) = installed {
-            let _ = tx.send(InstallEvent::Failed { error: e });
+        if let Err(error) = installed {
+            let _ = tx.send(ended_early(error, &cancel_for_thread));
         }
     });
     InstallHandle { events: rx, cancel }
+}
+
+/// How an install that stopped early ends: cancelled by the person, or
+/// failed.
+fn ended_early(error: String, cancel: &AtomicBool) -> InstallEvent {
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        InstallEvent::Cancelled
+    } else {
+        InstallEvent::Failed { error }
+    }
 }
 
 /// When an uninstall takes effect.
@@ -1181,6 +1193,18 @@ mod tests {
         assert!(!store.path().join(".cuda-addon-0.2.0-windows-x64.remove").exists(), "its mark too");
         assert!(store.path().join("cuda-1.24.1-windows-x64").exists(), "not marked: kept");
         assert!(store.path().join("other").exists() && store.path().join(".other.remove").exists(), "not an add-on: kept");
+    }
+
+    /// An install the person cancelled ends as a cancel, not as a failure
+    /// ("Could not install CUDA: cancelled"); one that stopped on its own
+    /// is a failure.
+    #[test]
+    fn a_cancelled_install_ends_as_a_cancel() {
+        let cancel = AtomicBool::new(false);
+        assert!(matches!(ended_early("offline".into(), &cancel), InstallEvent::Failed { error } if error == "offline"));
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+        let ended = ended_early("cancelled".into(), &cancel);
+        assert!(matches!(ended, InstallEvent::Cancelled), "{ended:?}");
     }
 
     /// An install over an add-on whose removal at an earlier start
