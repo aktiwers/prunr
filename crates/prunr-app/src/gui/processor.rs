@@ -712,38 +712,26 @@ impl prunr_core::ProgressSink for PictureSink {
     }
 }
 
-/// `recipe` is captured at dispatch, so `applied_recipe` names what ran,
-/// not an edit made mid-run.
-pub(crate) struct UpscaleResult {
+/// A finished upscale or colorize. `recipe` is captured at dispatch, so
+/// `applied_recipe` names what ran, not an edit made mid-run.
+pub(crate) struct RunResult<C> {
     pub item_id: u64,
     /// The image's run it answers.
     pub run: u64,
-    pub result: Result<UpscaleOutput, prunr_core::CoreError>,
+    pub result: Result<RunOutput<C>, prunr_core::CoreError>,
     pub recipe: ProcessingRecipe,
 }
 
-/// A finished upscale: the run kept for Refine, and the image to show
-/// (Refine's knobs applied in the upscale thread, not on the UI thread).
-pub(crate) struct UpscaleOutput {
-    pub run: super::item::UpscaleCache,
+/// The run kept for its knobs (Refine's, Strength's), and the image to
+/// show with the dispatch's knobs applied, rendered in the run's thread,
+/// not on the UI thread.
+pub(crate) struct RunOutput<C> {
+    pub run: C,
     pub shown: Arc<image::RgbaImage>,
 }
 
-/// A finished colorize, stamped with the recipe it ran.
-pub(crate) struct ColorizeResult {
-    pub item_id: u64,
-    /// The image's run it answers.
-    pub run: u64,
-    pub result: Result<ColorizeOutput, prunr_core::CoreError>,
-    pub recipe: ProcessingRecipe,
-}
-
-/// The run kept for Strength, and the image to show at the dispatch's
-/// strength (rendered in the colorize thread, not on the UI thread).
-pub(crate) struct ColorizeOutput {
-    pub run: super::item::ColorizeCache,
-    pub shown: Arc<image::RgbaImage>,
-}
+pub(crate) type UpscaleResult = RunResult<super::item::UpscaleCache>;
+pub(crate) type ColorizeResult = RunResult<super::item::ColorizeCache>;
 
 /// Whether a run of `descriptor`'s model goes to the CPU: its GPU when
 /// its charge there fits what is free (system RAM, and the card's memory
@@ -1876,7 +1864,7 @@ impl Processor {
                     let raw = Arc::new(raw);
                     let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
                     let (shown, reference) = super::live_preview::finish_upscale(Arc::clone(&raw), &input_for_inference, None, &knobs, None);
-                    UpscaleOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
+                    RunOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
                 })
             })
             .unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why)));
@@ -1941,12 +1929,12 @@ impl Processor {
         match engine {
             super::item::Engine::Upscale => {
                 let run = super::item::UpscaleCache::new(Arc::clone(&shown), Arc::clone(&shown), None);
-                let _ = self.upscale.done.tx.send(UpscaleResult { item_id, run: run_id, result: Ok(UpscaleOutput { run, shown }), recipe });
+                let _ = self.upscale.done.tx.send(UpscaleResult { item_id, run: run_id, result: Ok(RunOutput { run, shown }), recipe });
             }
             super::item::Engine::Colorize => {
                 let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
                 let run = super::item::ColorizeCache::new(Arc::new(vec![0.0; 2 * n]), Arc::clone(&shown));
-                let _ = self.colorize.done.tx.send(ColorizeResult { item_id, run: run_id, result: Ok(ColorizeOutput { run, shown }), recipe });
+                let _ = self.colorize.done.tx.send(ColorizeResult { item_id, run: run_id, result: Ok(RunOutput { run, shown }), recipe });
             }
             other => unreachable!("{other:?} is not an upscale or colorize"),
         }
@@ -1979,7 +1967,7 @@ impl Processor {
                 let plane = prunr_core::colorize::colorize_plane(&engine, &input, &progress)?;
                 let run = super::item::ColorizeCache::new(Arc::new(plane), input);
                 let shown = Arc::new(run.render(recipe.colorize.strength()));
-                Ok(ColorizeOutput { run, shown })
+                Ok(RunOutput { run, shown })
             }))
             .unwrap_or_else(|why| Err(prunr_core::CoreError::Inference(why)));
             if let Err(err) = &result {

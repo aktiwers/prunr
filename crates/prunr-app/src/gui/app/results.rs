@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::gui::item::{BatchItem, Engine};
 use crate::gui::knob_catalog::{shows, Surface};
+use crate::gui::processor::RunResult;
 use crate::gui::timeline::StepKind;
 use crate::gui::worker::WorkerResult;
 use super::PrunrApp;
@@ -174,41 +175,29 @@ impl PrunrApp {
     /// A result for a state the item has left is dropped.
     pub(super) fn pump_upscale_results(&mut self, ctx: &egui::Context) {
         let results = self.processor.pump_upscale_results();
-        if results.is_empty() {
-            return;
-        }
-        for r in results {
-            let item_id = r.item_id;
-            match r.result {
-                Ok(output) => {
-                    if self.land_run(ctx, item_id, r.run, output.shown, r.recipe, "upscale", |item| item.land_upscale(output.run)) {
-                        self.after_result_landed(item_id);
-                        tracing::info!(item_id, "upscale result applied");
-                    }
-                }
-                Err(err) => self.end_unlanded_run(item_id, r.run, Engine::Upscale, err),
-            }
-        }
-        self.dispatch_next_queued_run();
-        ctx.request_repaint();
+        self.land_runs(ctx, results, Engine::Upscale, "upscale", BatchItem::land_upscale);
     }
 
     /// Drain finished colorize runs and land each on its item. Nothing
     /// goes on top: a colorize has no selection re-cut and no Restore faces.
     pub(super) fn pump_colorize_results(&mut self, ctx: &egui::Context) {
         let results = self.processor.pump_colorize_results();
+        self.land_runs(ctx, results, Engine::Colorize, "colorize", BatchItem::land_colorize);
+    }
+
+    /// Land each finished upscale or colorize, then run the next queued
+    /// image. Only an upscale gets what the model can't know on top.
+    fn land_runs<C>(&mut self, ctx: &egui::Context, results: Vec<RunResult<C>>, engine: Engine, tex_kind: &'static str, keep: fn(&mut BatchItem, C)) {
         if results.is_empty() {
             return;
         }
         for r in results {
             let item_id = r.item_id;
-            match r.result {
-                Ok(output) => {
-                    if self.land_run(ctx, item_id, r.run, output.shown, r.recipe, "colorize", |item| item.land_colorize(output.run)) {
-                        tracing::info!(item_id, "colorize result applied");
-                    }
+            if self.land_run(ctx, r, engine, tex_kind, keep) {
+                if engine == Engine::Upscale {
+                    self.after_result_landed(item_id);
                 }
-                Err(err) => self.end_unlanded_run(item_id, r.run, Engine::Colorize, err),
+                tracing::info!(item_id, "{tex_kind} result applied");
             }
         }
         self.dispatch_next_queued_run();
@@ -217,20 +206,17 @@ impl PrunrApp {
 
     /// Show a finished upscale or colorize on its item, unless the item
     /// has left the state the run started from; `keep` records the step
-    /// and keeps the run. Returns whether it landed.
-    // args are the run's answer and how its item keeps it; a struct would
-    // be built at the two call sites only to be taken apart here
-    #[allow(clippy::too_many_arguments)]
-    fn land_run(
-        &mut self,
-        ctx: &egui::Context,
-        item_id: u64,
-        run: u64,
-        shown: Arc<image::RgbaImage>,
-        recipe: prunr_core::ProcessingRecipe,
-        tex_kind: &str,
-        keep: impl FnOnce(&mut BatchItem),
-    ) -> bool {
+    /// and keeps the run. A run that failed ends its item's wait. Returns
+    /// whether it landed.
+    fn land_run<C>(&mut self, ctx: &egui::Context, r: RunResult<C>, engine: Engine, tex_kind: &str, keep: fn(&mut BatchItem, C)) -> bool {
+        let RunResult { item_id, run, result, recipe } = r;
+        let output = match result {
+            Ok(output) => output,
+            Err(err) => {
+                self.end_unlanded_run(item_id, run, engine, err);
+                return false;
+            }
+        };
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return false };
         // A run an undo left behind lands on nothing, not on the run
         // started since.
@@ -243,9 +229,9 @@ impl PrunrApp {
             return false;
         }
         item.applied_recipe = Some(recipe);
-        item.show_result(Arc::clone(&shown));
-        keep(item);
-        self.upload_result(item_id, &shown, tex_kind, ctx);
+        item.show_result(Arc::clone(&output.shown));
+        keep(item, output.run);
+        self.upload_result(item_id, &output.shown, tex_kind, ctx);
         true
     }
 
