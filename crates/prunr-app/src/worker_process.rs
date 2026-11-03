@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use prunr_core::{
     create_engine_pool,
-    OrtEngine, ProcessResult, EdgeEngine,
+    OrtEngine, ProcessResult, EdgeEngine, LineMode,
 };
 
 use prunr_app::subprocess::protocol::*;
@@ -19,7 +19,6 @@ use prunr_app::subprocess::ipc::{read_image, read_message, write_message};
 use prunr_app::subprocess::first_look::{FirstLook, Look, Shown};
 use prunr_app::subprocess::spare_scales::{next_token, SpareScales};
 use prunr_app::subprocess::cancels::{DispatchCancel, DispatchCancels};
-use prunr_app::gui::settings::LineMode;
 
 const SEG_ENGINE_MISSING: &str = "segmentation engine not initialized";
 const STROKES_UNREADABLE: &str = "The strokes on the cut-out could not be read";
