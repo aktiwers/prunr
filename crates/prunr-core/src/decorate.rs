@@ -19,6 +19,7 @@
 use image::RgbaImage;
 use rayon::prelude::*;
 
+use crate::selection::bounds_of;
 use crate::types::Decoration;
 
 pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
@@ -26,15 +27,10 @@ pub fn apply_decoration(rgba: &mut RgbaImage, d: &Decoration) {
         return;
     }
     let (w, h) = rgba.dimensions();
-    let Some((x0, y0, x1, y1)) = alpha_bbox(rgba) else { return };
-    let reach = d.reach_px();
-    let region = Region {
-        x: x0.saturating_sub(reach) as usize,
-        y: y0.saturating_sub(reach) as usize,
-        w: (x1.saturating_add(reach).saturating_add(1).min(w) - x0.saturating_sub(reach)) as usize,
-        h: (y1.saturating_add(reach).saturating_add(1).min(h) - y0.saturating_sub(reach)) as usize,
-        stride: w as usize,
-    };
+    let pixels = &rgba.as_raw().as_chunks::<4>().0[..w as usize * h as usize];
+    let Some(subject) = bounds_of(pixels, w as usize, |px| px[3] != 0) else { return };
+    let r = subject.grown(d.reach_px(), w, h);
+    let region = Region { x: r.x0 as usize, y: r.y0 as usize, w: r.width() as usize, h: r.height() as usize, stride: w as usize };
     decorate_region(rgba, d, &region);
 }
 
@@ -106,21 +102,6 @@ impl Region {
             }
         });
     }
-}
-
-/// Inclusive bounds of the pixels with any alpha.
-fn alpha_bbox(rgba: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
-    let w = rgba.width() as usize;
-    rgba.as_raw()
-        .par_chunks_exact(w * 4)
-        .enumerate()
-        .filter_map(|(y, row)| {
-            let first = row.chunks_exact(4).position(|px| px[3] != 0)?;
-            let last = row.chunks_exact(4).rposition(|px| px[3] != 0)?;
-            Some((first, y, last, y))
-        })
-        .reduce_with(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
-        .map(|(a, b, c, e)| (a as u32, b as u32, c as u32, e as u32))
 }
 
 /// Outline coverage: 1 inside the subject (alpha ≥ half), falling from 1
@@ -342,6 +323,35 @@ mod tests {
             decorate_region(&mut whole, &d, &Region { x: 0, y: 0, w: w as usize, h: h as usize, stride: w as usize });
             let off: Vec<u8> = cropped.as_raw().iter().zip(whole.as_raw()).map(|(a, b)| a.abs_diff(*b)).filter(|&v| v > 0).collect();
             assert!(off.is_empty(), "{} channels off, by up to {}: {d:?}", off.len(), off.iter().max().unwrap_or(&0));
+        }
+    }
+
+    /// A subject at the image's edges, one pixel, or none: the region the
+    /// decoration reaches clips to the image, and the result is the whole
+    /// image's.
+    #[test]
+    fn a_subject_at_the_edges_decorates_as_the_whole_image() {
+        let (w, h) = (40u32, 30u32);
+        let subject = |on: &dyn Fn(u32, u32) -> bool| RgbaImage::from_fn(w, h, |x, y| image::Rgba([90, 60, 40, if on(x, y) { 255 } else { 0 }]));
+        let subjects = [
+            ("nothing", subject(&|_, _| false)),
+            ("the top-left pixel", subject(&|x, y| (x, y) == (0, 0))),
+            ("the bottom-right pixel", subject(&|x, y| (x, y) == (w - 1, h - 1))),
+            ("a block in the bottom-right corner", subject(&|x, y| x >= 30 && y >= 20)),
+            ("the left column", subject(&|x, _| x == 0)),
+        ];
+        for d in [
+            Decoration { outline_width: 3.0, shadow: ShadowKind::Drop, shadow_opacity: 0.6, shadow_blur: 6.0, shadow_distance: 5.0, ..Decoration::default() },
+            Decoration { shadow: ShadowKind::Soft, shadow_opacity: 0.8, shadow_blur: 4.0, ..Decoration::default() },
+            Decoration { outline_width: 5.0, ..Decoration::default() },
+        ] {
+            for (name, img) in &subjects {
+                let mut cropped = img.clone();
+                apply_decoration(&mut cropped, &d);
+                let mut whole = img.clone();
+                decorate_region(&mut whole, &d, &Region { x: 0, y: 0, w: w as usize, h: h as usize, stride: w as usize });
+                assert!(cropped == whole, "{name}: {d:?}");
+            }
         }
     }
 
