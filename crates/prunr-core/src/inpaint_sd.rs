@@ -424,7 +424,7 @@ pub fn process_inpaint_with(
     // A scaled-down region's Feather band is that much narrower.
     let out = crate::inpaint::fill_at_scale(image, mask, req.soft_edge_band.as_deref(), req.fill_scale, fit(&req), progress, |img, m, band, at, progress| {
         let scaled = SdInpaintRequest { soft_edge_px: req.soft_edge_px * at, soft_edge_band: None, ..req.clone() };
-        paint_regions(&bundle, &vae, img, m, band, &scaled, progress)
+        paint_regions(&bundle, &vae, &img, m, band, &scaled, progress)
     })?;
     if progress.is_cancelled() { return Err(CoreError::Cancelled); }
     tracing::info!(
@@ -3271,7 +3271,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let fit = crate::inpaint::Fit { long: 448, short: 448 };
         crate::inpaint::fill_at_scale(&photo, &hole, None, crate::inpaint::FillScale::Half, fit, &Progress::new(sink.clone()).with_tile_previews(800), |img, m, band, _, p| {
-            paint_regions_with(img, m, band, SD_TILE, p, fake_fill)
+            paint_regions_with(&img, m, band, SD_TILE, p, fake_fill)
         }).expect("fill");
         let found = places(&sink.updates());
         assert_eq!(found.len(), 1, "{found:?}");

@@ -353,10 +353,12 @@ pub fn process_lama(
 /// Fill `mask` through `fill` at `scale`, region by region: each region
 /// (nearby pieces grouped) `scale` shrinks is filled on its own, scaled down;
 /// the rest in one full-size pass. A small mark far from a large one
-/// stays sharp. `fill` gets the mask's per-pixel band, when it has one,
-/// cropped and scaled like the mask, the scale it fills at (1 at full
-/// size), and reports through the handle it is given, which places a
-/// scaled-down crop's tiles where the crop sits in the photo.
+/// stays sharp. `fill` gets the image to fill, the caller's photo
+/// borrowed or a buffer nothing else needs, which it may fill in place;
+/// the mask's per-pixel band, when it has one, cropped and scaled like
+/// the mask; the scale it fills at (1 at full size); and reports through
+/// the handle it is given, which places a scaled-down crop's tiles where
+/// the crop sits in the photo.
 pub(crate) fn fill_at_scale(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -364,10 +366,10 @@ pub(crate) fn fill_at_scale(
     scale: FillScale,
     fit: Fit,
     progress: &Progress,
-    mut fill: impl FnMut(&RgbaImage, &GrayImage, Option<&GrayImage>, f32, &Progress) -> Result<RgbaImage, CoreError>,
+    mut fill: impl FnMut(Cow<'_, RgbaImage>, &GrayImage, Option<&GrayImage>, f32, &Progress) -> Result<RgbaImage, CoreError>,
 ) -> Result<Filled, CoreError> {
     if scale == FillScale::Full {
-        return Ok(Filled::full(fill(image, mask, band, 1.0, progress)?));
+        return Ok(Filled::full(fill(Cow::Borrowed(image), mask, band, 1.0, progress)?));
     }
     let shrunk: Vec<(Bbox, f32)> = crate::inpaint_sd::mask_regions(mask).into_iter()
         .map(|r| {
@@ -377,7 +379,7 @@ pub(crate) fn fill_at_scale(
         .filter(|&(_, f)| f < 1.0)
         .collect();
     if shrunk.is_empty() {
-        return Ok(Filled::full(fill(image, mask, band, 1.0, progress)?));
+        return Ok(Filled::full(fill(Cow::Borrowed(image), mask, band, 1.0, progress)?));
     }
     let smallest = shrunk.iter().map(|&(_, f)| f).fold(1.0f32, f32::min);
     let mut out = image.clone();
@@ -391,7 +393,7 @@ pub(crate) fn fill_at_scale(
         }
     }
     if !mask_is_empty(&rest) {
-        out = fill(&out, &rest, band, 1.0, progress)?;
+        out = fill(Cow::Owned(out), &rest, band, 1.0, progress)?;
     }
     Ok(Filled { rgba: out, scale: smallest })
 }
@@ -412,7 +414,7 @@ fn fill_scaled_down(
     hole: Bbox,
     factor: f32,
     progress: &Progress,
-    fill: &mut impl FnMut(&RgbaImage, &GrayImage, Option<&GrayImage>, f32, &Progress) -> Result<RgbaImage, CoreError>,
+    fill: &mut impl FnMut(Cow<'_, RgbaImage>, &GrayImage, Option<&GrayImage>, f32, &Progress) -> Result<RgbaImage, CoreError>,
 ) -> Result<(), CoreError> {
     let margin = (OVERLAP as f32 / factor).ceil() as u32;
     let (x0, y0) = (hole.x.saturating_sub(margin), hole.y.saturating_sub(margin));
@@ -434,7 +436,7 @@ fn fill_scaled_down(
         small.pixels_mut().for_each(|p| p.0[0] = crate::math::round_u8(p.0[0] as f32 * factor));
         small
     });
-    let small_fill = fill(&small_rgba, &small_mask, small_band.as_ref(), factor, &progress.within((crop.x, crop.y, crop.w, crop.h), mask.dimensions()))?;
+    let small_fill = fill(Cow::Owned(small_rgba), &small_mask, small_band.as_ref(), factor, &progress.within((crop.x, crop.y, crop.w, crop.h), mask.dimensions()))?;
     let filled = crate::formats::resize_rgba(&small_fill, crop.w, crop.h, crate::formats::ResizeFilter::Lanczos3);
     // Only this hole: another one's pixels in the crop get their own fill.
     let in_hole = |x: u32, y: u32| (hole.x..hole.x + hole.w).contains(&x) && (hole.y..hole.y + hole.h).contains(&y);
@@ -879,7 +881,8 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 }
 
 /// Run `inpaint_tile` on every tile that touches the mask and
-/// feather-blend the results into a copy of `image`.
+/// feather-blend the results into `image`, copied first when it is
+/// borrowed.
 ///
 /// RAM: accumulators are sized to the mask bbox. A 200 × 200 stroke on a
 /// 4096 × 3072 image holds ~640 KB of f32 instead of ~250 MB.
@@ -900,7 +903,7 @@ pub(crate) fn feather_weight(distance_from_edge: u32) -> f32 {
 // `pub` only for the benches; callers use `process_inpaint`.
 #[doc(hidden)]
 pub fn tile_compose<F>(
-    image: &RgbaImage,
+    image: Cow<'_, RgbaImage>,
     mask: &GrayImage,
     progress: &Progress,
     mut inpaint_tile: F,
@@ -909,7 +912,7 @@ where
     F: FnMut(&RgbaImage, &GrayImage) -> Result<RgbaImage, CoreError>,
 {
     let (w, h) = image.dimensions();
-    let mut out = image.clone();
+    let mut out = image.into_owned();
 
     let Some(bbox) = mask_bbox(mask, 1, 0) else {
         return Ok(out);
@@ -938,7 +941,9 @@ where
         }
         progress.tile(i as u32, false);
         let tile_mask = image::imageops::crop_imm(mask, tile.x, tile.y, tile.w, tile.h).to_image();
-        let tile_rgba = image::imageops::crop_imm(image, tile.x, tile.y, tile.w, tile.h).to_image();
+        // `out` is written only after the last tile, so every tile is cut
+        // from the input's pixels.
+        let tile_rgba = image::imageops::crop_imm(&out, tile.x, tile.y, tile.w, tile.h).to_image();
         let painted = inpaint_tile(&tile_rgba, &tile_mask)?;
         accumulate_tile(&mut color_acc, &mut weight_acc, &painted, tile, bbox, (w, h));
         let rect = (tile.x, tile.y, tile.w, tile.h);
@@ -1083,7 +1088,7 @@ mod tests {
         mask.put_pixel(100, 100, Luma([255]));
         mask.put_pixel(1100, 500, Luma([255]));
         let sink = std::sync::Arc::new(RecordingSink::default());
-        tile_compose(&img, &mask, &Progress::new(sink.clone()), |t, _| Ok(t.clone())).unwrap();
+        tile_compose(Cow::Borrowed(&img), &mask, &Progress::new(sink.clone()), |t, _| Ok(t.clone())).unwrap();
         let updates = sink.updates();
         assert_eq!(check_contract(&updates), Ok(()));
         let layout = updates.iter().find_map(|u| match u { ProgressUpdate::Tiles(t) => Some(t.len()), _ => None });
@@ -1091,7 +1096,7 @@ mod tests {
 
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ran = std::cell::Cell::new(false);
-        let result = tile_compose(&img, &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); Ok(t.clone()) });
+        let result = tile_compose(Cow::Borrowed(&img), &mask, &Progress::none().with_cancel(flag), |t, _| { ran.set(true); Ok(t.clone()) });
         assert!(matches!(result, Err(CoreError::Cancelled)) && !ran.get());
     }
 
@@ -1115,7 +1120,7 @@ mod tests {
         let img = RgbaImage::from_pixel(600, 400, Rgba([10, 20, 30, 255]));
         let mut mask = GrayImage::new(600, 400);
         mask.put_pixel(100, 100, Luma([255]));
-        let result = tile_compose(&img, &mask, &Progress::none(), |_, _| Err(CoreError::Inference("the run failed".into())));
+        let result = tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), |_, _| Err(CoreError::Inference("the run failed".into())));
         assert!(matches!(result, Err(CoreError::Inference(why)) if why == "the run failed"));
     }
 
@@ -1137,7 +1142,7 @@ mod tests {
             let mask_box = mask_bbox(&mask, 1, 0).expect("a mask");
             let work: Vec<Bbox> = plan_tiles(w, h).into_iter().filter(|t| !rect_is_empty(&mask, t)).collect();
             let sink = std::sync::Arc::new(RecordingSink::default());
-            let with = tile_compose(&img, &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
+            let with = tile_compose(Cow::Borrowed(&img), &mask, &Progress::new(sink.clone()).with_tile_previews(w), fill).unwrap();
             let updates = sink.updates();
             assert_eq!(check_contract(&updates), Ok(()));
 
@@ -1166,10 +1171,10 @@ mod tests {
             assert!(w > TILE || work.len() == 1, "a small photo is one tile");
 
             let quiet = std::sync::Arc::new(RecordingSink::default());
-            let without = tile_compose(&img, &mask, &Progress::new(quiet.clone()), fill).unwrap();
+            let without = tile_compose(Cow::Borrowed(&img), &mask, &Progress::new(quiet.clone()), fill).unwrap();
             assert!(!quiet.updates().iter().any(|u| matches!(u, ProgressUpdate::TilePreview(_))), "no preview unless asked");
             assert_eq!(with.as_raw(), without.as_raw(), "previews leave the result as it is");
-            assert_eq!(tile_compose(&img, &mask, &Progress::none(), fill).unwrap().as_raw(), with.as_raw());
+            assert_eq!(tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), fill).unwrap().as_raw(), with.as_raw());
         }
     }
 
@@ -1189,7 +1194,7 @@ mod tests {
         let fill = |t: &RgbaImage, _: &GrayImage| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([250, 0, 0, 7])));
         let previewed = |progress: &Progress| progress.clone().with_tile_previews(300);
         let sink = std::sync::Arc::new(RecordingSink::default());
-        tile_compose(&img, &mask, &previewed(&Progress::new(sink.clone())), fill).unwrap();
+        tile_compose(Cow::Borrowed(&img), &mask, &previewed(&Progress::new(sink.clone())), fill).unwrap();
         let parts: Vec<_> = sink.updates().into_iter().filter_map(|u| match u {
             ProgressUpdate::TilePreview(p) => Some(p),
             _ => None,
@@ -1411,7 +1416,7 @@ mod tests {
         let run = |x0: u32, y0: u32, side: u32| {
             let mask = rect_mask(w, h, (x0, y0, x0 + side, y0 + side));
             let mut tiles = Vec::new();
-            tile_compose(&img, &mask, &Progress::none(), |t, m| {
+            tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), |t, m| {
                 tiles.push((t.dimensions(), mask_bbox(m, 1, 0).unwrap()));
                 Ok(t.clone())
             }).unwrap();
@@ -1440,7 +1445,7 @@ mod tests {
             for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
                 mask.put_pixel(x, y, Luma([255]));
             }
-            let out = tile_compose(&img, &mask, &Progress::none(), |t, _| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([200, 0, 0, 255])))).unwrap();
+            let out = tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), |t, _| Ok(RgbaImage::from_pixel(t.width(), t.height(), Rgba([200, 0, 0, 255])))).unwrap();
             for (x, y) in [(0, 0), (w - 1, h - 1), (0, h / 2), (w / 2, 0)] {
                 assert_eq!(out.get_pixel(x, y).0, [200, 0, 0, 255], "{w}x{h} at ({x}, {y})");
             }
@@ -1513,11 +1518,11 @@ mod tests {
         let factor = FillScale::Auto.factor((hole.w, hole.h), LAMA_FIT);
         let mut seen = None;
         let mut out = image.clone();
-        fill_scaled_down(&mut out, &mask, None, hole, factor, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: Option<&GrayImage>, _: f32, _: &Progress| {
+        fill_scaled_down(&mut out, &mask, None, hole, factor, &Progress::none(), &mut |rgba: Cow<'_, RgbaImage>, m: &GrayImage, _: Option<&GrayImage>, _: f32, _: &Progress| {
             // The mark at (1800-1830, 800-830): crop starts 200 px out, scaled by 0.32.
             let neighbour = m.get_pixel(485, 165).0[0];
             seen = Some((rgba.dimensions(), neighbour));
-            let mut filled = rgba.clone();
+            let mut filled = rgba.into_owned();
             for (x, y, p) in m.enumerate_pixels() {
                 if p.0[0] >= 128 { filled.put_pixel(x, y, Rgba([200, 0, 0, 255])); }
             }
@@ -1540,7 +1545,7 @@ mod tests {
         let mut seen = Vec::new();
         fill_at_scale(&image, &mask, Some(&band), FillScale::Half, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, band, at, _| {
             seen.push((at, band.map(|b| (b.dimensions() == rgba.dimensions(), b.get_pixel(0, 0).0[0]))));
-            Ok(rgba.clone())
+            Ok(rgba.into_owned())
         }).unwrap();
         assert_eq!(seen, vec![(0.5, Some((true, 6)))]);
     }
@@ -1559,7 +1564,7 @@ mod tests {
         let mut calls = Vec::new();
         let Filled { rgba: out, scale } = fill_at_scale(&image, &mask, None, FillScale::Auto, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, m, _, at, _| {
             calls.push((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count(), at));
-            let mut filled = rgba.clone();
+            let mut filled = rgba.into_owned();
             for (x, y, p) in m.enumerate_pixels() {
                 if p.0[0] >= 128 {
                     filled.put_pixel(x, y, Rgba([200, 0, 0, 255]));
@@ -1568,7 +1573,7 @@ mod tests {
             Ok(filled)
         }).unwrap();
         assert!(scale > 0.0 && scale < 1.0, "reports the large region's scale: {scale}");
-        let full = fill_at_scale(&image, &mask, None, FillScale::Full, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, _, _, _| Ok(rgba.clone())).unwrap();
+        let full = fill_at_scale(&image, &mask, None, FillScale::Full, Fit { long: 300, short: 300 }, &Progress::none(), |rgba, _, _, _, _| Ok(rgba.into_owned())).unwrap();
         assert_eq!(full.scale, 1.0, "Full fills at full size");
         assert_eq!(calls.len(), 2, "the large region scaled down, then the rest");
         assert!(calls[0].0.0 < 1200, "the large region's crop is scaled down");
@@ -1577,6 +1582,52 @@ mod tests {
         assert_eq!(out.get_pixel(1110, 200).0, [200, 0, 0, 255]);
         assert_eq!(out.get_pixel(400, 200).0, [200, 0, 0, 255]);
         assert_eq!(out.get_pixel(900, 200).0, [10, 20, 30, 255]);
+    }
+
+    /// A fill works in the buffer it is handed when nothing else needs
+    /// it (a shrunk crop, the rest pass after one) and gives the pixels a
+    /// fill of copies gives; a single pass borrows the caller's photo,
+    /// which stays as it was for the blend after.
+    #[test]
+    fn a_fill_works_in_what_it_is_handed_and_borrows_the_photo_for_one_pass() {
+        let image = RgbaImage::from_fn(1300, 900, |x, y| Rgba([(x % 251) as u8, (y % 241) as u8, ((x * 7 + y * 3) % 256) as u8, 255]));
+        let fake = |t: &RgbaImage, m: &GrayImage| -> Result<RgbaImage, CoreError> {
+            Ok(RgbaImage::from_fn(t.width(), t.height(), |x, y| {
+                let p = t.get_pixel(x, y).0;
+                Rgba([255 - p[0], p[1] / 2 + m.get_pixel(x, y).0[0] / 4, p[2] ^ 0x5a, p[3]])
+            }))
+        };
+        let fit = Fit { long: 300, short: 300 };
+        // A large region filled scaled down, a small mark far from it left for the rest pass.
+        let mut mask = rect_mask(1300, 900, (100, 50, 800, 700));
+        for y in 190..220 {
+            for x in 1100..1130 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let mut handed = Vec::new();
+        let Filled { rgba: in_place, .. } = fill_at_scale(&image, &mask, None, FillScale::Auto, fit, &Progress::none(), |rgba, m, _, at, p| {
+            let owned_at = match &rgba {
+                Cow::Owned(img) => Some(img.as_ptr()),
+                Cow::Borrowed(_) => None,
+            };
+            let out = tile_compose(rgba, m, p, fake)?;
+            handed.push((at < 1.0, owned_at.map(|at| at == out.as_ptr())));
+            Ok(out)
+        }).unwrap();
+        assert_eq!(handed, [(true, Some(true)), (false, Some(true))], "the shrunk crop, then the rest, each filled in itself");
+        let copied = fill_at_scale(&image, &mask, None, FillScale::Auto, fit, &Progress::none(), |rgba, m, _, _, p| tile_compose(Cow::Borrowed(&*rgba), m, p, fake)).unwrap();
+        assert_eq!(in_place, copied.rgba, "the same pixels as a fill of copies");
+
+        let small = rect_mask(1300, 900, (600, 400, 640, 440));
+        for scale in [FillScale::Full, FillScale::Auto] {
+            let before = image.clone();
+            fill_at_scale(&image, &small, None, scale, fit, &Progress::none(), |rgba, m, _, _, p| {
+                assert!(matches!(&rgba, Cow::Borrowed(photo) if std::ptr::eq(*photo, &image)), "one pass borrows the caller's photo");
+                tile_compose(rgba, m, p, fake)
+            }).unwrap();
+            assert_eq!(image, before);
+        }
     }
 
     /// A region filled scaled down reports its tiles and previews where
@@ -1600,7 +1651,7 @@ mod tests {
             let (w, h) = rgba.dimensions();
             p.tiles(vec![TileRect::of_pixels(0, 0, w, h, w, h)]);
             p.tile_preview((0, 0, w, h), (w, h), |pw, ph| vec![0; (pw * ph * 4) as usize]);
-            Ok(rgba.clone())
+            Ok(rgba.into_owned())
         }).unwrap();
         // The hole is 400 × 200 against a 300 px fit: filled at 3/4, with
         // ceil(64 / 0.75) = 86 px of photo around it.
@@ -1624,7 +1675,7 @@ mod tests {
         let hole = mask_bbox(&mask, 128, 0).unwrap();
         let mut seen = None;
         let mut out = image.clone();
-        fill_scaled_down(&mut out, &mask, None, hole, 0.25, &Progress::none(), &mut |rgba: &RgbaImage, m: &GrayImage, _: Option<&GrayImage>, _: f32, _: &Progress| {
+        fill_scaled_down(&mut out, &mask, None, hole, 0.25, &Progress::none(), &mut |rgba: Cow<'_, RgbaImage>, m: &GrayImage, _: Option<&GrayImage>, _: f32, _: &Progress| {
             seen = Some((rgba.dimensions(), m.pixels().filter(|p| p.0[0] == 255).count()));
             Ok(RgbaImage::from_pixel(rgba.width(), rgba.height(), Rgba([200, 0, 0, 255])))
         }).unwrap();
@@ -1648,7 +1699,7 @@ mod tests {
             }
         }
         let mask = GrayImage::new(128, 128); // all-zero
-        let out = tile_compose(&img, &mask, &Progress::none(), |t, _| Ok(t.clone())).unwrap();
+        let out = tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), |t, _| Ok(t.clone())).unwrap();
         assert_eq!(out, img);
     }
 
@@ -1864,7 +1915,7 @@ mod tests {
         }
         let mask = rect_mask(128, 128, (56, 56, 72, 72));
         // Inpaint closure paints the masked region pure red.
-        let out = tile_compose(&img, &mask, &Progress::none(), |tile, tile_mask| {
+        let out = tile_compose(Cow::Borrowed(&img), &mask, &Progress::none(), |tile, tile_mask| {
             let mut t = tile.clone();
             for y in 0..tile.height() {
                 for x in 0..tile.width() {
