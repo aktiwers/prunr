@@ -42,7 +42,7 @@ Every setting starts from Prunr's own setting for the model in use (the ones the
 | `--colorize` | `{stem}_color.png` |
 | `--depth-map` | `{stem}-depth.png`, beside the result |
 
-Without `-o` each result goes beside its input. With one input, `-o` names the file (a name without an extension is saved as `.png`) or an existing folder. With several inputs, `-o` must be a folder; it is made when missing. An existing result is skipped unless you give `-f`.
+Without `-o` each result goes beside its input. With one input, `-o` names the file (a name without an extension is saved as `.png`) or an existing folder. With several inputs, `-o` must be a folder; it is made when missing. Inputs whose results would share a name in one folder each get their own, as in the app: `IMG.jpg` and `IMG.png` save as `IMG.prunr.png` and `IMG-2.prunr.png`. An existing result is skipped unless you give `-f`.
 
 ## Exit codes
 

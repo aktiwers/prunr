@@ -654,9 +654,8 @@ fn finish_run(quiet: bool, saved: usize, failed: usize) -> i32 {
 fn run_whole_photo(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     let Some(CliFinish { backdrop, render: Some(mut render) }) = cli_finish(args, depth, s) else { return 1 };
     let (mut saved, mut failed) = (0usize, 0usize);
-    for input in &args.inputs {
+    for (input, out_path) in args.inputs.iter().zip(args.result_paths()) {
         let started = Instant::now();
-        let out_path = args.result_path(input);
         if let Err(e) = check_overwrite(&out_path, args.force) {
             failed += 1;
             report_skipped(None, input, &e, args.quiet);
@@ -768,18 +767,18 @@ impl CliDepth {
     }
 }
 
-/// Where an input's depth map goes, beside its result.
-fn depth_map_path(args: &Cli, input: &std::path::Path) -> PathBuf {
-    let mut name = input.file_stem().unwrap_or_default().to_os_string();
-    name.push(prunr_core::depth::MAP_FILE_SUFFIX);
-    args.result_path(input).with_file_name(name)
+/// Where each input's depth map goes, beside its result.
+fn depth_map_paths(args: &Cli) -> Vec<PathBuf> {
+    args.result_paths().into_iter().zip(args.result_stems()).map(|(result, mut name)| {
+        name.push(prunr_core::depth::MAP_FILE_SUFFIX);
+        result.with_file_name(name)
+    }).collect()
 }
 
 /// Write each input's depth map (`--depth-map`). Returns how many failed.
 fn write_depth_maps(args: &Cli, depth: &CliDepth) -> usize {
     let mut failed = 0;
-    for input in &args.inputs {
-        let out = depth_map_path(args, input);
+    for (input, out) in args.inputs.iter().zip(depth_map_paths(args)) {
         let written = check_overwrite(&out, args.force)
             .and_then(|()| depth.for_file(input))
             .and_then(|(map, (w, h))| prunr_core::depth::encode_depth_png(&map, w, h).map_err(|e| format!("encode failed: {e}")))
@@ -917,10 +916,32 @@ impl Cli {
         Ok(RunSettings { item: s, brush })
     }
 
-    /// Where an input's result is written: `-o` names the file for one
-    /// input and the folder for several.
-    fn result_path(&self, input: &std::path::Path) -> PathBuf {
-        output_path(input, &self.output, self.inputs.len() > 1)
+    /// Where each input's result is written: `-o` names the file for one
+    /// input and the folder for several, each named by its `result_stems`.
+    fn result_paths(&self) -> Vec<PathBuf> {
+        self.output_paths(&prunr_core::ExportFormat::Png.result_suffix())
+    }
+
+    /// `result_paths` with `suffix` in place of `.prunr.png`.
+    fn output_paths(&self, suffix: &str) -> Vec<PathBuf> {
+        let is_batch = self.inputs.len() > 1;
+        self.inputs.iter().zip(self.result_stems())
+            .map(|(input, stem)| output_path_with_suffix(input, &stem, &self.output, is_batch, suffix))
+            .collect()
+    }
+
+    /// The stem each input's files are named by: its own, or `stem-2`,
+    /// `stem-3`… when an earlier input's go into the same folder by it, as
+    /// the app names the files of a save of several.
+    fn result_stems(&self) -> Vec<std::ffi::OsString> {
+        let mut taken: std::collections::HashMap<PathBuf, crate::gui::drag_export::TakenStems> = Default::default();
+        self.inputs.iter().map(|input| {
+            let beside = || input.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+            let folder = self.output.as_deref().unwrap_or_else(beside);
+            // One folder however it is written: `a`, `./a`, a link to it.
+            let folder = std::fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf());
+            taken.entry(folder).or_default().take(input.file_stem().unwrap_or_default())
+        }).collect()
     }
 
 }
@@ -1118,10 +1139,8 @@ fn run_each_input(
     doing: &str,
     mut run: impl FnMut(image::RgbaImage) -> Result<image::RgbaImage, String>,
 ) -> i32 {
-    let is_batch = args.inputs.len() > 1;
     let mut failed = 0;
-    for input in &args.inputs {
-        let out_path = output_path_with_suffix(input, &args.output, is_batch, suffix);
+    for (input, out_path) in args.inputs.iter().zip(args.output_paths(suffix)) {
         if let Err(e) = check_overwrite(&out_path, args.force) {
             eprintln!("error: {e}");
             failed += 1;
@@ -1160,7 +1179,7 @@ fn run_inpaint(args: &Cli, brush: &BrushSettings) -> i32 {
         return 1;
     };
 
-    let out_path = output_path_with_suffix(input, &args.output, false, "_erased.png");
+    let out_path = output_path_with_suffix(input, input.file_stem().unwrap_or_default(), &args.output, false, "_erased.png");
     if let Err(e) = check_overwrite(&out_path, args.force) {
         eprintln!("error: {e}");
         return 1;
@@ -1211,14 +1230,17 @@ fn run_inpaint(args: &Cli, brush: &BrushSettings) -> i32 {
     0
 }
 
-/// `output_path` with a caller-chosen suffix in place of `.prunr.png`.
+/// Where an input's file `{stem}{suffix}` is written. Batch mode or -o is
+/// a directory: into that directory. Single mode with -o file.png: that
+/// path. No -o: beside the input.
 fn output_path_with_suffix(
     input: &std::path::Path,
+    stem: &std::ffi::OsStr,
     output: &Option<PathBuf>,
     is_batch: bool,
     suffix: &str,
 ) -> std::path::PathBuf {
-    let mut name = input.file_stem().unwrap_or_default().to_os_string();
+    let mut name = stem.to_os_string();
     name.push(suffix);
     match output {
         Some(out) if is_batch || out.is_dir() => out.join(name),
@@ -1228,14 +1250,6 @@ fn output_path_with_suffix(
         Some(out) => out.clone(),
         None => input.with_file_name(name),
     }
-}
-
-/// Compute output path for an input image.
-/// Batch mode or -o is a directory: write {stem}.prunr.png into that directory.
-/// Single mode with -o file.png: use that path directly.
-/// No -o: write alongside input as {input_dir}/{stem}.prunr.png.
-fn output_path(input: &std::path::Path, output: &Option<PathBuf>, is_batch: bool) -> std::path::PathBuf {
-    output_path_with_suffix(input, output, is_batch, &prunr_core::ExportFormat::Png.result_suffix())
 }
 
 /// The CLI's one error shape: "<path>: could not <what>: <reason>", the
@@ -1290,11 +1304,11 @@ impl ToSend {
 /// The inputs worth a run, checked by their header only: the subprocess
 /// reads each file when its turn comes. An output that is there already
 /// is refused here, before the model runs on its input.
-fn sendable_inputs(args: &Cli, spinners: &[Option<ProgressBar>]) -> Sendable {
+fn sendable_inputs(args: &Cli, out_paths: &[PathBuf], spinners: &[Option<ProgressBar>]) -> Sendable {
     let mut sendable = Sendable { indices: Vec::new(), paths: Vec::new(), refused: 0 };
-    for (idx, input) in args.inputs.iter().enumerate() {
+    for (idx, (input, out_path)) in args.inputs.iter().zip(out_paths).enumerate() {
         let spinner = spinners.get(idx).and_then(Option::as_ref);
-        if let Err(msg) = check_overwrite(&args.result_path(input), args.force) {
+        if let Err(msg) = check_overwrite(out_path, args.force) {
             report_skipped(spinner, input, &msg, args.quiet);
             sendable.refused += 1;
             continue;
@@ -1401,7 +1415,8 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     }).collect();
 
     let start_times: Vec<Instant> = args.inputs.iter().map(|_| Instant::now()).collect();
-    let Sendable { indices: valid_indices, paths: mut to_send, refused: load_fail_count } = sendable_inputs(args, &spinners);
+    let out_paths = args.result_paths();
+    let Sendable { indices: valid_indices, paths: mut to_send, refused: load_fail_count } = sendable_inputs(args, &out_paths, &spinners);
 
     // Lines alone build no cut-out engine: the model only names the run.
     let model = args.model.settings_model().recipe_kind();
@@ -1425,19 +1440,19 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
         let original_idx = valid_indices[batch_idx];
         let input = &args.inputs[original_idx];
         let elapsed = start_times[original_idx].elapsed();
-        let out_path = args.result_path(input);
+        let out_path = &out_paths[original_idx];
 
         let spinner_opt = spinners_arc.get(original_idx).and_then(|o| o.as_ref());
 
         match result {
             Ok(pr) => {
                 // Another input of this batch may have written it meanwhile.
-                if let Err(msg) = check_overwrite(&out_path, args.force) {
+                if let Err(msg) = check_overwrite(out_path, args.force) {
                     report_skipped(spinner_opt, input, &msg, args.quiet);
                     fail_count += 1;
                     return;
                 }
-                match save_png(&out_path, &pr.rgba_image) {
+                match save_png(out_path, &pr.rgba_image) {
                     Ok(()) => {
                         success_count += 1;
                         if let Some(pb) = spinner_opt {
@@ -1459,7 +1474,7 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
                         if let Some(pb) = spinner_opt {
                             pb.finish_with_message(format!("X {} — write error: {e}", input.display()));
                         } else {
-                            eprintln!("error: {}", could_not(&out_path, "write", e));
+                            eprintln!("error: {}", could_not(out_path, "write", e));
                         }
                     }
                 }
@@ -1983,7 +1998,7 @@ impl ReportFiles {
 
     /// Beside the report: `prunr-bench.md` saves into `prunr-bench-outputs/`.
     fn outputs_dir(&self) -> PathBuf {
-        output_path_with_suffix(&self.md, &None, false, "-outputs")
+        output_path_with_suffix(&self.md, self.md.file_stem().unwrap_or_default(), &None, false, "-outputs")
     }
 
     fn write(&mut self, report: &prunr_app::bench::report::Report) {
@@ -2232,10 +2247,11 @@ mod tests {
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let cli = |force: &[&str]| super::Cli::parse_from(["prunr".as_ref(), kept.as_os_str(), fresh.as_os_str(), "-o".as_ref(), out.as_os_str(), "-q".as_ref()].into_iter().chain(force.iter().map(std::ffi::OsStr::new)));
-        std::fs::write(cli(&[]).result_path(&kept), b"an earlier result").unwrap();
-        let sendable = super::sendable_inputs(&cli(&[]), &[]);
+        let sendable_inputs = |args: super::Cli| super::sendable_inputs(&args, &args.result_paths(), &[]);
+        std::fs::write(&cli(&[]).result_paths()[0], b"an earlier result").unwrap();
+        let sendable = sendable_inputs(cli(&[]));
         assert_eq!((sendable.paths, sendable.indices, sendable.refused), (vec![super::ToSend::File(fresh.clone())], vec![1], 1));
-        let forced = super::sendable_inputs(&cli(&["-f"]), &[]);
+        let forced = sendable_inputs(cli(&["-f"]));
         assert_eq!((forced.paths, forced.refused), (vec![super::ToSend::File(kept.clone()), super::ToSend::File(fresh.clone())], 0));
     }
 
@@ -2250,9 +2266,10 @@ mod tests {
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let cli = |policy: &[&str]| super::Cli::parse_from(["prunr".as_ref(), big.as_os_str(), "-o".as_ref(), out.as_os_str(), "-q".as_ref()].into_iter().chain(policy.iter().map(std::ffi::OsStr::new)));
-        assert_eq!(super::sendable_inputs(&cli(&[]), &[]).paths, vec![super::ToSend::File(big.clone())], "kept at its size by default");
+        let sendable_inputs = |args: super::Cli| super::sendable_inputs(&args, &args.result_paths(), &[]);
+        assert_eq!(sendable_inputs(cli(&[])).paths, vec![super::ToSend::File(big.clone())], "kept at its size by default");
 
-        let mut sent = super::sendable_inputs(&cli(&["--large-image", "downscale"]), &[]).paths;
+        let mut sent = sendable_inputs(cli(&["--large-image", "downscale"])).paths;
         let super::ToSend::Shrunk { to, .. } = sent[0].clone() else { panic!("marked to shrink: {sent:?}") };
         assert!(!to.exists(), "nothing is shrunk before its turn");
         let first = sent[0].path(true).unwrap();
@@ -2276,11 +2293,63 @@ mod tests {
     fn dash_o_is_the_file_for_one_input_and_the_folder_for_several() {
         use std::path::Path;
         let one = super::Cli::parse_from(["prunr", "in/a.jpg", "-o", "out/result.png"]);
-        assert_eq!(one.result_path(Path::new("in/a.jpg")), Path::new("out/result.png"));
+        assert_eq!(one.result_paths(), [Path::new("out/result.png")]);
         let many = super::Cli::parse_from(["prunr", "in/a.jpg", "in/b.jpg", "-o", "out"]);
-        assert_eq!(many.result_path(Path::new("in/b.jpg")), Path::new("out/b.prunr.png"));
+        assert_eq!(many.result_paths(), [Path::new("out/a.prunr.png"), Path::new("out/b.prunr.png")]);
         let none = super::Cli::parse_from(["prunr", "in/a.jpg"]);
-        assert_eq!(none.result_path(Path::new("in/a.jpg")), Path::new("in/a.prunr.png"));
+        assert_eq!(none.result_paths(), [Path::new("in/a.prunr.png")]);
+    }
+
+    /// A result takes `stem-2` only when an earlier one of the run takes
+    /// its name in its folder, ignoring case: not across folders, and its
+    /// depth map and every mode's file follow it.
+    #[test]
+    fn a_result_is_renamed_only_when_its_name_is_taken_in_its_folder() {
+        use std::path::{Path, PathBuf};
+        let args = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args).copied());
+        let paths = |a: &[&str]| args(a).result_paths();
+        assert_eq!(paths(&["x/a.jpg", "y/A.png", "y/b.png", "-o", "out"]), ["out/a.prunr.png", "out/A-2.prunr.png", "out/b.prunr.png"].map(PathBuf::from));
+        assert_eq!(paths(&["x/a.jpg", "y/a.png"]), ["x/a.prunr.png", "y/a.prunr.png"].map(PathBuf::from), "beside inputs in two folders");
+        assert_eq!(paths(&["a.jpg", "./a.png"]), ["a.prunr.png", "./a-2.prunr.png"].map(PathBuf::from), "one folder however it is written");
+        let both = args(&["x/a.jpg", "x/a.png", "--depth-map"]);
+        assert_eq!(both.output_paths("_x4.png"), ["x/a_x4.png", "x/a-2_x4.png"].map(PathBuf::from));
+        assert_eq!(super::depth_map_paths(&both), ["x/a-depth.png", "x/a-2-depth.png"].map(PathBuf::from));
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join("a")).expect("folder");
+        let (plain, roundabout) = (dir.path().join("a/IMG.png"), dir.path().join("a/../a/IMG.jpg"));
+        let named = super::Cli::parse_from([Path::new("prunr"), plain.as_path(), roundabout.as_path()]).result_paths();
+        assert_eq!(named[1].file_name(), Some("IMG-2.prunr.png".as_ref()));
+    }
+
+    /// Inputs whose results would share a folder and a name each keep
+    /// their own: the later ones as `stem-2`, `stem-3`, as the app names
+    /// them. Beside their inputs, same-named photos of two folders keep
+    /// their names.
+    #[test]
+    fn inputs_of_one_name_save_a_result_each() {
+        use std::ffi::OsStr;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (a, b, out) = (dir.path().join("a"), dir.path().join("b"), dir.path().join("out"));
+        for folder in [&a, &b] {
+            std::fs::create_dir(folder).expect("folder");
+        }
+        let inputs = [a.join("IMG.png"), a.join("IMG.bmp"), b.join("IMG.png")];
+        for (input, shade) in inputs.iter().zip([40u8, 120, 200]) {
+            image::RgbaImage::from_pixel(6, 4, image::Rgba([shade, shade, shade, 255])).save(input).expect("saved");
+        }
+        let run = |output: &[&OsStr]| {
+            let flags = ["-m", "none", "--effect", "desaturate", "-q", "-f"].map(OsStr::new);
+            let args = [OsStr::new("prunr")].into_iter().chain(inputs.iter().map(|p| p.as_os_str())).chain(flags).chain(output.iter().copied());
+            super::run_remove(&super::Cli::parse_from(args))
+        };
+        let shade = |path: std::path::PathBuf| image::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).to_rgba8().get_pixel(0, 0).0[0];
+
+        assert_eq!(run(&[OsStr::new("-o"), out.as_os_str()]), 0);
+        assert_eq!(["IMG.prunr.png", "IMG-2.prunr.png", "IMG-3.prunr.png"].map(|name| shade(out.join(name))), [40, 120, 200]);
+
+        assert_eq!(run(&[]), 0);
+        assert_eq!([a.join("IMG.prunr.png"), a.join("IMG-2.prunr.png"), b.join("IMG.prunr.png")].map(shade), [40, 120, 200]);
     }
 
     #[test]
@@ -2304,11 +2373,12 @@ mod tests {
         use super::output_path_with_suffix;
         use std::path::PathBuf;
         let input = std::path::Path::new("/photos/a.jpg");
-        let out = |o: &str| output_path_with_suffix(input, &Some(PathBuf::from(o)), false, "_x.png");
+        let stem = std::ffi::OsStr::new("a");
+        let out = |o: &str| output_path_with_suffix(input, stem, &Some(PathBuf::from(o)), false, "_x.png");
         assert_eq!(out("/tmp/result"), PathBuf::from("/tmp/result.png"));
         assert_eq!(out("/tmp/result.webp"), PathBuf::from("/tmp/result.webp"));
-        assert_eq!(output_path_with_suffix(input, &Some(PathBuf::from("/tmp/dir")), true, "_x.png"), PathBuf::from("/tmp/dir/a_x.png"));
-        assert_eq!(output_path_with_suffix(input, &None, false, "_x.png"), PathBuf::from("/photos/a_x.png"));
+        assert_eq!(output_path_with_suffix(input, stem, &Some(PathBuf::from("/tmp/dir")), true, "_x.png"), PathBuf::from("/tmp/dir/a_x.png"));
+        assert_eq!(output_path_with_suffix(input, stem, &None, false, "_x.png"), PathBuf::from("/photos/a_x.png"));
     }
 
     /// `--line-fade` reads the depth model only when lines are drawn;
@@ -2431,14 +2501,15 @@ mod tests {
     fn the_depth_map_goes_beside_the_result() {
         use clap::Parser;
         let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "-o", "/out/x.png", "--depth-map"]);
-        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/out/cat-depth.png"));
+        assert_eq!(super::depth_map_paths(&args), [std::path::PathBuf::from("/out/cat-depth.png")]);
         let args = super::Cli::parse_from(["prunr", "/p/cat.jpg", "--depth-map", "--depth-only"]);
-        assert_eq!(super::depth_map_path(&args, std::path::Path::new("/p/cat.jpg")), std::path::PathBuf::from("/p/cat-depth.png"));
+        assert_eq!(super::depth_map_paths(&args), [std::path::PathBuf::from("/p/cat-depth.png")]);
         assert!(super::Cli::try_parse_from(["prunr", "/p/cat.jpg", "--depth-only"]).is_err(), "--depth-only needs --depth-map");
     }
 
     /// A stem that is not UTF-8 names its result and depth map as it is:
-    /// a mended name would let two inputs write one file.
+    /// a mended name would let two inputs write one file. Two such stems
+    /// are one name only byte for byte.
     #[cfg(unix)]
     #[test]
     fn a_name_that_is_not_utf8_is_kept() {
@@ -2447,8 +2518,10 @@ mod tests {
         let os = |bytes: &[u8]| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
         let input = os(b"/p/caf\xe9.jpg");
         let args = super::Cli::parse_from([std::ffi::OsStr::new("prunr"), input.as_os_str(), std::ffi::OsStr::new("--depth-map")]);
-        assert_eq!(args.result_path(&input), os(b"/p/caf\xe9.prunr.png"));
-        assert_eq!(super::depth_map_path(&args, &input), os(b"/p/caf\xe9-depth.png"));
+        assert_eq!(args.result_paths(), [os(b"/p/caf\xe9.prunr.png")]);
+        assert_eq!(super::depth_map_paths(&args), [os(b"/p/caf\xe9-depth.png")]);
+        let several = super::Cli::parse_from([os(b"prunr"), input.clone(), os(b"/p/caf\xe8.jpg"), os(b"/p/caf\xe9.png")]);
+        assert_eq!(several.result_paths(), [os(b"/p/caf\xe9.prunr.png"), os(b"/p/caf\xe8.prunr.png"), os(b"/p/caf\xe9-2.prunr.png")]);
     }
 
     /// `--depth-map` writes the map a backdrop measured instead of
