@@ -18,9 +18,7 @@ pub struct Cli {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
-    /// Launch GUI mode with this image pre-loaded (skips the file picker).
-    /// Useful for shortcuts ("Open with Prunr…") and for the test harness,
-    /// which needs to land an image without driving a modal file dialog.
+    /// Open the app with this image loaded.
     #[arg(long, value_name = "PATH")]
     pub open: Option<PathBuf>,
 
@@ -53,10 +51,8 @@ pub struct Cli {
     #[arg(short = 'q', long)]
     pub quiet: bool,
 
-    /// Verbose diagnostics: bumps tracing filter to `prunr=debug` and, on
-    /// Windows, attaches the parent console so GUI-mode stderr is visible
-    /// in the launching terminal. Use to capture pipeline diagnostics
-    /// when reporting a bug.
+    /// Detailed log for a bug report; on Windows the app also writes it to
+    /// the terminal it started from.
     #[arg(long)]
     pub debug: bool,
 
@@ -128,7 +124,7 @@ pub struct Cli {
     pub bg_color: Option<String>,
 
     /// Fill transparent background with an image (PNG/JPEG/WebP/BMP). Wins
-    /// over `--bg-color` when both are set (matches GUI mutual exclusion).
+    /// over `--bg-color` when both are set, as in the app.
     #[arg(long, value_name = "PATH")]
     pub bg_image: Option<std::path::PathBuf>,
 
@@ -146,8 +142,10 @@ pub struct Cli {
     pub effect: Option<prunr_core::SubjectEffect>,
 
     /// Fill transparent background with a copy of the photo: `blur`
-    /// (optionally `blur:N`, N = 1-64 px) or `bw` (black and white). Wins
-    /// over `--bg-image` and `--bg-color`, as in the app.
+    /// (optionally `blur:N`, N = 1-64 px), `lens` (optionally `lens:N`,
+    /// N = 0-100: blurs more the farther from the subject; needs the depth
+    /// model) or `bw` (black and white). Wins over `--bg-image` and
+    /// `--bg-color`, as in the app.
     #[arg(long, value_name = "blur[:N]|lens[:N]|bw", value_parser = parse_bg_effect)]
     pub bg_effect: Option<prunr_core::BgEffect>,
 
@@ -173,15 +171,14 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub worker_of: Option<String>,
 
-    /// Print a diagnostic dump (hardware profile, ORT runtime status,
-    /// installed models, paths) and exit. Paste the output into bug
-    /// reports when hardware acceleration misbehaves.
+    /// Print the computer's hardware, Prunr's AI runtime, the installed
+    /// models and Prunr's folders, and exit. Paste it into a bug report
+    /// when hardware acceleration misbehaves.
     #[arg(long)]
     pub doctor: bool,
 
-    /// Clear the persistent EP × model compatibility cache. Use after
-    /// updating drivers / OpenVINO Runtime to re-discover which EPs
-    /// can actually run each model on this machine.
+    /// Forget which models failed on which accelerator, so each is tried
+    /// there again (after a graphics driver update).
     #[arg(long)]
     pub clear_ep_cache: bool,
 
@@ -194,8 +191,8 @@ pub struct Cli {
     /// Path to the inpaint mask image. Required with --inpaint.
     /// Any image format; pixels >128 in the first channel are treated
     /// as "inpaint here". Mask must match the input image's dimensions.
-    /// `requires` enforces this at parse time so `--mask m.png foo.jpg`
-    /// (no `--inpaint`) errors out instead of silently dropping the flag.
+    // `requires`: `--mask m.png foo.jpg` without `--inpaint` errors out
+    // instead of dropping the flag.
     #[arg(long, requires = "inpaint")]
     pub mask: Option<PathBuf>,
 
@@ -397,11 +394,11 @@ impl CliFaceModel {
 /// Model selection
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliModel {
-    /// Silueta (~4MB, fast)
+    /// Silueta: fast
     Silueta,
-    /// U2Net (~170MB, higher quality)
+    /// U2Net: downloaded in the app's Model Store
     U2net,
-    /// BiRefNet-lite (~214MB, best detail at 1024×1024) — default
+    /// BiRefNet-lite: the finest detail (default)
     BirefnetLite,
     /// No model: effects, lines and background over the whole photo
     #[value(name = "none")]
@@ -433,7 +430,7 @@ impl CliModel {
 /// How to handle images exceeding LARGE_IMAGE_LIMIT
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LargeImagePolicy {
-    /// Shrink to DOWNSCALE_TARGET (4096 px) before the model runs
+    /// Shrink to 4096 px before the model runs
     Downscale,
     /// Keep the original size; a photo too large for the free memory is refused
     Process,
@@ -2373,6 +2370,46 @@ mod tests {
             .filter(|flag| !text.contains(&format!("\"{flag}")))
             .collect();
         assert!(missing.is_empty(), "missing from the reference: {missing:?}");
+    }
+
+    /// docs/CLI.md names every option `--help` shows, `bench`'s too, with
+    /// the values each takes; it and the app's reference name no option
+    /// the command line lacks.
+    #[test]
+    fn the_cli_reference_names_every_option_and_no_other() {
+        use clap::CommandFactory;
+        use std::collections::BTreeSet;
+        let doc = include_str!("../../../docs/CLI.md");
+        let named = |text: &'static str| -> BTreeSet<&'static str> {
+            text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .filter_map(|word| word.strip_prefix("--"))
+                .filter(|flag| flag.starts_with(|c: char| c.is_ascii_lowercase()))
+                .collect()
+        };
+        let mut cmd = super::Cli::command();
+        cmd.build();
+        let args: Vec<clap::Arg> = std::iter::once(&cmd)
+            .chain(cmd.get_subcommands())
+            .flat_map(|c| c.get_arguments().cloned())
+            .collect();
+        let longs = |arg: &clap::Arg| -> Vec<String> {
+            arg.get_long().into_iter().chain(arg.get_visible_aliases().into_iter().flatten()).map(str::to_owned).collect()
+        };
+        let known: BTreeSet<String> = args.iter().flat_map(longs).collect();
+        let shown = args.iter().filter(|a| !a.is_hide_set());
+
+        let in_doc = named(doc);
+        let missing: Vec<String> = shown.clone().flat_map(longs).filter(|long| !in_doc.contains(long.as_str())).collect();
+        assert!(missing.is_empty(), "missing from docs/CLI.md: {missing:?}");
+        let values_missing: Vec<String> = shown
+            .flat_map(|a| a.get_possible_values().into_iter().filter(|v| !v.is_hide_set()).map(|v| v.get_name().to_owned()))
+            .filter(|value| !["true", "false"].contains(&value.as_str()) && !doc.contains(&format!("`{value}`")))
+            .collect();
+        assert!(values_missing.is_empty(), "values missing from docs/CLI.md: {values_missing:?}");
+        for (reference, text) in [("docs/CLI.md", doc), ("the app's reference", include_str!("gui/views/cli_help.rs"))] {
+            let unknown: Vec<&str> = named(text).into_iter().filter(|flag| !known.contains(*flag)).collect();
+            assert!(unknown.is_empty(), "{reference} names options the command line lacks: {unknown:?}");
+        }
     }
 
     #[test]
