@@ -61,13 +61,14 @@ fn sd_inpaint_modifies_painted_region() {
     }
 }
 
-/// The run's fill, or `None` after a SKIP line when the pre-flight RAM
-/// gate refused the load: not enough free memory on this machine right
-/// now, so the test skips like a missing bundle.
+/// The run's fill, or `None` after a SKIP line when this machine can't run
+/// it: the pre-flight RAM gate refused the load, or no GPU provider is
+/// loaded (SD refuses the processor, whose output is wrong). The test
+/// skips like a missing bundle.
 fn fill_or_skip(label: &str, run: Result<RgbaImage, prunr_core::CoreError>) -> Option<RgbaImage> {
     match run {
         Ok(rgba) => Some(rgba),
-        Err(e) if e.to_string().contains("of free memory to load") => {
+        Err(e) if ["of free memory to load", "requires GPU acceleration"].iter().any(|refusal| e.to_string().contains(refusal)) => {
             eprintln!("[{label}] SKIP: {e}");
             None
         }
