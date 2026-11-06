@@ -41,6 +41,17 @@ pub fn skip_if_model_missing(label: &str, id: prunr_models::ModelId) -> bool {
     true
 }
 
+/// Returns `true` when one of `photos` isn't there, after printing a
+/// `[label] SKIP:` line. The photos in `tests/test_images` are not in git
+/// (see its README), so CI never has them.
+pub fn skip_if_photos_missing(label: &str, photos: &[&Path]) -> bool {
+    let Some(missing) = photos.iter().find(|p| !p.exists()) else {
+        return false;
+    };
+    eprintln!("[{label}] SKIP: {} is not there; see tests/test_images/README.md", missing.display());
+    true
+}
+
 // ---------- golden harness driver (shared by both golden tiers) ----------
 
 /// A golden tier's switches (`BOOTSTRAP_GOLDEN`, `UPDATE_GOLDEN`) and its
