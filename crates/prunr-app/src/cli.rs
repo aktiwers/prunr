@@ -830,9 +830,16 @@ impl Cli {
     /// Whether this run writes to the terminal it was started from. A
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
-    #[cfg_attr(not(windows), allow(dead_code))] // only Windows borrows a console; the tests check the rule everywhere
     pub fn writes_to_terminal(&self) -> bool {
         self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
+    }
+
+    /// The log level for this process and the workers it starts, `None`
+    /// for the default. A run that prints logs only errors: its own lines
+    /// are its output, and the session-start and provider-ladder lines
+    /// would bury them.
+    pub fn log_level(&self) -> Option<&'static str> {
+        if self.debug { Some("prunr=debug") } else { self.writes_to_terminal().then_some("prunr=error") }
     }
 
     /// Whether this run opens the window, where a failure to start has
@@ -2260,6 +2267,22 @@ mod tests {
         assert!(!writes(&[]), "the GUI");
         assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
         assert!(writes(&["bench"]));
+    }
+
+    /// A run that prints shows its own lines, not the log: only errors
+    /// unless `--debug`. The window keeps the default; a worker takes its
+    /// parent's level from the environment.
+    #[test]
+    fn a_printing_run_logs_only_errors() {
+        let level = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args)).log_level();
+        for printing in [&["photo.jpg"][..], &["--doctor"], &["--clear-ep-cache"], &["bench"]] {
+            assert_eq!(level(printing), Some("prunr=error"), "{printing:?}");
+        }
+        assert_eq!(level(&["--debug", "photo.jpg"]), Some("prunr=debug"));
+        assert_eq!(level(&["--debug"]), Some("prunr=debug"));
+        assert_eq!(level(&[]), None, "the window");
+        assert_eq!(level(&["--open", "photo.jpg"]), None, "the window with an image");
+        assert_eq!(level(&["--worker"]), None, "a worker");
     }
 
     /// A window run tells a failure to start in a dialog; a printing run

@@ -28,10 +28,7 @@ fn main() {
     // `--debug` reaches subprocess workers through env vars they inherit,
     // set BEFORE `init_tracing` reads them. PRUNR_DEBUG_LOG tees to a file:
     // on Windows a GUI-subsystem worker's stderr is unreliable.
-    // The bench's report carries every provider failure; the warnings
-    // the ladder logs for them would bury its progress lines.
-    let level = if cli.debug { Some("prunr=debug") } else { cli.command.is_some().then_some("prunr=error") };
-    if let Some(level) = level.filter(|_| std::env::var_os("RUST_LOG").is_none()) {
+    if let Some(level) = cli.log_level().filter(|_| std::env::var_os("RUST_LOG").is_none()) {
         // SAFETY: single-threaded at this point in main.
         unsafe { std::env::set_var("RUST_LOG", level); }
     }
