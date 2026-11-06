@@ -1,62 +1,115 @@
-//! Newtype around `egui_notify::Toasts` that pre-wraps long captions at
-//! word boundaries.
-//!
-//! `egui-notify` 0.22 hardcodes `TextWrapping::Extend` with infinite
-//! width inside its `show()` — there's no caller-side knob to opt into
-//! actual wrapping, so the toast widens with the longest caption and
-//! drifts off-screen on error messages that interpolate paths or
-//! exception text. Wrapping the caption ourselves before handing it off
-//! sidesteps the upstream limitation without forking the crate.
+//! `egui_notify::Toasts` with captions pre-wrapped at word boundaries:
+//! egui-notify 0.22 hardcodes infinite-width `TextWrapping::Extend`, so a
+//! caption with a path or error text would drift off-screen.
+
+use std::time::{Duration, Instant};
 
 use egui::{Context, Vec2};
 use egui_notify::{Anchor, Toast};
 
-/// Per-line character cap. Tuned for the default egui_notify font at
-/// ~12 px — readable line length without going wider than ~360 px.
-/// Words longer than this get hard-broken inside the wrapper.
+/// Readable line length at the default ~12 px font, under ~360 px wide.
 const TOAST_LINE_CHARS: usize = 60;
 
 #[derive(Default)]
-pub(crate) struct Toasts(egui_notify::Toasts);
+pub(crate) struct Toasts(
+    egui_notify::Toasts,
+    /// The latest captions and when each leaves, kept while a script
+    /// reads them.
+    std::collections::VecDeque<(String, Instant)>,
+    #[cfg(test)] Vec<(&'static str, String)>,
+);
+
+/// How many captions `Toasts` keeps for a script; more never show at once.
+const KEPT_CAPTIONS: usize = 8;
+
+/// How long a success or a note stays.
+const BRIEF: Duration = Duration::from_millis(3500);
+
+/// How long an error or a warning stays: long enough to read at about 15
+/// characters a second, 8 to 20 s. Hovering holds a toast, and each can
+/// be closed.
+fn reading_time(caption: &str) -> Duration {
+    Duration::from_secs_f32((4.0 + caption.chars().count() as f32 / 15.0).clamp(8.0, 20.0))
+}
 
 impl Toasts {
     pub fn new(anchor: Anchor, margin: Vec2) -> Self {
-        Self(egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin))
+        Self(
+            egui_notify::Toasts::default().with_anchor(anchor).with_margin(margin),
+            std::collections::VecDeque::new(),
+            #[cfg(test)] Vec::new(),
+        )
     }
 
     pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.success(wrap(&caption.into()))
+        self.push("success", caption.into(), BRIEF, |toasts, text| toasts.success(text))
     }
     pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.info(wrap(&caption.into()))
+        self.push("info", caption.into(), BRIEF, |toasts, text| toasts.info(text))
     }
     pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.warning(wrap(&caption.into()))
+        let caption = caption.into();
+        self.push("warning", caption.clone(), reading_time(&caption), |toasts, text| toasts.warning(text))
     }
     pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.error(wrap(&caption.into()))
-    }
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn basic(&mut self, caption: impl Into<String>) -> &mut Toast {
-        self.0.basic(wrap(&caption.into()))
+        let caption = caption.into();
+        self.push("error", caption.clone(), reading_time(&caption), |toasts, text| toasts.error(text))
     }
 
-    #[allow(dead_code)] // facade parity with egui_notify
-    pub fn dismiss_all_toasts(&mut self) {
-        self.0.dismiss_all_toasts()
+    #[cfg_attr(not(test), allow(unused_variables))] // the level is kept for tests only
+    fn push(&mut self, level: &'static str, caption: String, lasts: Duration, show: fn(&mut egui_notify::Toasts, String) -> &mut Toast) -> &mut Toast {
+        self.keep(&caption, lasts);
+        let text = wrap(&caption);
+        #[cfg(test)] self.2.push((level, caption));
+        show(&mut self.0, text).duration(lasts)
+    }
+    /// A success toast for `Ok`, an error toast for `Err`.
+    pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
+        match outcome {
+            Ok(caption) => self.success(caption),
+            Err(caption) => self.error(caption),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn len_for_test(&self) -> usize {
+        self.0.len()
+    }
+
+    /// The last toast shown: its level ("success", "error", …) and caption.
+    #[cfg(test)]
+    pub fn last_for_test(&self) -> Option<(&'static str, &str)> {
+        self.2.last().map(|(level, caption)| (*level, caption.as_str()))
     }
 
     pub fn show(&mut self, ctx: &Context) {
         self.0.show(ctx)
     }
+
+    fn keep(&mut self, caption: &str, lasts: Duration) {
+        if !crate::gui::automation::record::is_on() {
+            return;
+        }
+        if self.1.len() == KEPT_CAPTIONS {
+            self.1.pop_front();
+        }
+        self.1.push_back((caption.to_owned(), Instant::now() + lasts));
+    }
+
+    /// The captions on screen, oldest first: those not yet due to leave,
+    /// the latest as many as are shown. Empty unless a script turned
+    /// recording on.
+    pub fn shown(&self) -> Vec<String> {
+        let now = Instant::now();
+        let mut shown: Vec<String> = self.1.iter().rev().filter(|(_, leaves)| *leaves > now).take(self.0.len()).map(|(caption, _)| caption.clone()).collect();
+        shown.reverse();
+        shown
+    }
 }
 
 
-/// Greedy word-wrap: break on whitespace into lines of at most
-/// `TOAST_LINE_CHARS` chars (counted in unicode scalar values, which is
-/// close enough to display width for our use cases). Words longer than
-/// the limit hard-break — uncommon in practice (URLs, file paths) but
-/// we'd rather wrap mid-word than overflow the screen.
+/// Greedy word-wrap counted in chars (close enough to display width);
+/// a word over the limit hard-breaks rather than overflow the screen.
 fn wrap(input: &str) -> String {
     let mut out = String::with_capacity(input.len() + input.len() / TOAST_LINE_CHARS);
     for (i, line) in input.split('\n').enumerate() {
@@ -75,7 +128,6 @@ fn wrap_one_line(line: &str, out: &mut String) {
         let wlen = word.chars().count();
         if wlen >= TOAST_LINE_CHARS {
             if !first { out.push('\n'); col = 0; }
-            // Hard-break very long words so the toast still fits.
             for ch in word.chars() {
                 if col >= TOAST_LINE_CHARS {
                     out.push('\n');
@@ -138,6 +190,17 @@ mod tests {
         let s = "Header line\nSecond line that is not particularly long";
         let w = wrap(s);
         assert_eq!(w.lines().count(), 2);
+    }
+
+    /// An error stays long enough to read, a long one longer, within
+    /// bounds; a success stays briefly.
+    #[test]
+    fn an_error_stays_long_enough_to_read() {
+        assert_eq!(reading_time("Could not save."), Duration::from_secs(8));
+        let long = "Could not install CUDA: the download stopped. Check the connection and try again from Settings.";
+        assert!(reading_time(long) > Duration::from_secs(10), "{:?}", reading_time(long));
+        assert_eq!(reading_time(&"x".repeat(2000)), Duration::from_secs(20));
+        assert!(BRIEF < reading_time(""));
     }
 
     #[test]

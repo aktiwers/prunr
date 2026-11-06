@@ -48,8 +48,11 @@ use prunr_core::{
     process_image_from_decoded, MaskSettings, ModelKind, OrtEngine,
 };
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::{Path, PathBuf}};
-use test_common::{ensure_ort_initialized, render_synthetic_source, synthetic_specs};
+use std::{fs, path::Path};
+use test_common::{
+    assert_golden_fixtures, golden_fixtures, list_fixture_dirs, match_or_update,
+    render_synthetic_source, skip_if_no_ort, synthetic_specs, GoldenRun,
+};
 
 const FIXTURE_ROOT_COMMITTED: &str = "tests/golden_data/e2e";
 const FIXTURE_ROOT_LOCAL: &str = "tests/golden_data_local/e2e";
@@ -67,39 +70,17 @@ struct Recipe {
 
 #[test]
 fn golden_e2e() {
-    if let Err(msg) = ensure_ort_initialized() {
-        eprintln!("[golden_e2e] SKIP: {msg}");
+    if skip_if_no_ort("golden_e2e") {
         return;
     }
 
-    let bootstrap = env::var_os("BOOTSTRAP_GOLDEN").is_some();
-    let update = env::var_os("UPDATE_GOLDEN").is_some();
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let committed_root = manifest_dir.join(FIXTURE_ROOT_COMMITTED);
-    let local_root = manifest_dir.join(FIXTURE_ROOT_LOCAL);
-    fs::create_dir_all(&committed_root).expect("create committed fixture root");
-
-    if bootstrap {
-        bootstrap_committed(&committed_root);
-        bootstrap_recipes_for_local(&local_root);
+    let run = GoldenRun::new(FIXTURE_ROOT_COMMITTED, FIXTURE_ROOT_LOCAL);
+    if run.bootstrap {
+        bootstrap_committed(&run.committed);
+        bootstrap_recipes_for_local(&run.local);
     }
 
-    let mut fixtures = Vec::new();
-    fixtures.extend(list_fixtures(&committed_root));
-    if local_root.is_dir() {
-        fixtures.extend(list_fixtures(&local_root));
-    }
-    fixtures.sort();
-
-    if fixtures.is_empty() {
-        panic!(
-            "no e2e fixtures under {} or {}.\n\
-             Run with BOOTSTRAP_GOLDEN=1 to generate canary fixtures.",
-            committed_root.display(),
-            local_root.display(),
-        );
-    }
+    let fixtures = golden_fixtures("e2e", &run.committed, &run.local);
 
     // One engine for all Silueta fixtures; reuse to amortize the ~1s
     // session-init across iterations. Fixtures with a different model in
@@ -107,28 +88,7 @@ fn golden_e2e() {
     let engine = OrtEngine::new_cpu_only(ModelKind::Silueta, 1)
         .expect("OrtEngine::new_cpu_only(Silueta) failed");
 
-    let mut failures = Vec::new();
-    for fixture in &fixtures {
-        if let Err(e) = run_fixture(fixture, &engine, update) {
-            let id = fixture.file_name().unwrap().to_string_lossy().into_owned();
-            failures.push(format!("[{id}] {e}"));
-        }
-    }
-
-    if !failures.is_empty() {
-        panic!("e2e golden mismatches:\n{}", failures.join("\n"));
-    }
-}
-
-fn list_fixtures(root: &Path) -> Vec<PathBuf> {
-    fs::read_dir(root)
-        .map(|it| {
-            it.filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default()
+    assert_golden_fixtures("e2e", &fixtures, |f| run_fixture(f, &engine, run.update));
 }
 
 fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), String> {
@@ -166,74 +126,15 @@ fn run_fixture(dir: &Path, engine: &OrtEngine, update: bool) -> Result<(), Strin
         &prunr_core::Progress::none(),
     )
     .map_err(|e| format!("pipeline: {e:?}"))?;
-    let actual = result.rgba_image;
 
-    if update || !expected_path.exists() {
-        actual.save(&expected_path).map_err(|e| format!("write expected: {e}"))?;
-        return Ok(());
-    }
-
-    let expected = image::open(&expected_path)
-        .map_err(|e| format!("expected decode: {e}"))?
-        .to_rgba8();
-
-    compare_pixels(&actual, &expected)
-}
-
-fn compare_pixels(actual: &RgbaImage, expected: &RgbaImage) -> Result<(), String> {
-    if actual.dimensions() != expected.dimensions() {
-        return Err(format!(
-            "dimension mismatch: actual {:?} vs expected {:?}",
-            actual.dimensions(),
-            expected.dimensions(),
-        ));
-    }
-
-    let aw = actual.width() as usize;
-    let mut max_observed: u8 = 0;
-    let mut diff_pixels: usize = 0;
-    let mut first_mismatch: Option<String> = None;
-
-    for (i, (a, e)) in actual.pixels().zip(expected.pixels()).enumerate() {
-        let mut pixel_max: u8 = 0;
-        for c in 0..4 {
-            let d = a.0[c].abs_diff(e.0[c]);
-            if d > pixel_max {
-                pixel_max = d;
-            }
-        }
-        if pixel_max > MAX_DIFF {
-            if first_mismatch.is_none() {
-                let x = i % aw;
-                let y = i / aw;
-                first_mismatch = Some(format!(
-                    "first mismatch at ({x}, {y}): actual rgba{:?} vs expected rgba{:?}",
-                    a.0, e.0,
-                ));
-            }
-            if pixel_max > max_observed {
-                max_observed = pixel_max;
-            }
-            diff_pixels += 1;
-        }
-    }
-
-    if max_observed > MAX_DIFF {
-        let total = actual.width() as usize * actual.height() as usize;
-        return Err(format!(
-            "{}; {diff_pixels}/{total} pixels differ; max channel diff {max_observed} \
-             (threshold {MAX_DIFF})",
-            first_mismatch.as_deref().unwrap_or("(no first-mismatch recorded)"),
-        ));
-    }
-    Ok(())
+    match_or_update(&result.rgba_image, &expected_path, update, MAX_DIFF)
 }
 
 // ---------- bootstrap: committed synthetic fixtures ----------
 
 /// Generate committed fixture inputs procedurally. Idempotent — skips fixtures
-/// whose `source.png` already exists. Each fixture targets a specific past-bug
-/// category from `.planning/phases/20-golden-image-suite/PLAN.md`.
+/// whose `source.png` already exists. Each fixture targets a specific category
+/// of past bug.
 fn bootstrap_committed(root: &Path) {
     bootstrap_circle_silueta_e2e(root);
     bootstrap_synthetic_e2e_fixtures(root);
@@ -316,15 +217,7 @@ fn write_default_recipe(path: &Path) {
 /// drop a source.png into `golden_data_local/e2e/<id>/` and just run
 /// BOOTSTRAP_GOLDEN to fill in defaults.
 fn bootstrap_recipes_for_local(root: &Path) {
-    if !root.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(root) else { return };
-    for entry in entries.filter_map(Result::ok) {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
+    for dir in list_fixture_dirs(root) {
         let source = dir.join("source.png");
         let recipe = dir.join("recipe.json");
         if source.is_file() && !recipe.exists() {

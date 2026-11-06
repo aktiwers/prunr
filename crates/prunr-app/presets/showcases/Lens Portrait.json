@@ -1,0 +1,32 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 75
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 75
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg_effect": {
+          "lens_blur": {
+            "amount_pct": 75
+          }
+        }
+      }
+    }
+  }
+}

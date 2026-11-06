@@ -1,0 +1,20 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg_effect": "desaturated_source"
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg_effect": "desaturated_source"
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg_effect": "desaturated_source"
+      }
+    }
+  }
+}

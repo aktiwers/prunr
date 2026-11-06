@@ -1,5 +1,5 @@
 //! Microbench for the Lines live-preview path at 4K: edge mask from the
-//! DexiNed tensor, then the plain, styled and dual-scale compositions.
+//! TEED tensor, then the plain, styled and dual-scale compositions.
 //!
 //! Run: `cargo bench -p prunr-core --bench edge_compose`.
 
@@ -12,7 +12,7 @@ const H: u32 = 3072;
 
 fn tensor(seed: f32) -> Vec<f32> {
     // Ridges every 17 columns, so ~6 % of the plane is edge.
-    (0..640 * 480).map(|i| if (i % 17) as u32 % 17 < 1 { 6.0 + seed } else { -6.0 }).collect()
+    (0..640 * 480).map(|i| if i % 17 == 0 { 0.9 + 0.1 * seed } else { 0.0 }).collect()
 }
 
 fn base() -> RgbaImage {
@@ -35,7 +35,7 @@ pub fn bench(c: &mut Criterion) {
     group.bench_function("dilate_round_r20", |b| {
         b.iter(|| black_box(prunr_core::morphology::dilate_round(black_box(&mask), 20)))
     });
-    group.bench_function("dilate_square_r20", |b| {
+    group.bench_function("dilate_octagon_r20", |b| {
         b.iter(|| { let mut m = mask.clone(); prunr_core::morphology::shift_mask(&mut m, -20.0); black_box(m) })
     });
     group.bench_function("edge_plane", |b| {

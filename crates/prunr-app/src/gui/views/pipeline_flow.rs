@@ -1,6 +1,6 @@
 //! F3 modal: the processing order of each mode, one tab per pipeline,
 //! with a one-line explanation per step so the user can predict how a
-//! knob change cascades. Step names match the toolbar rows.
+//! knob change cascades.
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -46,7 +46,7 @@ const PIPELINES: [Pipeline; 4] = [
             Stage { icon: ICON_FILTER_B_AND_W.codepoint, title: "Pre-filter", tagline: "Grayscale, contrast or posterize applied before detection. Requires reprocessing." },
             Stage { icon: ICON_TUNE.codepoint, title: "Scale", tagline: "How zoomed-in the detector looks: fine texture, bold silhouettes, or every scale fused." },
             Stage { icon: ICON_TUNE.codepoint, title: "Line detail", tagline: "How much of the detected edge map becomes a line." },
-            Stage { icon: ICON_LINE_WEIGHT.codepoint, title: "Line thickness", tagline: "Thickens the lines by whole pixels." },
+            Stage { icon: ICON_LINE_WEIGHT.codepoint, title: "Line width", tagline: "Thickens the lines by whole pixels." },
             Stage { icon: ICON_LAYERS.codepoint, title: "Composition and color", tagline: "How the lines combine with the subject, and what color they take." },
         ],
     },
@@ -57,7 +57,7 @@ const PIPELINES: [Pipeline; 4] = [
         stages: &[
             Stage { icon: ICON_BRUSH.codepoint, title: "Paint region", tagline: "Everything under the brush is replaced." },
             Stage { icon: ICON_OPEN_IN_FULL.codepoint, title: "Expand region", tagline: "Grows or shrinks the region first; a little growth gives the fill more context." },
-            Stage { icon: ICON_AUTO_AWESOME.codepoint, title: "Fill", tagline: "The eraser model invents what belongs there. SD models follow the prompt." },
+            Stage { icon: ICON_AUTO_AWESOME.codepoint, title: "Fill", tagline: "The eraser model invents what belongs there. The Stable Diffusion eraser follows the prompt." },
             Stage { icon: ICON_BLUR_LINEAR.codepoint, title: "Feather", tagline: "Blends the fill into the photo across a band at the boundary." },
             Stage { icon: ICON_DEBLUR.codepoint, title: "Sharpen", tagline: "Sharpens the filled area, which comes out slightly soft." },
         ],
@@ -68,30 +68,26 @@ const PIPELINES: [Pipeline; 4] = [
         output: "The enlarged photo",
         stages: &[
             Stage { icon: ICON_BLUR_ON.codepoint, title: "Denoise", tagline: "Smooths grain first so it is not enlarged along with the detail. Requires reprocessing." },
-            Stage { icon: ICON_BRIGHTNESS_6.codepoint, title: "Brightness lift", tagline: "Brightens shadows for the model, then restores the original brightness. Requires reprocessing." },
             Stage { icon: ICON_ARROW_UPWARD.codepoint, title: "Upscale", tagline: "The model enlarges the photo tile by tile at the chosen scale." },
             Stage { icon: ICON_PSYCHOLOGY.codepoint, title: "AI blend", tagline: "Mixes the plain enlargement back in to soften a plastic look." },
             Stage { icon: ICON_DEBLUR.codepoint, title: "Sharpen", tagline: "Negative softens, positive sharpens." },
-            Stage { icon: ICON_PALETTE.codepoint, title: "Saturation and color match", tagline: "Adjusts color intensity, then matches the result's color balance to the photo." },
+            Stage { icon: ICON_PALETTE.codepoint, title: "Color match", tagline: "Matches the result's color balance to the photo." },
         ],
     },
 ];
 
 /// Returns true if the modal should close.
 pub fn render(ctx: &egui::Context) -> bool {
-    theme::standard_modal_window(
+    theme::bare_modal_window(
         ctx, "pipeline_flow", "Pipelines",
         [MODAL_WIDTH, MODAL_HEIGHT],
-        |ui| {
-            let tab_id = egui::Id::new("pipeline_flow_tab");
-            let mut tab: usize = ui.data(|d| d.get_temp(tab_id).unwrap_or(0));
+        |ui| chip::modal_page(ui, "Pipelines", "", |ui| {
             let labels: [&str; PIPELINES.len()] = std::array::from_fn(|i| PIPELINES[i].tab);
-            chip::tab_strip(ui, &labels, &mut tab);
-            ui.data_mut(|d| d.insert_temp(tab_id, tab));
+            let tab = chip::remembered_tab_strip(ui, egui::Id::new("pipeline_flow_tab"), &labels);
             ui.separator();
 
             let pipeline = &PIPELINES[tab];
-            ui.vertical(|ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(theme::SPACE_SM);
                 endpoint_label(ui, pipeline.input);
                 arrow(ui);
@@ -109,11 +105,11 @@ pub fn render(ctx: &egui::Context) -> bool {
                         "The order is fixed. Each step works on the result of the one above it, \
                          so a knob changes what every later step has to work with.",
                     )
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
                 );
             });
-        },
+        }),
     )
 }
 
@@ -129,7 +125,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
         ui.vertical(|ui| {
             ui.label(
                 RichText::new(format!("Step {number} of {total}"))
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_SECONDARY),
             );
             ui.label(
@@ -140,7 +136,7 @@ fn stage_row(ui: &mut egui::Ui, number: usize, total: usize, stage: &Stage) {
             );
             ui.label(
                 RichText::new(stage.tagline)
-                    .size(theme::FONT_SIZE_MONO)
+                    .size(theme::FONT_SIZE_SECONDARY)
                     .color(theme::TEXT_PRIMARY),
             );
         });
@@ -163,7 +159,7 @@ fn endpoint_label(ui: &mut egui::Ui, text: &str) {
         ui.add_space(theme::SPACE_SM);
         ui.label(
             RichText::new(text)
-                .size(theme::FONT_SIZE_MONO)
+                .size(theme::FONT_SIZE_SECONDARY)
                 .color(theme::TEXT_SECONDARY),
         );
     });

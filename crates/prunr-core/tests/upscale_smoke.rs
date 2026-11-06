@@ -11,8 +11,8 @@ mod test_common;
 
 use image::{Rgba, RgbaImage};
 use prunr_core::upscale::upscale_rgba;
-use prunr_models::{is_available, ModelId};
-use test_common::skip_if_no_ort;
+use prunr_models::ModelId;
+use test_common::{skip_if_model_missing, skip_if_no_ort};
 
 fn gradient_test_image(w: u32, h: u32) -> RgbaImage {
     RgbaImage::from_fn(w, h, |x, y| {
@@ -22,21 +22,13 @@ fn gradient_test_image(w: u32, h: u32) -> RgbaImage {
     })
 }
 
-fn skip_if_unavailable(id: ModelId) -> bool {
-    if !is_available(id) {
-        eprintln!("SKIP: {id:?} not installed — run the Model Store download");
-        return true;
-    }
-    false
-}
-
 #[test]
-fn real_esrgan_and_nomos8k_upscale_128x128_to_512x512() {
+fn every_4x_upscaler_turns_128x128_into_512x512() {
     if skip_if_no_ort("upscale_128x128") {
         return;
     }
-    for id in [ModelId::RealEsrganX4Plus, ModelId::Nomos8kSchatL] {
-        if skip_if_unavailable(id) {
+    for id in [ModelId::RealEsrganX4Plus, ModelId::Nomos8kSchatL, ModelId::FourXNomos2RealPlksr] {
+        if skip_if_model_missing("upscale_128x128", id) {
             continue;
         }
         let input = gradient_test_image(128, 128);
@@ -52,7 +44,7 @@ fn nomos_8k_schatl_upscales_non_multiple_of_16() {
     if skip_if_no_ort("upscale_non_multiple_of_16") {
         return;
     }
-    if skip_if_unavailable(ModelId::Nomos8kSchatL) {
+    if skip_if_model_missing("upscale_non_multiple_of_16", ModelId::Nomos8kSchatL) {
         return;
     }
     let input = gradient_test_image(120, 120); // NOT a multiple of 16
@@ -67,7 +59,7 @@ fn scale_2_downscales_to_half_of_native() {
     if skip_if_no_ort("upscale_scale_2") {
         return;
     }
-    if skip_if_unavailable(ModelId::RealEsrganX4Plus) {
+    if skip_if_model_missing("upscale_scale_2", ModelId::RealEsrganX4Plus) {
         return;
     }
     let input = gradient_test_image(256, 256);

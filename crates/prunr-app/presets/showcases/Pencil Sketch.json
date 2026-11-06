@@ -1,0 +1,31 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "fill_style": "desaturate",
+        "gamma": 1.1,
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "fill_style": "desaturate",
+        "gamma": 1.1,
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Teed": {
+      "item_settings": {
+        "line_strength": 0.8
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "fill_style": "desaturate",
+        "gamma": 1.1,
+        "line_mode": "SubjectOutline"
+      }
+    }
+  }
+}

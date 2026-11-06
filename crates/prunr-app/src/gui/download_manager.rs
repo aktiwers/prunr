@@ -1,20 +1,21 @@
 //! Coordinator for on-demand model downloads.
 //!
-//! Concurrency cap: 1 active download at a time. Additional `start_download`
-//! calls queue in submission order — keeps bandwidth + disk pressure
-//! predictable, and a fresh stroke from the user can't stack 5 simultaneous
-//! 800 MB downloads.
-//!
-//! HTTP + SHA + atomic-write logic lives in `download_to_file` so the
-//! state machine here stays testable without a network.
+//! One active download at a time; more queue in submission order, so a
+//! burst of strokes can't stack five 800 MB downloads. HTTP, SHA and the
+//! atomic write live in `download_to_file`, so the state machine here is
+//! testable without a network. A download onto an accelerator no one
+//! measured the model on ends with a check of its result there
+//! (`bench::here::check`), one at a time while the app is idle.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 
-use prunr_models::{descriptor, on_demand_dir, ModelId, ModelPart, ModelSource, OnDemandVariant};
-use sha2::{Digest, Sha256};
+use prunr_runtime_install::DlError;
+use prunr_models::{descriptor, on_demand_dir, Column, ModelId, ModelPart, ModelSource, OnDemandVariant};
+
+use crate::download::download_to_file;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DownloadState {
@@ -22,7 +23,7 @@ pub enum DownloadState {
     Queued,
     InProgress { bytes_so_far: u64, total_bytes: u64 },
     Verifying,
-    Failed { error: String, retryable: bool },
+    Failed { error: String },
     Done,
 }
 
@@ -30,17 +31,66 @@ pub enum DownloadState {
 pub enum DownloadEvent {
     Progress { id: ModelId, bytes_so_far: u64, total: u64 },
     Verifying { id: ModelId },
-    Complete { id: ModelId },
-    Failed { id: ModelId, error: String, retryable: bool },
+    /// It is installed; `note` says what the person should know (a
+    /// companion file that did not come).
+    Complete { id: ModelId, note: Option<String> },
+    Failed { id: ModelId, error: String },
+    Cancelled { id: ModelId },
 }
 
 pub(crate) struct DownloadManager {
     states: HashMap<ModelId, DownloadState>,
     queue: VecDeque<ModelId>,
     cancel_flags: HashMap<ModelId, Arc<AtomicBool>>,
-    progress_tx: mpsc::Sender<DownloadEvent>,
+    progress_tx: Waking,
     progress_rx: mpsc::Receiver<DownloadEvent>,
     active: Option<ModelId>,
+    /// Downloads waiting for their check, and the one being checked, each
+    /// with the column it runs in: the check's own finding can move the
+    /// model to another accelerator.
+    checks: VecDeque<(ModelId, Column)>,
+    checking: Option<(ModelId, Column, crate::gui::machine_test::MachineTest)>,
+}
+
+/// The download threads' end of the channel: each event wakes the window
+/// too. The checksum pass sends nothing for seconds, the window then goes
+/// idle, and the event that ends a download would sit unread. Progress
+/// comes with every network read, so it wakes nothing: the window draws
+/// it at its own pace while the Model Store shows it.
+#[derive(Clone)]
+struct Waking {
+    tx: mpsc::Sender<DownloadEvent>,
+    repaint: Arc<OnceLock<egui::Context>>,
+}
+
+/// What a download's file reports as its checksum is checked: only the
+/// last file of a download says Verifying. A download in parts (Nomos2's
+/// thirty) or with a half-precision companion otherwise flips its card
+/// between the bar and "Verifying" at every file.
+fn verifying(tx: &Waking, id: ModelId, last: bool) -> impl Fn() {
+    let tx = tx.clone();
+    move || {
+        if last {
+            let _ = tx.send(DownloadEvent::Verifying { id });
+        }
+    }
+}
+
+impl Waking {
+    fn send(&self, event: DownloadEvent) -> Result<(), mpsc::SendError<DownloadEvent>> {
+        let wakes = !matches!(event, DownloadEvent::Progress { .. });
+        let sent = self.tx.send(event);
+        if wakes {
+            self.wake();
+        }
+        sent
+    }
+
+    fn wake(&self) {
+        if let Some(ctx) = self.repaint.get() {
+            ctx.request_repaint();
+        }
+    }
 }
 
 impl DownloadManager {
@@ -50,10 +100,54 @@ impl DownloadManager {
             states: HashMap::new(),
             queue: VecDeque::new(),
             cancel_flags: HashMap::new(),
-            progress_tx: tx,
+            progress_tx: Waking { tx, repaint: Arc::default() },
             progress_rx: rx,
             active: None,
+            checks: VecDeque::new(),
+            checking: None,
         }
+    }
+
+    /// A check waits, or runs.
+    pub(crate) fn has_checks(&self) -> bool {
+        self.checking.is_some() || !self.checks.is_empty()
+    }
+
+    pub(crate) fn checking(&self) -> bool {
+        self.checking.is_some()
+    }
+
+    /// Check `id`'s result in `column` once the app is idle.
+    pub(crate) fn queue_check(&mut self, id: ModelId, column: Column) {
+        let checking = self.checking.as_ref().is_some_and(|(m, ..)| *m == id);
+        if !checking && !self.checks.iter().any(|(m, _)| *m == id) {
+            self.checks.push_back((id, column));
+        }
+    }
+
+    /// Each frame: follow the check under way, or start the next while the
+    /// app is `idle`. The model whose check just ended, and how.
+    pub(crate) fn pump_checks(&mut self, idle: bool) -> Option<(ModelId, Column, crate::gui::machine_test::Ended)> {
+        if let Some((id, column, check)) = &mut self.checking {
+            let (id, column, ended) = (*id, *column, check.pump()?);
+            self.checking = None;
+            return Some((id, column, ended));
+        }
+        if !idle {
+            return None;
+        }
+        let (id, column) = self.checks.pop_front()?;
+        let waking = self.progress_tx.clone();
+        match crate::gui::machine_test::MachineTest::check(id, move || waking.wake()) {
+            Ok(check) => self.checking = Some((id, column, check)),
+            Err(e) => tracing::warn!(?id, %e, "a download's check did not start"),
+        }
+        None
+    }
+
+    /// The window the download threads wake with each event.
+    pub(crate) fn wake(&self, ctx: &egui::Context) {
+        let _ = self.progress_tx.repaint.set(ctx.clone());
     }
 
     /// Returns `Idle` for ids that have never been touched.
@@ -61,14 +155,33 @@ impl DownloadManager {
         self.states.get(&id).cloned().unwrap_or(DownloadState::Idle)
     }
 
-    #[cfg(test)]
     pub(crate) fn active(&self) -> Option<ModelId> {
         self.active
     }
 
-    /// No-op when the model is already installed / in progress / queued.
+    /// Downloads waiting for the one under way.
+    pub(crate) fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// `id` taken as downloading, with no thread behind it.
+    #[cfg(test)]
+    pub(crate) fn begin_for_test(&mut self, id: ModelId) {
+        self.active = Some(id);
+        self.states.insert(id, DownloadState::InProgress { bytes_so_far: 0, total_bytes: 1 });
+    }
+
+    /// What a download thread sends events with.
+    #[cfg(test)]
+    pub(crate) fn sender_for_test(&self) -> impl Fn(DownloadEvent) + Send + 'static {
+        let tx = self.progress_tx.clone();
+        move |event| drop(tx.send(event))
+    }
+
+    /// No-op when the model is already installed with every file it
+    /// downloads, or in progress / queued.
     pub(crate) fn start_download(&mut self, id: ModelId) {
-        if prunr_models::is_available(id) {
+        if prunr_models::is_available(id) && !prunr_models::lacks_fp16_companion(id) {
             self.states.insert(id, DownloadState::Done);
             return;
         }
@@ -98,15 +211,16 @@ impl DownloadManager {
         }
     }
 
-    /// Returns drained events so the UI can fan them out to toasts /
-    /// repaints — the manager itself owns no UI state.
+    /// Drained events for the UI to act on; the manager owns no UI state.
+    /// Progress, one per network read, is taken in here and not returned.
     pub(crate) fn pump(&mut self) -> Vec<DownloadEvent> {
         let mut out = Vec::new();
         while let Ok(event) = self.progress_rx.try_recv() {
             self.apply_event(&event);
-            out.push(event);
+            if !matches!(event, DownloadEvent::Progress { .. }) {
+                out.push(event);
+            }
         }
-        // If nothing is active and there's a queued model, kick the next.
         if self.active.is_none() {
             if let Some(next) = self.queue.pop_front() {
                 self.kick_off(next);
@@ -123,31 +237,31 @@ impl DownloadManager {
             DownloadEvent::Verifying { id } => {
                 self.states.insert(id, DownloadState::Verifying);
             }
-            DownloadEvent::Complete { id } => {
+            DownloadEvent::Complete { id, .. } => {
                 self.states.insert(id, DownloadState::Done);
-                self.cancel_flags.remove(&id);
-                if self.active == Some(id) {
-                    self.active = None;
-                }
+                self.end_active(id);
             }
-            DownloadEvent::Failed { id, ref error, retryable } => {
-                self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
-                self.cancel_flags.remove(&id);
-                if self.active == Some(id) {
-                    self.active = None;
-                }
+            DownloadEvent::Failed { id, ref error } => {
+                tracing::warn!(?id, %error, "model download failed");
+                self.states.insert(id, DownloadState::Failed { error: error.clone() });
+                self.end_active(id);
+            }
+            DownloadEvent::Cancelled { id } => {
+                tracing::info!(?id, "model download cancelled");
+                self.states.insert(id, DownloadState::Idle);
+                self.end_active(id);
             }
         }
     }
 
     fn kick_off(&mut self, id: ModelId) {
         let Some(desc) = descriptor(id) else {
-            self.send_failure(id, format!("Unknown model id: {id:?}"), false);
+            self.send_failure(id, format!("Unknown model id: {id:?}"));
             return;
         };
         match desc.source {
-            ModelSource::Bundled | ModelSource::MultiPartBundled { .. } => {
-                self.send_failure(id, format!("{id:?} is bundled — no download path"), false);
+            ModelSource::Bundled { .. } | ModelSource::MultiPartBundled { .. } => {
+                self.send_failure(id, format!("{id:?} is bundled — no download path"));
             }
             ModelSource::OnDemand { url, sha256, filename, size_mb, fp16, .. } => {
                 self.kick_off_single(id, url, sha256, filename, size_mb, fp16);
@@ -167,97 +281,44 @@ impl DownloadManager {
         size_mb: u32,
         fp16: Option<OnDemandVariant>,
     ) {
-        let Some(dir) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into(), false);
-            return;
-        };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"), true);
-            return;
-        }
-        let dest = dir.join(filename);
-        let fp16_dest = fp16.as_ref().map(|v| dir.join(v.filename));
-        // Combined byte budget for progress: main file + optional fp16
-        // companion. The UI bar tracks both as one logical download so
-        // the user sees a single progress trajectory.
-        let main_bytes = (size_mb as u64) * 1024 * 1024;
-        let fp16_bytes = fp16.as_ref().map(|v| (v.size_mb as u64) * 1024 * 1024).unwrap_or(0);
-        let total = main_bytes + fp16_bytes;
+        let Some(dir) = self.prepare_dir(id, None) else { return };
+        let own = Fetch { url, sha256, dest: dir.join(filename), bytes: u64::from(size_mb) * 1024 * 1024 };
+        let companion = fp16.map(|v| Fetch { url: v.url, sha256: v.sha256, dest: dir.join(v.filename), bytes: v.size_bytes() });
+        let single = Single::new(own, companion);
+        // Main file + optional fp16 companion count as one download, one bar.
+        let total = single.total();
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
-            let on_progress_main = {
-                let tx = tx.clone();
-                move |bytes_so_far: u64, _part_total: u64| {
-                    let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
-                }
-            };
-            let on_verifying = {
-                let tx = tx.clone();
-                move || {
-                    let _ = tx.send(DownloadEvent::Verifying { id });
-                }
-            };
-            if let Err(e) = download_to_file(url, &dest, sha256, cancel.clone(), &on_progress_main, &on_verifying) {
-                let _ = tx.send(DownloadEvent::Failed {
-                    id, error: e.message, retryable: e.retryable,
-                });
+            if let Some(why) = no_room(&dir, total) {
+                let _ = tx.send(failure_event(id, why, &cancel));
                 return;
             }
-
-            if let (Some(variant), Some(dest_fp16)) = (fp16.as_ref(), fp16_dest.as_ref()) {
-                let on_progress_fp16 = {
-                    let tx = tx.clone();
-                    move |part_so_far: u64, _part_total: u64| {
-                        let _ = tx.send(DownloadEvent::Progress {
-                            id, bytes_so_far: main_bytes + part_so_far, total,
-                        });
-                    }
-                };
-                if let Err(e) = download_to_file(variant.url, dest_fp16, variant.sha256, cancel, &on_progress_fp16, &on_verifying) {
-                    // fp16 companion failed: keep the main fp32 install
-                    // and surface a non-fatal warning. The engine falls
-                    // back to fp32 automatically (see
-                    // `engine.rs::optimized_variant_bytes` -> None ->
-                    // FP32 path).
-                    tracing::warn!(
-                        ?id,
-                        error = %e.message,
-                        "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
-                    );
-                }
-            }
-
-            let _ = tx.send(DownloadEvent::Complete { id });
+            let _ = tx.send(single.run(id, &tx, &cancel, download_to_file));
         });
     }
 
-    /// Multi-part dispatch: download each part sequentially under
-    /// `<on_demand_dir>/<subdir>/`, aggregating progress so the UI's
-    /// `InProgress { bytes_so_far, total_bytes }` tracks the bundle as a
-    /// whole. Already-renamed parts are skipped on retry — gives the
-    /// user effective resume across cancels without HTTP Range support.
+    /// Download each part in turn under `<on_demand_dir>/<subdir>/`, progress
+    /// counted over the bundle. Parts already renamed are skipped on retry:
+    /// resume across cancels without HTTP Range.
     fn kick_off_multi(
         &mut self,
         id: ModelId,
         subdir: &'static str,
         parts: &'static [ModelPart],
     ) {
-        let Some(root) = on_demand_dir() else {
-            self.send_failure(id, "Could not resolve user data directory".into(), false);
-            return;
-        };
-        let bundle_dir = root.join(subdir);
-        if let Err(e) = std::fs::create_dir_all(&bundle_dir) {
-            self.send_failure(id, format!("Could not create models directory: {e}"), true);
-            return;
-        }
+        let Some(bundle_dir) = self.prepare_dir(id, Some(subdir)) else { return };
         let total: u64 = parts.iter().map(|p| p.size_bytes).sum();
         let cancel = self.begin_active(id, total);
         let tx = self.progress_tx.clone();
         std::thread::spawn(move || {
+            let to_fetch: u64 = parts.iter().filter(|p| !bundle_dir.join(p.filename).is_file()).map(|p| p.size_bytes).sum();
+            if let Some(why) = no_room(&bundle_dir, to_fetch) {
+                let _ = tx.send(failure_event(id, why, &cancel));
+                return;
+            }
             let mut bytes_done: u64 = 0;
-            for part in parts {
+            for (index, part) in parts.iter().enumerate() {
                 let dest = bundle_dir.join(part.filename);
                 if dest.is_file() {
                     bytes_done += part.size_bytes;
@@ -273,30 +334,20 @@ impl DownloadManager {
                         });
                     }
                 };
-                let on_verifying = {
-                    let tx = tx.clone();
-                    move || { let _ = tx.send(DownloadEvent::Verifying { id }); }
-                };
-                match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &on_verifying) {
+                match download_to_file(part.url, &dest, part.sha256, cancel.clone(), &on_progress, &verifying(&tx, id, index + 1 == parts.len())) {
                     Ok(()) => { bytes_done += part.size_bytes; }
                     Err(e) => {
-                        let _ = tx.send(DownloadEvent::Failed {
-                            id,
-                            error: format!("{}: {}", part.key, e.message),
-                            retryable: e.retryable,
-                        });
+                        let _ = tx.send(failure_event(id, format!("{}: {}", part.key, e.message), &cancel));
                         return;
                     }
                 }
             }
-            let _ = tx.send(DownloadEvent::Complete { id });
+            let _ = tx.send(DownloadEvent::Complete { id, note: None });
         });
     }
 
-    /// Common state-machine prelude for any active download (single or
-    /// multi-part): seed `InProgress`, register the cancel flag, mark
-    /// `id` as the currently active download. Returns the cancel flag
-    /// for the worker thread.
+    /// Seed `InProgress`, register the cancel flag and mark `id` active; the
+    /// flag goes to the worker thread.
     fn begin_active(&mut self, id: ModelId, total_bytes: u64) -> Arc<AtomicBool> {
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel_flags.insert(id, cancel.clone());
@@ -305,135 +356,228 @@ impl DownloadManager {
         cancel
     }
 
-    fn send_failure(&mut self, id: ModelId, error: String, retryable: bool) {
-        self.states.insert(id, DownloadState::Failed { error: error.clone(), retryable });
-        let _ = self.progress_tx.send(DownloadEvent::Failed { id, error, retryable });
+    fn end_active(&mut self, id: ModelId) {
+        self.cancel_flags.remove(&id);
+        if self.active == Some(id) {
+            self.active = None;
+        }
+    }
+
+    /// The on-demand models directory (or its `sub` folder), created.
+    /// `None` after reporting the failure for `id`.
+    fn prepare_dir(&mut self, id: ModelId, sub: Option<&str>) -> Option<PathBuf> {
+        let Some(root) = on_demand_dir() else {
+            self.send_failure(id, "Could not resolve user data directory".into());
+            return None;
+        };
+        let dir = sub.map_or_else(|| root.clone(), |s| root.join(s));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.send_failure(id, format!("Could not create models directory: {e}"));
+            return None;
+        }
+        Some(dir)
+    }
+
+    fn send_failure(&mut self, id: ModelId, error: String) {
+        self.states.insert(id, DownloadState::Failed { error: error.clone() });
+        let _ = self.progress_tx.send(DownloadEvent::Failed { id, error });
     }
 }
 
-#[derive(Debug)]
-struct DownloadError {
-    message: String,
-    retryable: bool,
+/// One file of a download: from `url` to `dest`, checked against `sha256`.
+struct Fetch {
+    url: &'static str,
+    sha256: &'static str,
+    dest: PathBuf,
+    bytes: u64,
 }
 
-impl DownloadError {
-    fn fatal(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: false }
+/// A single-file download: the model's own file, then its half-precision
+/// companion where it has one.
+struct Single {
+    /// `None` when it is in place: only the companion did not come.
+    own: Option<Fetch>,
+    companion: Option<Fetch>,
+}
+
+impl Single {
+    fn new(own: Fetch, companion: Option<Fetch>) -> Self {
+        Self { own: Some(own).filter(|own| !own.dest.is_file()), companion }
     }
-    fn transient(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), retryable: true }
+
+    fn total(&self) -> u64 {
+        self.own.iter().chain(&self.companion).map(|f| f.bytes).sum()
+    }
+
+    /// Fetch each file in turn with `fetch` (`download_to_file`, or a
+    /// test's); how the download ends.
+    fn run(
+        &self,
+        id: ModelId,
+        tx: &Waking,
+        cancel: &Arc<AtomicBool>,
+        fetch: impl Fn(&str, &Path, &str, Arc<AtomicBool>, &dyn Fn(u64, u64), &dyn Fn()) -> Result<(), DlError>,
+    ) -> DownloadEvent {
+        let total = self.total();
+        let mut done = 0;
+        if let Some(own) = &self.own {
+            let on_progress = |bytes_so_far: u64, _part_total: u64| {
+                let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far, total });
+            };
+            if let Err(e) = fetch(own.url, &own.dest, own.sha256, Arc::clone(cancel), &on_progress, &verifying(tx, id, self.companion.is_none())) {
+                return failure_event(id, e.message, cancel);
+            }
+            done = own.bytes;
+        }
+        let Some(companion) = &self.companion else { return DownloadEvent::Complete { id, note: None } };
+        let on_progress = |part_so_far: u64, _part_total: u64| {
+            let _ = tx.send(DownloadEvent::Progress { id, bytes_so_far: done + part_so_far, total });
+        };
+        match fetch(companion.url, &companion.dest, companion.sha256, Arc::clone(cancel), &on_progress, &verifying(tx, id, true)) {
+            Ok(()) => DownloadEvent::Complete { id, note: None },
+            // Fetched alone, or cancelled: it ends as that, the model's own
+            // file staying installed.
+            Err(e) if self.own.is_none() || cancel.load(Ordering::Acquire) => failure_event(id, e.message, cancel),
+            Err(e) => {
+                // fp16 companion failed: keep the main fp32 install
+                // and surface a non-fatal warning. Without the fp16
+                // file on disk the engine loads the fp32 weights.
+                tracing::warn!(
+                    ?id,
+                    error = %e.message,
+                    "fp16 companion download failed — fp32 install succeeded; engine will use fp32"
+                );
+                DownloadEvent::Complete { id, note: Some(COMPANION_FAILED.to_string()) }
+            }
+        }
     }
 }
 
-impl prunr_runtime_install::Retryable for DownloadError {
-    fn is_retryable(&self) -> bool { self.retryable }
-    fn cancelled() -> Self { DownloadError::fatal("Cancelled by user") }
+const COMPANION_FAILED: &str = "Its faster half-precision file did not download, so it runs at full precision. Download it again to get it.";
+
+/// How a download that stopped early ends: cancelled by the user, or failed.
+fn failure_event(id: ModelId, error: String, cancel: &AtomicBool) -> DownloadEvent {
+    if cancel.load(Ordering::Acquire) {
+        DownloadEvent::Cancelled { id }
+    } else {
+        DownloadEvent::Failed { id, error }
+    }
 }
 
-/// Download `url` to `dest`, verifying SHA256 against `expected_sha`.
-/// Writes to a `<dest>.partial` sidecar; renames to `dest` only after
-/// verification passes. Wraps `download_attempt` in the shared retry
-/// loop (`prunr_runtime_install::retry_with_backoff`) so transient
-/// network errors (timeout, 5xx) get up to 3 tries with exponential
-/// backoff. Fatal errors (404, SHA mismatch, disk full, user cancel)
-/// fail fast without retry.
-fn download_to_file(
-    url: &str,
-    dest: &Path,
-    expected_sha: &str,
-    cancel: Arc<AtomicBool>,
-    on_progress: &dyn Fn(u64, u64),
-    on_verifying: &dyn Fn(),
-) -> Result<(), DownloadError> {
-    prunr_runtime_install::retry_with_backoff(&cancel, 3, 500, |_attempt| {
-        download_attempt(url, dest, expected_sha, &cancel, on_progress, on_verifying)
+/// Why `needed` bytes should not be downloaded into `dir`.
+fn no_room(dir: &Path, needed: u64) -> Option<String> {
+    prunr_core::sysmem::free_disk_bytes(dir).and_then(|free| space_refusal(needed, free))
+}
+
+/// Why a download of `needed` bytes should not start with `free` bytes
+/// free: it would fill the disk. Room is left over for the rest of the
+/// system.
+fn space_refusal(needed: u64, free: u64) -> Option<String> {
+    const SPARE: u64 = 500 * 1024 * 1024;
+    (free < needed.saturating_add(SPARE)).then(|| {
+        format!(
+            "Not enough disk space: it needs {}, and {} is free.",
+            prunr_core::memory::byte_size(needed),
+            prunr_core::memory::byte_size(free),
+        )
     })
 }
 
-fn download_attempt(
-    url: &str,
-    dest: &Path,
-    expected_sha: &str,
-    cancel: &Arc<AtomicBool>,
-    on_progress: &dyn Fn(u64, u64),
-    on_verifying: &dyn Fn(),
-) -> Result<(), DownloadError> {
-    let partial = partial_path(dest);
-
-    // Tear down any leftover partial from a previous aborted attempt so
-    // the writer starts fresh. (Resuming via Range requests would be
-    // nicer but it's a v2 polish.)
-    let _ = std::fs::remove_file(&partial);
-
-    let client = prunr_runtime_install::http_client(crate::runtime_install::USER_AGENT)
-        .map_err(|e| DownloadError::fatal(format!("HTTP client init failed: {e}")))?;
-
-    let response = client.get(url).send()
-        .map_err(|e| DownloadError::transient(format!("Network error: {e}")))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(if status.as_u16() >= 500 {
-            DownloadError::transient(format!("Server returned {status}"))
-        } else {
-            DownloadError::fatal(format!("Download failed: {status}"))
-        });
+/// Remove every partial an earlier run left in the model store: one from a
+/// quit mid-download stayed for good when that model was never fetched
+/// again.
+pub(crate) fn cleanup_stale() {
+    if let Some(store) = prunr_models::on_demand_dir() {
+        sweep_store_partials(&store);
     }
-
-    let total = response.content_length().unwrap_or(0);
-    let mut response = response;
-    let mut file = std::fs::File::create(&partial)
-        .map_err(|e| DownloadError::fatal(format!("Could not create {}: {e}", partial.display())))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    let mut written: u64 = 0;
-    loop {
-        if cancel.load(Ordering::Acquire) {
-            let _ = std::fs::remove_file(&partial);
-            return Err(DownloadError::fatal("Cancelled by user"));
-        }
-        let n = std::io::Read::read(&mut response, &mut buf)
-            .map_err(|e| DownloadError::transient(format!("Read error: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        std::io::Write::write_all(&mut file, &buf[..n])
-            .map_err(|e| DownloadError::fatal(format!("Write error: {e}")))?;
-        hasher.update(&buf[..n]);
-        written += n as u64;
-        on_progress(written, total);
-    }
-    std::io::Write::flush(&mut file)
-        .map_err(|e| DownloadError::fatal(format!("Flush error: {e}")))?;
-    drop(file);
-
-    on_verifying();
-    let actual_sha = hex::encode(hasher.finalize());
-    if !actual_sha.eq_ignore_ascii_case(expected_sha) {
-        let _ = std::fs::remove_file(&partial);
-        return Err(DownloadError::fatal(format!(
-            "Checksum mismatch — expected {expected_sha}, got {actual_sha}",
-        )));
-    }
-
-    std::fs::rename(&partial, dest)
-        .map_err(|e| DownloadError::fatal(format!("Could not finalize file: {e}")))?;
-    Ok(())
 }
 
-fn partial_path(dest: &Path) -> PathBuf {
-    let mut s = dest.as_os_str().to_owned();
-    s.push(".partial");
-    PathBuf::from(s)
+/// `cleanup_stale` in `store` and each bundle's folder in it.
+fn sweep_store_partials(store: &Path) {
+    for dir in crate::fs_util::dir_and_subfolders(store) {
+        crate::fs_util::sweep_left_by_ended_runs(&dir, crate::download::PARTIAL, |_| true);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A download that would fill the disk does not start, and says how
+    /// much it needs; one with room does.
+    #[test]
+    fn a_download_needs_room_to_start() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let why = space_refusal(5 * GB, GB).expect("refused");
+        assert!(why.starts_with("Not enough disk space"), "{why}");
+        assert_eq!(space_refusal(GB, 5 * GB), None);
+        assert!(space_refusal(GB, GB).is_some(), "room is left for the system");
+        assert!(prunr_core::sysmem::free_disk_bytes(&std::env::temp_dir()).is_some_and(|free| free > 0));
+    }
+
     fn fixture() -> DownloadManager {
         DownloadManager::new()
+    }
+
+    /// A download runs on its own thread while the window may sit idle
+    /// (the checksum pass sends nothing for seconds): each event it sends
+    /// but progress wakes the window, or a finished download sat unread
+    /// and the queued ones never started until the pointer moved.
+    #[test]
+    fn a_download_s_end_wakes_the_window() {
+        let ctx = egui::Context::default();
+        for _ in 0..5 {
+            let _ = ctx.run_ui(Default::default(), |_| {});
+        }
+        assert!(!ctx.has_requested_repaint(), "an idle window");
+        let mut dm = DownloadManager::new();
+        dm.wake(&ctx);
+        dm.active = Some(ModelId::LaMaFp32);
+        dm.states.insert(ModelId::BigLaMa, DownloadState::Queued);
+        dm.queue.push_back(ModelId::BigLaMa);
+        let tx = dm.progress_tx.clone();
+        std::thread::spawn(move || { let _ = tx.send(DownloadEvent::Cancelled { id: ModelId::LaMaFp32 }); }).join().unwrap();
+        assert!(ctx.has_requested_repaint(), "the window is woken");
+        dm.pump();
+        assert_ne!(dm.state(ModelId::BigLaMa), DownloadState::Queued, "and the next one starts");
+    }
+
+    /// Progress comes with every network read, hundreds a second: it
+    /// wakes nothing and is taken in without being handed on, so a
+    /// download does not draw the window per read.
+    #[test]
+    fn progress_does_not_wake_the_window() {
+        let ctx = egui::Context::default();
+        for _ in 0..5 {
+            let _ = ctx.run_ui(Default::default(), |_| {});
+        }
+        let mut dm = DownloadManager::new();
+        dm.wake(&ctx);
+        let tx = dm.progress_tx.clone();
+        std::thread::spawn(move || {
+            for bytes_so_far in 1..=100 {
+                let _ = tx.send(DownloadEvent::Progress { id: ModelId::LaMaFp32, bytes_so_far, total: 100 });
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(!ctx.has_requested_repaint(), "no read woke the window");
+        assert!(dm.pump().is_empty(), "nothing for the window to act on");
+        assert_eq!(dm.state(ModelId::LaMaFp32), DownloadState::InProgress { bytes_so_far: 100, total_bytes: 100 });
+    }
+
+    /// Only a download's last file says Verifying: the card of one in
+    /// parts kept flipping between its bar and "Verifying" at each part.
+    #[test]
+    fn only_the_last_file_says_verifying() {
+        let mut dm = DownloadManager::new();
+        dm.begin_for_test(ModelId::FourXNomos2RealPlksr);
+        for last in [false, false, true] {
+            super::verifying(&dm.progress_tx, ModelId::FourXNomos2RealPlksr, last)();
+            dm.pump();
+            let verifying = dm.state(ModelId::FourXNomos2RealPlksr) == DownloadState::Verifying;
+            assert_eq!(verifying, last, "a part that is not the last says nothing");
+        }
     }
 
     #[test]
@@ -478,123 +622,154 @@ mod tests {
     fn apply_event_complete_clears_active() {
         let mut dm = fixture();
         dm.active = Some(ModelId::U2net);
-        dm.apply_event(&DownloadEvent::Complete { id: ModelId::U2net });
+        dm.apply_event(&DownloadEvent::Complete { id: ModelId::U2net, note: None });
         assert_eq!(dm.state(ModelId::U2net), DownloadState::Done);
         assert!(dm.active.is_none());
     }
 
     #[test]
-    fn apply_event_failed_records_retryable_flag() {
+    fn apply_event_failed_records_the_error() {
         let mut dm = fixture();
-        dm.apply_event(&DownloadEvent::Failed {
-            id: ModelId::U2net, error: "timeout".into(), retryable: true,
+        dm.active = Some(ModelId::U2net);
+        dm.apply_event(&DownloadEvent::Failed { id: ModelId::U2net, error: "timeout".into() });
+        assert_eq!(dm.state(ModelId::U2net), DownloadState::Failed { error: "timeout".into() });
+        assert!(dm.active().is_none());
+    }
+
+    /// At start every model's partial an earlier run left goes, a bundle's
+    /// too, even for a model never fetched again; a running instance's
+    /// download and the installed models stay.
+    #[test]
+    fn the_start_sweeps_every_abandoned_partial_in_the_store() {
+        let store = tempfile::tempdir().unwrap();
+        let bundle = store.path().join("sd15-inpaint-fp16-1.0.0");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let file = |path: PathBuf| {
+            std::fs::write(&path, b"x").unwrap();
+            path
+        };
+        let dead = crate::fs_util::a_free_pid();
+        let live = std::process::id();
+        let left = [
+            file(store.path().join(format!("big_lama.onnx.partial.{dead}"))),
+            file(store.path().join("migan.onnx.partial")),
+            file(bundle.join(format!("unet.onnx.partial.{dead}"))),
+        ];
+        let kept = [
+            file(store.path().join(format!("u2net.onnx.partial.{live}"))),
+            file(store.path().join("u2net-1.0.0.onnx")),
+            file(bundle.join("unet.onnx")),
+            file(bundle.join(format!("vae.onnx.partial.{live}"))),
+        ];
+        sweep_store_partials(store.path());
+        assert!(left.iter().all(|p| !p.exists()), "an earlier run's partials go");
+        assert!(kept.iter().all(|p| p.exists()), "a running download and the installed models stay");
+    }
+
+    /// A model folder linked from elsewhere (a developer's export) is not
+    /// swept: what lies there is not the store's.
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_does_not_follow_a_linked_folder() {
+        let store = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let theirs = elsewhere.path().join(format!("unet.onnx.partial.{}", crate::fs_util::a_free_pid()));
+        std::fs::write(&theirs, b"x").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), store.path().join("rorem-4s-fp16-1.0.0")).unwrap();
+        sweep_store_partials(store.path());
+        assert!(theirs.exists());
+        assert!(store.path().join("rorem-4s-fp16-1.0.0").exists(), "the link itself stays");
+    }
+
+    // ── Single-file downloads ─────────────────────────────────────────────
+
+    fn file_in(dir: &Path, name: &'static str, mb: u64) -> Fetch {
+        Fetch { url: name, sha256: "", dest: dir.join(name), bytes: mb * 1024 * 1024 }
+    }
+
+    /// Run `single` against a network that answers each url with
+    /// `answer`: the urls it asked for, and how it ended.
+    fn run_offline(single: &Single, cancel: &Arc<AtomicBool>, answer: impl Fn(&str, &AtomicBool) -> Result<(), DlError>) -> (Vec<String>, DownloadEvent) {
+        let dm = fixture();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ended = single.run(ModelId::RealEsrganX4Plus, &dm.progress_tx, cancel, |url, _, _, cancel, _, _| {
+            asked.borrow_mut().push(url.to_string());
+            answer(url, &cancel)
         });
-        match dm.state(ModelId::U2net) {
-            DownloadState::Failed { retryable, .. } => assert!(retryable),
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        (asked.into_inner(), ended)
     }
 
+    /// A model whose own file is in place (its half-precision file failed
+    /// or was cancelled) fetches only the half-precision file, its bar
+    /// counting that file alone.
     #[test]
-    fn partial_path_appends_partial_suffix() {
-        let p = partial_path(Path::new("/tmp/big_lama.onnx"));
-        assert_eq!(p, PathBuf::from("/tmp/big_lama.onnx.partial"));
+    fn with_its_own_file_in_place_only_the_half_precision_file_is_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = file_in(dir.path(), "x4.onnx", 64);
+        std::fs::write(&own.dest, b"fp32").unwrap();
+        let single = Single::new(own, Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
+        assert_eq!(single.total(), 33 * 1024 * 1024);
+        let (asked, ended) = run_offline(&single, &Arc::default(), |_, _| Ok(()));
+        assert_eq!(asked, ["x4_fp16.onnx"]);
+        assert!(matches!(ended, DownloadEvent::Complete { note: None, .. }), "{ended:?}");
     }
 
-    // ── Retry policy ──────────────────────────────────────────────────────
-
-    fn never_cancel() -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
-    }
-
+    /// A cancel while the half-precision file comes ends as a cancel, not
+    /// as "ready" with a note that the file failed; the model's own file,
+    /// fetched first, stays.
     #[test]
-    fn retry_succeeds_after_two_transient_failures() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            let n = attempts.fetch_add(1, Ordering::SeqCst);
-            if n < 2 {
-                Err(DownloadError::transient("simulated timeout"))
-            } else {
-                Ok(())
-            }
-        });
-        assert!(result.is_ok());
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    #[test]
-    fn retry_fails_fast_on_fatal_error() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::fatal("404"))
-        });
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 1, "fatal error must not retry");
-    }
-
-    #[test]
-    fn retry_exhausts_max_attempts() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let cancel = never_cancel();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 1, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
-        });
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    #[test]
-    fn retry_aborts_during_backoff_on_cancel() {
+    fn a_cancel_during_the_half_precision_file_ends_as_a_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = Single::new(file_in(dir.path(), "x4.onnx", 64), Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
         let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_for_thread = cancel.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            cancel_for_thread.store(true, Ordering::Release);
+        let (asked, ended) = run_offline(&single, &cancel, |url, cancel| {
+            if url == "x4_fp16.onnx" {
+                cancel.store(true, Ordering::Release);
+                return Err(<DlError as prunr_runtime_install::Retryable>::cancelled());
+            }
+            Ok(())
         });
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let started = std::time::Instant::now();
-        let result: Result<(), DownloadError> = prunr_runtime_install::retry_with_backoff(&cancel, 3, 200, |_attempt| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(DownloadError::transient("network"))
-        });
-        let elapsed = started.elapsed();
-        assert!(result.is_err());
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        // An un-aborted run sleeps 200 ms + 400 ms before its third attempt;
-        // anything under that proves the abort, with room for CI scheduling
-        // jitter (a 231 ms run was observed on a loaded macOS runner).
-        assert!(elapsed < std::time::Duration::from_millis(500),
-            "cancel during backoff must abort before the schedule completes, took {elapsed:?}");
+        assert_eq!(asked, ["x4.onnx", "x4_fp16.onnx"]);
+        assert!(matches!(ended, DownloadEvent::Cancelled { .. }), "{ended:?}");
     }
 
-    // ── Multi-part dispatch ──────────────────────────────────────────────
-
-    /// Aggregated bytes_so_far accumulates across parts: emitting the
-    /// same Progress event sequence the UI expects works whether the
-    /// download is single-file or multi-part.
+    /// A half-precision file that fails within a whole download leaves the
+    /// model ready and says to download it again; fetched alone, its
+    /// failure is a failed download, which the card offers to try again,
+    /// and the next try brings it.
     #[test]
-    fn multi_part_progress_aggregation_via_apply_event() {
+    fn a_failed_half_precision_file_can_be_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, companion) = (|| file_in(dir.path(), "x4.onnx", 64), || Some(file_in(dir.path(), "x4_fp16.onnx", 33)));
+        let refused = |url: &str, _: &AtomicBool| if url == "x4_fp16.onnx" { Err(DlError::fatal("The download was refused (404 Not Found)")) } else { Ok(()) };
+        let (_, ended) = run_offline(&Single::new(own(), companion()), &Arc::default(), refused);
+        assert!(matches!(&ended, DownloadEvent::Complete { note: Some(note), .. } if note == COMPANION_FAILED), "{ended:?}");
+
+        std::fs::write(own().dest, b"fp32").unwrap();
+        let alone = Single::new(own(), companion());
+        let (_, ended) = run_offline(&alone, &Arc::default(), refused);
         let mut dm = fixture();
-        let id = ModelId::SdV15InpaintFp16;
-        // Simulate part-1 finishing (e.g. 1 GB) toward a 2 GB total.
-        dm.apply_event(&DownloadEvent::Progress { id, bytes_so_far: 1_073_741_824, total: 2_147_483_648 });
-        match dm.state(id) {
-            DownloadState::InProgress { bytes_so_far, total_bytes } => {
-                assert_eq!(bytes_so_far, 1_073_741_824);
-                assert_eq!(total_bytes, 2_147_483_648);
-            }
-            other => panic!("expected InProgress, got {other:?}"),
-        }
-        // Bundle complete.
-        dm.apply_event(&DownloadEvent::Complete { id });
-        assert_eq!(dm.state(id), DownloadState::Done);
+        dm.begin_for_test(ModelId::RealEsrganX4Plus);
+        dm.apply_event(&ended);
+        assert!(matches!(dm.state(ModelId::RealEsrganX4Plus), DownloadState::Failed { .. }), "{ended:?}");
+        let (asked, ended) = run_offline(&alone, &Arc::default(), |_, _| Ok(()));
+        assert_eq!(asked, ["x4_fp16.onnx"], "the try again fetches it alone");
+        assert!(matches!(ended, DownloadEvent::Complete { note: None, .. }), "{ended:?}");
     }
 
     // ── Queue behaviour ───────────────────────────────────────────────────
+
+    /// A cancelled download goes back to "Download", not to a failure
+    /// whose Retry was disabled until restart.
+    #[test]
+    fn a_cancelled_download_returns_to_idle_and_frees_the_slot() {
+        let mut dm = fixture();
+        dm.active = Some(ModelId::LaMaFp32);
+        dm.states.insert(ModelId::LaMaFp32, DownloadState::InProgress { bytes_so_far: 1, total_bytes: 9 });
+        dm.apply_event(&DownloadEvent::Cancelled { id: ModelId::LaMaFp32 });
+        assert_eq!(dm.state(ModelId::LaMaFp32), DownloadState::Idle);
+        assert!(dm.active().is_none());
+    }
 
     #[test]
     fn cancel_dequeues_a_pending_id() {

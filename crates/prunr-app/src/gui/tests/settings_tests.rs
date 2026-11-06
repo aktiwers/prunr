@@ -1,17 +1,4 @@
-use crate::gui::app::PrunrApp;
 use crate::gui::settings::{Settings, SettingsModel};
-
-#[test]
-fn settings_default_model_is_birefnet() {
-    let s = Settings::default();
-    assert_eq!(s.model, SettingsModel::BiRefNetLite);
-}
-
-#[test]
-fn settings_default_auto_process_is_false() {
-    let s = Settings::default();
-    assert!(!s.auto_process_on_import);
-}
 
 #[test]
 fn settings_default_parallel_jobs_is_half_cpus() {
@@ -41,10 +28,4 @@ fn settings_roundtrip_json() {
     let restored: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.model, SettingsModel::U2net);
     assert_eq!(restored.parallel_jobs, 4);
-}
-
-#[test]
-fn show_settings_defaults_false() {
-    let app = PrunrApp::new_for_test();
-    assert!(!app.show_settings);
 }

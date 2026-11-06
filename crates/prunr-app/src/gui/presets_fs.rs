@@ -1,83 +1,97 @@
-//! One-file-per-preset store for sharing presets between users.
+//! One JSON file per preset in the config dir's `presets/`, named by the
+//! sanitized preset name, so a user shares one by sending the file. JSON
+//! because shared files must stay human-readable and hand-editable.
 //!
-//! Presets live as individual JSON files in `~/.config/prunr/presets/`
-//! (or the platform-equivalent config dir). Filename = preset name + ".json"
-//! (with path-unsafe characters sanitized). To share a preset, a user sends
-//! the `.json` file; the receiver drops it into the folder and the preset
-//! appears in their dropdown on the next launch. JSON is the format because
-//! the sharing workflow needs human-readable, hand-editable files — binary
-//! formats would be faster to parse but break that.
+//! Old preset files MUST keep loading as `ItemSettings` grows:
+//! - every field reads from default (`#[serde(default)]` on the struct);
+//! - a renamed field keeps `#[serde(alias = "old_name")]`;
+//! - a type change that breaks existing JSON (e.g. `u8` → enum) bumps the
+//!   format version with a migration in `parse_preset_value`.
 //!
-//! ## Forward-compatibility contract (read before editing `ItemSettings`)
-//!
-//! Old preset files MUST keep loading when we add new fields. The rule:
-//!
-//! - Every field in `ItemSettings` must have `#[serde(default)]` OR a
-//!   `Default` impl that covers the whole struct (we use the latter via
-//!   `#[serde(default)]` on the struct itself — see `item_settings.rs`).
-//! - Never rename a field without also adding a `#[serde(alias = "old_name")]`.
-//! - Never change a field's type in a way that breaks existing JSON
-//!   (e.g. `u8` → enum). If you must, bump a format version and add a
-//!   migration path in `load_all`.
-//!
-//! The `loads_old_preset_with_unknown_fields` and
-//! `loads_empty_preset_as_defaults` tests at the bottom of this file are
-//! the tripwires — if you add a field without `#[serde(default)]`, they
-//! will fail and tell you what's missing.
+//! The tests below are the tripwires.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use super::item_settings::ItemSettings;
-use super::presets::{
-    model_id_key, ModelPreset, PresetFile, PRESET_FORMAT_VERSION,
-};
-use super::settings::{PRUNR_PRESET, Settings};
-use prunr_core::{ComposeMode, FillStyle, LineMode, LineStyle};
+use super::presets::{Preset, PresetFile, PRESET_FORMAT_VERSION};
+use super::settings::PRUNR_PRESET;
 
-/// Name of the presets subdirectory under the app config dir.
 const PRESETS_SUBDIR: &str = "prunr/presets";
 
-/// File extension for preset files.
-const PRESET_EXT: &str = "json";
+pub(crate) const PRESET_EXT: &str = "json";
 
-/// Marker file written after the first successful seed of the curated
-/// built-in presets. Presence = "don't seed again on this install." Lets
-/// users delete any built-in they don't want without having it re-appear
-/// on next launch. Bump the suffix (`_v2`, `_v3`, ...) when shipping a
-/// fresh batch of curated presets — the old marker won't gate the new
-/// batch.
-const SEED_MARKER: &str = ".builtins_seeded_v2";
-
-/// Resolve the presets directory, creating it if needed. Returns `None` if
-/// the platform config dir can't be resolved (very rare).
+/// Created if needed; `None` without a platform config dir.
 pub(crate) fn presets_dir() -> Option<PathBuf> {
-    let base = dirs::config_dir()?;
+    let base = super::settings::config_root()?;
     let dir = base.join(PRESETS_SUBDIR);
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
 
-/// Resolve the on-disk path for a preset name, rejecting "Prunr" (reserved)
-/// and returning `None` when the config dir is unavailable.
-pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
-    if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
-    let dir = presets_dir()?;
-    Some(dir.join(format!("{}.{PRESET_EXT}", sanitize_filename(name))))
+/// Whether `name` is Prunr's own preset, in any case.
+pub(crate) fn is_prunr(name: &str) -> bool {
+    same_name(name, PRUNR_PRESET)
 }
 
-/// Sanitize a preset name into a filesystem-safe stem.
-///
-/// Strips path separators, parent-traversal (`..`), control chars, and the
-/// leading-dot convention (no hidden files). Trims whitespace. Empty
-/// results map to `preset` so a malformed name still yields a valid path.
+/// Whether two preset names are one: case and outer spaces ignored, as
+/// the file systems presets are shared through treat them.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Whether a newer Prunr saved preset `name` (`newer` holds lowercased
+/// names).
+fn newer_has(newer: &HashSet<String>, name: &str) -> bool {
+    newer.contains(&name.trim().to_lowercase())
+}
+
+/// The file preset `name` is kept in.
+pub(crate) fn file_name(name: &str) -> String {
+    format!("{name}.{PRESET_EXT}")
+}
+
+/// `None` for the reserved "Prunr" or without a config dir.
+pub(crate) fn preset_path(name: &str) -> Option<PathBuf> {
+    if is_prunr(name) { return None; }
+    let dir = presets_dir()?;
+    Some(dir.join(file_name(&sanitize_filename(name))))
+}
+
+/// Preset names in the order the list shows them, case ignored.
+pub(crate) fn sorted_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.into_iter().collect();
+    names.sort_by_cached_key(|name| name.to_lowercase());
+    names
+}
+
+/// A name Windows keeps for a device, whatever follows a dot: CON, PRN,
+/// AUX, NUL, COM0-9, LPT0-9.
+fn is_device_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(name.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (name.len() == 4 && (name.starts_with("COM") || name.starts_with("LPT")) && name.as_bytes()[3].is_ascii_digit())
+}
+
+/// The name a typed one saves under, as its file keeps it; `None` for a
+/// blank one.
+pub(crate) fn preset_name(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    (!typed.is_empty()).then(|| sanitize_filename(typed))
+}
+
+/// Strips path separators, `..`, control chars, the characters Windows
+/// refuses in a file name and leading dots (no hidden files), and marks a
+/// device name; an empty result becomes `preset`. Every platform does
+/// all of it: presets are shared between computers.
 pub fn sanitize_filename(name: &str) -> String {
     let mut out: String = name
         .trim()
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*'))
         .collect();
     if out.starts_with('.') {
         out = out.trim_start_matches('.').to_string();
@@ -88,57 +102,96 @@ pub fn sanitize_filename(name: &str) -> String {
     if out.is_empty() {
         return "preset".to_string();
     }
+    let device = out.split('.').next().unwrap_or_default();
+    if is_device_name(device) {
+        out.insert(device.len(), '_');
+    }
     out
 }
 
-/// Wrap a v1 preset file (raw `ItemSettings` shape, no `format_version`
-/// key) into a v2 `PresetFile`. v1 files predate per-model bundling, so
-/// they carry no model identity — every v1 file wraps under the
-/// workspace default (`Settings::default().model`, currently
-/// `BiRefNetLite`). The resolver pulls Prunr-floor brush/sd values at
-/// apply-time, so missing brush/sd is not data loss.
-///
-/// Returns `None` when the JSON does not parse as `ItemSettings` — caller
-/// logs and skips. Successful migrations are read-only on disk; the v2
-/// shape only persists once the user explicitly re-saves the preset.
+/// A v1 file (raw `ItemSettings`, no model) wraps under the default
+/// model; its brush and SD values are Prunr's. The file on disk stays v1
+/// until the user re-saves it.
 fn migrate_v1_to_v2(value: &serde_json::Value) -> Option<PresetFile> {
-    // Reject non-objects up front — `#[serde(default)]` on ItemSettings
-    // makes empty arrays / unrelated maps deserialize to a fully-default
-    // ItemSettings, which would silently mask a corrupt file.
-    if !value.is_object() {
+    // `#[serde(default)]` would read any JSON as a fully-default
+    // ItemSettings, masking a corrupt or unrelated file.
+    if !names_a_setting(value) {
         return None;
     }
     let item_settings: ItemSettings = serde_json::from_value(value.clone()).ok()?;
-    // Settings::default().model is BiRefNetLite, whose to_model_id() is
-    // Some(ModelId::BiRefNetLite) — invariant is local (settings.rs Default
-    // impl + SettingsModel::to_model_id match arms).
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let mut models = HashMap::new();
-    models.insert(model_id_key(wrap_key), ModelPreset {
-        item_settings,
-        brush: Default::default(),
-        sd: None,
-    });
-    Some(PresetFile { format_version: PRESET_FORMAT_VERSION, models })
+    Some(PresetFile::of_item_settings(item_settings))
 }
 
-/// Load every preset file in the directory into a map. Malformed files
-/// are skipped (with a `warn!` for the user's log) so 9 of 10 valid
-/// presets still load when one is broken.
-///
-/// v1 files (raw `ItemSettings` shape, no `format_version` key) are
-/// auto-wrapped into a v2 `PresetFile` envelope on load; the on-disk
-/// file is untouched until the user explicitly re-saves it. v2 files
-/// deserialize directly.
-///
-/// Called once at startup from `Settings::load` (before the first frame) and
-/// once per preset delete to refresh the in-memory map. Not on the render path.
-pub(crate) fn load_all() -> HashMap<String, PresetFile> {
-    let Some(dir) = presets_dir() else { return HashMap::new() };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return HashMap::new() };
+/// The showcase presets built into Prunr, read-only like Prunr's own.
+const SHOWCASES: &[(&str, &str)] = &[
+    ("Catalog", include_str!("../../presets/showcases/Catalog.json")),
+    ("Cinematic", include_str!("../../presets/showcases/Cinematic.json")),
+    ("Color Pop", include_str!("../../presets/showcases/Color Pop.json")),
+    ("Comic", include_str!("../../presets/showcases/Comic.json")),
+    ("Duotone Poster", include_str!("../../presets/showcases/Duotone Poster.json")),
+    ("Engraving", include_str!("../../presets/showcases/Engraving.json")),
+    ("Golden Bokeh", include_str!("../../presets/showcases/Golden Bokeh.json")),
+    ("Halftone Pop", include_str!("../../presets/showcases/Halftone Pop.json")),
+    ("Halftone Print", include_str!("../../presets/showcases/Halftone Print.json")),
+    ("Ink Stamp", include_str!("../../presets/showcases/Ink Stamp.json")),
+    ("Lens Portrait", include_str!("../../presets/showcases/Lens Portrait.json")),
+    ("Midnight Duotone", include_str!("../../presets/showcases/Midnight Duotone.json")),
+    ("Miniature", include_str!("../../presets/showcases/Miniature.json")),
+    ("Misty Morning", include_str!("../../presets/showcases/Misty Morning.json")),
+    ("Neon Glow", include_str!("../../presets/showcases/Neon Glow.json")),
+    ("Night Vision", include_str!("../../presets/showcases/Night Vision.json")),
+    ("Noir", include_str!("../../presets/showcases/Noir.json")),
+    ("Old Photo", include_str!("../../presets/showcases/Old Photo.json")),
+    ("Pencil Sketch", include_str!("../../presets/showcases/Pencil Sketch.json")),
+    ("Pixel Art", include_str!("../../presets/showcases/Pixel Art.json")),
+    ("Pop Sticker", include_str!("../../presets/showcases/Pop Sticker.json")),
+    ("Soft Focus", include_str!("../../presets/showcases/Soft Focus.json")),
+    ("Sticker", include_str!("../../presets/showcases/Sticker.json")),
+    ("Studio", include_str!("../../presets/showcases/Studio.json")),
+    ("Sunset Lines", include_str!("../../presets/showcases/Sunset Lines.json")),
+    ("Teal and Orange", include_str!("../../presets/showcases/Teal and Orange.json")),
+    ("Thumbnail", include_str!("../../presets/showcases/Thumbnail.json")),
+    ("Warhol", include_str!("../../presets/showcases/Warhol.json")),
+    ("X-Ray", include_str!("../../presets/showcases/X-Ray.json")),
+];
+
+/// The showcases as presets, read once.
+fn showcases() -> &'static [(&'static str, Preset)] {
+    static READ: std::sync::OnceLock<Vec<(&str, Preset)>> = std::sync::OnceLock::new();
+    READ.get_or_init(|| {
+        SHOWCASES
+            .iter()
+            .filter_map(|&(name, json)| parse_preset_bytes(json.as_bytes()).ok().map(|file| (name, Preset::from(file).built_in())))
+            .collect()
+    })
+}
+
+/// The presets in the presets folder, and the showcases not `hidden` and
+/// not named by a file there (a file of the user's wins); the names a
+/// newer Prunr saved are left out. A malformed file is skipped with a
+/// warning, so one broken preset doesn't hide the rest.
+pub(crate) fn load_all(hidden: &BTreeSet<String>) -> (HashMap<String, Preset>, HashSet<String>) {
+    let (mut presets, newer) = presets_dir().map(|dir| load_files(&dir)).unwrap_or_default();
+    add_showcases(&mut presets, hidden, &newer);
+    (presets, newer)
+}
+
+/// Whether a built-in showcase has `name`, hidden or not.
+pub(crate) fn is_showcase(name: &str) -> bool {
+    SHOWCASES.iter().any(|&(showcase, _)| same_name(showcase, name))
+}
+
+fn add_showcases(presets: &mut HashMap<String, Preset>, hidden: &BTreeSet<String>, newer: &HashSet<String>) {
+    for (name, showcase) in showcases() {
+        let taken = hidden.iter().chain(presets.keys()).any(|other| same_name(other, name)) || newer_has(newer, name);
+        if !taken {
+            presets.insert(name.to_string(), showcase.clone());
+        }
+    }
+}
+
+fn load_files(dir: &Path) -> (HashMap<String, Preset>, HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Default::default() };
 
     let paths: Vec<PathBuf> = entries
         .flatten()
@@ -149,287 +202,223 @@ pub(crate) fn load_all() -> HashMap<String, PresetFile> {
         })
         .collect();
 
-    paths
+    let read: Vec<(String, Result<Preset, Skipped>)> = paths
         .par_iter()
         .filter_map(|path| {
             let name = path.file_stem()?.to_str()?.to_string();
-            if name.eq_ignore_ascii_case(PRUNR_PRESET) { return None; }
-            let file = load_from_path(path)?;
-            Some((name, file))
+            (!is_prunr(&name)).then(|| (name, read_preset(path).map(Preset::from)))
         })
-        .collect()
+        .collect();
+    let mut presets = HashMap::new();
+    let mut newer = HashSet::new();
+    for (name, preset) in read {
+        match preset {
+            Ok(preset) => {
+                presets.insert(name, preset);
+            }
+            Err(Skipped::Newer) => {
+                newer.insert(name.to_lowercase());
+            }
+            Err(Skipped::Unreadable) => {}
+        }
+    }
+    (presets, newer)
 }
 
-/// Parse a `serde_json::Value` into a `PresetFile`. v2 (has
-/// `format_version: 2`) deserializes directly; anything else is
-/// attempted as a v1 `ItemSettings` migration. Returns `None` when
-/// neither path succeeds; the caller decides whether to log + skip.
-fn parse_preset_value(mut value: serde_json::Value) -> Option<PresetFile> {
+/// Preset `name` from the presets folder, its case ignored, or the
+/// preset file at that path; why not, when it cannot be read.
+pub(crate) fn find_preset(name: &str) -> Result<Preset, String> {
+    let path = Path::new(name);
+    if path.is_file() {
+        return read_preset(path).map(Preset::from).map_err(|skipped| match skipped {
+            Skipped::Newer => format!("{name} was saved by a newer Prunr"),
+            Skipped::Unreadable => format!("{name} is not a Prunr preset"),
+        });
+    }
+    let (mut presets, newer) = load_all(&BTreeSet::new());
+    let found = presets.keys().find(|key| same_name(key, name)).cloned();
+    if let Some(preset) = found.and_then(|key| presets.remove(&key)) {
+        return Ok(preset);
+    }
+    if newer_has(&newer, name) {
+        return Err(format!("the preset \"{name}\" was saved by a newer Prunr"));
+    }
+    let names: Vec<String> = std::iter::once(PRUNR_PRESET.to_string()).chain(sorted_names(presets.into_keys())).collect();
+    Err(format!("no preset named \"{name}\" (presets: {})", names.join(", ")))
+}
+
+/// Why a preset file was left out.
+#[derive(Debug, PartialEq)]
+enum Skipped {
+    /// A newer Prunr saved it, in a format this one cannot read.
+    Newer,
+    Unreadable,
+}
+
+/// Why a preset cannot be saved under `name`, when it cannot: "Prunr" and
+/// the built-in presets in `presets` are never written over, and a name
+/// in `newer` (a newer Prunr's preset) is kept for it.
+pub(crate) fn name_refusal(name: &str, newer: &HashSet<String>, presets: &HashMap<String, Preset>) -> Option<&'static str> {
+    if is_prunr(name) {
+        return Some(RESERVED_NAME);
+    }
+    if presets.iter().any(|(other, preset)| preset.is_built_in() && same_name(other, name)) {
+        return Some("A preset built into Prunr has this name — pick another.");
+    }
+    newer_has(newer, name).then_some("A newer version of Prunr saved a preset with this name — pick another.")
+}
+
+const RESERVED_NAME: &str = "\"Prunr\" is reserved — pick another name.";
+
+/// Parse a `serde_json::Value` into a `PresetFile`, trimmed to what
+/// differs from Prunr's. v2 (has `format_version: 2`) deserializes
+/// directly; one with no version is attempted as a v1 `ItemSettings`
+/// migration. A later version is a newer Prunr's, never read as v1.
+fn parse_preset_value(mut value: serde_json::Value) -> Result<PresetFile, Skipped> {
     super::item_settings::migrate_old_item_settings(&mut value);
-    if value.get("format_version").and_then(|v| v.as_u64()) == Some(2) {
-        serde_json::from_value(value).ok()
-    } else {
-        migrate_v1_to_v2(&value)
+    match value.get("format_version").and_then(|v| v.as_u64()) {
+        Some(v) if v > u64::from(PRESET_FORMAT_VERSION) => Err(Skipped::Newer),
+        Some(2) => serde_json::from_value::<PresetFile>(value).map(PresetFile::trimmed).map_err(|_| Skipped::Unreadable),
+        _ => migrate_v1_to_v2(&value).ok_or(Skipped::Unreadable),
     }
 }
 
-/// Load a single preset file from disk. Returns `None` when the file
-/// is unreadable, malformed, or doesn't match either format. Used by
-/// `load_all`'s parallel scan AND by callers that want to refresh a
-/// single entry without rescanning the whole directory.
-pub(crate) fn load_from_path(path: &std::path::Path) -> Option<PresetFile> {
-    let data = std::fs::read(path)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping unreadable preset")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&data)
-        .map_err(|e| tracing::warn!(?path, %e, "skipping malformed-JSON preset")).ok()?;
-    parse_preset_value(value).or_else(|| {
-        tracing::warn!(?path, "skipping unrecognised preset shape (not v2 and not v1 ItemSettings)");
-        None
+/// A preset file's bytes as a preset, or why not.
+fn parse_preset_bytes(data: &[u8]) -> Result<PresetFile, Skipped> {
+    serde_json::from_slice(data).map_err(|_| Skipped::Unreadable).and_then(parse_preset_value)
+}
+
+/// The preset, or why it was left out: unreadable, malformed, matching
+/// neither format, or a newer Prunr's.
+fn read_preset(path: &std::path::Path) -> Result<PresetFile, Skipped> {
+    let data = std::fs::read(path).map_err(|e| {
+        tracing::warn!(?path, %e, "skipping unreadable preset");
+        Skipped::Unreadable
+    })?;
+    parse_preset_bytes(&data).inspect_err(|skipped| match skipped {
+        Skipped::Newer => tracing::warn!(?path, "skipping a preset a newer Prunr saved; it is kept as it is"),
+        Skipped::Unreadable => tracing::warn!(?path, "skipping a file that is no preset"),
     })
 }
 
-/// Write a preset to disk. Overwrites any existing file of the same name.
-/// "Prunr" is rejected — that name is synthetic and cannot be persisted.
+/// A preset file to import: picked or dropped by path, or dropped as its
+/// bytes.
+pub(crate) enum ImportSource {
+    Path(PathBuf),
+    Bytes { name: String, bytes: Arc<[u8]> },
+}
+
+/// How the import of one file went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Imported {
+    /// Added under this name.
+    As(String),
+    /// A newer Prunr's, added under this name: listed once Prunr is
+    /// updated.
+    Newer(String),
+    /// This file is not a Prunr preset, or could not be read.
+    NotAPreset(String),
+    /// This file could not be copied into the presets folder.
+    NotCopied(String),
+}
+
+/// Copy each preset in `sources` into the presets folder as it is, under
+/// its file's name or, when that is taken, the next free one
+/// ("Portrait 2"), so no preset is replaced.
+pub(crate) fn import(sources: Vec<ImportSource>) -> Vec<Imported> {
+    let Some(dir) = presets_dir() else { return Vec::new() };
+    import_into(&dir, sources)
+}
+
+fn import_into(dir: &Path, sources: Vec<ImportSource>) -> Vec<Imported> {
+    sources.into_iter().map(|source| import_one(dir, source)).collect()
+}
+
+fn import_one(dir: &Path, source: ImportSource) -> Imported {
+    let (file, bytes) = match source {
+        ImportSource::Path(path) => (path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(), std::fs::read(&path).ok()),
+        ImportSource::Bytes { name, bytes } => (name, Some(bytes.to_vec())),
+    };
+    let Some(bytes) = bytes else { return Imported::NotAPreset(file) };
+    let newer = match parse_preset_bytes(&bytes) {
+        Ok(_) => false,
+        Err(Skipped::Newer) => true,
+        Err(Skipped::Unreadable) => return Imported::NotAPreset(file),
+    };
+    let stem = Path::new(&file).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let name = free_name(dir, stem);
+    match crate::fs_util::write_bytes_replacing(&dir.join(file_name(&name)), &bytes) {
+        Ok(()) if newer => Imported::Newer(name),
+        Ok(()) => Imported::As(name),
+        Err(err) => {
+            tracing::warn!(%err, file, "preset not imported");
+            Imported::NotCopied(file)
+        }
+    }
+}
+
+/// Whether `value` reads as a preset rather than any JSON: it has a
+/// format version, or names an image setting.
+fn names_a_setting(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else { return false };
+    let settings = serde_json::to_value(ItemSettings::default()).unwrap_or_default();
+    map.contains_key("format_version") || settings.as_object().is_some_and(|known| map.keys().any(|key| known.contains_key(key)))
+}
+
+/// `stem` as a preset name no file in `dir` has yet, and not "Prunr".
+fn free_name(dir: &Path, stem: &str) -> String {
+    let base = preset_name(stem).unwrap_or_else(|| "Imported".to_string());
+    let taken = |name: &str| is_prunr(name) || dir.join(file_name(name)).exists();
+    let mut name = base.clone();
+    let mut n = 1;
+    while taken(&name) {
+        n += 1;
+        name = format!("{base} {n}");
+    }
+    name
+}
+
+/// Overwrites a file of the same name; "Prunr" is refused.
 pub(crate) fn save(name: &str, values: &PresetFile) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
-        if name.eq_ignore_ascii_case(PRUNR_PRESET) {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "\"Prunr\" is a reserved preset name",
-            )
-        } else {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
-        }
-    })?;
-    let json = serde_json::to_string_pretty(values)
+    write_preset(&writable_path(name)?, values)
+}
+
+/// `preset_path` for any name but the reserved "Prunr".
+fn writable_path(name: &str) -> std::io::Result<PathBuf> {
+    if is_prunr(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, RESERVED_NAME));
+    }
+    preset_path(name).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable"))
+}
+
+fn write_preset(path: &std::path::Path, file: &PresetFile) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)
+    crate::fs_util::write_bytes_replacing(path, json.as_bytes())
 }
 
-fn merge_into(
-    file: &mut PresetFile,
-    model_id: prunr_models::ModelId,
-    mp: ModelPreset,
-) {
-    file.format_version = PRESET_FORMAT_VERSION;
-    file.models.insert(model_id_key(model_id), mp);
-}
-
-/// Read an existing preset file (v1 auto-migrated to v2) into a
-/// `PresetFile`, or `PresetFile::default()` when the path is absent.
-fn load_existing_for_merge(path: &std::path::Path) -> std::io::Result<PresetFile> {
-    match std::fs::read(path) {
-        Ok(data) => {
-            let value: serde_json::Value = serde_json::from_slice(&data)
-                .unwrap_or(serde_json::Value::Null);
-            if value.is_null() {
-                Ok(PresetFile::default())
-            } else {
-                Ok(parse_preset_value(value).unwrap_or_default())
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PresetFile::default()),
-        Err(e) => Err(e),
+/// Write a preset off the UI thread, after every config write asked for
+/// before it. "Prunr" is never written.
+pub(crate) fn queue_save(name: &str, file: &PresetFile) {
+    if let Ok(path) = writable_path(name) {
+        queue_write(path, file);
     }
 }
 
-/// Merge-aware save. Loads the existing file (v1 auto-migrated to v2),
-/// updates the entry for `model_id` via `merge_into`, writes the
-/// merged result. Preserves entries for other model_ids verbatim.
-/// Scheduler bundles within `model_id`'s entry come straight from
-/// `model_preset.sd.schedulers` — the caller is responsible for
-/// carrying over any prior bundles it wants to retain.
-///
-/// If no existing file → behaves like `save` with a single-entry
-/// PresetFile. The "save current as new preset" path skips this
-/// function — it has nothing to merge against.
-pub(crate) fn save_merged(
-    name: &str,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    let path = preset_path(name).ok_or_else(|| {
-        if name.eq_ignore_ascii_case(PRUNR_PRESET) {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "\"Prunr\" is a reserved preset name",
-            )
-        } else {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "config dir unavailable")
-        }
-    })?;
-    let mut file = load_existing_for_merge(&path)?;
-    merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)
-}
-
-#[cfg(test)]
-fn save_merged_to_path(
-    path: &std::path::Path,
-    model_id: prunr_models::ModelId,
-    model_preset: ModelPreset,
-) -> std::io::Result<()> {
-    let mut file = load_existing_for_merge(path)?;
-    merge_into(&mut file, model_id, model_preset);
-    let json = serde_json::to_string_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(path, json)
-}
-
-/// Remove a preset's file. Silent no-op if the file doesn't exist — caller
-/// already drops the in-memory entry, and we don't want to surface "already
-/// deleted" as an error.
-pub fn delete(name: &str) -> std::io::Result<()> {
-    let Some(path) = preset_path(name) else { return Ok(()); };
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+/// Write `file` at `path` off the UI thread, in order with the other
+/// config writes.
+pub(crate) fn queue_write(path: PathBuf, file: &PresetFile) {
+    match serde_json::to_string_pretty(file) {
+        Ok(json) => super::disk_queue::write(path, json.into_bytes()),
+        Err(err) => tracing::error!(?path, %err, "preset not written"),
     }
 }
 
-/// Write the curated built-in presets to disk on first run. No-op when the
-/// seed marker already exists — users can delete any built-in and the
-/// deletion sticks.
-pub fn seed_builtins_once() {
-    let Some(dir) = presets_dir() else { return };
-    let marker = dir.join(SEED_MARKER);
-    if marker.exists() { return; }
-    let wrap_key = Settings::default()
-        .model
-        .to_model_id()
-        .expect("Settings::default().model always has a model_id");
-    let wrap_key = model_id_key(wrap_key);
-    for (name, item_settings) in builtin_presets() {
-        // Skip if a preset file with this name already exists. Protects
-        // user customisations against two edge cases:
-        //   1. A mid-seed crash (some presets saved, marker not yet written)
-        //      → next launch re-seeds, but won't overwrite files saved in
-        //      the previous partial run.
-        //   2. A future `_v3` seed that reuses a name the user edited under
-        //      `_v2` — keeps their version, skips the rename.
-        let Some(path) = preset_path(name) else { continue };
-        if path.exists() { continue; }
-        let mut models = HashMap::new();
-        models.insert(wrap_key.clone(), ModelPreset {
-            item_settings,
-            brush: Default::default(),
-            sd: None,
-        });
-        let file = PresetFile { format_version: PRESET_FORMAT_VERSION, models };
-        let _ = save(name, &file);
+/// Remove a preset's file off the UI thread.
+pub(crate) fn queue_delete(name: &str) {
+    if let Some(path) = preset_path(name) {
+        super::disk_queue::remove(path);
     }
-    let _ = std::fs::write(&marker, b"");
-}
-
-/// Factory list of curated named presets. Each covers a visually-distinct
-/// look and showcases a combination of the compose / line / fill enums
-/// that a user would otherwise need several chip clicks to discover.
-fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
-    let base = ItemSettings::default();
-    vec![
-        ("Comic", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 4 },
-            gamma: 1.3,
-            ..base
-        }),
-        ("Pencil Sketch", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.8,
-            edge_thickness: 0,
-            solid_line_color: None,
-            fill_style: FillStyle::Desaturate,
-            gamma: 1.1,
-            ..base
-        }),
-        ("Neon Glow", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.6,
-            edge_thickness: 3,
-            line_style: LineStyle::Rainbow { cycles: 2 },
-            fill_style: FillStyle::Saturate { percent: 220 },
-            ..base
-        }),
-        ("Sepia", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.6,
-            edge_thickness: 1,
-            solid_line_color: Some([70, 45, 20]),
-            fill_style: FillStyle::Sepia,
-            ..base
-        }),
-        ("Duotone Poster", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.6,
-            edge_thickness: 2,
-            solid_line_color: Some([10, 10, 40]),
-            fill_style: FillStyle::Duotone { dark: [20, 20, 60], light: [240, 220, 180] },
-            ..base
-        }),
-        ("X-Ray", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.8,
-            edge_thickness: 1,
-            solid_line_color: Some([200, 230, 255]),
-            fill_style: FillStyle::Invert,
-            bg: Some([0, 0, 30, 255]),
-            ..base
-        }),
-        ("Pop Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.65,
-            edge_thickness: 3,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Posterize { levels: 3 },
-            gamma: 1.4,
-            ..base
-        }),
-        ("Ghost", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::Ghost,
-            line_strength: 0.55,
-            edge_thickness: 1,
-            solid_line_color: Some([230, 230, 235]),
-            fill_style: FillStyle::Desaturate,
-            ..base
-        }),
-        ("Sunset Lines", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::LinesOnly,
-            line_strength: 0.7,
-            edge_thickness: 2,
-            line_style: LineStyle::GradientY {
-                top: [255, 180, 40],
-                bottom: [120, 20, 90],
-            },
-            ..base
-        }),
-        ("Pixel Art", ItemSettings {
-            line_mode: LineMode::SubjectOutline,
-            compose_mode: ComposeMode::SubjectFilled,
-            line_strength: 0.5,
-            edge_thickness: 2,
-            solid_line_color: Some([0, 0, 0]),
-            fill_style: FillStyle::Pixelate { block_size: 10 },
-            ..base
-        }),
-    ]
 }
 
 #[cfg(test)]
@@ -437,56 +426,76 @@ fn builtin_presets() -> Vec<(&'static str, ItemSettings)> {
 mod tests {
     use super::*;
 
+    /// A preset name becomes a file name inside the presets folder:
+    /// separators, control characters, leading dots and an embedded ".."
+    /// cannot reach outside it, and an empty name falls back.
     #[test]
-    fn sanitize_strips_path_separators() {
-        assert_eq!(sanitize_filename("foo/bar"), "foobar");
-        assert_eq!(sanitize_filename("foo\\bar"), "foobar");
+    fn a_preset_name_stays_inside_the_presets_folder() {
+        for (name, file) in [
+            ("foo/bar", "foobar"),
+            ("foo\\bar", "foobar"),
+            // Slash stripped to "..etc", then the leading dots.
+            ("../etc", "etc"),
+            ("foo..bar", "foo_bar"),
+            (".hidden", "hidden"),
+            ("good\x00bad\x01name", "goodbadname"),
+            ("  Portrait  ", "Portrait"),
+            ("", "preset"),
+            ("   ", "preset"),
+        ] {
+            assert_eq!(sanitize_filename(name), file, "{name:?}");
+        }
+    }
+
+    /// A name Windows cannot save stays savable there, and on the
+    /// computer a preset is shared to: its forbidden characters go, and a
+    /// device name (CON, NUL, COM1...) gets a mark.
+    #[test]
+    fn a_preset_name_is_a_file_name_windows_can_save() {
+        for (name, file) in [
+            ("Sky: blue?", "Sky blue"),
+            ("a<b>c|d\"e*f", "abcdef"),
+            ("CON", "CON_"),
+            ("nul.portrait", "nul_.portrait"),
+            ("com1", "com1_"),
+            ("LPT9", "LPT9_"),
+            ("Console", "Console"),
+            ("COM10", "COM10"),
+        ] {
+            assert_eq!(sanitize_filename(name), file, "{name:?}");
+        }
+    }
+
+    /// A typed name is the preset's name as its file keeps it, so the
+    /// dialog checks what will be saved: "a:b" overwrites "ab".
+    #[test]
+    fn a_typed_name_is_the_name_its_file_keeps() {
+        assert_eq!(preset_name("  Sky: blue? "), Some("Sky blue".to_string()));
+        assert_eq!(preset_name("CON"), Some("CON_".to_string()));
+        assert_eq!(preset_name("Portrait"), Some("Portrait".to_string()));
+        assert_eq!(preset_name("   "), None);
+    }
+
+    /// A preset a newer Prunr saved is left out, not read as defaults, and
+    /// its name cannot be saved over, so that version keeps it.
+    #[test]
+    fn a_newer_preset_is_left_out_and_never_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Future.json");
+        std::fs::write(&path, r#"{ "format_version": 3, "models": {}, "something_new": true }"#).unwrap();
+        assert_eq!(read_preset(&path).unwrap_err(), Skipped::Newer);
+        let newer: HashSet<String> = ["future".to_string()].into();
+        assert!(name_refusal("Future", &newer, &HashMap::new()).is_some(), "its name is refused, any case");
+        assert!(name_refusal(" future ", &newer, &HashMap::new()).is_some());
+        assert_eq!(name_refusal("Other", &newer, &HashMap::new()), None);
+        assert!(name_refusal("prunr", &HashSet::new(), &HashMap::new()).is_some(), "Prunr stays reserved");
     }
 
     #[test]
-    fn sanitize_rejects_parent_traversal() {
-        // "../etc": slash stripped → "..etc" → leading dots stripped → "etc".
-        // Output is confined to presets dir (no slashes possible anymore).
-        assert_eq!(sanitize_filename("../etc"), "etc");
-        // "foo..bar": no leading dot, so embedded ".." replaced with "_".
-        assert_eq!(sanitize_filename("foo..bar"), "foo_bar");
-    }
-
-    #[test]
-    fn sanitize_strips_leading_dot() {
-        assert_eq!(sanitize_filename(".hidden"), "hidden");
-    }
-
-    #[test]
-    fn sanitize_strips_control_chars() {
-        let name = "good\x00bad\x01name";
-        assert_eq!(sanitize_filename(name), "goodbadname");
-    }
-
-    #[test]
-    fn sanitize_trims_whitespace() {
-        assert_eq!(sanitize_filename("  Portrait  "), "Portrait");
-    }
-
-    #[test]
-    fn sanitize_empty_falls_back() {
-        assert_eq!(sanitize_filename(""), "preset");
-        assert_eq!(sanitize_filename("   "), "preset");
-    }
-
-    #[test]
-    fn save_rejects_prunr_name() {
-        let result = save("Prunr", &PresetFile::default());
-        assert!(result.is_err());
-        let result = save("prunr", &PresetFile::default());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn delete_prunr_is_noop() {
+    fn prunr_has_no_file_to_delete() {
         // Would be disastrous to delete anything when a user toggles the
-        // Prunr row, so this must be a safe no-op.
-        assert!(delete(PRUNR_PRESET).is_ok());
+        // Prunr row, so it names no file.
+        assert!(preset_path(PRUNR_PRESET).is_none());
     }
 
     // ── Forward-compat tripwires ──────────────────────────────────────
@@ -497,416 +506,218 @@ mod tests {
     // on the new field. See the module docstring.
 
     #[test]
-    fn loads_empty_preset_as_defaults() {
-        // An empty JSON object must deserialize to full defaults — proves
-        // every field has a default value and old presets (pre-dating new
-        // fields) still load.
-        let parsed: ItemSettings = serde_json::from_str("{}")
-            .expect("ItemSettings must deserialize from `{}` — add #[serde(default)] to any new field");
-        assert_eq!(parsed, ItemSettings::default());
-    }
-
-    #[test]
     fn loads_preset_with_unknown_fields() {
-        // A preset file carrying fields we don't know about (e.g. a
-        // forward-compat field added by a newer build) must still load.
+        // Only unknown keys: every real field defaults (old presets load)
+        // and the unknown ones are ignored (a newer build's presets load).
         let json = r#"{
             "definitely_not_a_real_field": 42,
             "another_future_field": "hello"
         }"#;
         let parsed: ItemSettings = serde_json::from_str(json)
-            .expect("ItemSettings must ignore unknown fields — do NOT add #[serde(deny_unknown_fields)]");
+            .expect("ItemSettings must default every missing field and ignore unknown ones — no #[serde(deny_unknown_fields)]");
         assert_eq!(parsed, ItemSettings::default());
     }
 
+    /// Every file in `presets/showcases` is built in, reads as a preset,
+    /// and holds only what differs from Prunr's settings.
     #[test]
-    fn builtins_have_unique_names_and_serialize() {
-        let presets = super::builtin_presets();
-        assert!(presets.len() >= 5, "ship at least 5 curated looks; got {}", presets.len());
-        let mut seen = std::collections::HashSet::new();
-        for (name, settings) in &presets {
-            assert!(seen.insert(*name), "duplicate builtin preset name: {name}");
-            // Reserved name would be silently rejected by `save`.
-            assert!(
-                !name.eq_ignore_ascii_case(PRUNR_PRESET),
-                "built-in preset cannot use reserved name '{PRUNR_PRESET}'",
-            );
-            // Each preset must round-trip through JSON — otherwise seed_builtins_once
-            // would silently skip it.
-            let json = serde_json::to_string(settings).expect("preset serializes");
-            let _: ItemSettings = serde_json::from_str(&json).expect("preset deserializes");
+    fn every_showcase_file_is_built_in_and_holds_only_its_differences() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("presets/showcases");
+        let files = sorted_names(std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path().file_stem().unwrap().to_str().unwrap().to_string()));
+        let listed: Vec<&str> = SHOWCASES.iter().map(|&(name, _)| name).collect();
+        assert_eq!(files, listed, "SHOWCASES lists every file once, by name");
+        assert_eq!(showcases().len(), SHOWCASES.len(), "every showcase reads");
+        for &(name, json) in SHOWCASES {
+            assert!(!is_prunr(name));
+            let file: PresetFile = serde_json::from_str(json).unwrap();
+            assert_eq!(file.clone().trimmed(), file, "{name} sets only what differs from Prunr's");
         }
     }
 
+    /// The list shows a showcase unless it was hidden or a file of the
+    /// user's has its name; only an unshadowed one is built in.
     #[test]
-    fn preset_roundtrips_through_json() {
-        // A preset must survive serialize → deserialize unchanged. If this
-        // breaks, a field serializes to something it can't parse back.
-        let original = ItemSettings::default();
-        let json = serde_json::to_string(&original).expect("must serialize");
-        let parsed: ItemSettings = serde_json::from_str(&json).expect("must deserialize");
-        assert_eq!(parsed, original);
+    fn a_showcase_shows_unless_hidden_or_the_user_has_its_name() {
+        let (name, _) = showcases()[0];
+        let shown = |hidden: &BTreeSet<String>, mut presets: HashMap<String, Preset>| {
+            add_showcases(&mut presets, hidden, &HashSet::new());
+            presets.get(name).map(Preset::is_built_in)
+        };
+        assert_eq!(shown(&BTreeSet::new(), HashMap::new()), Some(true));
+        assert_eq!(shown(&BTreeSet::from([name.to_lowercase()]), HashMap::new()), None, "hidden, in any case");
+        assert_eq!(shown(&BTreeSet::new(), HashMap::from([(name.to_string(), PresetFile::default().into())])), Some(false), "the user's file wins");
+    }
+
+    /// A shown showcase is never written over; once hidden, or shadowed
+    /// by a file of the user's, its name is free.
+    #[test]
+    fn a_shown_showcases_name_is_refused_for_a_save() {
+        let (name, preset) = &showcases()[0];
+        let shown = HashMap::from([(name.to_string(), preset.clone())]);
+        assert!(name_refusal(&name.to_uppercase(), &HashSet::new(), &shown).is_some());
+        assert_eq!(name_refusal(name, &HashSet::new(), &HashMap::new()), None);
+        let users = HashMap::from([(name.to_string(), PresetFile::default().into())]);
+        assert_eq!(name_refusal(name, &HashSet::new(), &users), None);
     }
 
     // ── v1 → v2 migration ────────────────────────────────────────────
     //
     // v1 preset files are raw `ItemSettings` JSON (no `format_version`
-    // key). They predate per-model bundling, so they carry no model
-    // identity — every v1 file wraps under the workspace default
-    // (`Settings::default().model`, currently `BiRefNetLite`).
+    // key). They predate per-model presets, so every v1 file wraps under
+    // the default model, keeping what differs from Prunr's.
 
-    #[test]
-    fn migrate_v1_with_item_settings_fields_wraps_into_default_model_entry() {
-        let v1_json = serde_json::json!({
-            "gamma": 2.0,
-            "edge_thickness": 5,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
-        assert_eq!(migrated.format_version, 2);
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings.gamma, 2.0);
-        assert_eq!(entry.item_settings.edge_thickness, 5);
-        assert_eq!(entry.brush, super::super::brush_state::BrushSettings::default());
-        assert!(entry.sd.is_none());
+    fn default_entry(file: &PresetFile) -> Option<&super::super::presets::Entry> {
+        file.models.get(&super::super::presets::preset_key(super::super::settings::DEFAULT_MODEL))
     }
 
+    /// A v1 file keeps what differs from Prunr's, under every model that
+    /// shows it.
     #[test]
-    fn migrate_v1_empty_object_wraps_default_item_settings() {
-        // An empty JSON object is a valid v1 file (every ItemSettings field
-        // serde-defaults). Migration must succeed and yield factory defaults.
-        let v1_json = serde_json::json!({});
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate empty");
+    fn migrate_v1_keeps_what_differs_under_every_model() {
+        let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 2.0, "edge_thickness": 5, "definitely_not_a_real_field": 42 })).expect("migrates");
         assert_eq!(migrated.format_version, 2);
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings, ItemSettings::default());
-    }
-
-    #[test]
-    fn migrate_v1_with_unknown_fields_succeeds() {
-        // Unknown forward-compat fields must not break v1 migration.
-        let v1_json = serde_json::json!({
-            "gamma": 1.5,
-            "definitely_not_a_real_field": 42,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("must migrate");
-        let default_key = model_id_key(prunr_models::ModelId::BiRefNetLite);
-        let entry = migrated.models.get(&default_key).expect("default model entry");
-        assert_eq!(entry.item_settings.gamma, 1.5);
+        let entry = default_entry(&migrated).expect("default model entry");
+        assert_eq!(entry.item_settings["gamma"].as_f64(), Some(2.0));
+        assert_eq!(entry.item_settings.len(), 1, "only what differs");
+        assert!(entry.brush.is_empty() && entry.sd.is_empty());
+        assert_eq!(migrated.models["Teed"].item_settings["edge_thickness"].as_u64(), Some(5), "the line width is the line model's");
+        let prunrs = migrate_v1_to_v2(&serde_json::json!({ "gamma": 1.0 })).expect("migrates");
+        assert!(prunrs.models.is_empty(), "nothing apart from Prunr's");
     }
 
     #[test]
     fn migrate_v1_with_garbage_json_returns_none() {
-        // Anything that doesn't deserialize as ItemSettings → None →
-        // load_all silently skips. (Strings, arrays, scalars at top level
-        // can't be ItemSettings.)
-        let v1_json = serde_json::json!("not an object");
-        assert!(migrate_v1_to_v2(&v1_json).is_none());
-        let v1_json = serde_json::json!([1, 2, 3]);
-        assert!(migrate_v1_to_v2(&v1_json).is_none());
+        // JSON that names no image setting is no preset: load_all skips it,
+        // and an import refuses it.
+        assert!(migrate_v1_to_v2(&serde_json::json!("not an object")).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!([1, 2, 3])).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!({})).is_none());
+        assert!(migrate_v1_to_v2(&serde_json::json!({ "name": "web", "version": "1.0" })).is_none());
     }
 
+    /// Once saved as v2, a migrated file loads back as it was.
     #[test]
-    fn v2_preset_file_round_trips_through_save_load_pure() {
-        // Pure round-trip (no disk): build a v2 PresetFile, serialize via
-        // the same code save() uses, deserialize via the same code load_all
-        // uses, assert byte-stable shape. Pins the on-disk format contract
-        // without touching the user's real config dir.
-        let mut original = PresetFile::default();
-        original.models.insert(
-            model_id_key(prunr_models::ModelId::SdV15InpaintFp16),
-            ModelPreset::default(),
-        );
-        let json = serde_json::to_string_pretty(&original).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        // load_all branches on format_version == 2 → direct deserialize.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        let restored: PresetFile = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(restored, original);
+    fn v1_to_v2_round_trip_is_stable() {
+        let migrated = migrate_v1_to_v2(&serde_json::json!({ "gamma": 1.5, "feather": 3.5 })).expect("migrates");
+        let saved: serde_json::Value = serde_json::from_str(&serde_json::to_string_pretty(&migrated).unwrap()).unwrap();
+        assert_eq!(saved.get("format_version").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(parse_preset_value(saved).expect("loads as v2"), migrated);
     }
 
-    #[test]
-    fn v1_to_v2_round_trip_via_serde_is_stable() {
-        // Seed a v1-shaped JSON, migrate to v2 in-memory, serialize as if
-        // saving, parse back via the load_all branch logic, assert the
-        // second-load PresetFile equals the migrated one. Proves migration
-        // is idempotent — once persisted as v2, it stays v2 verbatim.
-        let v1_json = serde_json::json!({
-            "gamma": 1.7,
-            "feather": 3.5,
-        });
-        let migrated = migrate_v1_to_v2(&v1_json).expect("migrate");
-        let serialized = serde_json::to_string_pretty(&migrated).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&serialized).expect("reparse");
-        // Second load must take the v2 branch, not re-migrate.
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        let reloaded: PresetFile = serde_json::from_value(value).expect("v2 deserialize");
-        assert_eq!(reloaded, migrated);
-    }
-
-    #[test]
-    fn save_writes_v2_envelope_to_disk() {
-        // End-to-end: save a v2 PresetFile to a tmpdir-backed path and
-        // assert the on-disk JSON has `format_version: 2` and `models`.
-        // Bypasses presets_dir() (which goes to the real user config) by
-        // writing directly via the same logic save() uses internally.
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Test.json");
-        let mut original = PresetFile::default();
-        original.models.insert(
-            model_id_key(prunr_models::ModelId::BiRefNetLite),
-            ModelPreset::default(),
-        );
-        let json = serde_json::to_string_pretty(&original).expect("serialize");
-        std::fs::write(&path, json).expect("write");
-        let read_back = std::fs::read_to_string(&path).expect("read");
-        let value: serde_json::Value = serde_json::from_str(&read_back).expect("parse");
-        assert_eq!(value.get("format_version").and_then(|v| v.as_u64()), Some(2));
-        assert!(value.get("models").is_some());
-    }
-
-    // ── Merge-save semantics ──────────────────────────────────────────
+    // ── Saving into a preset ──────────────────────────────────────────
     //
-    // Overwriting a preset on (active_model, active_scheduler) must
-    // touch ONLY that model's entry and ONLY that scheduler's bundle.
-    // Other models and other scheduler bundles round-trip bytewise.
-    // Tests use `save_merged_to_path` so they don't write to the
-    // user's real presets dir.
+    // Saving sets the model in use and keeps every other model's entry as
+    // it was. Tests use `save_at` so they don't write to the user's
+    // presets folder.
+
+    /// A save as the app makes it after applying the preset at `path` and
+    /// setting `item` and `brush` on `model`: the draft's rows, all ticked,
+    /// over the preset as loaded.
+    fn save_at(path: &std::path::Path, model: super::super::settings::SettingsModel, item: &ItemSettings, brush: &super::super::brush_state::BrushSettings) -> std::io::Result<()> {
+        use super::super::preset_changes::Changes;
+        use super::super::presets::{draft, Shown};
+        let existing = read_preset(path).unwrap_or_default();
+        let started = Preset::from(existing.clone());
+        let (item_changes, brush_changes) = (Changes::new(started.item_settings(model)), Changes::new(started.brush(model, None).clone()));
+        let shown = Shown { model, item, brush, item_changes: &item_changes, brush_changes: &brush_changes };
+        write_preset(path, &existing.with_entries(draft(&started, &shown)))
+    }
 
     #[test]
-    fn save_merged_preserves_other_model_entries() {
-        use super::super::brush_state::BrushSettings;
-        use super::super::presets::SdPreset;
-        use prunr_models::ModelId;
-
+    fn saving_keeps_the_other_models_entries() {
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::SettingsModel;
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Foo.json");
-
-        // Seed: Silueta entry with custom gamma + an SD entry alongside.
-        let silueta_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.5, ..ItemSettings::default() },
-            brush: BrushSettings::default(),
-            sd: None,
-        };
-        let mut seed = PresetFile::default();
-        seed.models.insert(model_id_key(ModelId::Silueta), silueta_mp.clone());
-        seed.models.insert(
-            model_id_key(ModelId::SdV15InpaintFp16),
-            ModelPreset { sd: Some(SdPreset::default()), ..ModelPreset::default() },
-        );
-        std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
-
-        // Save-merge a fresh SD entry. Silueta must survive untouched.
-        let new_sd_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.5, ..ItemSettings::default() },
-            brush: BrushSettings::default(),
-            sd: Some(SdPreset { prompt: "rewritten".into(), ..SdPreset::default() }),
-        };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_sd_mp.clone()).unwrap();
-
-        let reloaded = load_from_path(&path).expect("reload");
-        let silueta_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::Silueta))
-            .expect("Silueta entry preserved");
-        assert_eq!(*silueta_back, silueta_mp, "Silueta entry must be byte-equal");
-        let sd_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry exists");
-        assert_eq!(*sd_back, new_sd_mp, "SD entry must equal the merged-in preset");
+        let silueta = ItemSettings { gamma: 1.5, ..prunr_item_settings(SettingsModel::Silueta) };
+        save_at(&path, SettingsModel::Silueta, &silueta, &prunr_view(SettingsModel::Silueta, None).brush).unwrap();
+        let lama_brush = super::super::brush_state::BrushSettings { inpaint_grow: 6.0, ..prunr_view(SettingsModel::Inpaint, None).brush };
+        save_at(&path, SettingsModel::Inpaint, &prunr_item_settings(SettingsModel::Inpaint), &lama_brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        assert_eq!(reloaded.item_settings(SettingsModel::Silueta), silueta, "the earlier model's entry stays");
+        assert_eq!(reloaded.resolve(SettingsModel::Inpaint, None).brush, lama_brush);
     }
 
+    /// Saving onto a v1 file keeps its settings under the default model
+    /// beside the new entry.
     #[test]
-    fn save_merged_preserves_other_scheduler_bundles_within_sd() {
-        use super::super::brush_state::SdScheduler;
-        use super::super::presets::{SdPreset, SdSchedulerBundle};
-        use prunr_models::ModelId;
-
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Foo.json");
-
-        let lcm_bundle = SdSchedulerBundle {
-            steps: 8, guidance_scale: 1.5, use_karras_sigmas: false, strength: 1.0,
-        };
-        let ddim_bundle_old = SdSchedulerBundle {
-            steps: 20, guidance_scale: 7.5, use_karras_sigmas: false, strength: 1.0,
-        };
-        let mut schedulers_seed = HashMap::new();
-        schedulers_seed.insert(SdScheduler::Lcm, lcm_bundle);
-        schedulers_seed.insert(SdScheduler::Ddim, ddim_bundle_old);
-        let seed_sd = SdPreset {
-            prompt: "old".into(),
-            negative_prompt: "old-neg".into(),
-            use_taesd: Some(false),
-            seed: Some(11),
-            active_scheduler: SdScheduler::Lcm,
-            schedulers: schedulers_seed,
-        };
-        let seed_mp = ModelPreset {
-            sd: Some(seed_sd),
-            ..ModelPreset::default()
-        };
-        let mut seed_file = PresetFile::default();
-        seed_file.models.insert(model_id_key(ModelId::SdV15InpaintFp16), seed_mp);
-        std::fs::write(&path, serde_json::to_string_pretty(&seed_file).unwrap()).unwrap();
-
-        // Save-merge: caller only touched DDIM. LCM must survive.
-        let ddim_bundle_new = SdSchedulerBundle {
-            steps: 30, guidance_scale: 8.0, use_karras_sigmas: true, strength: 0.85,
-        };
-        let mut new_schedulers = HashMap::new();
-        new_schedulers.insert(SdScheduler::Ddim, ddim_bundle_new);
-        let new_sd = SdPreset {
-            prompt: "new".into(),
-            negative_prompt: "new-neg".into(),
-            use_taesd: Some(true),
-            seed: Some(99),
-            active_scheduler: SdScheduler::Ddim,
-            schedulers: new_schedulers,
-        };
-        let new_mp = ModelPreset { sd: Some(new_sd), ..ModelPreset::default() };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, new_mp).unwrap();
-
-        let reloaded = load_from_path(&path).expect("reload");
-        let mp_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry");
-        let sd_back = mp_back.sd.as_ref().expect("SD bundle");
-
-        // `save_merged` merges by ModelPreset, not by scheduler — the
-        // caller decides which scheduler bundles to carry over inside
-        // the SdPreset they pass. This test pins the round-trip: the
-        // scheduler-bundle map is written exactly as the caller built
-        // it, with no silent rewrite. (Cross-MODEL preservation is
-        // pinned by `save_merged_preserves_other_model_entries`.)
-        assert_eq!(
-            sd_back.schedulers.get(&SdScheduler::Ddim).copied(),
-            Some(ddim_bundle_new),
-            "Ddim bundle equals the freshly-merged values",
-        );
-        assert_eq!(sd_back.active_scheduler, SdScheduler::Ddim);
-        assert_eq!(sd_back.prompt, "new");
-        assert_eq!(sd_back.negative_prompt, "new-neg");
-        assert_eq!(sd_back.use_taesd, Some(true));
-        assert_eq!(sd_back.seed, Some(99));
-    }
-
-    #[test]
-    fn save_merged_creates_file_when_none_exists() {
-        use prunr_models::ModelId;
-
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let path = dir.path().join("Fresh.json");
-        assert!(!path.exists());
-
-        let mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 1.9, ..ItemSettings::default() },
-            ..ModelPreset::default()
-        };
-        save_merged_to_path(&path, ModelId::Silueta, mp.clone()).unwrap();
-
-        let reloaded = load_from_path(&path).expect("reload");
-        assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
-        assert_eq!(reloaded.models.len(), 1);
-        assert_eq!(
-            reloaded.models.get(&model_id_key(ModelId::Silueta)),
-            Some(&mp),
-        );
-    }
-
-    #[test]
-    fn save_merged_handles_v1_file_via_load_path() {
-        use prunr_models::ModelId;
-
+    fn saving_onto_a_v1_file_keeps_it() {
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::{SettingsModel, DEFAULT_MODEL};
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("LegacyV1.json");
-
-        // v1 file: raw ItemSettings JSON, no format_version.
-        let v1_json = serde_json::json!({
-            "gamma": 1.4,
-            "edge_thickness": 7,
-        });
-        std::fs::write(&path, serde_json::to_string_pretty(&v1_json).unwrap()).unwrap();
-
-        // Save-merge a different model on top. v1 → v2 migration runs
-        // before merge so the v1 entry survives.
-        let lama_mp = ModelPreset {
-            item_settings: ItemSettings { gamma: 2.0, ..ItemSettings::default() },
-            ..ModelPreset::default()
-        };
-        save_merged_to_path(&path, ModelId::LaMaFp32, lama_mp.clone()).unwrap();
-
-        let reloaded = load_from_path(&path).expect("reload");
-        assert_eq!(reloaded.format_version, PRESET_FORMAT_VERSION);
-        // v1 wraps under the workspace default model (BiRefNetLite).
-        let v1_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::BiRefNetLite))
-            .expect("v1 entry migrated under workspace default");
-        assert!((v1_back.item_settings.gamma - 1.4).abs() < f32::EPSILON);
-        assert_eq!(v1_back.item_settings.edge_thickness, 7);
-        // New entry merged in alongside.
-        assert_eq!(
-            reloaded.models.get(&model_id_key(ModelId::LaMaFp32)),
-            Some(&lama_mp),
-        );
+        std::fs::write(&path, serde_json::json!({ "gamma": 1.25, "edge_thickness": 7 }).to_string()).unwrap();
+        let nomos = ItemSettings { sharpen: 0.5, ..prunr_item_settings(SettingsModel::Nomos2Upscale) };
+        save_at(&path, SettingsModel::Nomos2Upscale, &nomos, &prunr_view(SettingsModel::Nomos2Upscale, None).brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        let v1 = reloaded.item_settings(DEFAULT_MODEL);
+        assert_eq!((v1.gamma, v1.edge_thickness), (1.25, 7));
+        assert_eq!(reloaded.item_settings(SettingsModel::Nomos2Upscale).sharpen, 0.5);
     }
 
     #[test]
-    fn save_merged_rejects_prunr_name() {
-        use prunr_models::ModelId;
-        let result = save_merged("Prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("Prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        // Case-insensitive — same shape as `save`.
-        let result = save_merged("prunr", ModelId::Silueta, ModelPreset::default());
-        let err = result.expect_err("prunr is reserved");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    fn a_queued_save_rejects_the_prunr_name() {
+        for name in ["Prunr", "prunr"] {
+            let err = writable_path(name).expect_err("Prunr is reserved");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
     }
 
+    /// Every Stable Diffusion setting a save keeps comes back on load: a
+    /// new one that does not read from default, or is dropped on save,
+    /// breaks the round trip.
     #[test]
-    fn merge_save_dynamic_field_capture() {
+    fn every_sd_setting_round_trips_through_a_save() {
         use super::super::brush_state::{BrushSettings, SdScheduler};
-        use super::super::presets::{fuse_brush_for_apply, split_brush_for_save};
-        use prunr_models::ModelId;
-
-        // Build a BrushSettings with every SD-tuning field mutated to a
-        // distinctive value. If a future field is added that doesn't
-        // serde-default — or that gets stripped at split/save — the
-        // round-trip equality breaks.
-        let mut base = BrushSettings::default();
-        base.radius = 73.0;
-        base.hardness = 0.42;
-        base.sd_prompt = "a-distinctive-prompt".into();
-        base.sd_negative_prompt = "a-distinctive-neg-prompt".into();
-        base.sd_steps = 17;
-        base.sd_guidance_scale = 5.25;
-        base.sd_scheduler = SdScheduler::Ddim;
-        base.sd_use_karras_sigmas = true;
-        base.sd_strength = 0.66;
-        base.sd_seed = Some(13579);
-        base.sd_use_taesd = Some(true);
-
+        use super::super::presets::{prunr_item_settings, prunr_view, Preset};
+        use super::super::settings::SettingsModel;
+        let sd = SettingsModel::SdInpaint;
+        let brush = BrushSettings {
+            radius: 73.0,
+            sd_prompt: "a-distinctive-prompt".into(),
+            sd_negative_prompt: "a-distinctive-neg-prompt".into(),
+            sd_steps: 17,
+            sd_guidance_scale: 5.25,
+            sd_scheduler: SdScheduler::DpmPlusPlus2MKarras,
+            sd_seed: Some(13579),
+            sd_use_taesd: Some(true),
+            sd_strength: 0.75,
+            inpaint_grow: 5.0,
+            ..prunr_view(sd, None).brush
+        };
         let dir = tempfile::tempdir().expect("tmpdir");
         let path = dir.path().join("Dynamic.json");
+        save_at(&path, sd, &prunr_item_settings(sd), &brush).unwrap();
+        let reloaded = Preset::from(read_preset(&path).expect("reloads"));
+        assert_eq!(reloaded.resolve(sd, None).brush, brush);
+    }
 
-        let (brush_split, sd) = split_brush_for_save(&base, ModelId::SdV15InpaintFp16);
-        let mp = ModelPreset {
-            item_settings: ItemSettings::default(),
-            brush: brush_split,
-            sd,
-        };
-        save_merged_to_path(&path, ModelId::SdV15InpaintFp16, mp).unwrap();
-
-        let reloaded = load_from_path(&path).expect("reload");
-        let mp_back = reloaded
-            .models
-            .get(&model_id_key(ModelId::SdV15InpaintFp16))
-            .expect("SD entry");
-        let fused = fuse_brush_for_apply(mp_back, Some(base.sd_scheduler));
-        assert_eq!(fused, base, "every BrushSettings field must round-trip");
+    /// An import copies each preset in under its file's name, the next
+    /// free one when that is taken or "Prunr", keeps a newer Prunr's for
+    /// it, and leaves out what is not a preset.
+    #[test]
+    fn an_import_adds_each_preset_under_a_free_name() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let preset: &[u8] = br#"{ "format_version": 2, "models": { "Silueta": { "item_settings": { "gamma": 1.5 } } } }"#;
+        std::fs::write(dir.path().join("Portrait.json"), preset).unwrap();
+        let file = |name: &str, bytes: &[u8]| ImportSource::Bytes { name: name.into(), bytes: Arc::from(bytes) };
+        let done = import_into(dir.path(), vec![
+            file("Portrait.json", preset),
+            file("Prunr.json", preset),
+            file("old.json", br#"{ "gamma": 1.2 }"#),
+            file("package.json", br#"{ "name": "web", "version": "1.0" }"#),
+            file("broken.json", b"{ not json"),
+            file("Future.json", br#"{ "format_version": 99 }"#),
+        ]);
+        assert_eq!(done, [
+            Imported::As("Portrait 2".into()),
+            Imported::As("Prunr 2".into()),
+            Imported::As("old".into()),
+            Imported::NotAPreset("package.json".into()),
+            Imported::NotAPreset("broken.json".into()),
+            Imported::Newer("Future".into()),
+        ]);
+        assert_eq!(std::fs::read(dir.path().join("Portrait 2.json")).unwrap(), preset, "copied as it is");
+        assert_eq!(std::fs::read(dir.path().join("Portrait.json")).unwrap(), preset, "the one there stays");
     }
 }

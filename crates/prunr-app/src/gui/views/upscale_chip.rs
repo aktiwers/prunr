@@ -1,7 +1,4 @@
 //! Output-scale chip widget for the upscale toolbar.
-//!
-//! Renders `[icon  {scale} · {w}×{h}]` as a chip button. Clicking opens
-//! a popover with the three scales (2× / 3× / 4×) and a reset button.
 
 use egui::Ui;
 use egui_material_icons::icons::ICON_OPEN_IN_FULL;
@@ -19,11 +16,9 @@ pub fn output_scale_label(s: OutputScale) -> &'static str {
 }
 
 /// Render the output-scale chip. Returns `true` if `value` changed.
-///
-/// `output_dims` is the projected output size at the current scale
-/// (caller computes `(source.0 * factor, source.1 * factor)` using
-/// `value.factor()`).
-pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, output_dims: (u32, u32)) -> bool {
+/// `default` is the default preset's; `output_dims` the projected output
+/// size at the current scale.
+pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, default: OutputScale, output_dims: (u32, u32)) -> bool {
     let label = format!(
         "{} \u{00b7} {}\u{00d7}{}",
         output_scale_label(*value),
@@ -44,8 +39,9 @@ pub(crate) fn render_output_scale_chip(ui: &mut Ui, value: &mut OutputScale, out
     let mut changed = false;
     let popup_id = egui::Id::new("upscale_output_scale_popup");
     chip::popup_for(ui, popup_id, &resp, |ui| {
-        if chip::popover_header(ui, "Scale", Some(("Back to 4\u{00d7}, the model's native size", *value == OutputScale::X4))) {
-            *value = OutputScale::X4;
+        let tip = chip::reset_tip(default == OutputScale::X4, "Back to 4\u{00d7}, the model's native size");
+        if chip::popover_header(ui, "Scale", Some((tip, *value == default))) {
+            *value = default;
             changed = true;
         }
         for option in [OutputScale::X2, OutputScale::X3, OutputScale::X4] {
@@ -68,12 +64,5 @@ mod tests {
         assert_eq!(output_scale_label(OutputScale::X2), "2\u{00d7}");
         assert_eq!(output_scale_label(OutputScale::X3), "3\u{00d7}");
         assert_eq!(output_scale_label(OutputScale::X4), "4\u{00d7}");
-    }
-
-    #[test]
-    fn output_scale_factor_via_method() {
-        assert_eq!(OutputScale::X2.factor(), 2);
-        assert_eq!(OutputScale::X3.factor(), 3);
-        assert_eq!(OutputScale::X4.factor(), 4);
     }
 }

@@ -1,81 +1,45 @@
-//! Test-harness escape hatches: env-var overrides for per-image knobs.
-//!
-//! Each `PRUNR_*` var is consulted by `apply_to_item_settings` whenever a
-//! new `BatchItem` is created, so a harness can preconfigure the knob state
-//! without driving sliders through xdotool (which is unreliable under
-//! Xephyr's coord-space mismatch — see task #83).
-//!
-//! Production users never touch these — unset env vars are no-ops.
+//! Test-harness escape hatches: `PRUNR_*` env vars preconfigure each new
+//! `BatchItem`'s knobs, since driving sliders through xdotool is
+//! unreliable under Xephyr. Unset vars are no-ops.
 
-use prunr_core::{BgEffect, FillStyle, LineMode};
+use prunr_core::{BgEffect, SubjectEffect, LineMode};
 
 use super::item_settings::ItemSettings;
 
-/// Apply `PRUNR_*` knob overrides on top of `item`. Unset vars leave fields
-/// untouched. Bad values are silently ignored — defensive parse so a typo
-/// in a harness script doesn't kill the launch.
+/// Bad values are ignored, so a typo in a harness script doesn't kill the
+/// launch.
 pub fn apply_to_item_settings(item: &mut ItemSettings) {
-    if let Some(v) = read_f32("PRUNR_GAMMA") { item.gamma = v; }
-    if let Some(v) = read_f32("PRUNR_CONTRAST") { item.contrast = v; }
-    if let Some(v) = read_f32("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
-    if let Some(v) = read_bool("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
-    if let Some(v) = read_f32("PRUNR_FEATHER") { item.feather = v; }
+    if let Some(v) = read("PRUNR_GAMMA") { item.gamma = v; }
+    if let Some(v) = read("PRUNR_CONTRAST") { item.contrast = v; }
+    if let Some(v) = read("PRUNR_EDGE_SHIFT") { item.edge_shift = prunr_core::MaskSettings::edge_shift_for_grow(v); }
+    if let Some(v) = prunr_core::env::flag("PRUNR_REFINE_EDGES") { item.refine_edges = v; }
+    if let Some(v) = read("PRUNR_FEATHER") { item.feather = v; }
     if let Some(v) = read_hex_rgba("PRUNR_BG_COLOR") { item.bg = Some(v); }
     if let Some(v) = read_line_mode("PRUNR_LINE_MODE") { item.line_mode = v; }
-    if let Some(v) = read_f32("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
-    if let Some(v) = read_fill_style("PRUNR_FILL_STYLE") { item.fill_style = v; }
+    if let Some(v) = read("PRUNR_LINE_STRENGTH") { item.line_strength = v; }
+    if let Some(v) = read_subject_effect("PRUNR_FILL_STYLE") { item.effect = v; }
     if let Some(v) = read_bg_effect("PRUNR_BG_EFFECT") { item.bg_effect = v; }
 }
 
-/// `PRUNR_AUTO_PROCESS=1` flips `auto_process_on_import` so imported images
-/// process without the harness having to send `Ctrl+R`. Mirrored on the
-/// `Settings` rather than per-item because that's where the toggle lives.
+/// `PRUNR_AUTO_PROCESS=1` sets `auto_process_on_import`, so imports
+/// process without the harness sending `Ctrl+R`.
 pub fn auto_process_override() -> Option<bool> {
-    read_bool("PRUNR_AUTO_PROCESS")
+    prunr_core::env::flag("PRUNR_AUTO_PROCESS")
 }
 
 /// `PRUNR_CONTROL_PORT=<port>` opens the control socket on localhost.
 pub fn control_port() -> Option<u16> {
-    std::env::var("PRUNR_CONTROL_PORT").ok()?.trim().parse().ok()
+    read("PRUNR_CONTROL_PORT")
 }
 
-fn read_f32(var: &str) -> Option<f32> {
-    std::env::var(var).ok()?.parse().ok()
-}
-
-/// `planned` with the SD overrides applied (scripts/sd_bench.sh):
-/// `PRUNR_SD_KEEP_LOADED`, `PRUNR_SD_TALL_CROP` and `PRUNR_SD_OV_DEVICE`.
-pub fn sd_tuning(planned: prunr_core::inpaint_sd::SdTuning) -> prunr_core::inpaint_sd::SdTuning {
-    prunr_core::inpaint_sd::SdTuning {
-        keep_loaded: read_bool("PRUNR_SD_KEEP_LOADED").unwrap_or(planned.keep_loaded),
-        tall_crop: read_bool("PRUNR_SD_TALL_CROP").unwrap_or(planned.tall_crop),
-        ov_device: std::env::var("PRUNR_SD_OV_DEVICE").ok().filter(|s| !s.is_empty()).or(planned.ov_device),
-        margin_mb: planned.margin_mb,
-    }
-}
-
-fn read_bool(var: &str) -> Option<bool> {
-    let s = std::env::var(var).ok()?;
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
+fn read<T: std::str::FromStr>(var: &str) -> Option<T> {
+    std::env::var(var).ok()?.trim().parse().ok()
 }
 
 /// Hex RGB ("ffffff") or RGBA ("ffffff80"). Leading `#` allowed.
 fn read_hex_rgba(var: &str) -> Option<[u8; 4]> {
     let raw = std::env::var(var).ok()?;
-    let s = raw.trim().trim_start_matches('#');
-    let bytes = match s.len() {
-        6 | 8 => (0..s.len()).step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect::<Option<Vec<_>>>()?,
-        _ => return None,
-    };
-    let mut out = [0, 0, 0, 255];
-    for (i, b) in bytes.into_iter().enumerate() { out[i] = b; }
-    Some(out)
+    prunr_core::color::parse_hex_rgba(raw.trim().trim_start_matches('#'))
 }
 
 fn read_line_mode(var: &str) -> Option<LineMode> {
@@ -88,13 +52,13 @@ fn read_line_mode(var: &str) -> Option<LineMode> {
     }
 }
 
-fn read_fill_style(var: &str) -> Option<FillStyle> {
+fn read_subject_effect(var: &str) -> Option<SubjectEffect> {
     let s = std::env::var(var).ok()?;
     match s.trim().to_ascii_lowercase().as_str() {
-        "none" => Some(FillStyle::None),
-        "desaturate" => Some(FillStyle::Desaturate),
-        "invert" => Some(FillStyle::Invert),
-        "sepia" => Some(FillStyle::Sepia),
+        "none" => Some(SubjectEffect::None),
+        "desaturate" => Some(SubjectEffect::Desaturate),
+        "invert" => Some(SubjectEffect::Invert),
+        "sepia" => Some(SubjectEffect::Sepia),
         _ => None,
     }
 }
@@ -104,7 +68,6 @@ fn read_bg_effect(var: &str) -> Option<BgEffect> {
     match s.trim().to_ascii_lowercase().as_str() {
         "none" => Some(BgEffect::None),
         "desaturated" | "desaturated_source" => Some(BgEffect::DesaturatedSource),
-        // BlurredSource{radius} not exposed — needs a parameter; defer.
         _ => None,
     }
 }

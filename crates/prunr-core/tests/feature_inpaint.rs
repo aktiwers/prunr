@@ -1,7 +1,6 @@
-//! Phase 23-04: each inpaint model runs end-to-end on a representative
-//! mask. Skip-on-missing-model mirrors `golden_e2e`'s ORT skip — these
-//! models are OnDemand, so a clean dev box won't have them until the
-//! user runs the Model Store.
+//! Each inpaint model runs end-to-end on a representative mask. These
+//! models are OnDemand, so a clean dev box skips them until the Model
+//! Store has downloaded them.
 //!
 //! Per-model invariants:
 //! - Output dimensions match input.
@@ -11,16 +10,13 @@
 //! - Unmasked region pixels EQUAL the source (proves identity preservation
 //!   outside the mask — `process_inpaint` blends the inpaint result back
 //!   onto the original at every non-mask pixel).
-//!
-//! SD-family models are deferred — too slow for routine CI; gated behind
-//! `--ignored` via separate slow-test infrastructure.
 
 mod test_common;
 
-use image::{GrayImage, Luma, RgbaImage};
+use image::{GrayImage, RgbaImage};
 use prunr_core::inpaint::process_inpaint;
-use prunr_models::{is_available, ModelId};
-use test_common::skip_if_no_ort;
+use prunr_models::ModelId;
+use test_common::{changed_in, rect_mask, skip_if_model_missing, skip_if_no_ort};
 
 /// 256² source: solid teal background, used so masked-region inpaint
 /// output is easily distinguishable from the unmasked area's identity.
@@ -34,27 +30,23 @@ fn fixture_source() -> RgbaImage {
 /// 256² mask: small rectangle in the centre. Anything inside the rect
 /// is "to be inpainted"; outside is identity.
 fn fixture_mask() -> GrayImage {
-    let mut mask = GrayImage::new(256, 256);
-    for py in 100..160 {
-        for px in 100..160 {
-            mask.put_pixel(px, py, Luma([255]));
-        }
-    }
-    mask
+    rect_mask(256, 256, 100, 100, 60, 60)
 }
 
 fn run_inpaint_test(model_id: ModelId, label: &str) {
+    run_inpaint_test_with(model_id, label, |image, mask| process_inpaint(image, mask, model_id));
+}
+
+fn run_inpaint_test_with(
+    model_id: ModelId,
+    label: &str,
+    run: impl Fn(&RgbaImage, &GrayImage) -> Result<RgbaImage, prunr_core::CoreError>,
+) {
     if skip_if_no_ort(label) { return; }
-    if !is_available(model_id) {
-        eprintln!(
-            "[{label}] SKIP: {model_id:?} is not installed. Run `cargo xtask fetch-models` \
-             or open the in-app Model Store to download it."
-        );
-        return;
-    }
+    if skip_if_model_missing(label, model_id) { return; }
     let image = fixture_source();
     let mask = fixture_mask();
-    let out = process_inpaint(&image, &mask, model_id)
+    let out = run(&image, &mask)
         .unwrap_or_else(|e| panic!("{label}: process_inpaint failed: {e:?}"));
 
     // Dimensions invariant.
@@ -64,14 +56,7 @@ fn run_inpaint_test(model_id: ModelId, label: &str) {
     // (We can't assert "every pixel differs" because the model may keep a
     // colour close to the mean; the strong contract is "the model did
     // something inside the mask.")
-    let mut differing = 0u32;
-    for py in 100..160u32 {
-        for px in 100..160u32 {
-            if out.get_pixel(px, py).0 != image.get_pixel(px, py).0 {
-                differing += 1;
-            }
-        }
-    }
+    let differing = changed_in(&out, &image, 100, 100, 60, 60);
     let total = 60 * 60;
     assert!(
         differing as f32 / total as f32 > 0.3,
@@ -103,4 +88,14 @@ fn inpaint_big_lama_runs_end_to_end() {
 #[test]
 fn inpaint_migan_runs_end_to_end() {
     run_inpaint_test(ModelId::Migan, "migan");
+}
+
+#[test]
+#[ignore = "5.5 GB bundle; a minute or more per run on a CPU"]
+fn inpaint_rorem_runs_end_to_end() {
+    use prunr_core::inpaint_sd::{SchedulerKind, SdInpaintRequest};
+    run_inpaint_test_with(ModelId::RoremFp16, "rorem", |image, mask| {
+        let req = SdInpaintRequest { num_inference_steps: 4, scheduler: SchedulerKind::Lcm, seed: Some(7), ..Default::default() };
+        prunr_core::inpaint_sd::process_inpaint_with(image, mask, ModelId::RoremFp16, req, &prunr_core::Progress::none()).map(|f| f.rgba)
+    });
 }

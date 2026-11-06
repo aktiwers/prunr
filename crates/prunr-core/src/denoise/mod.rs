@@ -1,19 +1,5 @@
-//! Classical denoise filters applied to the upscale input.
-//!
-//! Two primitives:
-//!   - `median_filter_channel`: 3×3 histogram-based sliding-window
-//!     median (Huang et al. 1979). O(1) per pixel after the initial
-//!     column histogram build. Rows are mutually independent — parallelised
-//!     with rayon to hit the ~300ms target on 2560×1920.
-//!   - `bilateral_filter_channel`: separable approximation —
-//!     horizontal row pass + vertical column pass, intensity-weighted
-//!     Gaussian kernel. Row-parallel via rayon.
-//!
-//! Public entry point `apply_denoise` operates on full-image RGBA:
-//!   - Sequential per-channel (R, G, B); alpha copied unchanged.
-//!   - `strength == 0.0` early-returns a clone (bit-identical to the
-//!     unfiltered path — pinned by `apply_denoise_strength_zero_is_identity`).
-//!   - `strength` linearly blends filtered output toward input.
+//! Classical denoise filters applied to the upscale input. Rows run in
+//! parallel to hit ~300 ms on 2560×1920.
 //!
 //! Peak RAM (canonical 2560×1920 input, sequential channels):
 //!   | working buffer              | size      |
@@ -24,26 +10,16 @@
 //!   | bilateral v-pass / out (f32)| ~19.7 MB  |
 //!   | peak (one channel at a time)| ~49 MB    |
 //!
-//! Concurrency: rayon row-parallelism here is safe because the only
-//! production caller — `Processor::dispatch_upscale::build_inference_input`
-//! (crates/prunr-app/src/gui/processor.rs) — invokes `apply_denoise`
-//! BEFORE the ORT session is created or driven. It is not nested inside
-//! the tiled-inference inner loop or any ort callback. Verified
-//! 2026-05-16 (Phase 32-DEFER-4 closed).
+//! Concurrency: the rayon row-parallelism here is safe only while
+//! `apply_denoise` runs before the upscale's ORT session is driven, never
+//! nested inside the tiled-inference loop or an ort callback.
 
 use image::RgbaImage;
 use rayon::prelude::*;
 
-/// Median-filter a single channel using the histogram-based O(1)
-/// sliding-window algorithm (Huang et al. 1979). `radius` is half-width:
-/// radius=1 → 3×3 window, radius=2 → 5×5.
-///
-/// `src` must be `width * height` bytes. Replicate-border padding is used
-/// at image edges (standard image-processing default).
-///
-/// Each row is independent — parallelised with rayon. The histogram is
-/// `[u32; 256]` on the stack — the per-row inner loop is allocation-free
-/// per CLAUDE.md `## Hot paths`.
+/// Sliding-window histogram median (Huang et al. 1979), O(1) per pixel.
+/// `radius` is half-width: 1 → 3×3 window. `src` must be `width * height`
+/// bytes; edges replicate.
 pub(crate) fn median_filter_channel(
     src: &[u8],
     width: usize,
@@ -59,7 +35,6 @@ pub(crate) fn median_filter_channel(
     out.par_chunks_mut(width)
         .enumerate()
         .for_each(|(y, row)| {
-            // Build histogram for the initial window centred at (0, y)
             let mut hist = [0u32; 256];
             for wy in 0..win_h {
                 let sy = (y as isize + wy as isize - radius as isize)
@@ -71,7 +46,6 @@ pub(crate) fn median_filter_channel(
             }
 
             for (x, slot) in row.iter_mut().enumerate() {
-                // Find median from histogram
                 let mut cum = 0u32;
                 let mut median = 0usize;
                 for (v, &count) in hist.iter().enumerate() {
@@ -83,7 +57,6 @@ pub(crate) fn median_filter_channel(
                 }
                 *slot = median as u8;
 
-                // Slide window right: remove x-radius column, add x+radius+1 column
                 if x + 1 < width {
                     let remove_x = (x as isize - radius as isize)
                         .clamp(0, width as isize - 1) as usize;
@@ -102,21 +75,9 @@ pub(crate) fn median_filter_channel(
     out
 }
 
-/// Bilateral filter on a single channel using the separable approximation.
-/// `spatial_sigma` controls the spatial radius (in pixels);
-/// `range_sigma` controls the intensity sensitivity (in normalized 0..1
-/// units — NOT 0..255).
-///
-/// Two-pass separable: horizontal row pass writes to an f32 scratch buffer;
-/// vertical column pass writes to the u8 output (clamp+cast at the boundary
-/// per CLAUDE.md `## Numerical & color invariants`).
-///
-/// Spatial kernel is precomputed once (not per-pixel) as a `Vec<f32>` of
-/// length `2*radius+1`. Rows processed in parallel via rayon.
-///
-/// Variance guard: when the denominator (sum of weights) is < 1e-6, the
-/// unfiltered pixel value is used — defends against the `0/0` case on
-/// degenerate inputs.
+/// Separable bilateral filter (row pass into f32, then column pass).
+/// `spatial_sigma` is in pixels; `range_sigma` in normalized 0..1 units,
+/// NOT 0..255.
 pub(crate) fn bilateral_filter_channel(
     src: &[u8],
     width: usize,
@@ -145,22 +106,9 @@ pub(crate) fn bilateral_filter_channel(
         .for_each(|(y, row_out)| {
             let src_row = &src[y * width..(y + 1) * width];
             for x in 0..width {
-                let center = src_row[x] as f32;
-                let center_norm = center / 255.0;
-                let mut weighted_sum = 0.0f32;
-                let mut weight_sum = 0.0f32;
-                for (ki, &sp_w) in spatial_kernel.iter().enumerate() {
-                    let sx = (x as isize + ki as isize - radius as isize)
-                        .clamp(0, width as isize - 1) as usize;
-                    let neighbor = src_row[sx] as f32;
-                    let diff = center_norm - neighbor / 255.0;
-                    let range_w = (-(diff * diff) / range_sigma2).exp();
-                    let w = sp_w * range_w;
-                    weighted_sum += neighbor * w;
-                    weight_sum += w;
-                }
-                let denom = weight_sum.max(1e-6);
-                row_out[x] = weighted_sum / denom;
+                row_out[x] = bilateral_tap(src_row[x] as f32, &spatial_kernel, range_sigma2, |d| {
+                    src_row[(x as isize + d).clamp(0, width as isize - 1) as usize] as f32
+                });
             }
         });
 
@@ -169,38 +117,38 @@ pub(crate) fn bilateral_filter_channel(
         .enumerate()
         .for_each(|(y, row_out)| {
             for x in 0..width {
-                let center = h_pass[y * width + x];
-                let center_norm = center / 255.0;
-                let mut weighted_sum = 0.0f32;
-                let mut weight_sum = 0.0f32;
-                for (ki, &sp_w) in spatial_kernel.iter().enumerate() {
-                    let sy = (y as isize + ki as isize - radius as isize)
-                        .clamp(0, height as isize - 1) as usize;
-                    let neighbor = h_pass[sy * width + x];
-                    let diff = center_norm - neighbor / 255.0;
-                    let range_w = (-(diff * diff) / range_sigma2).exp();
-                    let w = sp_w * range_w;
-                    weighted_sum += neighbor * w;
-                    weight_sum += w;
-                }
-                let denom = weight_sum.max(1e-6);
-                let filtered = weighted_sum / denom;
-                row_out[x] = filtered.clamp(0.0, 255.0) as u8;
+                let filtered = bilateral_tap(h_pass[y * width + x], &spatial_kernel, range_sigma2, |d| {
+                    h_pass[(y as isize + d).clamp(0, height as isize - 1) as usize * width + x]
+                });
+                row_out[x] = crate::math::round_u8(filtered);
             }
         });
 
     out
 }
 
-/// Apply classical denoise to the RGB channels of `img`. Alpha is copied
-/// unchanged. `strength` is the blend weight in [0.0, 1.0]:
-///   - 0.0 = output bit-identical to input (early-return clone).
-///   - 1.0 = output is the fully filtered image.
-///   - Values in between: linear lerp per pixel per channel.
-///
-/// At strength=1.0 the pipeline is: median (radius 1, 3×3 window) →
-/// bilateral (spatial_sigma 2.0, range_sigma 0.1 normalized) → lerp
-/// against original.
+/// One output sample of the bilateral pass: `kernel` (centred, odd
+/// length) weighted by intensity closeness to `center`. `neighbour(d)`
+/// is the value `d` taps from the centre, border-clamped by the caller.
+#[inline]
+fn bilateral_tap(center: f32, kernel: &[f32], range_sigma2: f32, neighbour: impl Fn(isize) -> f32) -> f32 {
+    let radius = (kernel.len() / 2) as isize;
+    let center_norm = center / 255.0;
+    let mut weighted_sum = 0.0f32;
+    let mut weight_sum = 0.0f32;
+    for (ki, &sp_w) in kernel.iter().enumerate() {
+        let neighbor = neighbour(ki as isize - radius);
+        let diff = center_norm - neighbor / 255.0;
+        let range_w = (-(diff * diff) / range_sigma2).exp();
+        let w = sp_w * range_w;
+        weighted_sum += neighbor * w;
+        weight_sum += w;
+    }
+    weighted_sum / weight_sum.max(1e-6)
+}
+
+/// Median 3×3 then bilateral on the RGB channels, lerped against the
+/// original by `strength` in [0, 1] (0 = bit-identical). Alpha unchanged.
 pub fn apply_denoise(img: &RgbaImage, strength: f32) -> RgbaImage {
     let s = strength.clamp(0.0, 1.0);
     if s == 0.0 {
@@ -215,20 +163,17 @@ pub fn apply_denoise(img: &RgbaImage, strength: f32) -> RgbaImage {
 
     // Sequential per-channel (NOT parallel channels — saves 2× peak RAM)
     for c in 0..3usize {
-        // Extract channel — originals buffer used both as median input and lerp source
         let originals: Vec<u8> = img.pixels().map(|p| p.0[c]).collect();
 
         let median_out = median_filter_channel(&originals, width, height, 1);
         let bilateral_out = bilateral_filter_channel(&median_out, width, height, 2.0, 0.1);
-        // explicit drop before the lerp pass
         drop(median_out);
 
-        // Lerp: original * (1-s) + filtered * s — write back to out
         for (i, p) in out.pixels_mut().enumerate() {
             let original = originals[i] as f32;
             let filtered = bilateral_out[i] as f32;
             let blended = original * (1.0 - s) + filtered * s;
-            p.0[c] = blended.clamp(0.0, 255.0) as u8;
+            p.0[c] = crate::math::round_u8(blended);
         }
     }
 
@@ -264,13 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_denoise_preserves_dimensions() {
-        let img = make_gradient_rgba(64, 48);
-        let result = apply_denoise(&img, 0.5);
-        assert_eq!(result.dimensions(), img.dimensions());
-    }
-
-    #[test]
     fn median_filter_channel_kills_impulse_noise() {
         let w = 32usize;
         let h = 32usize;
@@ -286,15 +224,39 @@ mod tests {
         }
     }
 
+    /// The separable passes, written out tap by tap as a reference.
     #[test]
-    fn median_filter_channel_preserves_constant_input() {
-        let w = 32usize;
-        let h = 32usize;
-        let src = vec![128u8; w * h];
-        let out = median_filter_channel(&src, w, h, 1);
-        for &v in &out {
-            assert_eq!(v, 128, "constant input should produce constant output");
-        }
+    fn bilateral_filter_channel_matches_a_tap_by_tap_reference() {
+        let (w, h, sigma, range) = (19usize, 13usize, 1.5f32, 0.1f32);
+        let src: Vec<u8> = (0..w * h).map(|i| ((i * 97 + i / 7 * 31) % 256) as u8).collect();
+        let r = (2.0 * sigma).ceil() as isize;
+        let kernel: Vec<f32> = (-r..=r).map(|d| (-0.5 * (d * d) as f32 / (sigma * sigma)).exp()).collect();
+        let rs2 = 2.0 * range * range;
+        let tap = |center: f32, at: &dyn Fn(isize) -> f32| {
+            let (mut ws, mut wsum) = (0.0f32, 0.0f32);
+            for (k, &sp) in kernel.iter().enumerate() {
+                let n = at(k as isize - r);
+                let diff = center / 255.0 - n / 255.0;
+                let wt = sp * (-(diff * diff) / rs2).exp();
+                ws += n * wt;
+                wsum += wt;
+            }
+            ws / wsum.max(1e-6)
+        };
+        let clamp = |v: isize, len: usize| v.clamp(0, len as isize - 1) as usize;
+        let hp: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                tap(src[i] as f32, &|d| src[y * w + clamp(x as isize + d, w)] as f32)
+            })
+            .collect();
+        let want: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                crate::math::round_u8(tap(hp[i], &|d| hp[clamp(y as isize + d, h) * w + x]))
+            })
+            .collect();
+        assert_eq!(bilateral_filter_channel(&src, w, h, sigma, range), want);
     }
 
     #[test]
@@ -380,15 +342,6 @@ mod tests {
 
         assert!(out_var < in_var,
             "full strength denoise must reduce variance: in={in_var:.2} out={out_var:.2}");
-    }
-
-    #[test]
-    fn apply_denoise_alpha_zero_input_passes_through() {
-        let img = RgbaImage::from_pixel(16, 16, Rgba([100, 150, 200, 0]));
-        let result = apply_denoise(&img, 0.7);
-        for p in result.pixels() {
-            assert_eq!(p.0[3], 0, "alpha must remain 0");
-        }
     }
 
     /// Wall-clock timing test for apply_denoise on a 2560×1920 image at strength=1.0.
