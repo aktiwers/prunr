@@ -12,7 +12,7 @@ use image::{Rgba, RgbaImage};
 use prunr_core::depth::{estimate_depth, estimate_depth_decoded, DepthLook, LensBlurMode, MODEL};
 use prunr_core::progress::{check_contract, RecordingSink};
 use prunr_core::{OrtEngine, Progress};
-use test_common::{skip_if_model_missing, skip_if_no_ort};
+use test_common::{skip_if_model_missing, skip_if_no_ort, skip_if_photos_missing};
 
 /// A floor that brightens toward the bottom under a flat sky: the model
 /// should read the bottom as nearer than the top.
@@ -94,8 +94,12 @@ fn auto_focus_finds_the_subject_without_a_face() {
         return;
     }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/test_images");
-    let photo = prunr_core::load_image_from_path(&dir.join("car-1.jpg")).expect("car-1 loads").to_rgba8();
-    let car = prunr_core::load_image_from_path(&dir.join("car-1_nobg.png")).expect("its cut-out loads").to_rgba8();
+    let [photo, car] = [dir.join("car-1.jpg"), dir.join("car-1_nobg.png")];
+    if skip_if_photos_missing("depth_focus", &[&photo, &car]) {
+        return;
+    }
+    let photo = prunr_core::load_image_from_path(&photo).expect("car-1 loads").to_rgba8();
+    let car = prunr_core::load_image_from_path(&car).expect("its cut-out loads").to_rgba8();
     let map = prunr_core::depth::Measurer::default().measure(&photo).expect("depth");
     assert_eq!(map.face_nearness(), None, "no face on car-1");
     let (focus, on_car) = (prunr_core::depth::auto_focus(&map), prunr_core::depth::subject_nearness(&map, &car).expect("the car is opaque"));
