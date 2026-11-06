@@ -202,8 +202,6 @@ fn result_event(ipc: &std::path::Path, item_id: u64, rgba: image::RgbaImage, ext
     let (width, height) = rgba.dimensions();
     let result_path = IpcKind::Result.path_for(ipc, item_id);
     let written = write_result(&result_path, &rgba);
-    // Free the ~50 MB result before posting the event; under N jobs it would
-    // otherwise hold N×50 MB until the next dispatch.
     drop(rgba);
     let ResultExtras { active_provider, tensor_cache, edge_cache, spare_scales } = extras;
     match written {
