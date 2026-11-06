@@ -1814,9 +1814,10 @@ pub fn run_doctor() {
         (Some(root), false) => {
             println!("Runtime store:  {}", root.display());
             for (name, has_dylib) in &diag.store_entries {
-                let mark = if *has_dylib { "OK" } else { "MISSING" };
+                use prunr_app::runtime_install::RuntimeId;
+                let addon_installed = RuntimeId::from_subdir(name).filter(|rt| rt.is_addon()).map(RuntimeId::is_installed);
                 let preferred = if diag.preferred.as_ref() == Some(name) { " (preferred)" } else { "" };
-                println!("  - {name} [{mark}]{preferred}");
+                println!("  - {}{preferred}", store_entry(name, *has_dylib, addon_installed));
             }
         }
     }
@@ -1858,6 +1859,17 @@ pub fn run_doctor() {
 fn section(title: &str) {
     println!("{title}");
     println!("{}", "-".repeat(title.len()));
+}
+
+/// A Runtime Store folder in the report. An add-on (`addon_installed`)
+/// holds a provider plugin, not the runtime library, so it is checked for
+/// its plugin.
+fn store_entry(name: &str, has_runtime: bool, addon_installed: Option<bool>) -> String {
+    let mark = |ok: bool| if ok { "OK" } else { "MISSING" };
+    match addon_installed {
+        Some(ok) => format!("{name} [{}] (add-on)", mark(ok)),
+        None => format!("{name} [{}]", mark(has_runtime)),
+    }
 }
 
 fn path_or_unknown(p: Option<std::path::PathBuf>) -> String {
@@ -2267,6 +2279,26 @@ mod tests {
         assert!(!writes(&[]), "the GUI");
         assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
         assert!(writes(&["bench"]));
+    }
+
+    /// An installed add-on has no runtime library of its own; the doctor
+    /// reads its plugin and does not call it missing.
+    #[test]
+    fn the_doctor_reads_an_add_on_by_its_plugin() {
+        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", false, Some(true)), "openvino-addon-1.8.1-linux-x64 [OK] (add-on)");
+        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", false, Some(false)), "openvino-addon-1.8.1-linux-x64 [MISSING] (add-on)");
+        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", true, None), "openvino-1.24.1-linux-x64 [OK]");
+        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", false, None), "openvino-1.24.1-linux-x64 [MISSING]");
+    }
+
+    /// The doctor knows an add-on by its folder's name: every add-on this
+    /// platform offers is found as one from the folder it installs to.
+    #[test]
+    fn every_add_on_folder_is_known_as_an_add_on() {
+        use prunr_app::runtime_install::RuntimeId;
+        for rt in RuntimeId::addons() {
+            assert_eq!(RuntimeId::from_subdir(&rt.install_subdir()).filter(|found| found.is_addon()), Some(rt), "{}", rt.install_subdir());
+        }
     }
 
     /// A run that prints shows its own lines, not the log: only errors
