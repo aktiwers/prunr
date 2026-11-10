@@ -15,7 +15,7 @@ use prunr_core::{
 };
 use image::{DynamicImage, RgbaImage};
 use std::path::{Path, PathBuf};
-use test_common::{skip_if_model_missing, skip_if_no_ort};
+use test_common::{skip_if_model_missing, skip_if_no_ort, skip_if_photos_missing};
 
 fn repo_root() -> PathBuf {
     // Integration tests run from workspace root with `cargo test -p prunr-core`
@@ -97,10 +97,7 @@ fn test_rembg_reference() {
 
     for stem in &test_cases {
         let image_path = test_images_dir().join(format!("{stem}.jpg"));
-        if !image_path.exists() {
-            eprintln!("Skipping reference test for {stem}: image not found at {}", image_path.display());
-            continue;
-        }
+        if skip_if_photos_missing("test_rembg_reference", &[&image_path]) { continue; }
 
         let img_bytes = std::fs::read(&image_path)
             .expect("Failed to read test image");
@@ -154,10 +151,7 @@ fn test_process_image_produces_valid_rgba_png() {
         .expect("Failed to create OrtEngine");
 
     let image_path = test_images_dir().join("car-1.jpg");
-    if !image_path.exists() {
-        eprintln!("Skipping: car-1.jpg not found — see tests/test_images/README.md");
-        return;
-    }
+    if skip_if_photos_missing("test_process_image_produces_valid_rgba_png", &[&image_path]) { return; }
 
     let img_bytes = std::fs::read(&image_path).unwrap();
     let result = process_image(&img_bytes, &engine, &prunr_core::Progress::none())
@@ -212,10 +206,7 @@ fn test_progress_callback_all_stages() {
         .expect("OrtEngine::new should succeed");
 
     let image_path = test_images_dir().join("car-1.jpg");
-    if !image_path.exists() {
-        eprintln!("Skipping: car-1.jpg not found");
-        return;
-    }
+    if skip_if_photos_missing("test_progress_callback_all_stages", &[&image_path]) { return; }
 
     let img_bytes = std::fs::read(&image_path).unwrap();
 
