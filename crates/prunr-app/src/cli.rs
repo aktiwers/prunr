@@ -1788,10 +1788,16 @@ fn render_finished(
     }
 }
 
+/// What the doctor lists under Environment, as the process holds it now.
+/// `main` reads it before it sets a log level and a log file for the run.
+pub fn doctor_env() -> [(&'static str, Option<std::ffi::OsString>); 3] {
+    ["RUST_LOG", "ORT_DYLIB_PATH", "PRUNR_DEBUG_LOG"].map(|var| (var, std::env::var_os(var)))
+}
+
 /// `prunr --doctor`: dump everything a support ticket would ask for.
 /// Runs before `ort::init_from`, so a missing/broken runtime shows up
 /// here instead of aborting the whole process.
-pub fn run_doctor() {
+pub fn run_doctor(started_env: &[(&'static str, Option<std::ffi::OsString>)]) {
     let p = prunr_app::hardware::profile();
     let diag = prunr_core::ort_runtime::diagnose();
 
@@ -1858,9 +1864,8 @@ pub fn run_doctor() {
     println!();
 
     section("Environment");
-    for var in ["RUST_LOG", "ORT_DYLIB_PATH", "PRUNR_DEBUG_LOG"] {
-        println!("  {var}: {}",
-            std::env::var(var).unwrap_or_else(|_| "(unset)".to_string()));
+    for (var, value) in started_env {
+        println!("  {var}: {}", value.as_deref().map_or(std::borrow::Cow::Borrowed("(unset)"), std::ffi::OsStr::to_string_lossy));
     }
 }
 

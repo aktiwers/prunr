@@ -24,6 +24,9 @@ fn main() {
     // SAFETY: single-threaded at this point in main.
     unsafe { std::env::set_var(name, value); }
     let cli = Cli::parse();
+    // Before the log's level and file go into the environment below: the
+    // doctor lists what Prunr was started with.
+    let started_env = cli::doctor_env();
 
     // `--debug` reaches subprocess workers through env vars they inherit,
     // set BEFORE `init_tracing` reads them. PRUNR_DEBUG_LOG tees to a file:
@@ -56,7 +59,7 @@ fn main() {
     }
 
     if cli.doctor {
-        cli::run_doctor();
+        cli::run_doctor(&started_env);
         std::process::exit(0);
     }
 
