@@ -831,7 +831,7 @@ impl Cli {
     /// Windows release build has no console of its own, so it borrows
     /// that one, or its output goes nowhere.
     pub fn writes_to_terminal(&self) -> bool {
-        self.debug || !self.inputs.is_empty() || self.doctor || self.clear_ep_cache || self.command.is_some()
+        self.debug || (!self.worker && !self.opens_the_window())
     }
 
     /// The log level for this process and the workers it starts, `None`
@@ -2286,6 +2286,7 @@ mod tests {
         assert!(writes(&["--debug"]));
         assert!(!writes(&[]), "the GUI");
         assert!(!writes(&["--open", "photo.jpg"]), "the GUI with an image");
+        assert!(!writes(&["--open", "photo.jpg", "other.jpg"]), "the GUI, given inputs it leaves alone");
         assert!(writes(&["bench"]));
     }
 
@@ -2324,6 +2325,7 @@ mod tests {
         assert_eq!(level(&["--debug"]), Some("prunr=debug"));
         assert_eq!(level(&[]), None, "the window");
         assert_eq!(level(&["--open", "photo.jpg"]), None, "the window with an image");
+        assert_eq!(level(&["--open", "photo.jpg", "other.jpg"]), None, "the window, given inputs it leaves alone");
         assert_eq!(level(&["--worker"]), None, "a worker");
     }
 
@@ -2380,6 +2382,7 @@ mod tests {
         assert!(opens(&[]));
         assert!(opens(&["--debug"]));
         assert!(opens(&["--open", "photo.jpg"]));
+        assert!(opens(&["--open", "photo.jpg", "other.jpg"]));
         for printing in [&["photo.jpg"][..], &["--doctor"], &["--clear-ep-cache"], &["bench"], &["--worker"]] {
             assert!(!opens(printing), "{printing:?}");
         }
