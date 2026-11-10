@@ -565,14 +565,14 @@ pub fn run_worker() -> ! {
                                 // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
                                 let transformed = prunr_core::apply_input_transform(img, edge.input_transform);
-                                spare.trace(eng_ref, &transformed, traced_scales).map(|res| {
-                                    let measured = line_depth.as_ref().and_then(|d| d.measure(img));
+                                spare.trace(eng_ref, &transformed, traced_scales).and_then(|res| {
+                                    let measured = line_depth.as_ref().map(|d| d.measure(img)).transpose()?;
                                     let rgba_image = prunr_core::compose_whole_photo(&res, img, &edge, measured.as_ref().map(Measured::fade));
                                     edge_tensor_for_cache = Some(res);
-                                    ProcessResult {
+                                    Ok(ProcessResult {
                                         rgba_image,
                                         active_provider: provider.clone(),
-                                    }
+                                    })
                                 })
                             })
                         }
@@ -585,12 +585,13 @@ pub fn run_worker() -> ! {
                                 progress.step(prunr_core::Step::DrawingLines);
                                 // invariant: ensure_edge_engine ran above for every line mode but Off.
                                 let eng_ref = edge_eng.as_ref().unwrap();
-                                let measured = line_depth.as_ref().and_then(|d| d.measure(&img));
-                                prunr_core::outline_subject(img.into_rgba8(), prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
-                                    .map(|(rgba_image, res)| {
-                                        edge_tensor_for_cache = Some(res);
-                                        ProcessResult { rgba_image, active_provider: provider.clone() }
-                                    })
+                                line_depth.as_ref().map(|d| d.measure(&img)).transpose().and_then(|measured| {
+                                    prunr_core::outline_subject(img.into_rgba8(), prunr_core::SubjectEffect::None, &edge, measured.as_ref().map(Measured::fade), |i| spare.trace(eng_ref, i, traced_scales))
+                                        .map(|(rgba_image, res)| {
+                                            edge_tensor_for_cache = Some(res);
+                                            ProcessResult { rgba_image, active_provider: provider.clone() }
+                                        })
+                                })
                             } else {
                                 // Non-chain: split pipeline so the seg tensor is captured
                                 // for Tier 2 mask reruns and cross-mode transitions.
@@ -626,7 +627,7 @@ pub fn run_worker() -> ! {
                                     progress.step(prunr_core::Step::DrawingLines);
                                     // invariant: ensure_edge_engine ran above for every line mode but Off.
                                     let eng_ref = edge_eng.as_ref().unwrap();
-                                    let measured = line_depth.as_ref().zip(kept.as_ref()).and_then(|(depth, original)| depth.measure(original));
+                                    let measured = line_depth.as_ref().zip(kept.as_ref()).map(|(depth, original)| depth.measure(original)).transpose()?;
                                     let (rgba_image, edge_res) = prunr_core::outline_subject(
                                         subject, mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales),
                                     )?;
@@ -831,7 +832,10 @@ pub fn run_worker() -> ! {
                         progress.step(prunr_core::Step::DrawingLines);
                         let eng_ref = edge_eng.as_ref()
                             .ok_or_else(|| "edge engine not initialized in this subprocess".to_string())?;
-                        let measured = line_depth.as_ref().zip(kept.as_ref()).and_then(|(depth, original)| depth.measure(original));
+                        let measured = line_depth.as_ref().zip(kept.as_ref())
+                            .map(|(depth, original)| depth.measure(original))
+                            .transpose()
+                            .map_err(|e| e.to_string())?;
                         prunr_core::outline_subject(subject, cmd_mask.effect, &edge, measured.as_ref().map(Measured::fade), |img| spare.trace(eng_ref, img, traced_scales))
                             .map_err(|e| e.to_string())
                     })();
@@ -1005,13 +1009,12 @@ impl LineDepth {
         Self { measurer: prunr_core::depth::Measurer::lines_only(), amount: prunr_core::math::pct(fade_pct) }
     }
 
-    /// `photo`'s depth map; `None` (lines drawn unfaded) when the model
-    /// is missing or the run fails, which is logged.
-    fn measure(&self, photo: &image::DynamicImage) -> Option<Measured> {
+    /// `photo`'s depth map. A run that cannot measure it fails the image:
+    /// lines asked to fade are not drawn unfaded.
+    fn measure(&self, photo: &image::DynamicImage) -> Result<Measured, prunr_core::CoreError> {
         self.measurer.measure_decoded(photo)
-            .map_err(|err| tracing::warn!(%err, "worker: depth run failed; lines drawn without fading"))
-            .ok()
             .map(|map| Measured { map, amount: self.amount })
+            .map_err(|err| prunr_core::CoreError::Model(format!("depth failed: {}", err.message())))
     }
 }
 
@@ -1178,6 +1181,16 @@ mod tests {
         let fine = dir.path().join("result_2.raw");
         write_result(&fine, &rgba).unwrap();
         assert_eq!(std::fs::read(&fine).unwrap(), rgba.as_raw().as_slice());
+    }
+
+    /// Lines asked to fade with distance are not drawn unfaded when the
+    /// depth cannot be measured: the image fails.
+    #[test]
+    fn lines_that_cannot_fade_fail_their_image() {
+        let photo = image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 6));
+        let depth = LineDepth { measurer: prunr_core::depth::Measurer::unloadable_for_test(), amount: 0.6 };
+        let why = depth.measure(&photo).err().expect("no depth map, so no lines drawn unfaded");
+        assert!(why.to_string().contains("depth failed"), "{why}");
     }
 
     /// The cut the lines trace is the same whether the photo is kept for
