@@ -1834,9 +1834,13 @@ pub fn run_doctor(started_env: &[(&'static str, Option<std::ffi::OsString>)]) {
             println!("Runtime store:  {}", root.display());
             for (name, has_dylib) in &diag.store_entries {
                 use prunr_app::runtime_install::RuntimeId;
-                let addon_installed = RuntimeId::from_subdir(name).filter(|rt| rt.is_addon()).map(RuntimeId::is_installed);
+                let folder = match RuntimeId::addon_of_subdir(name) {
+                    Some((rt, true)) => StoreFolder::Addon { installed: rt.is_installed() },
+                    Some((_, false)) => StoreFolder::AddonOfAnotherVersion,
+                    None => StoreFolder::Runtime { has_library: *has_dylib },
+                };
                 let preferred = if diag.preferred.as_ref() == Some(name) { " (preferred)" } else { "" };
-                println!("  - {}{preferred}", store_entry(name, *has_dylib, addon_installed));
+                println!("  - {}{preferred}", store_entry(name, folder));
             }
         }
     }
@@ -1879,14 +1883,22 @@ fn section(title: &str) {
     println!("{}", "-".repeat(title.len()));
 }
 
-/// A Runtime Store folder in the report. An add-on (`addon_installed`)
-/// holds a provider plugin, not the runtime library, so it is checked for
-/// its plugin.
-fn store_entry(name: &str, has_runtime: bool, addon_installed: Option<bool>) -> String {
+/// What a Runtime Store folder is, with what the report checked it for.
+enum StoreFolder {
+    Runtime { has_library: bool },
+    /// It holds a provider plugin, not the runtime library.
+    Addon { installed: bool },
+    /// Left by another version of Prunr: this one loads only its own
+    /// version's add-on, so the folder is neither broken nor in use.
+    AddonOfAnotherVersion,
+}
+
+fn store_entry(name: &str, folder: StoreFolder) -> String {
     let mark = |ok: bool| if ok { "OK" } else { "MISSING" };
-    match addon_installed {
-        Some(ok) => format!("{name} [{}] (add-on)", mark(ok)),
-        None => format!("{name} [{}]", mark(has_runtime)),
+    match folder {
+        StoreFolder::Runtime { has_library } => format!("{name} [{}]", mark(has_library)),
+        StoreFolder::Addon { installed } => format!("{name} [{}] (add-on)", mark(installed)),
+        StoreFolder::AddonOfAnotherVersion => format!("{name} [NOT USED] (add-on of another version)"),
     }
 }
 
@@ -2300,24 +2312,17 @@ mod tests {
         assert!(writes(&["bench"]));
     }
 
-    /// An installed add-on has no runtime library of its own; the doctor
-    /// reads its plugin and does not call it missing.
+    /// An add-on's folder has no runtime library of its own: the doctor
+    /// reads this version's by its plugin, and another version's, which
+    /// this Prunr never loads, as not used rather than missing.
     #[test]
     fn the_doctor_reads_an_add_on_by_its_plugin() {
-        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", false, Some(true)), "openvino-addon-1.8.1-linux-x64 [OK] (add-on)");
-        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", false, Some(false)), "openvino-addon-1.8.1-linux-x64 [MISSING] (add-on)");
-        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", true, None), "openvino-1.24.1-linux-x64 [OK]");
-        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", false, None), "openvino-1.24.1-linux-x64 [MISSING]");
-    }
-
-    /// The doctor knows an add-on by its folder's name: every add-on this
-    /// platform offers is found as one from the folder it installs to.
-    #[test]
-    fn every_add_on_folder_is_known_as_an_add_on() {
-        use prunr_app::runtime_install::RuntimeId;
-        for rt in RuntimeId::addons() {
-            assert_eq!(RuntimeId::from_subdir(&rt.install_subdir()).filter(|found| found.is_addon()), Some(rt), "{}", rt.install_subdir());
-        }
+        use super::StoreFolder::{Addon, AddonOfAnotherVersion, Runtime};
+        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", Addon { installed: true }), "openvino-addon-1.8.1-linux-x64 [OK] (add-on)");
+        assert_eq!(super::store_entry("openvino-addon-1.8.1-linux-x64", Addon { installed: false }), "openvino-addon-1.8.1-linux-x64 [MISSING] (add-on)");
+        assert_eq!(super::store_entry("openvino-addon-0.0.1-linux-x64", AddonOfAnotherVersion), "openvino-addon-0.0.1-linux-x64 [NOT USED] (add-on of another version)");
+        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", Runtime { has_library: true }), "openvino-1.24.1-linux-x64 [OK]");
+        assert_eq!(super::store_entry("openvino-1.24.1-linux-x64", Runtime { has_library: false }), "openvino-1.24.1-linux-x64 [MISSING]");
     }
 
     /// A run that prints shows its own lines, not the session's start-up

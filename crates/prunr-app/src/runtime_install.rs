@@ -134,14 +134,28 @@ impl RuntimeId {
 
     pub fn install_subdir(self) -> String {
         match self.addon() {
-            Some(addon) => ri::install_subdir(&format!("{}-addon", self.short_name()), addon.version),
+            Some(addon) => ri::install_subdir(&self.addon_stem(), addon.version),
             None => ri::install_subdir(self.short_name(), self.ort_version()),
         }
+    }
+
+    /// Its add-on install's name up to the version, which a new add-on
+    /// version changes.
+    fn addon_stem(self) -> String {
+        format!("{}-addon", self.short_name())
     }
 
     /// The offered runtime installed under `subdir` of the runtime store.
     pub fn from_subdir(subdir: &str) -> Option<Self> {
         Self::OFFERED.iter().copied().find(|rt| rt.install_subdir() == subdir)
+    }
+
+    /// The add-on `subdir` of the runtime store is an install of, in any
+    /// version, and whether it is the version this Prunr loads.
+    pub fn addon_of_subdir(subdir: &str) -> Option<(Self, bool)> {
+        Self::addons()
+            .find(|rt| subdir.strip_prefix(rt.addon_stem().as_str()).is_some_and(|rest| rest.starts_with('-')))
+            .map(|rt| (rt, rt.install_subdir() == subdir))
     }
 
     pub fn install_dir(self) -> Option<PathBuf> {
@@ -1253,6 +1267,27 @@ mod tests {
         let mut replaced: Vec<String> = rt.superseded_in(store.path()).iter().map(|d| d.file_name().unwrap().to_string_lossy().into_owned()).collect();
         replaced.sort();
         assert_eq!(replaced, ["openvino-1.24.1-linux-x64", "openvino-addon-0.0.1-linux-x64"]);
+    }
+
+    /// An add-on's folder is known by its name in any version: a new add-on
+    /// version renames it, and the one an earlier Prunr left is still that
+    /// add-on's, only not the one this Prunr loads. The whole runtime the
+    /// add-on replaced is no add-on.
+    #[test]
+    fn an_add_on_folder_is_known_in_any_version() {
+        for rt in RuntimeId::addons() {
+            let current = rt.install_subdir();
+            let another = current.replace(rt.addon().expect("an add-on").version, "0.0.1");
+            assert_ne!(another, current);
+            assert_eq!(RuntimeId::addon_of_subdir(&current), Some((rt, true)), "{current}");
+            assert_eq!(RuntimeId::addon_of_subdir(&another), Some((rt, false)), "{another}");
+            let whole = ri::install_subdir(rt.short_name(), ri::PINNED_ORT_VERSION);
+            assert_eq!(RuntimeId::addon_of_subdir(&whole), None, "{whole}");
+        }
+        for &rt in RuntimeId::OFFERED.iter().filter(|rt| !rt.is_addon()) {
+            assert_eq!(RuntimeId::addon_of_subdir(&rt.install_subdir()), None, "{}", rt.install_subdir());
+        }
+        assert_eq!(RuntimeId::addon_of_subdir("onnxruntime-1.24.1-linux-x64"), None, "a store entry Prunr does not install");
     }
 
     /// An add-on's download leaves its library in the install, beside the
