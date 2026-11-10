@@ -2776,7 +2776,7 @@ mod tests {
         let args = ["-m", "none", "--effect", "desaturate"];
         let mut render = super::CliRender { settings: settings(&args), role: cli(&args).settings_model().role(), faces: None, depth: &depth, downscale: false, quiet: true };
         let lens = super::CliBackdrop::Effect(BgEffect::LensBlur { amount_pct: 50 }, &depth, false);
-        let why = render.render(&lens, &path, None, None).err().expect("saved without the background it asked for");
+        let why = render.render(&lens, &path, None, None).expect_err("saved without the background it asked for");
         assert!(why.contains("depth failed"), "{why}");
         let bw = super::CliBackdrop::Effect(BgEffect::DesaturatedSource, &depth, false);
         assert!(render.render(&bw, &path, None, None).is_ok(), "black and white reads no depth");
