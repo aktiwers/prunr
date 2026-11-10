@@ -835,11 +835,19 @@ impl Cli {
     }
 
     /// The log level for this process and the workers it starts, `None`
-    /// for the default. A run that prints logs only errors: its own lines
-    /// are its output, and the session-start and provider-ladder lines
-    /// would bury them.
+    /// for the default. A run that prints hides the session-start lines,
+    /// which would bury its own, and keeps the warnings: a failure's own
+    /// text and a run that went on another way than asked are said
+    /// nowhere else. `bench` logs errors only: its report carries every
+    /// provider failure the ladder warns about.
     pub fn log_level(&self) -> Option<&'static str> {
-        if self.debug { Some("prunr=debug") } else { self.writes_to_terminal().then_some("prunr=error") }
+        if self.debug {
+            Some("prunr=debug")
+        } else if matches!(self.command, Some(Command::Bench(_))) {
+            Some("prunr=error")
+        } else {
+            self.writes_to_terminal().then_some("prunr=warn")
+        }
     }
 
     /// Whether this run opens the window, where a failure to start has
@@ -2301,20 +2309,67 @@ mod tests {
         }
     }
 
-    /// A run that prints shows its own lines, not the log: only errors
-    /// unless `--debug`. The window keeps the default; a worker takes its
-    /// parent's level from the environment.
+    /// A run that prints shows its own lines, not the session's start-up
+    /// log; its warnings stay. `bench` alone logs errors only. The window
+    /// keeps the default; a worker takes its parent's level from the
+    /// environment.
     #[test]
-    fn a_printing_run_logs_only_errors() {
+    fn a_printing_run_hides_the_start_up_log_not_its_warnings() {
         let level = |args: &[&str]| super::Cli::parse_from(["prunr"].iter().chain(args)).log_level();
-        for printing in [&["photo.jpg"][..], &["--doctor"], &["--clear-ep-cache"], &["bench"]] {
-            assert_eq!(level(printing), Some("prunr=error"), "{printing:?}");
+        for printing in [&["photo.jpg"][..], &["-q", "photo.jpg"], &["--doctor"], &["--clear-ep-cache"]] {
+            assert_eq!(level(printing), Some("prunr=warn"), "{printing:?}");
         }
+        assert_eq!(level(&["bench"]), Some("prunr=error"), "its report carries the failures");
         assert_eq!(level(&["--debug", "photo.jpg"]), Some("prunr=debug"));
         assert_eq!(level(&["--debug"]), Some("prunr=debug"));
         assert_eq!(level(&[]), None, "the window");
         assert_eq!(level(&["--open", "photo.jpg"]), None, "the window with an image");
         assert_eq!(level(&["--worker"]), None, "a worker");
+    }
+
+    /// At the level a printing run names, the log keeps the text of a
+    /// failure the command line tells in plain words, and drops a
+    /// session-start line.
+    #[test]
+    fn a_printing_run_logs_a_failures_own_text_and_no_start_up_line() {
+        use std::sync::{Arc, Mutex, PoisonError};
+        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+        #[derive(Clone, Default)]
+        struct Log(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let raw = "Format error decoding Png: CRC error";
+        let photo = std::path::Path::new("photo.png");
+        for printing in [&["photo.png"][..], &["-q", "photo.png"], &["--upscale", "nomos", "photo.png"]] {
+            let level = super::Cli::parse_from(["prunr"].iter().chain(printing)).log_level().expect("a printing run names its level");
+            let log = Log::default();
+            let sink = log.clone();
+            let subscriber = tracing_subscriber::registry()
+                .with(EnvFilter::new(level))
+                .with(fmt::layer().with_ansi(false).with_writer(move || sink.clone()));
+            let shown = tracing::subscriber::with_default(subscriber, || {
+                tracing::info!("worker: init complete, sending Ready");
+                // tracing keeps a callsite's first answer, and another
+                // test's thread, with no subscriber, may have given it:
+                // ask again once this one is in place.
+                let _ = super::could_not(photo, "read", raw);
+                tracing::callsite::rebuild_interest_cache();
+                super::could_not(photo, "read", raw)
+            });
+            assert!(shown.ends_with(prunr_core::plain::Kind::Unreadable.sentence()), "{shown}");
+            let logged = String::from_utf8_lossy(&log.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned();
+            assert!(logged.contains(raw), "{printing:?} at {level}: the failure's own text is not logged: {logged:?}");
+            assert!(!logged.contains("init complete"), "{printing:?} at {level}: a start-up line is logged: {logged:?}");
+        }
     }
 
     /// A window run tells a failure to start in a dialog; a printing run

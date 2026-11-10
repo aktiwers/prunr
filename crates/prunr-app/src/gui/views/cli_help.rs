@@ -64,7 +64,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                             opt_row(ui, "--preset <name|file>", "Start from a preset; flags you give override it");
                             opt_row(ui, "--jobs, -j 4", "Process 4 images at once");
                             opt_row(ui, "--force, -f", "Overwrite existing files");
-                            opt_row(ui, "--quiet, -q", "Silent mode (errors only)");
+                            opt_row(ui, "--quiet, -q", "Silent mode (errors and warnings only)");
                             opt_row(ui, "--cpu", "Run every model on the CPU");
                         });
 
