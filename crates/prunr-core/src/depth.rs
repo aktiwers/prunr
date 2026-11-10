@@ -203,6 +203,13 @@ impl Measurer {
         Self { lines_only: true, ..Self::default() }
     }
 
+    /// A measurer whose depth model did not load: every photo fails to
+    /// measure, with no runtime and no model file read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn unloadable_for_test() -> Self {
+        Self { engine: OnceLock::from(None), ..Self::lines_only() }
+    }
+
     pub fn measure(&self, photo: &RgbaImage) -> Result<DepthMap, CoreError> {
         let map = estimate_depth(self.engine()?, photo, &Progress::none())?;
         Ok(self.with_focus(map, photo.dimensions(), |f| f.find(photo), |look| crate::subject::find_sure_subject(photo, look)))
