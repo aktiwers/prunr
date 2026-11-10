@@ -457,6 +457,11 @@ fn lay<T>(setting: &mut T, flag: Option<T>) {
     }
 }
 
+/// What a run that needed a depth map says when it could not be measured.
+fn depth_failed(e: CoreError) -> String {
+    format!("depth failed: {e}")
+}
+
 /// What goes behind each result, from `--bg-effect`, `--bg-image` and
 /// `--bg-color`.
 enum CliBackdrop<'a> {
@@ -470,8 +475,9 @@ enum CliBackdrop<'a> {
 
 impl CliBackdrop<'_> {
     /// Put the backdrop under `result`; an effect is made from the photo
-    /// at `photo_path`, `photo` when it is decoded already.
-    fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path, photo: Option<&image::RgbaImage>) {
+    /// at `photo_path`, `photo` when it is decoded already. Why not, when
+    /// the photo or the depth an effect needs cannot be had.
+    fn apply(&self, result: &mut image::RgbaImage, photo_path: &std::path::Path, photo: Option<&image::RgbaImage>) -> Result<(), String> {
         match self {
             CliBackdrop::Transparent => {}
             CliBackdrop::Color(c) => prunr_core::apply_background_color(result, *c),
@@ -482,22 +488,21 @@ impl CliBackdrop<'_> {
                     Some(photo) => photo,
                     // Read as the run read it: a photo the run shrank is the
                     // one its result was cut from.
-                    None => match read_for_run(photo_path, *downscale, true) {
-                        Ok(read) => {
-                            decoded = read.into_rgba8();
-                            &decoded
-                        }
-                        Err(err) => return tracing::warn!(path = %photo_path.display(), %err, "bg effect: photo unreadable"),
-                    },
+                    None => {
+                        decoded = read_for_run(photo_path, *downscale, true).map_err(|e| e.message())?.into_rgba8();
+                        &decoded
+                    }
                 };
                 let depth = effect.needs_depth()
-                    .then(|| depth.for_photo(photo_path, photo, None)
-                        .map_err(|err| tracing::warn!(path = %photo_path.display(), %err, "bg effect: depth"))
-                        .ok())
-                    .flatten();
-                prunr_core::apply_bg_effect(result, photo, *effect, depth.as_deref());
+                    .then(|| depth.for_photo(photo_path, photo, None))
+                    .transpose()
+                    .map_err(depth_failed)?;
+                if !prunr_core::apply_bg_effect(result, photo, *effect, depth.as_deref()) {
+                    return Err("the background effect made no picture".into());
+                }
             }
         }
+        Ok(())
     }
 
     /// An effect is made from the photo.
@@ -570,13 +575,13 @@ impl CliRender<'_> {
         let depth = self.settings.photo_reads_depth(self.role)
             .then(|| self.depth.for_photo(path, &photo, places.as_deref()))
             .transpose()
-            .map_err(|e| format!("depth failed: {e}"))?;
+            .map_err(depth_failed)?;
         let photo = std::sync::Arc::new(photo);
         // Kept only for an effect backdrop: a photo the render alone holds
         // is not copied for the faces or the effect.
         let kept = backdrop.reads_photo().then(|| std::sync::Arc::clone(&photo));
         let mut image = crate::gui::live_preview::ExportRender { photo, settings: self.settings, role: self.role, seg, edges, faces, depth }.render()?;
-        backdrop.apply(&mut image, path, kept.as_deref());
+        backdrop.apply(&mut image, path, kept.as_deref())?;
         Ok(image)
     }
 }
@@ -756,7 +761,7 @@ impl CliDepth {
             return Ok(kept);
         }
         let photo = prunr_core::load_image_from_path(input).map_err(|e| could_not(input, "read", e.message()))?;
-        let map = self.measurer.measure_decoded(&photo).map_err(|e| format!("depth failed: {e}"))?;
+        let map = self.measurer.measure_decoded(&photo).map_err(depth_failed)?;
         Ok((std::sync::Arc::new(map), (photo.width(), photo.height())))
     }
 }
@@ -1693,9 +1698,9 @@ fn run_batch_subprocess(
                                 }
                                 prunr_app::subprocess::ipc::read_result_rgba(&result_path, width, height)
                                     .ok_or_else(|| CoreError::Model("Failed to read subprocess result".into()))
-                                    .map(|mut rgba_image| {
-                                        finish.backdrop.apply(&mut rgba_image, input, None);
-                                        prunr_core::ProcessResult { rgba_image, active_provider: String::new() }
+                                    .and_then(|mut rgba_image| {
+                                        finish.backdrop.apply(&mut rgba_image, input, None).map_err(CoreError::Model)?;
+                                        Ok(prunr_core::ProcessResult { rgba_image, active_provider: String::new() })
                                     })
                             }
                         };
@@ -2734,8 +2739,8 @@ mod tests {
         let backdrop = super::CliBackdrop::Effect(prunr_core::BgEffect::BlurredSource { radius: 16 }, &depth, true);
         let mut from_file = image::RgbaImage::new(shrunk.width(), shrunk.height());
         let mut from_held = from_file.clone();
-        backdrop.apply(&mut from_file, &path, None);
-        backdrop.apply(&mut from_held, &path, Some(&shrunk));
+        backdrop.apply(&mut from_file, &path, None).expect("the backdrop is made");
+        backdrop.apply(&mut from_held, &path, Some(&shrunk)).expect("the backdrop is made");
         assert!(from_file == from_held, "the worker's background differs from the rendered run's");
     }
 
@@ -2747,10 +2752,42 @@ mod tests {
         let photo = dir.path().join("photo.png");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 50, 50, 255])).save(&photo).unwrap();
         let mut result = image::RgbaImage::from_fn(4, 4, |x, _| if x == 0 { image::Rgba([0, 0, 255, 255]) } else { image::Rgba([0, 0, 0, 0]) });
-        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default(), false).apply(&mut result, &photo, None);
+        super::CliBackdrop::Effect(prunr_core::BgEffect::DesaturatedSource, &super::CliDepth::default(), false).apply(&mut result, &photo, None).expect("the backdrop is made");
         assert_eq!(result.get_pixel(0, 0).0, [0, 0, 255, 255]);
         let p = result.get_pixel(3, 3).0;
         assert!(p[3] == 255 && p[0] == p[1] && p[1] == p[2], "grey photo behind: {p:?}");
+    }
+
+    /// A lens-blur background whose depth cannot be measured fails the
+    /// photo: saved without it, the result is not what was asked for. A
+    /// background that reads no depth needs none.
+    #[test]
+    fn a_lens_background_without_its_depth_fails_the_photo() {
+        use prunr_core::BgEffect;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("photo.png");
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([200, 50, 50, 255])).save(&path).expect("saved");
+        let depth = super::CliDepth { measurer: prunr_core::depth::Measurer::unloadable_for_test(), ..Default::default() };
+        let args = ["-m", "none", "--effect", "desaturate"];
+        let mut render = super::CliRender { settings: settings(&args), role: cli(&args).settings_model().role(), faces: None, depth: &depth, downscale: false, quiet: true };
+        let lens = super::CliBackdrop::Effect(BgEffect::LensBlur { amount_pct: 50 }, &depth, false);
+        let why = render.render(&lens, &path, None, None).err().expect("saved without the background it asked for");
+        assert!(why.contains("depth failed"), "{why}");
+        let bw = super::CliBackdrop::Effect(BgEffect::DesaturatedSource, &depth, false);
+        assert!(render.render(&bw, &path, None, None).is_ok(), "black and white reads no depth");
+    }
+
+    /// A background made from the photo fails its image when the photo
+    /// cannot be read again, whatever the effect.
+    #[test]
+    fn a_backdrop_whose_photo_cannot_be_read_fails_its_image() {
+        use prunr_core::BgEffect;
+        let depth = super::CliDepth::default();
+        let mut result = image::RgbaImage::new(4, 4);
+        for effect in [BgEffect::BlurredSource { radius: 12 }, BgEffect::DesaturatedSource, BgEffect::LensBlur { amount_pct: 50 }] {
+            let gone = super::CliBackdrop::Effect(effect, &depth, false).apply(&mut result, std::path::Path::new("/missing/photo.png"), None);
+            assert!(gone.is_err(), "{effect:?}");
+        }
     }
 
     #[test]
