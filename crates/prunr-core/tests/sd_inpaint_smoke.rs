@@ -13,8 +13,9 @@
 mod test_common;
 
 use image::{GrayImage, Rgba, RgbaImage};
+use prunr_core::engine::Skip;
 use prunr_core::inpaint_blend;
-use prunr_core::inpaint_sd::{self, SdInpaintRequest};
+use prunr_core::inpaint_sd::{self, SdInpaintRequest, SdRamFit};
 use test_common::{changed_in, rect_mask, skip_if_model_missing, skip_if_no_ort};
 
 #[test]
@@ -23,6 +24,7 @@ fn sd_inpaint_modifies_painted_region() {
     if skip_if_no_ort("sd_inpaint_smoke") { return; }
     let id = prunr_models::ModelId::SdV15InpaintFp16;
     if skip_if_model_missing("sd_inpaint_smoke", id) { return; }
+    if skip_if_no_gpu_provider("sd_inpaint_smoke", id) { return; }
 
     // 512×512 solid blue. Mask covers the centre 128×128 region.
     let w: u32 = 512;
@@ -37,8 +39,8 @@ fn sd_inpaint_modifies_painted_region() {
         ..Default::default()
     };
     let progress = prunr_core::Progress::none();
-    let run = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).map(|r| r.rgba);
-    let Some(result) = fill_or_skip("sd_inpaint_smoke", run) else { return; };
+    if skip_if_short_of_memory("sd_inpaint_smoke", id) { return; }
+    let result = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).expect("SD inpaint should succeed").rgba;
 
     assert_eq!(result.dimensions(), image.dimensions());
 
@@ -61,19 +63,73 @@ fn sd_inpaint_modifies_painted_region() {
     }
 }
 
-/// The run's fill, or `None` after a SKIP line when this machine can't run
-/// it: the pre-flight RAM gate refused the load, or no GPU provider is
-/// loaded (SD refuses the processor, whose output is wrong). The test
-/// skips like a missing bundle.
-fn fill_or_skip(label: &str, run: Result<RgbaImage, prunr_core::CoreError>) -> Option<RgbaImage> {
-    match run {
-        Ok(rgba) => Some(rgba),
-        Err(e) if ["of free memory to load", "requires GPU acceleration"].iter().any(|refusal| e.to_string().contains(refusal)) => {
-            eprintln!("[{label}] SKIP: {e}");
-            None
-        }
-        Err(e) => panic!("SD inpaint should succeed: {e}"),
+/// Whether a model that needs a GPU provider (`needs_gpu`: its output is
+/// wrong on the processor) finds none on `ladder` that would be tried:
+/// none is offered, or each is kept off by design. SD refuses that run.
+/// A provider that failed the bundle before is no skip: a build that
+/// broke must not pass as one the second time.
+fn none_would_be_tried(needs_gpu: bool, ladder: &[(&str, Option<Skip>)]) -> bool {
+    needs_gpu && ladder.iter().all(|(_, skip)| matches!(skip, Some(Skip::KeptOff(_))))
+}
+
+/// Returns `true` when SD would refuse `id` for want of a GPU provider,
+/// after printing a `[label] SKIP:` line.
+fn skip_if_no_gpu_provider(label: &str, id: prunr_models::ModelId) -> bool {
+    let ladder = prunr_core::engine::gpu_ladder(id);
+    let needs_gpu = id.sd_spec().is_some_and(|spec| !spec.cpu_output_correct);
+    if !none_would_be_tried(needs_gpu, &ladder) {
+        return false;
     }
+    eprintln!("[{label}] SKIP: {id:?} needs a GPU provider and none here would be tried: {ladder:?}");
+    true
+}
+
+/// What a load the memory gate judged `fit` is short of; `None` when it
+/// loads.
+fn short_of(fit: SdRamFit) -> Option<&'static str> {
+    match fit {
+        SdRamFit::Full | SdRamFit::NoTallCrop => None,
+        SdRamFit::Refused => Some("system memory"),
+        SdRamFit::CardFull => Some("the graphics card's memory"),
+    }
+}
+
+/// Returns `true` when the memory gate would refuse to load `id` now, at
+/// the headroom every run here keeps, after printing a `[label] SKIP:`
+/// line. Asked right before the first load: the run reads the memory
+/// again, and a refusal there fails the test.
+fn skip_if_short_of_memory(label: &str, id: prunr_models::ModelId) -> bool {
+    use prunr_core::memory;
+    let provider = memory::provider_for(id, false);
+    let Some(bundle) = memory::charge_on(id, provider) else { return false };
+    let Some(room) = memory::room_now(bundle, provider) else { return false };
+    let margin = inpaint_sd::SD_DEFAULT_MARGIN_MB;
+    let Some(short) = short_of(inpaint_sd::sd_ram_fit(id, room, margin, bundle)) else { return false };
+    eprintln!("[{label}] SKIP: {id:?} on {provider} is short of {short}: it takes {bundle:?} with {margin} MB kept spare, and {room:?} is free");
+    true
+}
+
+/// The no-GPU skip holds only where no provider would be tried: one that
+/// would be, or that failed the bundle before, runs the test.
+#[test]
+fn no_gpu_provider_skips_only_where_none_would_be_tried() {
+    const WHY: prunr_models::Why = prunr_models::Why::Fails("compiles a graph per input shape");
+    let kept_off = Some(Skip::KeptOff(WHY));
+    assert!(none_would_be_tried(true, &[]));
+    assert!(none_would_be_tried(true, &[("MIGraphX", kept_off)]));
+    assert!(!none_would_be_tried(true, &[("MIGraphX", kept_off), ("CUDA", None)]), "CUDA would be tried");
+    assert!(!none_would_be_tried(true, &[("CUDA", Some(Skip::FailedBefore))]), "it failed the bundle before");
+    assert!(!none_would_be_tried(false, &[]), "right on the processor, it runs there");
+}
+
+/// The memory skip holds for whatever the gate says is short, the
+/// graphics card's memory included; a load that fits runs.
+#[test]
+fn a_memory_refusal_skips_whatever_is_short() {
+    assert!(short_of(SdRamFit::Refused).is_some());
+    assert!(short_of(SdRamFit::CardFull).is_some());
+    assert!(short_of(SdRamFit::Full).is_none());
+    assert!(short_of(SdRamFit::NoTallCrop).is_none());
 }
 
 /// `PRUNR_SD_BENCH_MODEL=lcm` runs the LCM bundle and `=rorem` the RORem
@@ -102,6 +158,7 @@ fn sd_step_previews() {
     if skip_if_no_ort("sd_step_previews") { return; }
     let (id, default_steps, guidance, scheduler) = bench_model();
     if skip_if_model_missing("sd_step_previews", id) { return; }
+    if skip_if_no_gpu_provider("sd_step_previews", id) { return; }
     let steps = std::env::var("PRUNR_SD_BENCH_STEPS").ok().map_or(default_steps, |v| v.parse().expect("PRUNR_SD_BENCH_STEPS"));
     let (w, h) = (900u32, 700u32);
     let image = RgbaImage::from_fn(w, h, |x, y| {
@@ -123,8 +180,8 @@ fn sd_step_previews() {
     let fill = |progress: &prunr_core::Progress| inpaint_sd::process_inpaint_with(&image, &mask, id, req.clone(), progress).map(|f| f.rgba);
     const EDGE: u32 = 600;
     let sink = std::sync::Arc::new(RecordingSink::default());
-    let run = fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE));
-    let Some(previewed) = fill_or_skip("sd_step_previews", run) else { return; };
+    if skip_if_short_of_memory("sd_step_previews", id) { return; }
+    let previewed = fill(&prunr_core::Progress::new(sink.clone()).with_tile_previews(EDGE)).expect("the run with previews");
     let plain = fill(&prunr_core::Progress::none()).expect("the run without previews");
     let out_dir = std::env::var("PRUNR_SD_PREVIEW_OUT").ok();
     if let Some(dir) = &out_dir {
@@ -179,6 +236,7 @@ fn sd_soft_edge_follows_each_parts_band() {
     if skip_if_no_ort("sd_soft_edge") { return; }
     let (id, steps, guidance, scheduler) = bench_model();
     if skip_if_model_missing("sd_soft_edge", id) { return; }
+    if skip_if_no_gpu_provider("sd_soft_edge", id) { return; }
     let (w, h) = (1500u32, 700u32);
     let image = RgbaImage::from_fn(w, h, |x, y| {
         let stripe = if (x / 40 + y / 40) % 2 == 0 { 40 } else { 0 };
@@ -202,7 +260,8 @@ fn sd_soft_edge_follows_each_parts_band() {
         let req = SdInpaintRequest { soft_edge_px, soft_edge_band: band.map(std::sync::Arc::new), ..req.clone() };
         inpaint_sd::process_inpaint_with(&image, &mask, id, req, &prunr_core::Progress::none()).map(|f| f.rgba)
     };
-    let Some(narrow) = fill_or_skip("sd_soft_edge", fill(4.0, None)) else { return; };
+    if skip_if_short_of_memory("sd_soft_edge", id) { return; }
+    let narrow = fill(4.0, None).expect("a 4 px band");
     let wide = fill(24.0, None).expect("a 24 px band");
     let wide_again = fill(24.0, None).expect("a 24 px band again");
     let mixed = fill(24.0, Some(GrayImage::from_fn(w, h, |x, _| image::Luma([if x < w / 2 { 4 } else { 24 }])))).expect("a band per part");
@@ -245,11 +304,15 @@ fn sd_reloads_give_their_memory_back() {
     if skip_if_no_ort("sd_reloads") { return; }
     let (id, _, guidance, scheduler) = bench_model();
     if skip_if_model_missing("sd_reloads", id) { return; }
+    if skip_if_no_gpu_provider("sd_reloads", id) { return; }
     let (w, h) = (768u32, 768u32);
     let image = RgbaImage::from_fn(w, h, |x, y| Rgba([(x / 3 % 256) as u8, (y / 3 % 256) as u8, 128, 255]));
     let mask = rect_mask(w, h, 256, 256, 256, 256);
     let progress = prunr_core::Progress::none();
     let mut held_mb = Vec::new();
+    // Asked before the first load only: a refusal after it is what this
+    // test is for.
+    if skip_if_short_of_memory("sd_reloads", id) { return; }
     for seed in 0..5 {
         let req = SdInpaintRequest {
             num_inference_steps: 4,
@@ -259,11 +322,7 @@ fn sd_reloads_give_their_memory_back() {
             tuning: inpaint_sd::plan_tuning(false, inpaint_sd::SD_DEFAULT_MARGIN_MB),
             ..Default::default()
         };
-        let run = inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).map(|r| r.rgba);
-        // Only the first load may skip for a busy machine; a later refusal
-        // is what this test is for.
-        let filled = if seed == 0 { fill_or_skip("sd_reloads", run) } else { Some(run.unwrap_or_else(|e| panic!("fill {seed}: {e}"))) };
-        if filled.is_none() { return; }
+        inpaint_sd::process_inpaint_with(&image, &mask, id, req, &progress).unwrap_or_else(|e| panic!("fill {seed}: {e}"));
         held_mb.push(prunr_core::sysmem::process_rss_mb().expect("this process's memory"));
     }
     eprintln!("[sd_reloads] {id:?} process memory after each fill (MB): {held_mb:?}");
@@ -282,6 +341,7 @@ fn sd_bench() {
     if skip_if_no_ort("sd_bench") { return; }
     let (id, steps, guidance, scheduler) = bench_model();
     if skip_if_model_missing("sd_bench", id) { return; }
+    if skip_if_no_gpu_provider("sd_bench", id) { return; }
     // `PRUNR_SD_BENCH_IMAGE=a.png,b.png PRUNR_SD_BENCH_MASK=a_mask.png,b_mask.png`
     // run real photos with their painted regions (grown and blended as
     // the app does) instead of the synthetic pair.
@@ -334,6 +394,7 @@ fn sd_bench() {
     // `PRUNR_SD_BENCH_OUT=dir` saves each fill blended into its photo.
     let out_dir = std::env::var("PRUNR_SD_BENCH_OUT").ok();
     let progress = prunr_core::Progress::none();
+    if skip_if_short_of_memory("sd_bench", id) { return; }
     for (stem, image, mask) in &pairs {
         for &steps in &steps_list {
             for &seed in &seeds {
@@ -353,8 +414,7 @@ fn sd_bench() {
                         ..Default::default()
                     };
                     let started = std::time::Instant::now();
-                    let run = inpaint_sd::process_inpaint_with(image, mask, id, req, &progress).map(|r| r.rgba);
-                    let Some(result) = fill_or_skip("sd_bench", run) else { return; };
+                    let result = inpaint_sd::process_inpaint_with(image, mask, id, req, &progress).expect("SD inpaint should succeed").rgba;
                     assert_eq!(result.dimensions(), image.dimensions());
                     eprintln!("[sd_bench] {stem} steps={steps} seed={seed} fill={fill_scale} strength={strength} prompt={prompt:?} total {} ms", started.elapsed().as_millis());
                     if let Some(dir) = &out_dir {
