@@ -42,8 +42,8 @@ pub fn skip_if_model_missing(label: &str, id: prunr_models::ModelId) -> bool {
 }
 
 /// Returns `true` when one of `photos` isn't there, after printing a
-/// `[label] SKIP:` line. The photos in `tests/test_images` are not in git
-/// (see its README), so CI never has them.
+/// `[label] SKIP:` line. The photos in `tests/test_images` are not in git,
+/// so CI never has them.
 pub fn skip_if_photos_missing(label: &str, photos: &[&Path]) -> bool {
     let Some(missing) = photos.iter().find(|p| !p.exists()) else {
         return false;
