@@ -146,6 +146,32 @@ fn cli_help_text_succeeds() {
     assert!(stdout.contains("--lines"), "--help must list --lines");
 }
 
+/// The doctor's report lists the environment Prunr was started in: the
+/// log level and log file a run sets for itself are not the user's.
+#[test]
+fn the_doctor_lists_the_environment_it_was_started_in() {
+    let temp = tempdir().expect("tempdir");
+    let doctor = |args: &[&str], rust_log: Option<&str>| {
+        let mut cmd = Command::new(CLI_BIN);
+        cmd.args(args).env_remove("RUST_LOG").env_remove("PRUNR_DEBUG_LOG");
+        // `--debug` names its log file in the temp folder.
+        for var in ["TMPDIR", "TMP", "TEMP"] {
+            cmd.env(var, temp.path());
+        }
+        if let Some(level) = rust_log {
+            cmd.env("RUST_LOG", level);
+        }
+        let out = cmd.output().expect("spawn prunr binary");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for args in [&["--doctor"][..], &["--debug", "--doctor"]] {
+        let report = doctor(args, None);
+        assert!(report.contains("RUST_LOG: (unset)") && report.contains("PRUNR_DEBUG_LOG: (unset)"), "{args:?}:\n{report}");
+    }
+    assert!(doctor(&["--doctor"], Some("prunr=info")).contains("RUST_LOG: prunr=info"), "a level the user set is listed");
+}
+
 /// Run the CLI on several inputs, killed if it outlives `limit`: the exit
 /// code (`None`: it hung) and stderr.
 fn run_cli_batch(inputs: &[&std::path::Path], out_dir: &std::path::Path, extra: &[&str], limit: std::time::Duration) -> (Option<i32>, String) {
