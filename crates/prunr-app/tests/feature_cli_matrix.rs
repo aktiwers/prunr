@@ -153,6 +153,8 @@ fn run_cli_batch(inputs: &[&std::path::Path], out_dir: &std::path::Path, extra: 
         .args(inputs)
         .arg("-o").arg(out_dir).arg("-f")
         .args(extra)
+        // The run picks its own log level, whatever the shell holds.
+        .env_remove("RUST_LOG")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -194,6 +196,8 @@ fn cli_batch_goes_on_after_an_image_fails() {
         return;
     }
     assert_eq!(code, Some(2), "a partial failure, not a hang; stderr:\n{stderr}");
+    assert!(stderr.contains("a failure shown in plain words"), "the failure's own text is in the log; stderr:\n{stderr}");
+    assert!(!stderr.contains("INFO"), "the start-up log stays hidden; stderr:\n{stderr}");
     assert_output_decodes(&dir.path().join("input.prunr.png"), "the image after the failure");
 }
 

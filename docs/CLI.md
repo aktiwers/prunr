@@ -65,7 +65,7 @@ Silueta, BiRefNet-lite and TEED (lines) come with Prunr. Every other model the c
 | `[INPUTS]...` | The images to process |
 | `-o, --output <PATH>` | Where to save: a file for one image, a folder for several |
 | `-f, --force` | Overwrite results that are there already |
-| `-q, --quiet` | Print errors only |
+| `-q, --quiet` | Print only errors and warnings |
 | `-j, --jobs <N>` | Images processed at once. Default: as the app, half the processor cores, 2 on a graphics card, fewer when memory is short |
 | `--large-image <POLICY>` | Images over 8000 px on a side: `process` (default) keeps their size, and a photo too large for the free memory is refused; `downscale` shrinks them to 4096 px first |
 
