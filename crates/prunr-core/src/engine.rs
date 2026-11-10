@@ -1563,6 +1563,7 @@ impl OrtEngine {
         tracing::debug!(?model, intra_threads, cpu_only, "OrtEngine init");
         let id: prunr_models::ModelId = model.into();
         let mut failed = Vec::new();
+        let mut a_gpu_session_failed = false;
         for weights in [lighter_weights(id, cpu_only, eps), Some(Weights::Fp32)].into_iter().flatten() {
             let eps = if weights == Weights::Fp16 { Cow::Owned(fp16_eps(id, eps)) } else { Cow::Borrowed(eps) };
             if let Some(walk) = (!cpu_only).then(|| Walk::without_a_try(id, weights, &eps)).flatten() {
@@ -1582,12 +1583,17 @@ impl OrtEngine {
                 Err(e) if cpu_only && weights == Weights::Fp32 => return Err(e),
                 Err(e) => {
                     tracing::warn!(?model, ?weights, error = %e, "session failed — trying the next weights");
+                    a_gpu_session_failed = true;
                     failed.push(format!("{} weights: {e}", weights.label()));
                 }
             }
         }
         let mut engine = Self::build_with(model, intra_threads, &[], true, level)?;
-        tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (CPU fallback after GPU failure)");
+        if a_gpu_session_failed {
+            tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (CPU fallback after GPU failure)");
+        } else {
+            tracing::info!(?model, provider = %engine.pick.provider, "OrtEngine ready (on the CPU: no GPU provider to try)");
+        }
         engine.pick.put_first(failed);
         Ok(engine)
     }
