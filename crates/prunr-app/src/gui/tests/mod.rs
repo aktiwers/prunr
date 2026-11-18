@@ -10,5 +10,6 @@ mod catalog_tests;
 mod control_socket_tests;
 mod layout_tests;
 mod dialog_tests;
+mod explorer;
 mod rule_scan_tests;
 mod workspace_rule_tests;

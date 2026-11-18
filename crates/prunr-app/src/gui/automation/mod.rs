@@ -460,6 +460,22 @@ pub(crate) fn shown_part(ctx: &egui::Context, node: u64) -> Option<egui::Rect> {
     ctx.read_response(id).map(|r| r.interact_rect)
 }
 
+/// Where a press reaches control `node`: the middle of the part of it
+/// that shows, when no layer above its own (an open popover, a dialog)
+/// covers that point. `None` for a control a person cannot press now.
+#[cfg(test)]
+pub(crate) fn reachable_at(ctx: &egui::Context, node: u64) -> Option<egui::Pos2> {
+    // SAFETY: as in `shown_part`: a widget id egui handed AccessKit.
+    let id = (node != 0).then(|| unsafe { egui::Id::from_high_entropy_bits(node) })?;
+    let response = ctx.read_response(id)?;
+    let shown = response.interact_rect;
+    if !shown.is_positive() {
+        return None;
+    }
+    let at = shown.center();
+    (ctx.layer_id_at(at) == Some(response.layer_id)).then_some(at)
+}
+
 /// Serves queued requests and releases replies whose frames have run.
 /// Called once per frame from `logic`, after the keyboard.
 pub fn pump(app: &mut PrunrApp, ctx: &egui::Context) {
