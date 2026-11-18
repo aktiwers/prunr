@@ -834,9 +834,9 @@ mod tests {
     #[test]
     fn the_command_line_runs_a_showcase() {
         for model in [SettingsModel::BiRefNetLite, SettingsModel::U2net, SettingsModel::Silueta] {
-            let (item, _) = command_line_settings(Some("comic"), model, None).expect("Comic is built in");
+            let (item, _) = command_line_settings(Some("pencil sketch"), model, None).expect("Pencil Sketch is built in");
             assert_eq!(item.line_mode, prunr_core::LineMode::SubjectOutline, "{model:?}");
-            assert!((item.gamma - 1.3).abs() < 1e-6, "{model:?}");
+            assert!((item.gamma - 1.1).abs() < 1e-6, "{model:?}");
         }
     }
 

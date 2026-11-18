@@ -1,6 +1,42 @@
 {
   "format_version": 2,
   "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          10,
+          25,
+          35,
+          255
+        ],
+        "fill_style": {
+          "gradient_map": {
+            "stops": [
+              [
+                10,
+                25,
+                35
+              ],
+              [
+                25,
+                90,
+                110
+              ],
+              [
+                235,
+                145,
+                75
+              ],
+              [
+                255,
+                235,
+                200
+              ]
+            ]
+          }
+        }
+      }
+    },
     "DepthAnythingV2Small": {
       "item_settings": {
         "depth": {
@@ -14,6 +50,78 @@
     },
     "NoModel": {
       "item_settings": {
+        "fill_style": {
+          "gradient_map": {
+            "stops": [
+              [
+                10,
+                25,
+                35
+              ],
+              [
+                25,
+                90,
+                110
+              ],
+              [
+                235,
+                145,
+                75
+              ],
+              [
+                255,
+                235,
+                200
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          10,
+          25,
+          35,
+          255
+        ],
+        "fill_style": {
+          "gradient_map": {
+            "stops": [
+              [
+                10,
+                25,
+                35
+              ],
+              [
+                25,
+                90,
+                110
+              ],
+              [
+                235,
+                145,
+                75
+              ],
+              [
+                255,
+                235,
+                200
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          10,
+          25,
+          35,
+          255
+        ],
         "fill_style": {
           "gradient_map": {
             "stops": [
