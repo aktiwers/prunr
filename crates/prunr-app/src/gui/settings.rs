@@ -107,8 +107,10 @@ pub struct Settings {
     #[serde(default)]
     pub hotkeys: BTreeMap<String, Vec<String>>,
 
-    /// Keep the Stable Diffusion eraser resident between strokes (about
-    /// 16 GB) so each one after the first skips the session build.
+    /// Keep the Stable Diffusion eraser resident between strokes so each
+    /// one after the first skips the session build. What it holds depends
+    /// on the provider: about 3 GB of RAM and 7 GB of card memory on CUDA
+    /// (RTX 3060), 14 GB of RAM on OpenVINO's processor.
     #[serde(default)]
     pub keep_sd_loaded: bool,
 

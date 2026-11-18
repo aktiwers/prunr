@@ -39,7 +39,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - **Progress you can follow.** A capsule at the bottom of the canvas names each step for every model, counts tiles, steps, crops or images, and estimates the time left. A tile map over the image shows which tiles are done and which one is running. Magic Brush says "Loading Magic Brush" beside the cursor while it gets ready.
 - **Compiled-model cache** on CPU, CUDA and CoreML, so the second session with a model skips graph optimisation; Settings can clear it.
 - **Help menu** with the command-line reference and pipeline diagrams; `prunr --open <path>` starts the app with an image loaded.
-- **Keep the Stable Diffusion eraser loaded** (Settings › Performance): repeated erases skip the session build, at the cost of about 16 GB of RAM, until you quit.
+- **Keep the Stable Diffusion eraser loaded** (Settings › Performance): repeated erases skip the session build, at the cost of several GB of memory held until you quit.
 - **Screen-reader names.** Every control, icon buttons and sliders included, carries a readable name.
 - **Outline & Shadow** for cut-outs: a sticker outline (width, color, round corners that follow soft hair edges) and a Soft or Drop shadow (opacity, blur, distance), under the subject, in the preview, Save and drag-out. `--outline PX[:HEX]` and `--shadow soft|drop` on the command line.
 - **Try another** on the Stable Diffusion eraser's strip: fills the same region again from the image it started on, with a new seed. Undo brings the previous fill back.
