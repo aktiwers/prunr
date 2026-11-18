@@ -3021,7 +3021,7 @@ mod tests {
         ).expect("Cargo.toml must be readable");
         assert!(
             !toml.contains(r#"path = ".."#),
-            "prunr-models must remain a leaf crate with no workspace-internal path deps — see the project rules Layers table"
+            "prunr-models must remain a leaf crate with no workspace-internal path deps"
         );
     }
 
