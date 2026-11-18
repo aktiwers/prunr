@@ -553,11 +553,6 @@ impl Timeline {
         self.strokes_since_picture().filter(|h| h.latest_of(tool).is_some())
     }
 
-    /// Whether step `id` is the shown one and nothing is ahead of it.
-    pub(crate) fn is_newest_shown(&self, id: u64) -> bool {
-        self.current().id == id && !self.can_redo()
-    }
-
     /// Fill in the shown state as a job it started lands: no new step.
     pub(crate) fn current_mut(&mut self) -> &mut DocState {
         self.revision += 1;

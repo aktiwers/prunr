@@ -312,6 +312,31 @@ fn a_redraw_never_writes_into_a_step_its_stroke_did_not_make() {
     assert!(!undone.batch.selection_queue.any_pending(), "an undone stroke: nothing redrawn");
 }
 
+/// A slider still draws the latest stroke again after an undo left a
+/// step ahead to redo (an erase undone, say): the redraw is a step of
+/// its own that takes the undone one's place, as any change after an
+/// undo does, and the slider goes on filling that step in.
+#[test]
+fn a_slider_redraws_the_latest_stroke_with_a_step_left_to_redo() {
+    let (mut app, pick) = app_with_a_magic_pick();
+    app.batch.items[0].commit(StepKind::Adjust);
+    app.handle_undo(&egui::Context::default());
+    assert!(app.batch.items[0].timeline.can_redo(), "the undone step is there to redo");
+    assert_eq!(app.batch.items[0].selection_hash, Some(pick));
+    let steps = app.batch.items[0].timeline.undo_steps();
+
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
+    redraw_lands(&mut app);
+    let item = &app.batch.items[0];
+    assert_ne!(item.selection_hash, Some(pick), "the selection follows the slider");
+    assert!(!item.timeline.can_redo(), "the redraw takes the undone step's place");
+    assert_eq!(item.timeline.undo_steps(), steps + 1, "as a step of its own");
+
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.7);
+    redraw_lands(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "which the slider goes on filling in");
+}
+
 /// Each brush's sliders reach the strokes that brush drew: Last its
 /// latest one, even with the other brush's stroke after it, and All every
 /// one of its own; the other brush's strokes stay as drawn, also for

@@ -1495,9 +1495,13 @@ impl BatchItem {
     }
 
     /// The strokes' adjustment under way, while nothing else has happened
-    /// since: its step is the one shown and the newest.
+    /// since: its step is the one shown and, once it has landed there, the
+    /// newest. Until it lands it may begin with a step left to redo (after
+    /// an undo): its redraw is a step of its own, which takes that step's
+    /// place as any change after an undo does.
     pub(crate) fn adjustment(&mut self) -> Option<&mut StrokeAdjustment> {
-        if self.adjusting.as_ref().is_some_and(|a| !self.timeline.is_newest_shown(a.step)) {
+        let stale = |a: &StrokeAdjustment| self.timeline.current().id != a.step || (a.landed && self.timeline.can_redo());
+        if self.adjusting.as_ref().is_some_and(stale) {
             self.adjusting = None;
         }
         self.adjusting.as_mut()
