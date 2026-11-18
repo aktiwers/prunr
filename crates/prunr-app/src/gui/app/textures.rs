@@ -40,7 +40,7 @@ impl PrunrApp {
                 self.batch.items[idx].set_on_screen(true);
                 // A failed decode is tried again on each visit: memory may
                 // have been short, or the file has come back.
-                self.batch.items[idx].decode_failed = false;
+                self.batch.items[idx].read_again();
             }
             self.show_original = false;
         }

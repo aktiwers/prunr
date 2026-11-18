@@ -2095,6 +2095,14 @@ impl BatchItem {
         }
     }
 
+    /// The photo is about to be read again: a read that failed before no
+    /// longer says why the image shows nothing.
+    pub(crate) fn read_again(&mut self) {
+        if std::mem::take(&mut self.decode_failed) {
+            self.failure = None;
+        }
+    }
+
     /// The decoded source lands: the item holds its pixels (`true`), or
     /// shows why decoding failed.
     pub(crate) fn land_decode(&mut self, result: Result<Arc<image::RgbaImage>, String>) -> bool {
@@ -2414,6 +2422,11 @@ impl BatchItem {
         self.applied_preset = shown.applied_preset;
         self.preset_changes = shown.preset_changes;
         self.job = None;
+        // A run's failure was said when it failed; it is not the step
+        // moved to that failed. A photo that cannot be read still cannot.
+        if !self.decode_failed {
+            self.failure = None;
+        }
         self.tile_preview = None;
         self.reset_result_caches();
         if shown.result.is_none() {
@@ -4433,6 +4446,31 @@ mod tests {
         assert!(item.source_rgba.is_some() && !item.decode_pending);
         assert!(!item.land_decode(Err("bad file".into())));
         assert_eq!(item.status(), BatchStatus::Error("bad file".into()));
+    }
+
+    /// A failure belongs to the run or the read that failed, not to the
+    /// image for good. A re-run that failed over a kept result, then Undo
+    /// back to the photo: the photo is waiting, not failed. A read that
+    /// failed and worked when tried again: the image is fine.
+    #[test]
+    fn a_failure_does_not_outlive_what_failed() {
+        let mut item = fixture_item(1);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.commit(StepKind::Process);
+        item.fail("the model stopped".into());
+        assert_eq!(item.status(), BatchStatus::Done, "the result is kept");
+        item.undo_step().expect("back to the photo");
+        assert_eq!(item.status(), BatchStatus::Pending, "the photo never failed");
+        assert_eq!(item.error(), None);
+
+        let mut item = fixture_item(2);
+        item.dimensions = (2, 2);
+        assert!(!item.land_decode(Err("bad file".into())));
+        assert!(item.unreadable().is_some());
+        item.read_again();
+        assert!(item.land_decode(Ok(Arc::new(image::RgbaImage::new(2, 2)))));
+        assert_eq!(item.status(), BatchStatus::Pending, "read at the second try");
+        assert_eq!(item.error(), None);
     }
 
     /// A failed image's status shares its failure text: the readers that
