@@ -144,7 +144,7 @@ const SHOWCASES: &[(&str, &str)] = &[
 ];
 
 /// The showcases as presets, read once.
-fn showcases() -> &'static [(&'static str, Preset)] {
+pub(crate) fn showcases() -> &'static [(&'static str, Preset)] {
     static READ: std::sync::OnceLock<Vec<(&str, Preset)>> = std::sync::OnceLock::new();
     READ.get_or_init(|| {
         SHOWCASES

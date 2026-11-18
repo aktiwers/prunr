@@ -119,6 +119,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         AppState::Processing => render_processing_canvas(ui, app),
         AppState::Done => render_done(ui, app),
     };
+    app.zoom_state.shown_at = img_rect;
 
     if let Some(progress) = app.processor.dispatch_progress() {
         // A one-image run's tile map belongs over its own image; over

@@ -26,6 +26,9 @@ pub struct StateDump {
     pub toasts: Vec<String>,
     /// The window's size in points, filled in by the control socket.
     pub viewport: Option<[f32; 2]>,
+    /// Where the canvas shows the image, in points: left, top, right,
+    /// bottom. What `hold_at` aims a stroke by.
+    pub image_rect: Option<[f32; 4]>,
     pub settings: SettingsDump,
 }
 
@@ -90,6 +93,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         modals: app.open_modals(),
         toasts: app.toasts.shown(),
         viewport: None,
+        image_rect: app.zoom_state.shown_at.map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]),
         settings: SettingsDump {
             auto_process_on_import: app.settings.auto_process_on_import,
             parallel_jobs: app.settings.parallel_jobs,

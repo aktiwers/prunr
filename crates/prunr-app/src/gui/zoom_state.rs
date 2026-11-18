@@ -7,6 +7,9 @@ pub struct ZoomState {
     pub pending_actual_size: bool,
     /// The item shown and the size of its frame, as of the last frame.
     frame: Option<(u64, egui::Vec2)>,
+    /// Where the canvas drew the image on the last frame, on screen:
+    /// what a script aims a stroke by. `None` with no image on it.
+    pub shown_at: Option<egui::Rect>,
 }
 
 impl Default for ZoomState {
@@ -19,6 +22,7 @@ impl Default for ZoomState {
             pending_fit_zoom: false,
             pending_actual_size: false,
             frame: None,
+            shown_at: None,
         }
     }
 }

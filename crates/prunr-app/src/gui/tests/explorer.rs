@@ -1,13 +1,15 @@
-//! The sequence explorer: random sequences of what a person does (click a
-//! control, press a key, wait for work) on the real app through the test
-//! harness, a stand-in answering for the cut-out worker, and rules checked
-//! after every step. Ordinary tests start from a tidy window and do one
-//! thing; the bugs this looks for need a history (pick, process, undo,
-//! then a slider). A sequence that breaks a rule is cut down to the
-//! shortest that still does and printed as steps to paste into a test.
+//! The sequence explorer: random sequences of what a person does (press a
+//! control, drag a slider, paint a stroke, press a key, wait for work) on
+//! the real app through the test harness, a stand-in answering for the
+//! cut-out worker, and rules checked after every step. Ordinary tests
+//! start from a tidy window and do one thing; the bugs this looks for
+//! need a history (pick, process, undo, then a slider). A sequence that
+//! breaks a rule is cut down to the shortest that still does and printed
+//! as steps to paste into a test.
 //!
 //! Not picked yet, each for want of a stand-in for its engine: erasers,
-//! upscalers, Colorize, the brushes, Sketch, Faces and the depth looks.
+//! upscalers, Colorize, the Magic Brush, Sketch, Faces and the depth
+//! looks.
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -17,6 +19,8 @@ use egui_kittest::Harness;
 
 use super::harness::{harness, settle, tree};
 use crate::gui::app::PrunrApp;
+use crate::gui::item_settings::ItemSettings;
+use crate::gui::settings::SettingsModel;
 use crate::gui::views::shortcuts::Chord;
 use crate::gui::worker::{CompressedTensor, RawSegTensor, WorkerMessage, WorkerResult};
 
@@ -34,14 +38,23 @@ impl Rng {
     fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
     }
+
+    fn percent(&mut self) -> u8 {
+        self.below(101) as u8
+    }
 }
 
 /// One thing a person does. Replayed on a window where it does not apply
-/// (no such control, or it is greyed), it is skipped, so a shortened
-/// sequence stays a valid one.
+/// (no such control, it is greyed or covered, no brush in hand), it is
+/// skipped, so a shortened sequence stays a valid one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Click(String),
+    /// Press the slider named so at this percent of its width.
+    Slide(String, u8),
+    /// Drag over the image with the brush in hand, between two points
+    /// given in percent of the image's width and height.
+    Stroke([u8; 4]),
     Key(&'static str),
     /// The worker answers every run asked for, and the window settles.
     Work,
@@ -67,7 +80,6 @@ const LEFT_ALONE: &[(&str, &str)] = &[
     ("Upscale (", "no stand-in for the upscale engines yet"),
     ("Colorize (", "no stand-in for Colorize yet"),
     ("Magic Brush", "no stand-in for the Magic Brush's model yet"),
-    ("Paint Brush", "strokes are not drawn yet"),
     ("Sketch", "no stand-in for the lines model yet"),
     ("Faces", "no stand-in for the face models yet"),
     ("Depth", "no stand-in for the depth model yet"),
@@ -85,6 +97,12 @@ fn left_alone(name: &str) -> bool {
     LEFT_ALONE.iter().any(|(start, _)| name.starts_with(start))
 }
 
+/// Controls that end a scenario early (an image gone, a run stopped):
+/// picked one time in ten, so sequences grow a history first.
+fn ends_things(name: &str) -> bool {
+    ["Delete photo", "Remove", "Cancel"].iter().any(|start| name.starts_with(start))
+}
+
 /// The cut-out worker's stand-in: it holds the other ends of the
 /// processor's two channels and answers each run with a cut made by the
 /// real postprocess from a tensor of its own, so the app's own landing
@@ -96,7 +114,7 @@ struct StandIn {
 }
 
 impl StandIn {
-    /// A soft ellipse, the same for every run of an image this size.
+    /// A soft ellipse, the same for every run.
     fn tensor(model: prunr_core::ModelKind) -> RawSegTensor {
         const SIDE: u32 = 32;
         let data = (0..SIDE * SIDE)
@@ -158,13 +176,13 @@ fn photo(item: &crate::gui::item::BatchItem) -> Option<image::RgbaImage> {
 
 /// A small photo with something in it: a gradient under a bright disc.
 fn photo_png(seed: u8) -> Vec<u8> {
-    let (w, h) = (48u32, 32u32);
+    let (w, h) = (240u32, 160u32);
     let img = image::RgbaImage::from_fn(w, h, |x, y| {
         let (dx, dy) = (x as f32 - w as f32 / 2.0, y as f32 - h as f32 / 2.0);
-        if dx * dx + dy * dy < 90.0 {
+        if dx * dx + dy * dy < 2200.0 {
             image::Rgba([230, 60u8.wrapping_add(seed.wrapping_mul(40)), 50, 255])
         } else {
-            image::Rgba([(x * 5) as u8, (y * 7) as u8, 90u8.wrapping_add(seed.wrapping_mul(30)), 255])
+            image::Rgba([x as u8, (y as u8).wrapping_mul(3) / 2, 90u8.wrapping_add(seed.wrapping_mul(30)), 255])
         }
     });
     let mut bytes = Vec::new();
@@ -178,7 +196,8 @@ struct World {
 }
 
 impl World {
-    /// The window with two photos opened, the first on the canvas.
+    /// The window with two photos opened, the first on the canvas, and
+    /// the showcases in the preset list.
     fn new() -> Self {
         let mut h = harness();
         let (to_worker, asked) = mpsc::channel();
@@ -187,6 +206,9 @@ impl World {
             let app = h.state_mut();
             app.processor.worker_tx = to_worker;
             app.processor.worker_rx = from_worker;
+            for (name, preset) in crate::gui::presets_fs::showcases() {
+                app.settings.presets.insert((*name).to_string(), preset.clone());
+            }
             for id in [1u8, 2] {
                 app.add_to_batch(photo_png(id), format!("photo{id}.png"));
             }
@@ -201,17 +223,21 @@ impl World {
         self.h.state()
     }
 
+    fn busy(&self) -> bool {
+        crate::gui::automation::state::busy(self.app()) || self.app().batch.selection_queue.any_pending()
+    }
+
     /// Frames, the worker answering between them, until nothing is owed
     /// or the rounds run out. Whether it went quiet.
     fn quiet(&mut self) -> bool {
-        for _ in 0..200 {
+        for _ in 0..300 {
             self.worker.answer(self.h.state());
             self.h.step();
-            if !crate::gui::automation::state::busy(self.h.state()) && !self.h.state().batch.selection_queue.any_pending() {
+            if !self.busy() {
                 settle(&mut self.h);
                 self.worker.answer(self.h.state());
                 self.h.step();
-                if !crate::gui::automation::state::busy(self.h.state()) {
+                if !self.busy() {
                     return true;
                 }
             }
@@ -220,32 +246,42 @@ impl World {
         false
     }
 
-    /// The controls a person could click now: enabled, on top (nothing
-    /// covers them), and not left alone.
-    fn clickable(&self) -> Vec<String> {
-        let names: BTreeSet<String> = tree(&self.h)
+    /// The controls a person could press now, by name, with whether each
+    /// is a slider: enabled, on top (nothing covers them), not left alone.
+    fn offered(&self) -> Vec<(String, bool)> {
+        let offered: BTreeSet<(String, bool)> = tree(&self.h)
             .iter()
             .filter(|n| n.is_control() && !n.disabled && crate::gui::automation::reachable_at(&self.h.ctx, n.id).is_some())
-            .filter_map(|n| n.name.clone())
-            .filter(|name| !left_alone(name))
+            .filter_map(|n| Some((n.name.clone()?, n.role == accesskit::Role::Slider)))
+            .filter(|(name, _)| !left_alone(name))
             .collect();
-        names.into_iter().collect()
+        offered.into_iter().collect()
     }
 
     /// The control named `name` a person could press, the last of them:
-    /// where to press it, and how it reads (its role and whether it is on).
-    fn pressable(&self, name: &str) -> Option<(egui::Pos2, String, Option<bool>)> {
+    /// its place, where a press reaches it, and how it reads (its role
+    /// and whether it is on).
+    fn pressable(&self, name: &str) -> Option<Pressable> {
         tree(&self.h)
             .iter()
             .filter(|n| n.is_control() && !n.disabled && n.name.as_deref() == Some(name))
-            .filter_map(|n| crate::gui::automation::reachable_at(&self.h.ctx, n.id).map(|at| (at, format!("{:?}", n.role), n.toggled)))
+            .filter_map(|n| {
+                let at = crate::gui::automation::reachable_at(&self.h.ctx, n.id)?;
+                Some(Pressable { at, rect: n.rect?, role: format!("{:?}", n.role), on: n.toggled })
+            })
             .last()
     }
 
-    /// A pointer press and release at `at`, a frame each, as a mouse makes.
-    fn press(&mut self, at: egui::Pos2) {
-        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
-        for event in [egui::Event::PointerMoved(at), button(true), button(false)] {
+    /// A pointer press at `from`, a drag to `to` when it differs, and the
+    /// release, a frame each, as a mouse makes.
+    fn drag(&mut self, from: egui::Pos2, to: egui::Pos2) {
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        let mut events = vec![egui::Event::PointerMoved(from), button(from, true)];
+        if to != from {
+            events.extend((1..=4).map(|i| egui::Event::PointerMoved(from + (to - from) * (i as f32 / 4.0))));
+        }
+        events.push(button(to, false));
+        for event in events {
             self.h.input_mut().events.push(event);
             self.h.step();
         }
@@ -256,8 +292,24 @@ impl World {
     fn act(&mut self, action: &Action) -> bool {
         match action {
             Action::Click(name) => {
-                let Some((at, ..)) = self.pressable(name) else { return false };
-                self.press(at);
+                let Some(control) = self.pressable(name) else { return false };
+                self.drag(control.at, control.at);
+            }
+            Action::Slide(name, percent) => {
+                let Some(control) = self.pressable(name).filter(|c| c.role == "Slider") else { return false };
+                let [left, top, right, bottom] = control.rect;
+                let at = egui::pos2(left + (right - left) * f32::from(*percent) / 100.0, (top + bottom) / 2.0);
+                self.drag(at, at);
+            }
+            Action::Stroke([ax, ay, bx, by]) => {
+                let Some(image) = self.app().zoom_state.shown_at.filter(|_| self.app().active_tool().is_some()) else { return false };
+                let point = |x: u8, y: u8| image.min + egui::vec2(image.width() * f32::from(x) / 100.0, image.height() * f32::from(y) / 100.0);
+                let (from, to) = (point(*ax, *ay), point(*bx, *by));
+                // A press a panel covers lands on the panel, not the image.
+                if self.h.ctx.layer_id_at(from).is_some_and(|layer| layer.order != egui::Order::Background) {
+                    return false;
+                }
+                self.drag(from, to);
             }
             Action::Key(chord) => {
                 let chord = Chord::parse(chord).expect("a chord the app knows");
@@ -269,6 +321,34 @@ impl World {
             }
         }
         true
+    }
+
+    /// The brush in hand has strokes its sliders draw again, with
+    /// something to show for it: Last or All is on, it drew a stroke since
+    /// the picture last changed, and a selection covering part of the
+    /// image is on screen (one cleared since, or one a huge brush filled
+    /// the image with, shows no change of edge or size).
+    fn brush_reaches_strokes(&self) -> bool {
+        use crate::gui::brush_state::StrokeReach;
+        let app = self.app();
+        let (Some(tool), Some(item)) = (app.active_tool(), app.batch.selected_item()) else { return false };
+        let partly_selected = item.selection_mask.as_ref().is_some_and(|mask| {
+            let cells = mask.cells();
+            cells.contains(&0) && cells.iter().any(|&c| c != 0)
+        });
+        if !partly_selected {
+            return false;
+        }
+        match app.brush_state.reach {
+            StrokeReach::Next => false,
+            StrokeReach::Last => item.timeline.latest_stroke(tool).is_some(),
+            StrokeReach::All => item.timeline.strokes_of(tool).is_some(),
+        }
+    }
+
+    /// The value the slider named `name` shows, the last of that name.
+    fn slider_value(&self, name: &str) -> Option<String> {
+        tree(&self.h).iter().filter(|n| n.role == accesskit::Role::Slider && n.name.as_deref() == Some(name)).filter_map(|n| n.number.map(|v| format!("{v:.4}"))).last()
     }
 
     /// What the window shows and holds, as far as a person could tell:
@@ -295,12 +375,13 @@ impl World {
         let controls = tree(&self.h)
             .iter()
             .filter(|n| n.is_control())
-            .map(|n| format!("{:?}|{}|{:?}|{:?}", n.name, n.disabled, n.toggled, n.value))
+            .map(|n| format!("{:?}|{}|{:?}|{:?}|{:?}", n.name, n.disabled, n.toggled, n.value, n.number))
             .collect();
         Seen {
             model: format!("{:?}", app.settings.model),
             selected: app.batch.selected_id(),
             tool: format!("{:?}", app.active_tool()),
+            brush: format!("{:?}", app.settings.brush),
             modals: format!("{:?}", app.open_modals()),
             comparing: app.show_original,
             toasts_asked: app.toasts.asked_for_test(),
@@ -308,6 +389,13 @@ impl World {
             controls,
         }
     }
+}
+
+struct Pressable {
+    at: egui::Pos2,
+    rect: [f32; 4],
+    role: String,
+    on: Option<bool>,
 }
 
 fn pixels_hash(img: &image::RgbaImage) -> u64 {
@@ -336,6 +424,7 @@ struct Seen {
     model: String,
     selected: Option<u64>,
     tool: String,
+    brush: String,
     modals: String,
     /// Compare is on: the canvas shows the photo as opened.
     comparing: bool,
@@ -360,8 +449,12 @@ impl Seen {
     }
 }
 
-/// Why a click on `name` may change nothing here, when that is by design.
-/// `role` and `on`: how the control read before the click.
+/// The sliders of a brush's strip: with Last or All on they draw the
+/// brush's strokes again.
+const BRUSH_SLIDERS: [&str; 6] = ["Size", "Hardness", "Opacity", "Feather", "Confidence", "Range"];
+
+/// Why a press on `name` may change nothing here, when that is by design.
+/// `role` and `on`: how the control read before the press.
 fn quiet_by_design(name: &str, before: &Seen, role: &str, on: Option<bool>) -> Option<&'static str> {
     if before.images.iter().any(|i| before.selected == Some(i.id) && i.name == name) {
         return Some("the image is on the canvas already");
@@ -369,8 +462,8 @@ fn quiet_by_design(name: &str, before: &Seen, role: &str, on: Option<bool>) -> O
     if role == "RadioButton" && on == Some(true) {
         return Some("it is the choice already picked");
     }
-    if name == "Reset" {
-        return Some("nothing differs from the default preset");
+    if name == "Reset" || name == "Reset the brush" {
+        return Some("nothing differs from the preset");
     }
     None
 }
@@ -390,26 +483,46 @@ fn run(actions: &[Action]) -> Option<Broken> {
     let mut world = World::new();
     for action in actions {
         let before = world.seen();
-        let asked_before = pending_work(&world);
+        let busy_before = busy_images(&world);
         let pressed = match action {
             Action::Click(name) => world.pressable(name),
             _ => None,
         };
+        let (slider_before, world_before_reached) = match action {
+            Action::Slide(name, _) => (world.slider_value(name), world.brush_reaches_strokes()),
+            _ => (None, false),
+        };
         if !world.act(action) {
             continue;
         }
-        if let (Action::Click(name), Some((_, role, on))) = (action, pressed) {
+        if let (Action::Click(name), Some(control)) = (action, pressed) {
             let after = world.seen();
-            let nothing = after == before && pending_work(&world) == asked_before && !crate::gui::automation::state::busy(world.app());
-            if nothing && quiet_by_design(name, &before, &role, on).is_none() {
+            let nothing = after == before && busy_images(&world) == busy_before && !world.busy();
+            if nothing && quiet_by_design(name, &before, &control.role, control.on).is_none() {
                 return Some(Broken {
                     rule: "an enabled control does something",
                     what: name.clone(),
-                    detail: format!("clicking {name:?} (a {role}, on: {on:?}) changed nothing a person could see, started no work and said nothing"),
+                    detail: format!("pressing {name:?} (a {}, on: {:?}) changed nothing a person could see, started no work and said nothing", control.role, control.on),
                 });
             }
         }
-        if matches!(action, Action::Work) && crate::gui::automation::state::busy(world.app()) {
+        if let Action::Slide(name, _) = action {
+            let reaches = BRUSH_SLIDERS.contains(&name.as_str()) && world_before_reached;
+            let moved = slider_before.is_some() && world.slider_value(name) != slider_before;
+            if reaches && moved {
+                world.quiet();
+                let after = world.seen();
+                let shown = |seen: &Seen| seen.images.iter().find(|i| seen.selected == Some(i.id)).map(|i| (i.selection, i.result));
+                if shown(&after) == shown(&before) {
+                    return Some(Broken {
+                        rule: "a brush slider reaches its strokes",
+                        what: name.clone(),
+                        detail: format!("{name:?} moved from {slider_before:?} to {:?} with strokes of the brush in hand to draw again, and neither the selection nor the picture changed", world.slider_value(name)),
+                    });
+                }
+            }
+        }
+        if matches!(action, Action::Work) && world.busy() {
             let stuck: Vec<String> = world.app().batch.items.iter().filter(|i| i.is_busy()).map(|i| format!("image {} ({:?})", i.id, i.status())).collect();
             return Some(Broken { rule: "nothing stays stuck", what: "work".into(), detail: format!("still busy after the worker answered everything: {stuck:?}") });
         }
@@ -417,17 +530,71 @@ fn run(actions: &[Action]) -> Option<Broken> {
     if !world.quiet() {
         return Some(Broken { rule: "nothing stays stuck", what: "end".into(), detail: "the window never went quiet at the end".into() });
     }
-    undo_then_redo_gives_it_back(&mut world)
+    the_route_does_not_matter(&world).or_else(|| undo_then_redo_gives_it_back(&mut world))
 }
 
-/// Runs the worker has been asked for and not answered.
-fn pending_work(world: &World) -> usize {
+fn busy_images(world: &World) -> usize {
     world.app().batch.items.iter().filter(|i| i.is_busy()).count()
 }
 
-/// Every step of the image on the canvas undone, then redone: the
-/// document is as it was.
+/// The model whose cut the image shows, if it shows one.
+fn cut_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
+    use crate::gui::item::Cutter;
+    use prunr_core::ModelKind;
+    match item.timeline.current().origin.as_ref()?.cutter? {
+        Cutter::Model(ModelKind::BiRefNetLite) => Some(SettingsModel::BiRefNetLite),
+        Cutter::Model(ModelKind::Silueta) => Some(SettingsModel::Silueta),
+        Cutter::Model(ModelKind::U2net) => Some(SettingsModel::U2net),
+        _ => None,
+    }
+}
+
+/// A cut-out's picture comes from its photo, the model that cut it and
+/// its settings: the same three on a fresh window, processed once, give
+/// the same picture, whatever route led here. (A model picked since
+/// leaves the cut as it is until Process.) Images with strokes are left
+/// out: their route is part of what they are.
+fn the_route_does_not_matter(world: &World) -> Option<Broken> {
+    let app = world.app();
+    for item in &app.batch.items {
+        let plain_cut = item.shows_cutout() && item.selection_mask.is_none() && item.edits.is_none();
+        let Some(here) = item.result_rgba.as_deref().filter(|_| plain_cut).map(pixels_hash) else { continue };
+        let Some(model) = cut_by(item) else { continue };
+        let straight = straight_cut(model, item.settings, &item.filename)?;
+        if straight != here {
+            return Some(Broken {
+                rule: "the route does not matter",
+                what: "picture".into(),
+                detail: format!("{} under {model:?} shows another picture than the same settings give on a fresh window\n  settings: {:?}", item.filename, item.settings),
+            });
+        }
+    }
+    None
+}
+
+/// The picture `settings` give `name`'s photo under `model` on a fresh
+/// window, processed once.
+fn straight_cut(model: SettingsModel, settings: ItemSettings, name: &str) -> Option<u64> {
+    let mut fresh = World::new();
+    let id = {
+        let app = fresh.h.state_mut();
+        app.settings.model = model;
+        let idx = app.batch.items.iter().position(|i| i.filename == name)?;
+        app.batch.select_item(idx);
+        app.batch.items[idx].settings = settings;
+        app.batch.items[idx].id
+    };
+    fresh.quiet();
+    fresh.act(&Action::Click("Process".into()));
+    fresh.quiet();
+    fresh.app().batch.find_by_id(id)?.result_rgba.as_deref().map(pixels_hash)
+}
+
+/// Every step of the image on the canvas undone, then redone: that image
+/// is as it was. (Undo and redo reach every ticked image, each by its own
+/// history, so the others may differ.)
 fn undo_then_redo_gives_it_back(world: &mut World) -> Option<Broken> {
+    let shown = world.app().batch.selected_id()?;
     let before = world.seen();
     let steps = world.app().batch.selected_item().map_or(0, |i| i.timeline.undo_steps());
     for chord in ["Mod+Z", "Mod+Shift+Z"] {
@@ -437,10 +604,11 @@ fn undo_then_redo_gives_it_back(world: &mut World) -> Option<Broken> {
         }
     }
     let after = world.seen();
-    (after.document() != before.document()).then(|| Broken {
+    let page = |seen: &Seen| seen.document().into_iter().find(|p| p.id == shown).map(|p| format!("{p:?}"));
+    (page(&after) != page(&before)).then(|| Broken {
         rule: "undo then redo gives it back",
         what: "document".into(),
-        detail: format!("after {steps} undos and {steps} redos:\n  before: {:?}\n  after:  {:?}", before.document(), after.document()),
+        detail: format!("after {steps} undos and {steps} redos:\n  before: {:?}\n  after:  {:?}", page(&before), page(&after)),
     })
 }
 
@@ -449,6 +617,8 @@ fn undo_then_redo_gives_it_back(world: &mut World) -> Option<Broken> {
 struct Reached {
     pressed: BTreeSet<String>,
     presses: usize,
+    slides: usize,
+    strokes: usize,
     runs_answered: usize,
     most_undo_steps: usize,
     cut_outs: usize,
@@ -460,22 +630,27 @@ fn random_sequence(rng: &mut Rng, len: usize, reached: &mut Reached) -> Vec<Acti
     let mut world = World::new();
     let mut actions = Vec::with_capacity(len);
     for _ in 0..len {
-        let action = match rng.below(10) {
-            0 => Action::Key(KEYS[rng.below(KEYS.len())]),
-            1 | 2 => Action::Work,
-            _ => {
-                let offered = world.clickable();
-                if offered.is_empty() {
-                    Action::Work
-                } else {
-                    Action::Click(offered[rng.below(offered.len())].clone())
-                }
-            }
+        let offered = world.offered();
+        let sliders: Vec<&String> = offered.iter().filter(|(_, slider)| *slider).map(|(name, _)| name).collect();
+        let buttons: Vec<&String> = offered.iter().filter(|(name, slider)| !slider && (!ends_things(name) || rng.below(10) == 0)).map(|(name, _)| name).collect();
+        let brush_in_hand = world.app().active_tool().is_some();
+        let action = match rng.below(20) {
+            0 | 1 => Action::Key(KEYS[rng.below(KEYS.len())]),
+            2..=5 => Action::Work,
+            6..=8 if brush_in_hand => Action::Stroke([rng.percent(), rng.percent(), rng.percent(), rng.percent()]),
+            9..=11 if !sliders.is_empty() => Action::Slide(sliders[rng.below(sliders.len())].clone(), rng.percent()),
+            _ if !buttons.is_empty() => Action::Click(buttons[rng.below(buttons.len())].clone()),
+            _ => Action::Work,
         };
         if world.act(&action) {
-            if let Action::Click(name) = &action {
-                reached.pressed.insert(name.clone());
-                reached.presses += 1;
+            match &action {
+                Action::Click(name) => {
+                    reached.pressed.insert(name.clone());
+                    reached.presses += 1;
+                }
+                Action::Slide(..) => reached.slides += 1,
+                Action::Stroke(_) => reached.strokes += 1,
+                _ => {}
             }
         }
         actions.push(action);
@@ -533,9 +708,11 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
         found.push((short, broken));
     }
     eprintln!(
-        "\n[explorer] reached: {} presses on {} different controls, {} runs answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
+        "\n[explorer] reached: {} presses on {} different controls, {} slides, {} strokes, {} runs answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
         reached.presses,
         reached.pressed.len(),
+        reached.slides,
+        reached.strokes,
         reached.runs_answered,
         reached.cut_outs,
         reached.most_undo_steps,
@@ -553,12 +730,12 @@ fn a_few_sequences_hold_the_rules() {
 }
 
 /// The real run: `PRUNR_EXPLORE_SEQS` sequences (200) of
-/// `PRUNR_EXPLORE_LEN` actions (20) from `PRUNR_EXPLORE_SEED` (1).
+/// `PRUNR_EXPLORE_LEN` actions (30) from `PRUNR_EXPLORE_SEED` (1).
 /// `cargo test -p prunr-app --lib explorer -- --ignored --nocapture`
 #[test]
 #[ignore = "long: run by hand or nightly"]
 fn explore_many_sequences() {
-    let (seed, sequences, len) = (env_number("PRUNR_EXPLORE_SEED", 1), env_number("PRUNR_EXPLORE_SEQS", 200), env_number("PRUNR_EXPLORE_LEN", 20) as usize);
+    let (seed, sequences, len) = (env_number("PRUNR_EXPLORE_SEED", 1), env_number("PRUNR_EXPLORE_SEQS", 200), env_number("PRUNR_EXPLORE_LEN", 30) as usize);
     let found = explore(seed, sequences, len);
     eprintln!("\n[explorer] {sequences} sequences of {len} from seed {seed}: {} distinct failure(s)", found.len());
     assert!(found.is_empty(), "{} rule(s) broken; see the steps above", found.len());
