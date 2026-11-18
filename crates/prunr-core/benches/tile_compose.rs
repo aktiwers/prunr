@@ -36,8 +36,8 @@ pub fn bench(c: &mut Criterion) {
         group.sample_size(10); // 4K compose is multi-second per iter — keep run time bounded
         group.bench_function(label, |b| {
             b.iter(|| {
-                let out = tile_compose(black_box(&image), black_box(&mask), &prunr_core::Progress::none(), |tile_rgba, _tile_mask| {
-                    tile_rgba.clone()
+                let out = tile_compose(std::borrow::Cow::Borrowed(black_box(&image)), black_box(&mask), &prunr_core::Progress::none(), |tile_rgba, _tile_mask| {
+                    Ok(tile_rgba.clone())
                 })
                 .expect("tile_compose passthrough must not fail");
                 black_box(out);

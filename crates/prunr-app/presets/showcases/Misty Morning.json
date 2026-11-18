@@ -1,0 +1,16 @@
+{
+  "format_version": 2,
+  "models": {
+    "DepthAnythingV2Small": {
+      "item_settings": {
+        "depth": {
+          "aerial_pct": 40,
+          "blur": "off",
+          "blur_pct": 0,
+          "focus": null,
+          "fog_pct": 55
+        }
+      }
+    }
+  }
+}

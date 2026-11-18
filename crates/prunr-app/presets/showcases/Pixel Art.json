@@ -1,0 +1,32 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "fill_style": {
+          "pixelate": {
+            "block_size": 10
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "fill_style": {
+          "pixelate": {
+            "block_size": 10
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "fill_style": {
+          "pixelate": {
+            "block_size": 10
+          }
+        }
+      }
+    }
+  }
+}

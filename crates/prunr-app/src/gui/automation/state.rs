@@ -5,6 +5,7 @@
 use serde::Serialize;
 
 use crate::gui::app::PrunrApp;
+use crate::gui::brush_state::Tool;
 use crate::gui::item_settings::ItemSettings;
 
 #[derive(Debug, Serialize)]
@@ -21,6 +22,10 @@ pub struct StateDump {
     pub sidebar_hidden: bool,
     pub adjustments_hidden: bool,
     pub modals: Vec<&'static str>,
+    /// The captions of the toasts on screen.
+    pub toasts: Vec<String>,
+    /// The window's size in points, filled in by the control socket.
+    pub viewport: Option<[f32; 2]>,
     pub settings: SettingsDump,
 }
 
@@ -42,25 +47,26 @@ pub struct ItemDump {
 pub struct SettingsDump {
     pub auto_process_on_import: bool,
     pub parallel_jobs: usize,
-    pub live_preview: bool,
     pub keep_sd_loaded: bool,
+}
+
+/// Work still owed to the screen: what `wait_idle` waits out.
+pub fn busy(app: &PrunrApp) -> bool {
+    app.quiet_background_work().is_some() || app.processor.is_run_in_flight() || app.batch.items.iter().any(|it| it.is_busy())
 }
 
 pub fn dump(app: &PrunrApp) -> StateDump {
     StateDump {
         app_state: format!("{:?}", app.batch.app_state()),
         model: format!("{:?}", app.settings.model),
-        tool: if app.magic_brush_state.is_active() {
-            "magic_brush"
-        } else if app.brush_state.is_enabled() {
-            "paint_brush"
-        } else {
-            "none"
+        tool: match app.active_tool() {
+            Some(Tool::Magic) => "magic_brush",
+            Some(Tool::Paint) => "paint_brush",
+            None if app.picking_depth_focus => "set_focus",
+            None => "none",
         },
-        selected: app.batch.selected_item().map(|it| it.id),
-        busy: app.processor.live_preview.is_busy()
-            || app.processor.is_upscale_in_flight()
-            || app.batch.items.iter().any(|it| it.status == crate::gui::item::BatchStatus::Processing || it.has_pending_work()),
+        selected: app.batch.selected_id(),
+        busy: busy(app),
         items: app
             .batch
             .items
@@ -68,11 +74,11 @@ pub fn dump(app: &PrunrApp) -> StateDump {
             .map(|it| ItemDump {
                 id: it.id,
                 filename: it.filename.clone(),
-                status: format!("{:?}", it.status),
-                selected: it.selected,
+                status: format!("{:?}", it.status()),
+                selected: it.ticked,
                 dimensions: it.dimensions,
-                has_result: it.result_rgba.is_some(),
-                result_dims: it.result_rgba.as_ref().map(|r| r.dimensions()),
+                has_result: it.has_result(),
+                result_dims: it.result_pixels().and_then(|p| p.decoded_dims()),
                 has_selection: it.selection_mask.is_some(),
                 undo_steps: it.timeline.undo_steps(),
                 settings: it.settings,
@@ -82,10 +88,11 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         sidebar_hidden: app.sidebar_hidden,
         adjustments_hidden: app.adjustments_hidden,
         modals: app.open_modals(),
+        toasts: app.toasts.shown(),
+        viewport: None,
         settings: SettingsDump {
             auto_process_on_import: app.settings.auto_process_on_import,
             parallel_jobs: app.settings.parallel_jobs,
-            live_preview: app.settings.live_preview,
             keep_sd_loaded: app.settings.keep_sd_loaded,
         },
     }

@@ -1,18 +1,19 @@
-//! Selection actions — Delete / Copy / Cut / Invert / Clear — rendered as
+//! Selection actions — Delete / Copy / Cut / Invert / Clear, and Restore on a cut-out — rendered as
 //! icon buttons in the toolbar's tool cluster while a selection exists.
 //! Keyboard hints come from the shortcut table.
 
 use egui::Ui;
-use egui_material_icons::icons::{ICON_CLOSE, ICON_CONTENT_COPY, ICON_CONTENT_CUT, ICON_DELETE, ICON_FLIP};
+use egui_material_icons::icons::{ICON_CLOSE, ICON_CONTENT_COPY, ICON_CONTENT_CUT, ICON_DELETE, ICON_FLIP, ICON_SETTINGS_BACKUP_RESTORE};
 
 use super::chip::{icon_action_button, tooltip};
 use super::shortcuts::Action;
 use crate::gui::theme::{DESTRUCTIVE, TEXT_PRIMARY};
 
-/// What the action bar wants the app to do. Returned to the caller
-/// (PrunrApp) which holds the BatchManager + SystemBridge + history.
+/// What the action bar wants the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectionAction {
+    /// On a cut-out: bring the selected area back.
+    Restore,
     Delete,
     Copy,
     Cut,
@@ -20,45 +21,45 @@ pub(crate) enum SelectionAction {
     Clear,
 }
 
-/// Render the five actions. The caller lays them out right-to-left, so
-/// the list is in reverse visual order: Delete ends up leftmost.
-/// Returns `Some(action)` when one was clicked this frame.
-pub(crate) fn render_selection_actions(ui: &mut Ui) -> Option<SelectionAction> {
+impl SelectionAction {
+    pub(crate) const ALL: [Self; 6] = [Self::Restore, Self::Delete, Self::Copy, Self::Cut, Self::Invert, Self::Clear];
+}
+
+/// Why each action can't act now (`None`: it can), from the app's
+/// `selection_action_refusal`, so the buttons grey by the gate the click
+/// goes through.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SelectionGates([Option<&'static str>; 6]);
+
+impl SelectionGates {
+    pub(crate) fn of(refusal: impl Fn(SelectionAction) -> Option<&'static str>) -> Self {
+        Self(SelectionAction::ALL.map(refusal))
+    }
+
+    fn get(&self, action: SelectionAction) -> Option<&'static str> {
+        SelectionAction::ALL.iter().position(|&a| a == action).and_then(|i| self.0[i])
+    }
+}
+
+/// Render the actions; on a `cutout` Restore joins them. The caller lays
+/// them out right-to-left, so the list is in reverse visual order: Delete
+/// (and Restore) end up leftmost. Returns `Some(action)` when one was
+/// clicked this frame.
+pub(crate) fn render_selection_actions(ui: &mut Ui, cutout: bool, gates: SelectionGates) -> Option<SelectionAction> {
     let buttons = [
-        (SelectionAction::Clear, ICON_CLOSE.codepoint, "Clear selection", Action::Cancel, TEXT_PRIMARY),
-        (SelectionAction::Invert, ICON_FLIP.codepoint, "Invert selection", Action::Invert, TEXT_PRIMARY),
-        (SelectionAction::Cut, ICON_CONTENT_CUT.codepoint, "Cut selection", Action::Cut, TEXT_PRIMARY),
-        (SelectionAction::Copy, ICON_CONTENT_COPY.codepoint, "Copy selection", Action::Copy, TEXT_PRIMARY),
-        (SelectionAction::Delete, ICON_DELETE.codepoint, "Delete selection", Action::Delete, DESTRUCTIVE),
+        (SelectionAction::Clear, ICON_CLOSE.codepoint, "Clear selection", Some(Action::Cancel), TEXT_PRIMARY),
+        (SelectionAction::Invert, ICON_FLIP.codepoint, "Invert selection", Some(Action::Invert), TEXT_PRIMARY),
+        (SelectionAction::Cut, ICON_CONTENT_CUT.codepoint, "Cut selection", Some(Action::Cut), TEXT_PRIMARY),
+        (SelectionAction::Copy, ICON_CONTENT_COPY.codepoint, "Copy selection", Some(Action::Copy), TEXT_PRIMARY),
+        (SelectionAction::Delete, ICON_DELETE.codepoint, "Delete selection", Some(Action::Delete), DESTRUCTIVE),
     ];
+    let restore = (SelectionAction::Restore, ICON_SETTINGS_BACKUP_RESTORE.codepoint, "Restore selection", None, TEXT_PRIMARY);
     let mut chosen = None;
-    for (action, icon, label, shortcut, color) in buttons {
-        if tooltip(icon_action_button(ui, icon, color), label, "", Some(shortcut)).clicked() {
+    for (action, icon, label, shortcut, color) in buttons.into_iter().chain(cutout.then_some(restore)) {
+        let clicked = super::chip::gated(ui, gates.get(action), |ui| tooltip(icon_action_button(ui, icon, color), label, "", shortcut).clicked());
+        if clicked {
             chosen = Some(action);
         }
     }
     chosen
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selection_action_variants_are_distinct() {
-        let actions = [
-            SelectionAction::Delete,
-            SelectionAction::Copy,
-            SelectionAction::Cut,
-            SelectionAction::Invert,
-            SelectionAction::Clear,
-        ];
-        for i in 0..actions.len() {
-            for j in 0..actions.len() {
-                if i != j {
-                    assert_ne!(actions[i], actions[j]);
-                }
-            }
-        }
-    }
 }

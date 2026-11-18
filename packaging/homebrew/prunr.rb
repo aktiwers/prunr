@@ -11,8 +11,10 @@
 class Prunr < Formula
   desc "Local AI background removal — no cloud, no API keys"
   homepage "https://prunr.io"
-  version "0.4.4"
+  version "0.5.0"
   license "Apache-2.0"
+
+  depends_on macos: :sonoma
 
   on_macos do
     on_arm do
@@ -21,8 +23,11 @@ class Prunr < Formula
     end
   end
 
+  # prunr loads libonnxruntime.dylib from beside its real path, so both
+  # stay together in libexec and bin only holds a link.
   def install
-    bin.install "prunr"
+    libexec.install "prunr", "libonnxruntime.dylib"
+    bin.install_symlink libexec/"prunr"
   end
 
   test do

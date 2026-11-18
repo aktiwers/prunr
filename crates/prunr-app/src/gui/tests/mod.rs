@@ -1,11 +1,14 @@
 pub(crate) mod fixtures;
-mod state_tests;
+mod harness;
 mod input_tests;
 mod clipboard_tests;
-mod zoom_pan_tests;
 mod settings_tests;
-mod batch_tests;
 mod per_model_interpretation_tests;
 mod tree_tests;
 mod surface_tests;
+mod catalog_tests;
+mod control_socket_tests;
 mod layout_tests;
+mod dialog_tests;
+mod rule_scan_tests;
+mod workspace_rule_tests;

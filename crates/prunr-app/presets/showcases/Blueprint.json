@@ -1,0 +1,71 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg": [
+          18,
+          58,
+          138,
+          255
+        ],
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "NoModel": {
+      "item_settings": {
+        "bg": [
+          18,
+          58,
+          138,
+          255
+        ],
+        "line_mode": "EdgesOnly"
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg": [
+          18,
+          58,
+          138,
+          255
+        ],
+        "line_mode": "SubjectOutline"
+      }
+    },
+    "Teed": {
+      "item_settings": {
+        "edge_thickness": 1,
+        "input_transform": "smooth",
+        "line_fade_pct": 60,
+        "line_strength": 0.25,
+        "line_style": {
+          "dual_scale": {
+            "bold_color": [
+              255,
+              255,
+              255
+            ],
+            "fine_color": [
+              130,
+              185,
+              255
+            ]
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg": [
+          18,
+          58,
+          138,
+          255
+        ],
+        "line_mode": "SubjectOutline"
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 //! Microbench for the edge-shift kernel (erode / dilate by N pixels)
-//! behind the Edge shift knob and the Lines thickness. Runs on a 4K mask at
-//! the shifts the knob reaches.
+//! behind the Shift edge slider. Runs on a 4K mask at shifts up to the
+//! slider's 20 px, and at 50 px to show the cost stays flat.
 //!
 //! Run: `cargo bench -p prunr-core --bench edge_shift`.
 
@@ -26,7 +26,7 @@ pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("edge_shift_4K");
     group.throughput(Throughput::Elements((w * h) as u64));
     group.sample_size(10);
-    for shift in [1.0f32, 2.5, 10.0, 50.0, -50.0] {
+    for shift in [1.0f32, 2.5, 10.0, 20.0, 50.0, -50.0] {
         group.bench_function(format!("shift_{shift}"), |b| {
             b.iter_batched(
                 || mask.clone(),
