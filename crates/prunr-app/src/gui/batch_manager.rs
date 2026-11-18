@@ -929,7 +929,7 @@ impl BatchManager {
     /// Drop every image's Magic Brush embedding (16 MB each).
     pub fn clear_magic_embeddings(&mut self) {
         for item in &mut self.items {
-            super::reclaim::later(item.magic_brush_embedding.take());
+            item.drop_magic_embedding();
         }
     }
 

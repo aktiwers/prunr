@@ -1533,6 +1533,14 @@ impl BatchItem {
         }
     }
 
+    /// Let the embedding go (16 MB), and with it the note that an encode
+    /// ahead of the tool was refused: memory may be there next time.
+    pub(crate) fn drop_magic_embedding(&mut self) {
+        super::reclaim::later(self.magic_brush_embedding.take());
+        self.magic_embedding_saw = None;
+        self.magic_preencode_refused = false;
+    }
+
     /// The embedding of the picture picks read now.
     pub(crate) fn magic_embedding(&self) -> Option<&Arc<prunr_core::sam::SamEmbedding>> {
         self.magic_brush_embedding.as_ref().filter(|_| same_start(self.magic_embedding_saw.as_ref(), self.pick_start().as_ref()))
@@ -1897,7 +1905,7 @@ impl BatchItem {
         // 16 MB each: the shown image keeps its embedding, and with the
         // tool on so does the one shown before it.
         if !keep_embedding {
-            self.magic_brush_embedding = None;
+            self.drop_magic_embedding();
         }
         if self.park_result() {
             self.release_result_texture();
@@ -5113,6 +5121,183 @@ mod tests {
             item.undo_step().expect("a step back");
         }
         assert!(item.cached_edge_tensors.is_none(), "the photo's cut: the lines kept are the erased image's");
+    }
+
+    /// How a piece of an image's state stays right.
+    enum Keeper {
+        /// The image itself, or the user's own mark on it: nothing resets it.
+        Its,
+        /// Recorded in the shown step: undo and redo put it back.
+        Step,
+        /// Kept with what it was made from; a reader takes it only while
+        /// that still matches. The words name the key.
+        Keyed(&'static str),
+        /// Work under way: cleared when its answer lands, however it ends.
+        Awaits(&'static str),
+        /// Right only until one of these happens, each of which resets it;
+        /// `state_reset_by_events_is_reset_by_each` holds it to them.
+        Until(&'static [Event]),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Event {
+        Undo,
+        RunStarts,
+        /// Another image is shown, with nothing keeping this one's embedding.
+        LeavesScreen,
+        ShownAgain,
+    }
+
+    /// Every field of an image and what keeps it right. A new field does
+    /// not compile until it is listed: record it in the step when undo
+    /// should bring it back, keep it with what it was made from when it is
+    /// made from something, and only otherwise name the events that reset
+    /// it. That last kind is the one that goes stale when an event is
+    /// forgotten, so it also needs a row in
+    /// `state_reset_by_events_is_reset_by_each`.
+    fn keepers() -> Vec<(&'static str, Keeper)> {
+        macro_rules! keepers {
+            ($($field:ident: $keeper:expr,)*) => {{
+                let BatchItem { $($field: _),* } = fixture_item(0);
+                vec![$((stringify!($field), $keeper)),*]
+            }};
+        }
+        use Event::*;
+        use Keeper::*;
+        keepers! {
+            id: Its,
+            filename: Its,
+            source: Its,
+            source_len: Its,
+            dimensions: Its,
+            decode_slots: Its,
+            ticked: Its,
+            on_screen: Its,
+            timeline: Its,
+            settings: Step,
+            applied_preset: Step,
+            preset_changes: Step,
+            selection_mask: Step,
+            selection_hash: Step,
+            edits: Step,
+            result_rgba: Step,
+            applied_recipe: Step,
+            job: Keyed("its run's number and the timeline version it started on"),
+            saved: Keyed("the timeline revision that was saved"),
+            source_rgba: Keyed("the photo's file, which never changes"),
+            source_texture: Keyed("the photo's file, which never changes"),
+            thumb: Keyed("its build's number: only the latest asked for lands"),
+            start_photo: Keyed("the run start it was read from, checked when it is kept"),
+            result_texture: Keyed("result_tex_request"),
+            result_tex_request: Keyed("counts the results asked for"),
+            unreadable_result: Keyed("the stored image it names"),
+            warm_steps: Keyed("the stored images of the steps either side"),
+            found_faces: Keyed("the photo searched and the model"),
+            face_preview: Keyed("the photo searched and the model"),
+            faced_photo: Keyed("the faces and their blend"),
+            cached_tensor: Keyed("its model and cached_tensor_saw"),
+            cached_tensor_saw: Keyed("set with cached_tensor"),
+            upscale: Keyed("the run the shown step names"),
+            colorize: Keyed("the run the shown step names"),
+            cached_edge_tensors: Keyed("the cut they were traced on and cached_edges_saw"),
+            cached_edges_saw: Keyed("set with cached_edge_tensors"),
+            volatile_edge_tensor: Keyed("the kept lines it was unpacked from"),
+            volatile_seg_tensor: Keyed("the kept segmentation it was unpacked from"),
+            edge_planes: Keyed("the line settings and scale"),
+            cached_masked_base: Keyed("the mask recipe and model; dropped with the cut it was built over"),
+            kept_alpha: Keyed("the recipe and its inputs, held weakly"),
+            bg_image: Keyed("the picture hash in the settings"),
+            backdrop_texture: Keyed("the backdrop key"),
+            backdrop_thumb: Keyed("the effect, depth and result it was made of"),
+            lens_focus: Keyed("the depth map and focus it was measured from"),
+            backdrop_cut: Keyed("counts the cut-outs a backdrop follows"),
+            backdrop_made: Keyed("the backdrop key"),
+            correction_cache: Keyed("the selection and edits it was built from"),
+            selection_texture: Keyed("the selection's hash and style"),
+            magic_brush_embedding: Keyed("magic_embedding_saw, against the picture picks read"),
+            magic_embedding_saw: Keyed("set with magic_brush_embedding"),
+            adjusting: Keyed("the step it began on: a stale one is dropped when read"),
+            depth: Keyed("depth_saw, against the picture picks read"),
+            depth_saw: Keyed("set with depth"),
+            depth_photo: Keyed("the photo, the look and the map"),
+            quick_photo: Keyed("the image it was shrunk from"),
+            photo_look_for: Keyed("the faces, blend and step the look was asked for"),
+            source_tex_pending: Awaits("the photo's texture"),
+            result_tex_pending: Awaits("the result's texture"),
+            decode_pending: Awaits("the photo's decode"),
+            faces_pending: Awaits("the face search"),
+            backdrop_tex_pending: Awaits("the backdrop's texture"),
+            backdrop_thumb_pending: Awaits("the backdrop's thumbnail"),
+            selection_tex_pending: Awaits("the selection overlay"),
+            reveal: Awaits("the result's texture, then the reveal running out"),
+            failure: Until(&[Undo, RunStarts]),
+            decode_failed: Until(&[ShownAgain]),
+            quick: Until(&[Undo, LeavesScreen]),
+            photo_look: Until(&[LeavesScreen]),
+            subject: Until(&[Undo, RunStarts, LeavesScreen]),
+            tile_preview: Until(&[Undo, RunStarts]),
+            magic_preencode_refused: Until(&[LeavesScreen]),
+            depth_run: Until(&[ShownAgain]),
+        }
+    }
+
+    /// State that is right only until an event happens is reset by each
+    /// event it names: the bugs of an image that reads as failed after an
+    /// undo, or keeps a look from before, were a field of this kind and an
+    /// event that forgot it. Few fields are of this kind, and the count
+    /// only goes down: a new one is kept with what it was made from.
+    #[test]
+    fn state_reset_by_events_is_reset_by_each() {
+        type Dirty = fn(&mut BatchItem, &egui::Context);
+        type Clean = fn(&BatchItem) -> bool;
+        fn tex(ctx: &egui::Context) -> egui::TextureHandle {
+            ctx.load_texture("t", egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]), Default::default())
+        }
+        let rows: [(&str, Dirty, Clean); 8] = [
+            ("failure", |i, _| i.failure = Some("it failed".into()), |i| i.failure.is_none()),
+            ("decode_failed", |i, _| { i.land_decode(Err("unreadable".into())); }, |i| !i.decode_failed),
+            ("quick", |i, _| i.quick.expect(7), |i| !i.quick.wants(7)),
+            ("photo_look", |i, ctx| i.photo_look = Some(tex(ctx).into()), |i| i.photo_look.is_none()),
+            ("subject", |i, ctx| i.subject = Some(SubjectOutline { texture: tex(ctx), shown_at: std::time::Instant::now(), order: Arc::from([]) }), |i| i.subject.is_none()),
+            ("tile_preview", |i, ctx| i.tile_preview = Some(tex(ctx)), |i| i.tile_preview.is_none()),
+            ("magic_preencode_refused", |i, _| i.magic_preencode_refused = true, |i| !i.magic_preencode_refused),
+            ("depth_run", |i, _| i.depth_run.failed = true, |i| !i.depth_run.failed),
+        ];
+        let ctx = egui::Context::default();
+        let mut held = 0;
+        for (field, keeper) in keepers() {
+            let Keeper::Until(events) = keeper else { continue };
+            held += 1;
+            let (_, dirty, clean) = rows.iter().find(|(name, ..)| *name == field).unwrap_or_else(|| panic!("{field} is reset by events: give it a row here"));
+            for event in events {
+                // A processed image on screen, with a step to undo.
+                let mut item = fixture_item(1);
+                item.result_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+                item.commit(StepKind::Process);
+                item.set_on_screen(true);
+                dirty(&mut item, &ctx);
+                assert!(!clean(&item), "{field}: the row does not dirty it");
+                match event {
+                    Event::Undo => {
+                        item.undo_step().expect("a step to undo");
+                    }
+                    Event::RunStarts => item.start_job(Some(StepKind::Process), Engine::Segment),
+                    Event::LeavesScreen => item.leave_screen(false),
+                    Event::ShownAgain => item.read_again(),
+                }
+                assert!(clean(&item), "{field} is still set after {event:?}");
+            }
+        }
+        assert_eq!(held, rows.len(), "a row for a field that is no longer reset by events");
+        assert!(held <= 8, "{held} fields are kept right by resets alone: keep a new one with what it was made from");
+        let kinds = keepers().iter().fold([0usize; 4], |mut n, (field, k)| {
+            if let Keeper::Keyed(by) | Keeper::Awaits(by) = k {
+                assert!(!by.is_empty(), "{field}: say what it is kept with or waits for");
+            }
+            n[match k { Keeper::Its => 0, Keeper::Step => 1, Keeper::Keyed(_) => 2, Keeper::Awaits(_) | Keeper::Until(_) => 3 }] += 1;
+            n
+        });
+        assert!(kinds[2] > kinds[3], "most of what is kept beside the step is kept with its key: {kinds:?}");
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
