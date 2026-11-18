@@ -392,6 +392,17 @@ pub(super) fn named(resp: Response, name: &str) -> Response {
     resp
 }
 
+/// Mark `resp` as one of a set of choices, `picked` or not, in the
+/// accessibility tree: a selectable button's own node says neither, so a
+/// screen reader and a script could not tell which choice is in force.
+pub(super) fn choice(resp: Response, picked: bool) -> Response {
+    resp.ctx.accesskit_node_builder(resp.id, |node| {
+        node.set_role(accesskit::Role::RadioButton);
+        node.set_toggled(if picked { accesskit::Toggled::True } else { accesskit::Toggled::False });
+    });
+    resp
+}
+
 /// `named` for a name built per widget (from a file or model name):
 /// built only while the accessibility tree is being read.
 pub(super) fn named_with(resp: Response, name: impl FnOnce() -> String) -> Response {
@@ -1489,6 +1500,7 @@ fn choice_pills<T: Copy + PartialEq>(ui: &mut Ui, options: &[Choice<T>], icons: 
                             if opt.description.is_empty() { resp } else { resp.on_hover_text(opt.description) }
                         }
                     };
+                    let resp = choice(resp, selected);
                     if resp.clicked() && !selected {
                         *value = opt.value;
                         changed = true;

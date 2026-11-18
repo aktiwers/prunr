@@ -559,3 +559,20 @@ fn a_store_card_tests_its_own_model() {
     click(&mut h, "Cancel the test of U2Net");
     assert!(h.state().machine_test.is_none(), "Cancel ends it");
 }
+
+/// A set of choices says which of them is picked: each reads as a radio
+/// button, the picked one on. Without it a screen reader and a script see
+/// only buttons, and a press on the picked one looks like a dead control.
+#[test]
+fn a_choice_says_which_is_picked() {
+    let mut h = loaded();
+    click(&mut h, "Paint Brush");
+    let read = |h: &egui_kittest::Harness<'_, crate::gui::app::PrunrApp>, name: &str| {
+        tree(h).iter().find(|n| n.name.as_deref() == Some(name)).map(|n| (n.role, n.toggled))
+    };
+    assert_eq!(read(&h, "Restore"), Some((accesskit::Role::RadioButton, Some(true))), "the brush's own choice to begin with");
+    assert_eq!(read(&h, "Erase"), Some((accesskit::Role::RadioButton, Some(false))));
+    click(&mut h, "Erase");
+    assert_eq!(read(&h, "Erase").and_then(|(_, on)| on), Some(true));
+    assert_eq!(read(&h, "Restore").and_then(|(_, on)| on), Some(false));
+}
