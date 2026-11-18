@@ -72,8 +72,7 @@ impl PrunrApp {
         for &id in ids {
             self.cancel_runs_on(id);
         }
-        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.batch.items).into_iter().partition(|item| ids.contains(&item.id));
-        self.batch.items = kept;
+        let removed = self.batch.remove(ids);
         let count = removed.len();
         crate::gui::reclaim::later(removed);
         self.sync_after_batch_change();

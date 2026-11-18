@@ -285,6 +285,17 @@ impl BatchManager {
         true
     }
 
+    /// Take the items `ids` out, keeping the same item selected; when it is
+    /// among them, the one that moves into its row is.
+    pub(crate) fn remove(&mut self, ids: &[u64]) -> Vec<BatchItem> {
+        let above = self.items.iter().take(self.selected_index).filter(|item| ids.contains(&item.id)).count();
+        let (removed, kept) = std::mem::take(&mut self.items).into_iter().partition(|item| ids.contains(&item.id));
+        self.items = kept;
+        self.selected_index -= above;
+        self.clamp_selected_index();
+        removed
+    }
+
     /// Move the item at `from` to `to` (`items.len()` appends), keeping the
     /// same item selected.
     pub(crate) fn reorder(&mut self, from: usize, to: usize) {
@@ -1820,6 +1831,30 @@ mod tests {
             bm.reorder(from, to);
             assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), order, "{from} -> {to}");
             assert_eq!(bm.selected_index, now_selected, "{from} -> {to}");
+        }
+    }
+
+    /// Taking rows out keeps the same image shown, whichever rows went;
+    /// when the shown one goes, the row that moves into its place is, or
+    /// the last when it was the last.
+    #[test]
+    fn removing_rows_keeps_the_shown_image_shown() {
+        let rows: [(usize, &[u64], &[u64], Option<u64>); 6] = [
+            (1, &[10], &[20, 30, 40], Some(20)),
+            (2, &[10, 20], &[30, 40], Some(30)),
+            (1, &[30, 40], &[10, 20], Some(20)),
+            (1, &[20], &[10, 30, 40], Some(30)),
+            (3, &[40], &[10, 20, 30], Some(30)),
+            (2, &[10, 20, 30, 40], &[], None),
+        ];
+        for (selected, gone, left, shown) in rows {
+            let mut bm = fixture();
+            for id in [10, 20, 30, 40] { bm.items.push(item_with_cache(id, 0)); }
+            bm.selected_index = selected;
+            let removed = bm.remove(gone);
+            assert_eq!(removed.iter().map(|i| i.id).collect::<Vec<_>>(), gone, "what came out");
+            assert_eq!(bm.items.iter().map(|i| i.id).collect::<Vec<_>>(), left, "removing {gone:?}");
+            assert_eq!(bm.selected_id(), shown, "showing row {selected}, removing {gone:?}");
         }
     }
     // ── selection lifecycle ─────────────────────────────────────────────
