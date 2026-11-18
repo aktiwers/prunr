@@ -412,7 +412,7 @@ fn render_page_performance(ui: &mut egui::Ui, settings: &mut Settings, sd_instal
     }
     group_heading(ui, "Stable Diffusion eraser");
     group(ui, |rows| {
-        rows.row("Keep it loaded", "Faster repeated erases. Holds about 16 GB of RAM while the app is open.", |ui| {
+        rows.row("Keep it loaded", "Faster repeated erases. Keeps several GB of memory in use while the app is open.", |ui| {
             super::chip::switch(ui, "Keep the Stable Diffusion eraser loaded", &mut settings.keep_sd_loaded);
         });
         rows.row("Memory guard", "How much memory to leave free for other apps while it runs.", |ui| {
