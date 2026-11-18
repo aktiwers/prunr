@@ -30,10 +30,14 @@ impl Default for ZoomState {
 impl ZoomState {
     /// Note the frame `item` is shown in. When the same item's frame
     /// changes size (a 4× result lands), the zoom follows so the image
-    /// keeps its place on screen.
+    /// keeps its place on screen. Another item starts afresh, whatever
+    /// brought it (picked, or moved into a removed image's row): the zoom
+    /// and pan were set on the image before.
     pub fn follow_frame(&mut self, item: u64, size: egui::Vec2) {
         if let Some((shown, before)) = self.frame {
-            if shown == item && before != size && size.x > 0.0 {
+            if shown != item {
+                self.reset();
+            } else if before != size && size.x > 0.0 {
                 self.zoom *= before.x / size.x;
                 // A zoom to toggle back to belonged to the old size.
                 self.previous_zoom = 1.0;
@@ -104,9 +108,8 @@ mod tests {
         assert_eq!(z.pan_offset, egui::vec2(12.0, -4.0), "the image stays where it was");
         assert_eq!(z.previous_zoom, 1.0, "Fit to window then fits the new size rather than toggling back");
 
-        let before = z.zoom;
         z.follow_frame(2, source);
-        assert_eq!(z.zoom, before, "another image is not rescaled here");
+        assert!(z.pending_fit_zoom && z.pan_offset == egui::Vec2::ZERO, "another image starts afresh, whatever brought it");
     }
 
     /// Fit to window and Actual size each go back to the zoom before when
