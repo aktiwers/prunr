@@ -962,6 +962,12 @@ impl PrunrApp {
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
             item.abandon_job();
         }
+        // Counts held for the end of every batch end here when this was
+        // the last: the next batch's end tells only its own.
+        if !self.batch.any_awaiting_asked_cut() {
+            self.processor.take_untold();
+            self.processor.take_failed_reruns();
+        }
     }
 
     fn on_subprocess_retry(&mut self, reduced_jobs: usize, re_queued_count: usize) {
@@ -2684,6 +2690,39 @@ mod timeline_contract_tests {
             assert_eq!(app.toasts.last_for_test(), Some((level, text.as_str())), "{what}");
             assert_eq!(app.status.text, text, "{what}");
         }
+    }
+
+    /// A batch that ends while another still runs holds its count for the
+    /// end of them all. When that end is a Cancel, the count goes with it:
+    /// the next batch said "All done" for the cancelled one's images too.
+    #[test]
+    fn a_cancelled_batch_takes_the_held_count_with_it() {
+        use crate::gui::worker::WorkerMessage;
+        let ctx = egui::Context::default();
+        let cut = || Ok(prunr_core::ProcessResult { rgba_image: (*px(5)).clone(), active_provider: String::new() });
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        for id in 1..=3 {
+            push_test_item(&mut app, id).dimensions = (4, 4);
+        }
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        let mut start = |app: &mut PrunrApp, id: u64| {
+            app.process_items(|i| i.id == id, Some(StepKind::Process));
+            let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("image {id}: a batch is sent") };
+            batch
+        };
+        let (first, second) = (start(&mut app, 1), start(&mut app, 2));
+        app.on_batch_item_done(&ctx, first, 1, cut(), None, None);
+        app.on_batch_complete(first);
+        assert_eq!(app.toasts.asked_for_test(), 0, "held: the second still runs");
+        app.on_cancelled(second);
+
+        let third = start(&mut app, 3);
+        app.on_batch_item_done(&ctx, third, 3, cut(), None, None);
+        app.on_batch_complete(third);
+        assert_eq!(app.toasts.last_for_test(), Some(("success", "All done \u{2014} 1 image processed")));
     }
 
     /// A result for a state the image has since left (a knob change while
