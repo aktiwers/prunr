@@ -744,6 +744,17 @@ impl PrunrApp {
         self.admission_release_and_admit(item_id);
     }
 
+    /// A re-run that failed on an image still showing a result leaves it
+    /// Done: the user hears it failed rather than nothing. (With nothing
+    /// to show, the image itself reads as failed.)
+    fn tell_failed_rerun(&mut self, item_id: u64, err: &str) {
+        let Some(item) = self.batch.find_by_id(item_id).filter(|item| item.has_result()) else { return };
+        let name = item.filename.clone();
+        tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
+        self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
+        self.processor.note_failed_rerun();
+    }
+
     fn land_cut(
         &mut self,
         ctx: &egui::Context,
@@ -801,14 +812,10 @@ impl PrunrApp {
             item.reveal = None;
             item.subject = None;
         }
-        // A re-run that failed on an image still showing a result leaves it
-        // Done; the user hears it failed rather than nothing.
-        if let Some(err) = failure.filter(|_| item.has_result()) {
-            let name = item.filename.clone();
-            tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
-            self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
-            self.processor.note_failed_rerun();
+        if let Some(err) = failure {
+            self.tell_failed_rerun(item_id, &err);
         }
+        let Some(item) = self.batch.find_by_id(item_id) else { return CutLanding::Untold };
         let landing = match item.error() {
             Some(why) => CutLanding::Failed(why.to_owned()),
             None if succeeded => CutLanding::Landed,
@@ -1030,7 +1037,10 @@ impl PrunrApp {
                         item.finish_job();
                     }
                 }
-                Err(msg) => item.fail(msg),
+                Err(msg) => {
+                    item.fail(msg.clone());
+                    self.tell_failed_rerun(item_id, &msg);
+                }
             }
             filter_only_arrived = true;
         }
@@ -1829,6 +1839,26 @@ mod timeline_contract_tests {
         assert!(item.result_tex_pending);
         assert_eq!(item.status(), BatchStatus::Done);
         assert!(item.job.is_none(), "the step is recorded");
+    }
+
+    /// A No model pass that fails over a result the image keeps says so, as
+    /// a failed re-cut does: the image went on showing its last result
+    /// with no word that the new look was not made.
+    #[test]
+    fn a_failed_filters_pass_over_a_kept_result_says_so() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::None);
+        let item = &mut app.batch.items[0];
+        item.start_job(Some(StepKind::Process), Engine::Segment);
+        let run = item.job_run().expect("a run");
+        app.batch.bg_io.filter_only.tx.send((1, run, Err("the file is gone".into()), None)).unwrap();
+        app.drain_background_channels(&ctx);
+        let item = &app.batch.items[0];
+        assert_eq!(item.status(), BatchStatus::Done, "it keeps its result");
+        assert!(item.job.is_none());
+        let (level, text) = app.toasts.last_for_test().expect("told");
+        assert_eq!(level, "warning");
+        assert!(text.contains("could not be processed again"), "{text}");
     }
 
     /// A result that lands on an image not on screen is kept by its step
