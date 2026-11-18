@@ -2708,7 +2708,7 @@ mod timeline_contract_tests {
         app.batch.select_item(0);
         let (tx, rx) = std::sync::mpsc::channel();
         app.processor.worker_tx = tx;
-        let mut start = |app: &mut PrunrApp, id: u64| {
+        let start = |app: &mut PrunrApp, id: u64| {
             app.process_items(|i| i.id == id, Some(StepKind::Process));
             let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("image {id}: a batch is sent") };
             batch

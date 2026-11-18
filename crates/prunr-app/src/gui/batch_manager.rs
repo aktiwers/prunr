@@ -1839,7 +1839,9 @@ mod tests {
     /// the last when it was the last.
     #[test]
     fn removing_rows_keeps_the_shown_image_shown() {
-        let rows: [(usize, &[u64], &[u64], Option<u64>); 6] = [
+        // The row shown, the ids removed, the ids left, the id shown after.
+        type Row = (usize, &'static [u64], &'static [u64], Option<u64>);
+        let rows: [Row; 6] = [
             (1, &[10], &[20, 30, 40], Some(20)),
             (2, &[10, 20], &[30, 40], Some(30)),
             (1, &[30, 40], &[10, 20], Some(20)),
