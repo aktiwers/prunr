@@ -4,7 +4,6 @@
 //! end-to-end CLI timing would hide under noise.
 //!
 //! Run: `cargo bench -p prunr-core --bench guided_filter`.
-//! Reference numbers in `ARCHITECTURE.md` § Postprocess fast paths.
 //!
 //! NOT in CI: per-runner wall-clock variance produces false positives
 //! cheaper to ignore than to investigate.

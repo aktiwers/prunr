@@ -71,8 +71,7 @@ tempfile = { workspace = true }
 # criterion: microbench harness for the perf-sensitive kernels in this
 # crate. Benches are run manually (`cargo bench -p prunr-core`); CI
 # does not invoke them — runner noise + wall-clock variance would
-# produce false regressions. Reference numbers committed inline in
-# ARCHITECTURE.md under "Postprocess fast paths".
+# produce false regressions.
 criterion = { version = "0.5", default-features = false }
 
 [[bench]]
