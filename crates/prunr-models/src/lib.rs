@@ -1092,18 +1092,13 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "Eraser (MI-GAN)",
         description: "A light eraser (~25 MB). Sharper than LaMa on detailed regions; less smooth on flat backgrounds.",
         category: ModelCategory::Inpaint,
-        source: ModelSource::OnDemand {
-            filename: "migan-1.0.0.onnx",
-            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/migan-1.0.0.onnx",
-            sha256: "17531b1604e56ff3179a22824c19debf12741dadc551b4500b035bcb216b58ba",
-            size_mb: 26,
+        source: ModelSource::Bundled {
             license: LicenseInfo {
                 author: "Picsart AI Research",
                 license: "MIT",
                 license_url: "https://opensource.org/license/mit",
                 source_url: "https://github.com/Picsart-AI-Research/MI-GAN",
             },
-            fp16: None,
         },
         version: "1.0.0",
         gpu: GpuRequirement::None,
@@ -1386,23 +1381,15 @@ pub const REGISTRY: &[ModelDescriptor] = &[
         display_name: "Real-ESRGAN x4plus",
         description: "General-purpose 4\u{00d7} upscaler. Strong on photos and illustrations.",
         category: ModelCategory::Upscale,
-        source: ModelSource::OnDemand {
-            filename: "RealESRGAN_x4plus.onnx",
-            url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus.onnx",
-            sha256: "fb070c21d1e90102859d52328586a8738ebd4b2b076fe611ef42ba4f58076431",
-            size_mb: 64,
+        // Its FP16 copy is built in too (`bundled_fp16_bytes`): graphics
+        // cards run it, as they run a downloaded model's companion.
+        source: ModelSource::Bundled {
             license: LicenseInfo {
                 author: "Xintao Wang",
                 license: "BSD-3-Clause",
                 license_url: "https://opensource.org/licenses/BSD-3-Clause",
                 source_url: "https://github.com/xinntao/Real-ESRGAN",
             },
-            fp16: Some(OnDemandVariant {
-                filename: "RealESRGAN_x4plus_fp16.onnx",
-                url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus_fp16.onnx",
-                sha256: "838e4fad9a14a70e96c1953a08da2a0638c23b1dffc5b740351f0bc525b36250",
-                size_mb: 33,
-            }),
         },
         version: "1.0.0",
         gpu: GpuRequirement::Recommended,
@@ -2277,14 +2264,14 @@ fn bundled_bytes(id: ModelId) -> Arc<Vec<u8>> {
         ModelId::BiRefNetLite => birefnet_lite_bytes(),
         ModelId::Teed => teed_bytes(),
         ModelId::YuNet => yunet_bytes(),
+        ModelId::Migan => migan_bytes(),
+        ModelId::RealEsrganX4Plus => realesrgan_x4plus_bytes(),
         ModelId::U2net
         | ModelId::LaMaFp32
         | ModelId::BigLaMa
-        | ModelId::Migan
         | ModelId::SdV15InpaintFp16
         | ModelId::SdV15LcmInpaintFp16
         | ModelId::TaesdFp16
-        | ModelId::RealEsrganX4Plus
         | ModelId::Nomos8kSchatL
         | ModelId::RealEsrganX2Plus
         | ModelId::FourXNmkdSiaxCx
@@ -2378,6 +2365,17 @@ bundled_model!(silueta_bytes, "silueta.onnx", 50 * 1024 * 1024, "silueta model")
 bundled_model!(birefnet_lite_bytes, "birefnet_lite.onnx", 250 * 1024 * 1024, "birefnet-lite model");
 bundled_model!(teed_bytes, "teed.onnx", 1024 * 1024, "TEED model");
 bundled_model!(yunet_bytes, "face_detection_yunet_2026may.onnx", 1024 * 1024, "YuNet model");
+bundled_model!(migan_bytes, "migan.onnx", 40 * 1024 * 1024, "MI-GAN model");
+bundled_model!(realesrgan_x4plus_bytes, "RealESRGAN_x4plus.onnx", 80 * 1024 * 1024, "Real-ESRGAN x4plus model");
+bundled_model!(realesrgan_x4plus_fp16_bytes, "RealESRGAN_x4plus_fp16.onnx", 48 * 1024 * 1024, "Real-ESRGAN x4plus FP16 copy");
+
+/// The FP16 copy built in beside a bundled model, if it has one.
+fn bundled_fp16_bytes(id: ModelId) -> Option<fn() -> Arc<Vec<u8>>> {
+    match id {
+        ModelId::RealEsrganX4Plus => Some(realesrgan_x4plus_fp16_bytes),
+        _ => None,
+    }
+}
 bundled_model!(sam2_encoder_bytes, "sam2.1_hiera_small.encoder.onnx", 200 * 1024 * 1024, "SAM 2 encoder");
 bundled_model!(sam2_decoder_bytes, "sam2.1_hiera_small.decoder.onnx", 32 * 1024 * 1024, "SAM 2 decoder");
 
@@ -2398,8 +2396,8 @@ fn bundled_multipart_bytes(id: ModelId, part_key: &'static str) -> Arc<Vec<u8>> 
 // `None` when the variant isn't on disk or the model has none; the caller
 // falls back to FP32.
 
-pub fn model_fp16_bytes(id: ModelId) -> Option<Vec<u8>> {
-    load_variant(id, "fp16")
+pub fn model_fp16_bytes(id: ModelId) -> Option<Arc<Vec<u8>>> {
+    bundled_fp16_bytes(id).map(|bytes| bytes()).or_else(|| load_variant(id, "fp16").map(Arc::new))
 }
 
 pub fn model_int8_bytes(id: ModelId) -> Option<Vec<u8>> {
@@ -2439,7 +2437,7 @@ pub fn half_precision_copies() -> impl Iterator<Item = (ModelId, HalfPrecisionCo
 
 /// Whether the half-precision copy of `id` is on disk, without reading it.
 pub fn has_fp16_variant(id: ModelId) -> bool {
-    variant_path(id, "fp16").is_some()
+    bundled_fp16_bytes(id).is_some() || variant_path(id, "fp16").is_some()
 }
 
 /// `id` downloads a half-precision companion (`OnDemand`'s `fp16`) that
@@ -2463,12 +2461,11 @@ fn variant_path(id: ModelId, suffix: &str) -> Option<std::path::PathBuf> {
     // under the release artifact's name, the main file's stem.
     let name = match id {
         ModelId::Silueta | ModelId::U2net | ModelId::BiRefNetLite => id.stable_name(),
-        ModelId::RealEsrganX4Plus
-        | ModelId::RealEsrganX2Plus
-        | ModelId::FourXNmkdSiaxCx
-        | ModelId::FourXNmkdSuperscale => on_demand_stem(id)?,
+        ModelId::RealEsrganX2Plus | ModelId::FourXNmkdSiaxCx | ModelId::FourXNmkdSuperscale => on_demand_stem(id)?,
+        // Real-ESRGAN x4's FP16 copy is built in (`bundled_fp16_bytes`);
         // Nomos8k's published .onnx is already fp16.
-        ModelId::Nomos8kSchatL
+        ModelId::RealEsrganX4Plus
+        | ModelId::Nomos8kSchatL
         | ModelId::FourXNomos2RealPlksr
         | ModelId::Teed
         | ModelId::LaMaFp32
@@ -2833,14 +2830,13 @@ mod tests {
         // dev path / on_demand_dir / exe-adjacent dir, so asserting None
         // here would be machine-dependent):
         //   Silueta, U2net, BiRefNetLite — seg fp16/int8 dev artifacts
-        //   RealEsrganX4Plus, RealEsrganX2Plus, FourXNmkdSiaxCx,
-        //   FourXNmkdSuperscale — RRDB upscale fp16 siblings
+        //   RealEsrganX2Plus, FourXNmkdSiaxCx, FourXNmkdSuperscale —
+        //   RRDB upscale fp16 siblings
         let resolves_to_filename_stem = |id| matches!(
             id,
             ModelId::Silueta
                 | ModelId::U2net
                 | ModelId::BiRefNetLite
-                | ModelId::RealEsrganX4Plus
                 | ModelId::RealEsrganX2Plus
                 | ModelId::FourXNmkdSiaxCx
                 | ModelId::FourXNmkdSuperscale,
@@ -2849,7 +2845,7 @@ mod tests {
             if resolves_to_filename_stem(id) {
                 continue;
             }
-            assert!(model_fp16_bytes(id).is_none(), "{id:?} fp16");
+            assert!(load_variant(id, "fp16").is_none(), "{id:?} fp16");
             assert!(model_int8_bytes(id).is_none(), "{id:?} int8");
         }
     }
@@ -3212,11 +3208,11 @@ mod tests {
 
     #[test]
     fn rrdb_upscale_models_carry_fp16_companion() {
-        // All four RRDB upscale entries must declare an fp16 sibling.
+        // The downloaded RRDB upscale entries must declare an fp16
+        // sibling; Real-ESRGAN x4 carries its copy built in (below).
         // Nomos8k's main file IS fp16 (no sibling needed) — that's
         // covered separately.
         for id in [
-            ModelId::RealEsrganX4Plus,
             ModelId::RealEsrganX2Plus,
             ModelId::FourXNmkdSiaxCx,
             ModelId::FourXNmkdSuperscale,
@@ -3259,7 +3255,6 @@ mod tests {
     #[test]
     fn rrdb_fp16_lookup_name_is_the_downloaded_companion() {
         for id in [
-            ModelId::RealEsrganX4Plus,
             ModelId::RealEsrganX2Plus,
             ModelId::FourXNmkdSiaxCx,
             ModelId::FourXNmkdSuperscale,
@@ -3270,6 +3265,25 @@ mod tests {
             let stem = on_demand_stem(id).expect("filename ends in .onnx");
             assert_eq!(format!("{stem}_fp16.onnx"), variant.filename, "{id:?}");
         }
+    }
+
+    /// Built in, Real-ESRGAN x4 keeps the FP16 copy graphics cards run, so
+    /// it upscales as a downloaded install does, with nothing to fetch.
+    #[test]
+    fn real_esrgan_x4_is_built_in_with_its_fp16_copy() {
+        let id = ModelId::RealEsrganX4Plus;
+        assert!(descriptor(id).is_some_and(|d| d.source.is_bundled()));
+        assert!(has_fp16_variant(id));
+        assert!(!lacks_fp16_companion(id), "a built-in copy is never missing");
+        assert!(descriptor(ModelId::Migan).is_some_and(|d| d.source.is_bundled()));
+    }
+
+    #[cfg(feature = "dev-models")]
+    #[test]
+    fn real_esrgan_x4_s_fp16_copy_is_about_half_its_weights() {
+        let id = ModelId::RealEsrganX4Plus;
+        let (full, half) = (resolve_bytes(id).expect("built in").len(), model_fp16_bytes(id).expect("built in").len());
+        assert!(half * 2 > full * 9 / 10 && half * 2 < full * 11 / 10, "fp16 {half} bytes against fp32 {full}");
     }
 
     #[test]

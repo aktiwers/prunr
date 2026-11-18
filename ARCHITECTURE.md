@@ -550,9 +550,9 @@ Every model is one row in `prunr_models::REGISTRY` (source, GPU requirement, kno
 
 | Source | Models |
 |--------|--------|
-| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED, the YuNet face finder (0.2 MB, so faces are found without a face model) |
+| `Bundled` (zstd `include_bytes!`) | Silueta, BiRefNet-lite, TEED, the YuNet face finder (0.2 MB, so faces are found without a face model), MI-GAN and Real-ESRGAN x4 (with its FP16 copy for GPU EPs), so erasing and upscaling work offline |
 | `MultiPartBundled` | SAM 2.1 Hiera Small, so Magic Brush works offline on first click |
-| `OnDemand` | U2Net, LaMa, Big-LaMa, MI-GAN, five upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
+| `OnDemand` | U2Net, LaMa, Big-LaMa, four upscale models (the RRDB ones with an fp16 sibling for GPU EPs), DDColor, Depth Anything V2 Small, the face models (GFPGAN, RestoreFormer++) |
 | `MultiPartOnDemand` | SD 1.5 Inpaint, its LCM variant, TAESD, RORem (its SDXL UNet in 2 GB parts), 4xNomos2 (cut at its norms); restrictive licenses need an explicit accept |
 
 `resolve_bytes` / `resolve_part_bytes` are the only byte entry points. Bundled blobs decompress once; on-demand files are read at each load and dropped once the session has copied them, so a model used once doesn't hold its file's size for the rest of the run; SHA-256 is checked at download, not load. A missing model errors with a pointer to the Model Store, the only install surface. In the GUI every surface says the same thing about a model that isn't installed (`views::get_model`: "Get <model> · <size>", from the registry) and opens the Store on that model's section; a chip whose model is missing shows "Get" on its face, and the Model picker lists every model, downloaded or not. `DownloadManager` runs one download at a time (`.partial`, verify, rename; transient errors retry, multi-part bundles keep finished parts across a cancel).

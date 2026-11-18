@@ -500,16 +500,16 @@ fn a_store_card_offers_a_missing_half_precision_file() {
     let mut h = harness();
     {
         let app = h.state_mut();
-        app.hardware_install_cache = crate::gui::hardware_cache::HardwareInstallCache::all_installed().lacking_companion(ModelId::RealEsrganX4Plus);
+        app.hardware_install_cache = crate::gui::hardware_cache::HardwareInstallCache::all_installed().lacking_companion(ModelId::RealEsrganX2Plus);
         app.model_store = Some(crate::gui::views::adjustments_toolbar::ModelStoreRequest { filter: Some(prunr_models::ModelCategory::Upscale) });
     }
     settle(&mut h);
     assert_all_controls_named(&h, "the Model Store with a half-precision file missing");
     let present = names(&h);
     let offer = |id| format!("Download the half-precision file of {}", prunr_models::display_name(id));
-    assert!(present.contains(&offer(ModelId::RealEsrganX4Plus)), "{present:?}");
-    assert!(present.contains(&format!("Remove {}", prunr_models::display_name(ModelId::RealEsrganX4Plus))), "Remove stays");
-    assert!(!present.contains(&offer(ModelId::RealEsrganX2Plus)), "one that has its file offers none");
+    assert!(present.contains(&offer(ModelId::RealEsrganX2Plus)), "{present:?}");
+    assert!(present.contains(&format!("Remove {}", prunr_models::display_name(ModelId::RealEsrganX2Plus))), "Remove stays");
+    assert!(!present.contains(&offer(ModelId::FourXNmkdSiaxCx)), "one that has its file offers none");
     assert!(texts(&h).iter().any(|t| t == "Half-precision file missing."));
 }
 
