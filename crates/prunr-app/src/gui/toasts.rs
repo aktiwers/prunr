@@ -98,6 +98,12 @@ impl Toasts {
         self.2.len()
     }
 
+    /// Every toast asked for, in order.
+    #[cfg(test)]
+    pub fn texts_for_test(&self) -> Vec<&str> {
+        self.2.iter().map(|(_, caption)| caption.as_str()).collect()
+    }
+
     /// The last toast asked for: its level ("success", "error", …) and caption.
     #[cfg(test)]
     pub fn last_for_test(&self) -> Option<(&'static str, &str)> {

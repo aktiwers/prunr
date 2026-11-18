@@ -990,9 +990,11 @@ impl PrunrApp {
 
     /// Stop the upscale or colorize under way and the images queued after
     /// it: the capsule's Cancel and the app's.
-    pub(crate) fn cancel_runs(&mut self) {
+    /// Returns how many queued images never ran.
+    pub(crate) fn cancel_runs(&mut self) -> usize {
         let dropped = self.processor.cancel_runs();
         self.keep_dropped_looks(&dropped);
+        dropped.len()
     }
 
     /// A look the queued images took for runs that will not run stays a
@@ -1012,7 +1014,9 @@ impl PrunrApp {
         match cancel_target_for(kind) {
             Some(CancelTarget::Inpaint) => self.cancel_erases(),
             // The capsule counts the queued images too: its Cancel ends them all.
-            Some(CancelTarget::Upscale | CancelTarget::Colorize) => self.cancel_runs(),
+            Some(CancelTarget::Upscale | CancelTarget::Colorize) => {
+                self.cancel_runs();
+            }
             Some(CancelTarget::Cuts) => self.handle_cancel_cuts(),
             Some(CancelTarget::Faces) => self.processor.cancel_faces(),
             None => {}
@@ -1456,8 +1460,12 @@ impl PrunrApp {
         // The Depth chip that asked for a focus may not be this model's.
         self.picking_depth_focus = None;
         self.fit_brush_models_to_model();
-        // A run of the old model would land on the wrong selection.
-        self.cancel_runs();
+        // A run of the old model would land on the wrong selection. Nobody
+        // pressed Cancel, so the images it leaves are told.
+        let left = self.cancel_runs();
+        if left > 0 {
+            self.toasts.info(format!("{} left as they were: the model changed", crate::gui::views::fmt::count(left, "queued image", "queued images")));
+        }
         // The kept runs came from the old model; a Tier-2 tick would show
         // them under the new model's knobs.
         for item in &mut self.batch.items {

@@ -938,6 +938,32 @@ mod tool_mutual_exclusion_tests {
         assert_eq!(crate::gui::automation::state::dump(&app).tool, "magic_brush");
     }
 
+    /// A model switch ends the runs queued for the old model; unlike a
+    /// Cancel, nobody asked for that, so it says how many images it left.
+    /// They went without a word, the capsule having counted them.
+    #[test]
+    fn a_model_switch_says_which_queued_runs_it_dropped() {
+        let mut app = app();
+        push_test_item(&mut app, 2);
+        app.settings.model = SettingsModel::Inpaint;
+        app.processor.queue_runs(vec![1, 2]);
+        let from = std::mem::replace(&mut app.settings.model, SettingsModel::Silueta);
+        app.on_model_changed(from);
+        assert_eq!(app.processor.queued_run_count(), 0);
+        assert!(app.toasts.texts_for_test().iter().any(|t| t.contains("2 queued images")), "{:?}", app.toasts.texts_for_test());
+
+        let mut app = app_with_no_queue();
+        let from = std::mem::replace(&mut app.settings.model, SettingsModel::Silueta);
+        app.on_model_changed(from);
+        assert!(!app.toasts.texts_for_test().iter().any(|t| t.contains("queued")), "nothing queued, nothing said");
+    }
+
+    fn app_with_no_queue() -> PrunrApp {
+        let mut app = app();
+        app.settings.model = SettingsModel::Inpaint;
+        app
+    }
+
     /// A depth measurement that failed is not started again every frame,
     /// but it is when asked for by hand: a By depth click, a Depth knob
     /// moved, the image shown again (memory may have been short). It was
