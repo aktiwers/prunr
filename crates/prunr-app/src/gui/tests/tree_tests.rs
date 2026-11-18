@@ -464,7 +464,7 @@ fn the_depth_chip_s_controls_act() {
     let picked = { let d = &h.state().batch.items[0].settings.depth; (d.blur, d.blur_pct) };
     assert_eq!(picked, (prunr_core::depth::LensBlurMode::Point, prunr_core::depth::LENS_BLUR_START_PCT), "a blur picked at Amount 0 starts at half");
     click(&mut h, "Set focus");
-    assert!(h.state().picking_depth_focus, "the next click on the image sets the focus");
+    assert!(h.state().picking_focus(), "the next click on the image sets the focus");
 }
 
 /// A dropdown in a flyout opens its list in place: a popup list would

@@ -515,12 +515,12 @@ impl PrunrApp {
                 }
             }
             Some(Tool::Paint) => {
-                self.picking_depth_focus = false;
+                self.picking_depth_focus = None;
                 self.magic_brush_state.deactivate();
                 self.brush_state.enable();
             }
             Some(Tool::Magic) => {
-                self.picking_depth_focus = false;
+                self.picking_depth_focus = None;
                 self.brush_state.disable();
                 self.magic_brush_state.activate();
             }
@@ -547,7 +547,13 @@ impl PrunrApp {
     /// there, so a brush that would take that click goes off.
     pub(crate) fn begin_focus_pick(&mut self) {
         self.set_tool(None);
-        self.picking_depth_focus = true;
+        self.picking_depth_focus = self.batch.selected_id();
+    }
+
+    /// Set focus waits for a click on the image shown: the one it was
+    /// pressed for.
+    pub(crate) fn picking_focus(&self) -> bool {
+        self.picking_depth_focus.is_some() && self.picking_depth_focus == self.batch.selected_id()
     }
 
     /// Select with SAM: at once when `embedding` is there, else when the
@@ -921,11 +927,49 @@ mod tool_mutual_exclusion_tests {
         app.set_tool(Some(Tool::Paint));
         app.begin_focus_pick();
         assert_eq!(on(&app), (false, false));
-        assert!(app.picking_depth_focus);
+        assert!(app.picking_focus());
         assert_eq!(crate::gui::automation::state::dump(&app).tool, "set_focus");
         app.set_tool(Some(Tool::Magic));
-        assert!(!app.picking_depth_focus && on(&app) == (false, true));
+        assert!(!app.picking_focus() && on(&app) == (false, true));
         assert_eq!(crate::gui::automation::state::dump(&app).tool, "magic_brush");
+    }
+
+    /// Set focus waits for a click on the image it was pressed for, under
+    /// the model it was pressed in. Another image shown, another model, an
+    /// undo or Esc ends the wait: the next click on the canvas, meant to
+    /// pan or to look, set the focus of whichever image was there.
+    #[test]
+    fn set_focus_ends_when_its_image_or_model_goes() {
+        let ctx = egui::Context::default();
+        let armed = || {
+            let mut app = app();
+            push_test_item(&mut app, 2);
+            app.reconcile_selected(&ctx);
+            app.begin_focus_pick();
+            assert!(app.picking_focus());
+            app
+        };
+
+        let mut app = armed();
+        app.batch.select_item(1);
+        app.reconcile_selected(&ctx);
+        assert!(!app.picking_focus(), "another image shown");
+        app.batch.select_item(0);
+        app.reconcile_selected(&ctx);
+        assert!(!app.picking_focus(), "and not waiting again on the way back");
+
+        let mut app = armed();
+        let from = std::mem::replace(&mut app.settings.model, crate::gui::settings::SettingsModel::Silueta);
+        app.on_model_changed(from);
+        assert!(!app.picking_focus(), "another model");
+
+        let mut app = armed();
+        app.apply_cancel_shortcut(&ctx);
+        assert!(!app.picking_focus(), "Esc backs out");
+
+        let mut app = armed();
+        app.handle_undo(&ctx);
+        assert!(!app.picking_focus(), "an undo");
     }
 
     /// Whichever way a tool comes on, the other goes off, and the on

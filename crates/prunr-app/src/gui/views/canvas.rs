@@ -48,7 +48,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         && app.magic_brush_state.is_active()
         && editable;
     // Picking the Depth chip's focus takes the next left click too.
-    let picking_focus = app.picking_depth_focus && editable;
+    let picking_focus = app.picking_focus() && editable;
     let any_brush_tool_active = brush_active || magic_brush_active || picking_focus;
     // Scroll-zoom always works: it doesn't conflict with brush strokes
     // and the zoom feedback is reassuring even mid-painting.
@@ -284,7 +284,7 @@ fn handle_focus_pick(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: Rect) {
             let (fx, fy) = (f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0));
             app.set_depth_focus(fx, fy);
         }
-        None if hover.is_some_and(|p| canvas_rect.contains(p)) => app.picking_depth_focus = false,
+        None if hover.is_some_and(|p| canvas_rect.contains(p)) => app.picking_depth_focus = None,
         None => {}
     }
 }

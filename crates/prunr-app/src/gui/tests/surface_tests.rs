@@ -389,7 +389,7 @@ fn picking_the_focus_takes_the_canvas_click() {
     {
         let app = h.state_mut();
         app.settings.model = crate::gui::settings::SettingsModel::None;
-        app.picking_depth_focus = true;
+        app.picking_depth_focus = app.batch.selected_id();
     }
     settle(&mut h);
     pointer_to(&mut h, CANVAS_POINT);
@@ -397,7 +397,7 @@ fn picking_the_focus_takes_the_canvas_click() {
     assert!(!h.state().zoom_state.is_panning, "the press does not pan");
     press(&mut h, CANVAS_POINT, false);
     settle(&mut h);
-    assert!(!h.state().picking_depth_focus, "the click ended the wait");
+    assert!(!h.state().picking_focus(), "the click ended the wait");
 }
 
 #[test]

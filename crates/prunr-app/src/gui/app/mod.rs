@@ -82,9 +82,9 @@ pub struct PrunrApp {
 
     // Before/After toggle
     pub(crate) show_original: bool,
-    /// "Set focus" was clicked on the Depth chip: the next click on the
-    /// image sets the focus point instead of panning or painting.
-    pub(crate) picking_depth_focus: bool,
+    /// "Set focus" was clicked on the Depth chip for this image: the next
+    /// click on it sets the focus point instead of panning or painting.
+    pub(crate) picking_depth_focus: Option<u64>,
     /// Since when quiet background work has gone on with nothing landing.
     busy_since: Option<std::time::Instant>,
     /// Which item the view was last brought up to date for; a change
@@ -448,7 +448,7 @@ impl PrunrApp {
             magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
             show_original: false,
-            picking_depth_focus: false,
+            picking_depth_focus: None,
             busy_since: None,
             synced_selected: None,
             title_state: TitleState::default(),
@@ -792,6 +792,8 @@ impl PrunrApp {
             Action::Redo => (BatchItem::redo_step, BatchItem::redo_target, BatchItem::redo_keeps_run, "redone", "Nothing to redo"),
             _ => (BatchItem::undo_step, BatchItem::undo_target, BatchItem::undo_keeps_run, "undone", "Nothing to undo"),
         };
+        // The step moved to may not have the Depth look that asked for a focus.
+        self.picking_depth_focus = None;
         let mut stepped = Vec::new();
         let mut lost = false;
         for &id in ids {
@@ -1151,6 +1153,9 @@ impl PrunrApp {
         if self.close_top_modal() || self.any_modal_open() {
             return;
         }
+        if self.picking_depth_focus.take().is_some() {
+            return;
+        }
         if let Some(kind) = self.run_escape_stops() {
             self.handle_capsule_cancel(kind);
         } else if self.can_selection_action(SelectionAction::Clear) {
@@ -1448,6 +1453,8 @@ impl PrunrApp {
         let preset = self.batch.selected_item().map_or_else(|| self.settings.default_preset.clone(), |i| i.applied_preset.clone());
         self.settings.switch_brush_model(from, &preset);
         self.brush_state.values_set_elsewhere();
+        // The Depth chip that asked for a focus may not be this model's.
+        self.picking_depth_focus = None;
         self.fit_brush_models_to_model();
         // A run of the old model would land on the wrong selection.
         self.cancel_runs();

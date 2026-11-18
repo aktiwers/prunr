@@ -33,6 +33,10 @@ impl PrunrApp {
         let selected = self.batch.selected_id();
         let idx = self.batch.selected_idx_clamped();
         self.magic_brush_state.note_shown(selected, std::time::Instant::now());
+        // A focus asked for on one image is not the next one's to take.
+        if self.picking_depth_focus != selected {
+            self.picking_depth_focus = None;
+        }
         if selected != self.synced_selected {
             self.synced_selected = selected;
             if let Some(idx) = idx {

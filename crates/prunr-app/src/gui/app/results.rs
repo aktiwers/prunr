@@ -589,7 +589,7 @@ impl PrunrApp {
 
     /// The next click on the image picks the Depth chip's focus.
     pub(crate) fn set_depth_focus(&mut self, fx: f32, fy: f32) {
-        self.picking_depth_focus = false;
+        self.picking_depth_focus = None;
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &mut self.batch.items[idx];
         item.settings.depth.set_focus(fx, fy);
@@ -3244,13 +3244,13 @@ mod depth_tests {
         app.settings.model = SettingsModel::None;
         push_test_item(&mut app, 1);
         app.batch.select_item(0);
-        app.picking_depth_focus = true;
+        app.picking_depth_focus = Some(1);
         let version = app.batch.items[0].timeline.version();
         app.set_depth_focus(0.25, 0.75);
         let item = &app.batch.items[0];
         assert_eq!(item.settings.depth.focus_point(), Some((0.25, 0.75)));
         assert!(item.timeline.version() != version, "an undo step");
-        assert!(!app.picking_depth_focus);
+        assert!(app.picking_depth_focus.is_none());
         assert!(app.processor.live_preview.is_pending_for(1));
     }
 }

@@ -65,7 +65,7 @@ pub fn dump(app: &PrunrApp) -> StateDump {
         tool: match app.active_tool() {
             Some(Tool::Magic) => "magic_brush",
             Some(Tool::Paint) => "paint_brush",
-            None if app.picking_depth_focus => "set_focus",
+            None if app.picking_focus() => "set_focus",
             None => "none",
         },
         selected: app.batch.selected_id(),

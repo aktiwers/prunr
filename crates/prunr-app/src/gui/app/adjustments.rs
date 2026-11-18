@@ -62,6 +62,7 @@ impl PrunrApp {
         adjustments_panel(panel_frame)
             .show_inside(ui, |ui| {
                 let can_compare = self.can_compare_intent();
+                let picking_focus = self.picking_focus();
                 let selection_gates = crate::gui::views::selection_action_bar::SelectionGates::of(|a| self.selection_action_refusal(a));
                 // Split borrow: disjoint fields, so the toolbar edits the
                 // preset string in place without a clone + writeback.
@@ -100,7 +101,7 @@ impl PrunrApp {
                     shown_seed: item.shown_seed(),
                     facts: crate::gui::capability::ItemFacts::of(item),
                     faces_found: Self::face_search(item, crate::gui::item::FaceStage::of(settings_ref.model.role())),
-                    picking_depth_focus: self.picking_depth_focus,
+                    picking_depth_focus: picking_focus,
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
