@@ -337,6 +337,41 @@ fn a_slider_redraws_the_latest_stroke_with_a_step_left_to_redo() {
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "which the slider goes on filling in");
 }
 
+/// A stroke is drawn again when its brush's slider moves, not when the
+/// brush's values come from somewhere else: a preset picked, or a model
+/// whose strokes have another edge (an eraser's Expand and Feather for a
+/// selection's Feather). Either redrew the latest stroke in its own step.
+#[test]
+fn a_preset_or_a_model_switch_is_not_a_slider_move() {
+    use crate::gui::views::adjustments_toolbar::ToolbarChange;
+    let ctx = egui::Context::default();
+
+    let (mut app, pick) = app_with_a_magic_pick();
+    app.adjust_strokes();
+    let before = app.batch.items[0].settings;
+    app.settings.brush.magic_confidence_threshold = 0.9;
+    app.apply_toolbar_change(&ctx, ToolbarChange { preset_applied: true, ..Default::default() }, before);
+    app.adjust_strokes();
+    app.adjust_strokes();
+    assert!(!app.batch.selection_queue.any_pending(), "a preset set the brush: the stroke stays as drawn");
+    assert_eq!(app.batch.items[0].selection_hash, Some(pick));
+
+    let (mut app, pick) = app_with_a_magic_pick();
+    app.settings.brush.inpaint_feather = 6.0;
+    app.adjust_strokes();
+    let before = app.batch.items[0].settings;
+    let from = std::mem::replace(&mut app.settings.model, SettingsModel::Inpaint);
+    app.apply_toolbar_change(&ctx, ToolbarChange { model_switched_from: Some(from), ..Default::default() }, before);
+    app.adjust_strokes();
+    app.adjust_strokes();
+    assert!(!app.batch.selection_queue.any_pending(), "another model's edge: the stroke stays as drawn");
+    assert_eq!(app.batch.items[0].selection_hash, Some(pick));
+
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
+    redraw_lands(&mut app);
+    assert_ne!(app.batch.items[0].selection_hash, Some(pick), "a slider still redraws it");
+}
+
 /// Each brush's sliders reach the strokes that brush drew: Last its
 /// latest one, even with the other brush's stroke after it, and All every
 /// one of its own; the other brush's strokes stay as drawn, also for

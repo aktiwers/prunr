@@ -1447,6 +1447,7 @@ impl PrunrApp {
         // is the one in front of the user.
         let preset = self.batch.selected_item().map_or_else(|| self.settings.default_preset.clone(), |i| i.applied_preset.clone());
         self.settings.switch_brush_model(from, &preset);
+        self.brush_state.values_set_elsewhere();
         self.fit_brush_models_to_model();
         // A run of the old model would land on the wrong selection.
         self.cancel_runs();

@@ -713,6 +713,12 @@ impl BrushState {
     }
 
     /// The finished stroke's path; `None` when it was never extended.
+    /// The brush's values were set by something other than its sliders (a
+    /// preset, another model's own values): no stroke is drawn again for it.
+    pub(crate) fn values_set_elsewhere(&mut self) {
+        self.seen = None;
+    }
+
     /// Give up the stroke in hand: nothing of it lands.
     pub fn drop_stroke(&mut self) {
         self.active = None;

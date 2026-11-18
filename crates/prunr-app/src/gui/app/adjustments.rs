@@ -114,7 +114,7 @@ impl PrunrApp {
         self.apply_toolbar_change(ui.ctx(), toolbar_change, settings_before);
     }
 
-    pub(super) fn apply_toolbar_change(
+    pub(crate) fn apply_toolbar_change(
         &mut self,
         ctx: &egui::Context,
         toolbar_change: adjustments_toolbar::ToolbarChange,
@@ -130,6 +130,7 @@ impl PrunrApp {
             // Applied or just saved: nothing is changed from it yet.
             item.preset_changes = crate::gui::preset_changes::Changes::new(item.settings);
             self.settings.restart_brush_changes();
+            self.brush_state.values_set_elsewhere();
             let shown = item.timeline.current();
             if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
                 item.commit(StepKind::Preset);
