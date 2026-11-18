@@ -421,8 +421,12 @@ fn reading_presets() -> egui_kittest::Harness<'static, PrunrApp> {
     super::harness::loaded_with(|app| app.preset_store = crate::gui::preset_store::PresetStore::new())
 }
 
-/// What the disk queue was asked to do has landed and been drained.
+/// The app has handled its input, what that asked of the disk queue has
+/// landed, and the answers are drained. The frames come first: a dialog
+/// answer queues its write only once a frame has handled it, and a flush
+/// before that leaves the write racing the test's read.
 fn landed(h: &mut egui_kittest::Harness<'_, PrunrApp>) {
+    settle(h);
     crate::gui::disk_queue::flush();
     settle(h);
 }
