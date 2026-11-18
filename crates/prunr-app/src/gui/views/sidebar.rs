@@ -274,10 +274,11 @@ fn should_request_thumbnail(item: &BatchItem) -> bool {
 }
 
 fn request_item_thumbnail(app: &mut PrunrApp, i: usize) {
-    app.batch.items[i].thumb.asked();
+    let request = app.batch.items[i].thumb.asked();
     let item_id = app.batch.items[i].id;
     app.batch.request_thumbnail(
         item_id,
+        request,
         &app.batch.items[i].source,
         app.batch.items[i].result_pixels(),
     );
@@ -616,8 +617,8 @@ mod tests {
     #[test]
     fn should_not_request_again_after_a_failure() {
         let mut item = fresh_item();
-        item.thumb.asked();
-        item.thumb.failed();
+        let request = item.thumb.asked();
+        item.thumb.failed(request);
         assert!(!should_request_thumbnail(&item));
         assert!(!item.thumb.is_pending(), "a failed one is no longer on its way");
     }

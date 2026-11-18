@@ -655,6 +655,7 @@ impl BatchManager {
     pub(crate) fn request_thumbnail(
         &self,
         item_id: u64,
+        request: u64,
         source: &ImageSource,
         result: Option<super::item::Pixels>,
     ) {
@@ -666,7 +667,7 @@ impl BatchManager {
                     let thumb = thumbnail_rgba(&rgba);
                     (thumb.width(), thumb.height(), thumb.into_raw())
                 })).flatten();
-                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, request, image });
             });
         } else {
             let source = source.clone();
@@ -681,7 +682,7 @@ impl BatchManager {
                     Some(prunr_core::formats::resize_to_rgba(&img, w, h, prunr_core::formats::ResizeFilter::Bilinear))
                 }).flatten();
                 let image = thumb.map(|t| (t.width(), t.height(), t.into_raw()));
-                let _ = tx.send(super::background_io::ThumbMsg { item_id, image });
+                let _ = tx.send(super::background_io::ThumbMsg { item_id, request, image });
             });
         }
     }
@@ -695,11 +696,11 @@ impl BatchManager {
             let Ok(msg) = self.bg_io.thumb.rx.try_recv() else { break };
             let Some(item) = self.find_by_id_mut(msg.item_id) else { continue };
             let Some((tw, th, pixels)) = msg.image else {
-                item.thumb.failed();
+                item.thumb.failed(msg.request);
                 continue;
             };
             let ci = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
-            item.thumb.landed(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR));
+            item.thumb.landed(ctx.load_texture(format!("thumb_{}", msg.item_id), ci, egui::TextureOptions::LINEAR), msg.request);
             uploaded += 1;
         }
         if uploaded == THUMB_UPLOADS_PER_FRAME {
@@ -1645,7 +1646,7 @@ mod tests {
         let bm = fixture();
         let result = Arc::new(image::RgbaImage::from_pixel(200, 200, image::Rgba([10, 20, 30, 255])));
         let source = ImageSource::Bytes(Arc::new(Vec::new())); // unused when result_rgba is Some
-        bm.request_thumbnail(7, &source, Some(crate::gui::item::Pixels::Resident(result)));
+        bm.request_thumbnail(7, 1, &source, Some(crate::gui::item::Pixels::Resident(result)));
 
         let msg = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb.tx must produce a result within 2s");
@@ -1660,7 +1661,7 @@ mod tests {
     fn request_thumbnail_without_result_decodes_source() {
         let bm = fixture();
         let source = ImageSource::Bytes(Arc::new(one_pixel_png()));
-        bm.request_thumbnail(8, &source, None);
+        bm.request_thumbnail(8, 1, &source, None);
 
         let msg = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2))
             .expect("thumb.tx must produce a result within 2s");
@@ -1676,7 +1677,7 @@ mod tests {
     #[test]
     fn a_thumbnail_that_cannot_be_made_still_answers() {
         let bm = fixture();
-        bm.request_thumbnail(9, &ImageSource::Bytes(Arc::new(b"not an image".to_vec())), None);
+        bm.request_thumbnail(9, 1, &ImageSource::Bytes(Arc::new(b"not an image".to_vec())), None);
         let answer = bm.bg_io.thumb.rx.recv_timeout(Duration::from_secs(2)).expect("no answer: the request never ends");
         assert_eq!(answer.item_id, 9);
         assert!(answer.image.is_none());

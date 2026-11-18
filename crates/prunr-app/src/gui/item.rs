@@ -277,6 +277,9 @@ pub(crate) enum StepRefused {
 pub(crate) struct Thumbnail {
     texture: Option<egui::TextureHandle>,
     build: ThumbBuild,
+    /// The latest build asked for: an earlier one still running shows a
+    /// state the image has left.
+    request: u64,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -304,21 +307,30 @@ impl Thumbnail {
     }
 
     /// A new one is on its way; the one shown stays until it lands.
-    pub(crate) fn asked(&mut self) {
+    /// Returns the build's number, which its answer carries.
+    pub(crate) fn asked(&mut self) -> u64 {
         self.build = ThumbBuild::Pending;
+        self.request += 1;
+        self.request
     }
 
-    pub(crate) fn landed(&mut self, texture: egui::TextureHandle) {
-        self.texture = Some(texture);
-        self.build = ThumbBuild::Idle;
+    /// Build `request` is done; one a later build or a `clear` overtook
+    /// shows a state the image has left, and is dropped.
+    pub(crate) fn landed(&mut self, texture: egui::TextureHandle, request: u64) {
+        if request == self.request {
+            self.texture = Some(texture);
+            self.build = ThumbBuild::Idle;
+        }
     }
 
-    pub(crate) fn failed(&mut self) {
-        self.build = ThumbBuild::Failed;
+    pub(crate) fn failed(&mut self, request: u64) {
+        if request == self.request {
+            self.build = ThumbBuild::Failed;
+        }
     }
 
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self { request: self.request + 1, ..Self::default() };
     }
 }
 

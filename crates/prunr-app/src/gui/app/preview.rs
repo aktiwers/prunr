@@ -440,10 +440,9 @@ impl PrunrApp {
             // Only the drag-settled result regenerates the sidebar thumbnail,
             // not every mid-drag render.
             if is_final {
-                if let Some(item) = self.batch.find_by_id_mut(item_id) {
-                    item.thumb.asked();
+                if let Some(request) = self.batch.find_by_id_mut(item_id).map(|item| item.thumb.asked()) {
+                    self.batch.request_thumbnail(item_id, request, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&landed))));
                 }
-                self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&landed))));
             }
         }
         ctx.request_repaint();

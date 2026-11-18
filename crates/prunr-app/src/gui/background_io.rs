@@ -161,6 +161,8 @@ pub struct TexPrepHandles {
 /// `None` when the image could not be read for one.
 pub struct ThumbMsg {
     pub item_id: u64,
+    /// The build's number, from `Thumbnail::asked`.
+    pub request: u64,
     pub image: Option<(u32, u32, Vec<u8>)>,
 }
 

@@ -134,6 +134,7 @@ impl PrunrApp {
         let switch = self.result_switch_id;
         let Some(item) = self.batch.find_by_id_mut(item_id) else { return };
         let source = item.source.clone();
+        let thumb = item.thumb.asked();
         if item.on_screen {
             let target = item.request_result_texture(false);
             Self::spawn_tex_prep(
@@ -144,7 +145,7 @@ impl PrunrApp {
             // when the image is shown.
             item.release_result_texture();
         }
-        self.batch.request_thumbnail(item_id, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(shown))));
+        self.batch.request_thumbnail(item_id, thumb, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(shown))));
     }
 
     /// Land each run's pictures on their item, one kind per arm. Whether a
@@ -3613,14 +3614,41 @@ mod texture_landing_tests {
         assert!(item.backdrop_texture_for(key).is_some(), "the backdrop picture");
     }
 
+    /// A thumbnail built for a state the image has left does not land:
+    /// the photo's, slow to read, came after the result's and stayed, and
+    /// an undone step's after the one undone to; nothing asked again.
+    #[test]
+    fn a_thumbnail_built_for_an_earlier_state_does_not_land() {
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        let item = push_test_item(&mut app, 1);
+        let (earlier, later) = (item.thumb.asked(), item.thumb.asked());
+        let built = |request, side: u32| ThumbMsg { item_id: 1, request, image: Some((side, side, vec![0; (side * side * 4) as usize])) };
+        app.batch.bg_io.thumb.tx.send(built(later, 2)).unwrap();
+        app.batch.bg_io.thumb.tx.send(built(earlier, 1)).unwrap();
+        app.drain_background_channels(&ctx);
+        let thumb = &app.batch.items[0].thumb;
+        assert_eq!(thumb.texture().map(|t| t.size()), Some([2, 2]), "the later build's picture");
+        assert!(!thumb.is_pending());
+
+        // One cleared while its build ran (the result behind it replaced):
+        // that build is for the state before.
+        let item = &mut app.batch.items[0];
+        let before = item.thumb.asked();
+        item.thumb.clear();
+        app.batch.bg_io.thumb.tx.send(built(before, 1)).unwrap();
+        app.drain_background_channels(&ctx);
+        assert!(app.batch.items[0].thumb.texture().is_none() && app.batch.items[0].thumb.wanted(), "asked for again, not shown");
+    }
+
     /// Thumbnails go up three a frame; the rest wait for the next.
     #[test]
     fn thumbnails_go_up_three_a_frame() {
         let ctx = egui::Context::default();
         let mut app = PrunrApp::new_for_test();
         for id in 1..=4 {
-            push_test_item(&mut app, id);
-            app.batch.bg_io.thumb.tx.send(ThumbMsg { item_id: id, image: Some((1, 1, vec![0; 4])) }).unwrap();
+            let request = push_test_item(&mut app, id).thumb.asked();
+            app.batch.bg_io.thumb.tx.send(ThumbMsg { item_id: id, request, image: Some((1, 1, vec![0; 4])) }).unwrap();
         }
         let up = |app: &PrunrApp| app.batch.items.iter().filter(|i| i.thumb.texture().is_some()).count();
         app.drain_background_channels(&ctx);
