@@ -402,6 +402,10 @@ impl PrunrApp {
     /// and `pump_depth` runs the click when it lands.
     pub(crate) fn magic_depth_click(&mut self, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
         let Some(depth) = self.batch.find_by_id(item_id).and_then(|i| i.depth.clone()) else {
+            // The click waits for the map: one that failed is measured again.
+            if let Some(item) = self.batch.find_by_id_mut(item_id) {
+                item.try_depth_again();
+            }
             self.magic_brush_state.pending_depth_click = Some(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode });
             return;
         };
@@ -932,6 +936,43 @@ mod tool_mutual_exclusion_tests {
         app.set_tool(Some(Tool::Magic));
         assert!(!app.picking_focus() && on(&app) == (false, true));
         assert_eq!(crate::gui::automation::state::dump(&app).tool, "magic_brush");
+    }
+
+    /// A depth measurement that failed is not started again every frame,
+    /// but it is when asked for by hand: a By depth click, a Depth knob
+    /// moved, the image shown again (memory may have been short). It was
+    /// never tried again: the knobs did nothing for that image, and a
+    /// click waited for a map that was not coming.
+    #[test]
+    fn a_failed_depth_measurement_is_tried_again_when_asked_for() {
+        let ctx = egui::Context::default();
+        let failed = || {
+            let mut app = app();
+            push_test_item(&mut app, 2);
+            app.reconcile_selected(&ctx);
+            let item = &mut app.batch.items[0];
+            item.depth_run.pending = true;
+            item.land_depth(Err("short of memory".into()));
+            assert!(!item.needs_depth_run(), "not on its own");
+            app
+        };
+
+        let mut app = failed();
+        app.magic_depth_click(1, (2.0, 2.0), (8, 8), prunr_core::selection::BrushMode::Add);
+        assert!(app.batch.items[0].needs_depth_run(), "a By depth click");
+
+        let mut app = failed();
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.depth.fog_pct = 40;
+        app.apply_toolbar_change(&ctx, ToolbarChange::default(), before);
+        assert!(app.batch.items[0].needs_depth_run(), "a Depth knob moved");
+
+        let mut app = failed();
+        app.batch.select_item(1);
+        app.reconcile_selected(&ctx);
+        app.batch.select_item(0);
+        app.reconcile_selected(&ctx);
+        assert!(app.batch.items[0].needs_depth_run(), "the image shown again");
     }
 
     /// Set focus waits for a click on the image it was pressed for, under

@@ -189,6 +189,9 @@ impl PrunrApp {
         }
         self.on_faces_change(idx, toolbar_change.faces);
         let role = self.settings.model.role();
+        if self.batch.items[idx].settings.depth != settings_before.depth {
+            self.batch.items[idx].try_depth_again();
+        }
         if self.batch.items[idx].settings.wants_depth(role) && !settings_before.wants_depth(role) {
             self.offer_depth_model(ctx);
         }

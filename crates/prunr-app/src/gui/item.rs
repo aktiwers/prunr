@@ -1515,6 +1515,13 @@ impl BatchItem {
         self.depth.is_none() && !self.depth_run.pending && !self.depth_run.failed
     }
 
+    /// The depth map is asked for by hand (a click that reads it, a Depth
+    /// knob, the image shown again): a measurement that failed before is
+    /// made again.
+    pub(crate) fn try_depth_again(&mut self) {
+        self.depth_run.failed = false;
+    }
+
     /// Keep a depth map measured from the photo. True when it was kept.
     pub(crate) fn land_depth(&mut self, result: Result<Arc<prunr_core::depth::DepthMap>, String>) -> bool {
         self.depth_run.pending = false;
@@ -2132,12 +2139,15 @@ impl BatchItem {
         }
     }
 
-    /// The photo is about to be read again: a read that failed before no
-    /// longer says why the image shows nothing.
+    /// The image is shown again: its photo is read again, and a read that
+    /// failed before no longer says why the image shows nothing. Memory
+    /// may have been short, so a depth measurement that failed is made
+    /// again too.
     pub(crate) fn read_again(&mut self) {
         if std::mem::take(&mut self.decode_failed) {
             self.failure = None;
         }
+        self.try_depth_again();
     }
 
     /// The decoded source lands: the item holds its pixels (`true`), or
