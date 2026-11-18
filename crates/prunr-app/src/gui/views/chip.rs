@@ -856,6 +856,7 @@ pub(super) fn picker_row(ui: &mut Ui, selected: bool, title: &str, description: 
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     crate::gui::automation::record::clip(ui.ctx(), title, rect, room);
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, row_name(title, description)));
+    let resp = choice(resp, selected);
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect_filled(rect, theme::ROW_ROUNDING, row_wash(&resp, selected));
@@ -1240,6 +1241,7 @@ pub(super) fn swatch_tile(ui: &mut Ui, name: &str, selected: bool, size: egui::V
     let tile = egui::vec2(size.x + 8.0, size.y + if caption { CAPTION_HEIGHT + 6.0 } else { 0.0 });
     let (rect, resp) = ui.allocate_exact_size(tile, egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, name));
+    let resp = choice(resp, selected);
     if ui.is_rect_visible(rect) {
         let swatch = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + size.y / 2.0), size);
         paint(ui.painter(), swatch);

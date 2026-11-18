@@ -1325,7 +1325,8 @@ pub(super) fn render_model_dropdown(
                     .and_then(prunr_models::descriptor)
                     .and_then(|d| d.hardware_advisory(app_settings.effective_backend()));
                 let info = model_info(variant);
-                let row = chip::choice_list_row(ui, info.icon, info.name, &blurb, app_settings.model == variant, chip::LIST_ICON_FILL);
+                let picked = app_settings.model == variant;
+                let row = chip::choice(chip::choice_list_row(ui, info.icon, info.name, &blurb, picked, chip::LIST_ICON_FILL), picked);
                 let row = match advisory {
                     Some(tip) => row.on_hover_text(tip),
                     None => row,

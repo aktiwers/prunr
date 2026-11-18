@@ -575,4 +575,11 @@ fn a_choice_says_which_is_picked() {
     click(&mut h, "Erase");
     assert_eq!(read(&h, "Erase").and_then(|(_, on)| on), Some(true));
     assert_eq!(read(&h, "Restore").and_then(|(_, on)| on), Some(false));
+
+    // A picker's rows are a choice too: the model list.
+    click(&mut h, "Model");
+    let rows: Vec<_> = tree(&h).iter().filter(|n| n.is_control() && n.name.as_deref().is_some_and(|name| name.contains(" MB"))).map(|n| (n.role, n.toggled)).collect();
+    assert!(rows.len() >= 3, "the cut-out models are listed: {rows:?}");
+    assert!(rows.iter().all(|(role, on)| *role == accesskit::Role::RadioButton && on.is_some()), "{rows:?}");
+    assert_eq!(rows.iter().filter(|(_, on)| *on == Some(true)).count(), 1, "one of them is picked: {rows:?}");
 }
