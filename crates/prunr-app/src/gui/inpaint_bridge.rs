@@ -77,8 +77,9 @@ enum SubState {
         rx: mpsc::Receiver<Result<(SubprocessManager, String), String>>,
         /// Strokes dispatched mid-spawn, sent in order once `Ready` lands.
         pending: Vec<InpaintJob>,
-        /// A Cancel arrived mid-spawn (already drained and toasted): kill the
-        /// subprocess when it lands instead of promoting it.
+        /// A Cancel arrived mid-spawn (already drained and toasted) and no
+        /// stroke was asked for since: kill the subprocess when it lands
+        /// instead of promoting it.
         cancelled: bool,
     },
     Ready(SubprocessManager),
@@ -197,7 +198,10 @@ fn handle_dispatch(
         SubState::Ready(s) => {
             send_or_fail(s, params, strokes, res_tx);
         }
-        SubState::Spawning { pending, .. } => {
+        SubState::Spawning { pending, cancelled, .. } => {
+            // A Cancel ended the strokes asked for before it; this one
+            // wants the worker on its way.
+            *cancelled = false;
             pending.push(params);
         }
         SubState::Idle => {
@@ -216,11 +220,12 @@ fn handle_cancel(
 ) {
     match sub_state {
         SubState::Idle => {}
-        SubState::Spawning { cancelled, .. } => {
+        SubState::Spawning { pending, cancelled, .. } => {
             if strokes.is_empty() {
                 return;
             }
             *cancelled = true;
+            pending.clear();
             fail_inflight(strokes, res_tx, crate::subprocess::protocol::CANCELLED_ERR_MSG);
             tracing::info!("inpaint Cancel during spawn — pending result will be killed");
         }
@@ -499,6 +504,65 @@ mod tests {
             Ok(InpaintBridgeResult::Error { item_id: 7, error, .. }) => assert!(error.starts_with("The eraser stopped"), "{error}"),
             _ => panic!("the stroke did not end"),
         }
+    }
+
+    fn stroke(generation: u64) -> InpaintJob {
+        InpaintJob {
+            item_id: 7,
+            generation,
+            model_id: prunr_models::ModelId::SdV15InpaintFp16,
+            image_path: Default::default(),
+            mask_path: Default::default(),
+            sd_req: None,
+            feather_px: 0.0,
+            sharpen: 0.0,
+            edge_colour: Default::default(),
+        }
+    }
+
+    /// A Cancel (or a model switch) while the worker is still starting ends
+    /// the strokes asked for so far, not one asked for after it: that one
+    /// is sent when the worker lands, and the cancelled one is not. It was
+    /// dropped with no answer, and the image stayed busy until restart.
+    #[test]
+    fn a_stroke_asked_after_a_cancel_mid_start_is_sent() {
+        for end in [handle_cancel, handle_release] {
+            let (_spawned, rx) = mpsc::channel();
+            let mut state = SubState::Spawning { rx, pending: vec![stroke(1)], cancelled: false };
+            let mut strokes = Strokes::from([(7, 1)]);
+            let (tx, answers) = mpsc::channel();
+            end(&mut state, &mut strokes, &tx);
+            assert!(matches!(answers.try_recv(), Ok(InpaintBridgeResult::Error { item_id: 7, generation: 1, .. })), "the first stroke is told it ended");
+
+            strokes.insert((7, 2));
+            handle_dispatch(&mut state, &mut strokes, &tx, stroke(2));
+            let SubState::Spawning { pending, cancelled, .. } = &state else { panic!("still starting") };
+            assert!(!cancelled, "the worker on its way is wanted again");
+            assert_eq!(pending.iter().map(|job| job.generation).collect::<Vec<_>>(), [2], "only the new stroke is sent");
+        }
+    }
+
+    /// The same stroke when the worker then fails to start: it ends with
+    /// why, as any stroke waiting for that worker does.
+    #[test]
+    fn a_stroke_asked_after_a_cancel_mid_start_hears_of_a_failed_start() {
+        let (spawned, rx) = mpsc::channel();
+        let mut state = SubState::Spawning { rx, pending: vec![stroke(1)], cancelled: false };
+        let mut strokes = Strokes::from([(7, 1)]);
+        let (tx, answers) = mpsc::channel();
+        handle_cancel(&mut state, &mut strokes, &tx);
+        let _ = answers.try_recv();
+
+        strokes.insert((7, 2));
+        handle_dispatch(&mut state, &mut strokes, &tx, stroke(2));
+        spawned.send(Err("no worker".to_string())).unwrap();
+        poll_spawn_result(&mut state, &mut strokes, &tx);
+        match answers.try_recv() {
+            Ok(InpaintBridgeResult::Error { item_id: 7, generation: 2, error }) => assert!(error.starts_with("Could not start the eraser"), "{error}"),
+            _ => panic!("the stroke got no answer"),
+        }
+        assert!(strokes.is_empty());
+        assert!(matches!(state, SubState::Idle));
     }
 
     /// A worker that lives on with output that can no longer be read (a
