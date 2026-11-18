@@ -132,10 +132,10 @@ impl PrunrApp {
     /// (Paint Brush, Magic Brush, Invert, a fold into the cut-out) goes
     /// through here.
     /// A selection edit on `item_id` is still being made: queued to land,
-    /// or a Magic Brush pick selecting. Undo, Process and the selection
-    /// actions wait for it.
+    /// or a Magic Brush pick selecting or waiting for its image to be
+    /// ready. Undo, Process and the selection actions wait for it.
     pub(crate) fn selection_edit_pending(&self, item_id: u64) -> bool {
-        self.batch.selection_queue.is_pending(item_id) || self.processor.selecting(item_id)
+        self.batch.selection_queue.is_pending(item_id) || self.processor.selecting(item_id) || self.magic_brush_state.waits_on(item_id)
     }
 
     /// Take back the Magic Brush picks on `ids` still waiting for their
@@ -936,6 +936,33 @@ mod tool_mutual_exclusion_tests {
         app.set_tool(Some(Tool::Magic));
         assert!(!app.picking_focus() && on(&app) == (false, true));
         assert_eq!(crate::gui::automation::state::dump(&app).tool, "magic_brush");
+    }
+
+    /// A Magic Brush pick waiting for its image to be ready is a selection
+    /// edit under way, like one being decoded: Process waits for it.
+    /// Process started instead, and the pick was dropped when it came,
+    /// with no word. A click by depth whose map could not be measured
+    /// stops waiting (the failure says why), so nothing waits on it for
+    /// good.
+    #[test]
+    fn a_waiting_pick_holds_process_like_one_selecting() {
+        use crate::gui::capability::Reason;
+        use prunr_core::selection::BrushMode;
+        let mut app = app();
+        app.set_tool(Some(Tool::Magic));
+        assert_eq!(app.run_refusal(&app.batch.items[0]), None, "nothing waits yet");
+        let prompt = prunr_core::sam::prompt::build_click_prompt(2.0, 2.0, 8, 8);
+        app.pick_with_sam(1, None, prompt, BrushMode::Add);
+        assert_eq!(app.run_refusal(&app.batch.items[0]), Some(Reason::FinishingSelection), "a pick waits for the embedding");
+
+        let mut app = app_with_no_queue();
+        app.settings.model = SettingsModel::Silueta;
+        app.set_tool(Some(Tool::Magic));
+        app.magic_depth_click(1, (2.0, 2.0), (8, 8), BrushMode::Add);
+        assert_eq!(app.run_refusal(&app.batch.items[0]), Some(Reason::FinishingSelection), "a click waits for the depth map");
+        app.batch.items[0].depth_run.pending = true;
+        app.on_depth_measured(&egui::Context::default(), 1, Err("short of memory".into()));
+        assert_eq!(app.run_refusal(&app.batch.items[0]), None, "the map failed: the click no longer waits");
     }
 
     /// A model switch ends the runs queued for the old model; unlike a

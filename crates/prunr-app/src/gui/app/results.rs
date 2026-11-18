@@ -528,19 +528,27 @@ impl PrunrApp {
     /// the shown image's photo when something wants its map.
     pub(super) fn pump_depth(&mut self, ctx: &egui::Context) {
         for landed in self.processor.pump_depth_results() {
-            let Some(idx) = self.batch.index_of(landed.item_id) else { continue };
-            let error = landed.result.as_ref().err().cloned();
-            if self.batch.items[idx].land_depth(landed.result) {
-                tracing::info!(item_id = landed.item_id, "depth map landed");
-                self.on_depth_landed(idx);
-                ctx.request_repaint();
-            } else if let Some(err) = error {
-                self.toasts.error(format!("Could not measure the depth: {}", prunr_core::plain::reason(err)));
-            }
+            self.on_depth_measured(ctx, landed.item_id, landed.result);
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         if self.wants_depth_now(idx) {
             self.request_depth(idx);
+        }
+    }
+
+    /// A depth measurement of `item_id` ended: its map is kept and read,
+    /// or why it failed is told.
+    pub(crate) fn on_depth_measured(&mut self, ctx: &egui::Context, item_id: u64, result: Result<Arc<prunr_core::depth::DepthMap>, String>) {
+        let Some(idx) = self.batch.index_of(item_id) else { return };
+        let error = result.as_ref().err().cloned();
+        if self.batch.items[idx].land_depth(result) {
+            tracing::info!(item_id, "depth map landed");
+            self.on_depth_landed(idx);
+            ctx.request_repaint();
+        } else if let Some(err) = error {
+            // A click that waited for the map has nothing to pick with.
+            self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id);
+            self.toasts.error(format!("Could not measure the depth: {}", prunr_core::plain::reason(err)));
         }
     }
 

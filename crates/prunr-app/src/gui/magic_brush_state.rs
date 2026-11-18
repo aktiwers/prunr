@@ -113,6 +113,11 @@ impl MagicBrushState {
         ENCODE_SETTLE.checked_sub(now.saturating_duration_since(since)).filter(|d| !d.is_zero())
     }
 
+    /// A pick on `item_id` waits for its embedding or its depth map.
+    pub(crate) fn waits_on(&self, item_id: u64) -> bool {
+        self.pending_sam_picks.iter().any(|p| p.item_id == item_id) || self.pending_depth_click.as_ref().is_some_and(|c| c.item_id == item_id)
+    }
+
     /// Clearing one buffer without the other leaves a ghost trail or a
     /// stuck dispatch.
     pub(crate) fn clear_stroke(&mut self) {
