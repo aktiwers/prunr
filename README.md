@@ -47,7 +47,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 
 ## Features
 
-- **Five bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), TEED (lines), SAM 2.1 (Magic Brush), YuNet (finds faces for Restore faces and Auto focus)
+- **Seven bundled models** — Silueta (fast), BiRefNet-lite (best detail at 1024×1024), TEED (lines), SAM 2.1 (Magic Brush), YuNet (finds faces for Restore faces and Auto focus), MI-GAN (erases objects), Real-ESRGAN x4plus (upscales 4×)
 - **Magic Brush** — click or drag over anything and SAM 2.1 selects it; Shift adds, Alt (or Ctrl on Windows and Linux) subtracts. Then Delete, Copy, Cut or Invert the selection, or let it correct the cut-out
 - **Paint Brush** — manual touch-ups with size, hardness, opacity and shape; every stroke is undoable
 - **Line extraction** — edges/outlines via TEED at three scales, standalone or combined with background removal, with colour styles and compositions
@@ -91,15 +91,16 @@ Every setting starts from Prunr's own for the model, or from `--preset`'s; a fla
 | TEED | ~0.25 MB | yes | 640×480 and 1280×960 | Line / edge extraction |
 | SAM 2.1 Hiera Small | ~148 MB | yes | 1024 input | Magic Brush selections |
 | YuNet | ~0.2 MB | yes | whole photo | Finds faces for Restore faces and Auto focus |
+| MI-GAN (Eraser) | ~26 MB | yes | 512×512 (tiled) | Lightweight GAN eraser — sharper detail, less smooth on flat backgrounds |
+| Real-ESRGAN x4plus | ~64 MB (+33 MB FP16 copy for graphics cards) | yes | tiled | Upscale photos 4× |
 | U2Net | ~168 MB | **on-demand** | 320×320 | Better edges than Silueta |
 | LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Object removal — paint over a region, fill it in |
 | Big-LaMa (Eraser) | ~199 MB | **on-demand** | 512×512 (tiled) | Sharper fills than LaMa, same architecture trained on more data |
-| MI-GAN (Eraser) | ~26 MB | **on-demand** | 512×512 (tiled) | Lightweight GAN — sharper detail, less smooth on flat backgrounds |
 | Stable Diffusion 1.5 Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Generative inpaint with prompts — phone-app-class quality. **GPU strongly recommended.** |
 | SD 1.5 LCM Inpaint | ~2 GB | **on-demand** | 512×512 (tiled) | Same, distilled to converge in 4–8 steps — the Fast quality preset |
 | TAESD | ~2.6 MB | **on-demand** | — | Fast VAE decoder for the SD erasers (about 3× faster decode) |
 | RORem (Eraser) | ~5.5 GB | **on-demand** | 512×512 (crop or tiled) | Removes large objects and fills with background, never with something new (SDXL, 4 steps). Needs ~16 GB of free RAM on the processor |
-| Real-ESRGAN x4plus / x2plus | see Model Store | **on-demand** | tiled | Upscale photos; x2plus also powers the 4× two-pass look |
+| Real-ESRGAN x2plus | see Model Store | **on-demand** | tiled | Upscale photos 2×; also powers the 4× two-pass look |
 | 4x NMKD Siax-CX / Superscale | see Model Store | **on-demand** | tiled | Upscale with a sharper, more textured character |
 | 4xNomos8kSCHAT-L | see Model Store | **on-demand** | tiled | Transformer upscale for the finest detail; slowest |
 | 4xNomos2 RealPLKSR | ~31 MB | **on-demand** | whole image, in parts | Fast upscale with natural skin and hair texture; can crackle on flat snow. Short of memory, it keeps its in-between results at half precision (within 1/255) |
@@ -107,7 +108,7 @@ Every setting starts from Prunr's own for the model, or from `--preset`'s; a fla
 | GFPGAN v1.4 / RestoreFormer++ | ~340 / ~295 MB | **on-demand** | 512×512 per face | Restore faces: the crispest / closest to the person's own features |
 | Depth Anything V2 Small | ~95 MB | **on-demand** | 518 short side | Depth effects: lens blur, fog, aerial perspective, line fade, select by depth, depth maps |
 
-The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 + YuNet for the common cases. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
+The default install bundles Silueta + BiRefNet-lite + TEED + SAM 2.1 + YuNet + MI-GAN + Real-ESRGAN x4plus, so cut-outs, erasing and upscaling work offline from the first start. Everything else is a download from prunr's GitHub releases: wherever a feature needs a model that isn't installed, the app says **Get <model> · <size>** and opens the Model Store on it. The Model picker lists every model, downloaded or not; **Get more models** opens the Store, where you can browse, download, view progress, retry, and delete installed models. SHA256 is verified after every download; partial files clean up automatically on cancel.
 
 ## Hardware Acceleration
 

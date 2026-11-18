@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn removing_a_model_takes_its_half_precision_file_too() {
         let dir = tempfile::tempdir().unwrap();
-        let source = prunr_models::descriptor(ModelId::RealEsrganX4Plus).expect("in the registry").source;
+        let source = prunr_models::descriptor(ModelId::RealEsrganX2Plus).expect("in the registry").source;
         let (path, companion) = downloaded_files(source, dir.path()).expect("a download");
         let companion = companion.expect("the upscaler brings a half-precision file");
         std::fs::write(&path, b"fp32").unwrap();

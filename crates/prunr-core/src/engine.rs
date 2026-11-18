@@ -1627,7 +1627,7 @@ impl OrtEngine {
             Weights::Fp32 => Some(
                 prunr_models::resolve_bytes(id).ok_or_else(|| CoreError::Inference(prunr_models::not_installed_error(id)))?,
             ),
-            Weights::Fp16 => prunr_models::model_fp16_bytes(id).map(std::sync::Arc::new),
+            Weights::Fp16 => prunr_models::model_fp16_bytes(id),
             Weights::Int8 => prunr_models::model_int8_bytes(id).map(std::sync::Arc::new),
         })
     }

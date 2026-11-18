@@ -70,13 +70,20 @@ pub(crate) const MODELS: &[ModelSpec] = &[
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/big_lama-1.0.1.onnx",
         sha256: "c9660fc4aea2e62ffbaf3932024c1f4ce29f360e464fc71e1b708f1ad3bfea2e",
     },
-    // RRDB upscale models: only the fp32 main file; the fp16 companion
-    // downloads at runtime.
+    // RRDB upscale models: the fp32 main file; the downloaded ones' fp16
+    // companion downloads at runtime. Real-ESRGAN x4 is built in with its
+    // fp16 copy, so both of its files are fetched and embedded.
     ModelSpec {
         id: prunr_models::ModelId::RealEsrganX4Plus,
         name: "RealESRGAN_x4plus.onnx",
         url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus.onnx",
         sha256: "fb070c21d1e90102859d52328586a8738ebd4b2b076fe611ef42ba4f58076431",
+    },
+    ModelSpec {
+        id: prunr_models::ModelId::RealEsrganX4Plus,
+        name: "RealESRGAN_x4plus_fp16.onnx",
+        url: "https://github.com/aktiwers/prunr/releases/download/models-v1/RealESRGAN_x4plus_fp16.onnx",
+        sha256: "838e4fad9a14a70e96c1953a08da2a0638c23b1dffc5b740351f0bc525b36250",
     },
     ModelSpec {
         id: prunr_models::ModelId::RealEsrganX2Plus,
