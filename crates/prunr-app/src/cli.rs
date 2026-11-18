@@ -183,10 +183,16 @@ pub struct Cli {
     pub clear_ep_cache: bool,
 
     /// Object removal (Eraser) mode. Reads a binary mask from --mask
-    /// (white = inpaint, black = keep) and runs LaMa to fill in the
-    /// masked region. Output saved as {stem}_erased.png by default.
+    /// (white = inpaint, black = keep) and fills the masked region with
+    /// the eraser model (--eraser). Output saved as {stem}_erased.png by
+    /// default.
     #[arg(long)]
     pub inpaint: bool,
+
+    /// The eraser model: migan (built in, the default), lama or big-lama
+    /// (downloaded in the app's Model Store).
+    #[arg(long, value_name = "MODEL", requires = "inpaint")]
+    pub eraser: Option<CliEraser>,
 
     /// Path to the inpaint mask image. Required with --inpaint.
     /// Any image format; pixels >128 in the first channel are treated
@@ -363,6 +369,33 @@ impl CliUpscaler {
     fn model_id(self) -> prunr_models::ModelId {
         // settings_model gives only upscale models, and each names a model.
         self.settings_model().to_model_id().expect("every upscaler names a model")
+    }
+}
+
+/// Eraser model selection.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CliEraser {
+    /// MI-GAN: built in, light, sharp on detail.
+    #[default]
+    Migan,
+    /// LaMa: smoother on flat backgrounds.
+    Lama,
+    /// Big-LaMa: LaMa trained on more data, sharper fills.
+    BigLama,
+}
+
+impl CliEraser {
+    fn settings_model(self) -> SettingsModel {
+        match self {
+            Self::Migan => SettingsModel::MiganInpaint,
+            Self::Lama => SettingsModel::Inpaint,
+            Self::BigLama => SettingsModel::BigInpaint,
+        }
+    }
+
+    fn model_id(self) -> prunr_models::ModelId {
+        // settings_model gives only erasers, and each names a model.
+        self.settings_model().to_model_id().expect("every eraser names a model")
     }
 }
 
@@ -866,7 +899,7 @@ impl Cli {
     /// colorizer or the background-removal model.
     fn settings_model(&self) -> SettingsModel {
         if self.inpaint {
-            SettingsModel::Inpaint
+            self.eraser.unwrap_or_default().settings_model()
         } else if let Some(upscaler) = self.upscale {
             upscaler.settings_model()
         } else if self.colorize {
@@ -1237,7 +1270,8 @@ fn run_inpaint(args: &Cli, brush: &BrushSettings) -> i32 {
         eprintln!("Erasing {} (mask: {})...", input.display(), mask_path.display());
     }
     let mask = fill_region(&mask, brush.inpaint_grow, brush.inpaint_feather);
-    let raw = match prunr_core::inpaint::process_lama(&img, &mask, prunr_models::ModelId::LaMaFp32, args.cpu, brush.inpaint_fill_scale, &prunr_core::Progress::none()) {
+    let eraser = args.eraser.unwrap_or_default().model_id();
+    let raw = match prunr_core::inpaint::process_lama(&img, &mask, eraser, args.cpu, brush.inpaint_fill_scale, &prunr_core::Progress::none()) {
         Ok(r) => r.rgba,
         Err(e) => {
             eprintln!("error: {}", could_not(input, "erase", e.message()));
@@ -2180,13 +2214,32 @@ mod tests {
             (&["-m", "silueta"][..], SettingsModel::Silueta),
             (&["--upscale", "nomos2"][..], SettingsModel::Nomos2Upscale),
             (&["--colorize"][..], SettingsModel::ColorizeDdcolor),
-            (&["--inpaint", "--mask", "m.png"][..], SettingsModel::Inpaint),
+            (&["--inpaint", "--mask", "m.png"][..], SettingsModel::MiganInpaint),
+            (&["--inpaint", "--eraser", "lama", "--mask", "m.png"][..], SettingsModel::Inpaint),
+            (&["--inpaint", "--eraser", "big-lama", "--mask", "m.png"][..], SettingsModel::BigInpaint),
         ] {
             let run = cli(args).run_settings().unwrap();
             assert_eq!((run.item, run.brush), command_line_settings(None, model, None).unwrap(), "{args:?}");
         }
-        let eraser = cli(&["--inpaint", "--mask", "m.png"]).run_settings().unwrap().brush;
+        let eraser = cli(&["--inpaint", "--eraser", "lama", "--mask", "m.png"]).run_settings().unwrap().brush;
         assert_eq!(eraser.inpaint_sharpen, 0.6);
+    }
+
+    /// The eraser is the built-in one unless another is named, so a new
+    /// install erases with nothing downloaded; `--eraser` is the eraser's
+    /// own option.
+    #[test]
+    fn the_eraser_is_the_built_in_one_unless_another_is_named() {
+        use super::CliEraser;
+        use prunr_models::ModelId;
+        assert_eq!(CliEraser::default().model_id(), ModelId::Migan);
+        assert!(prunr_models::descriptor(CliEraser::default().model_id()).is_some_and(|d| d.source.is_bundled()));
+        assert_eq!(cli(&["--inpaint", "--mask", "m.png"]).eraser.unwrap_or_default(), CliEraser::Migan);
+        for (name, eraser, model) in [("migan", CliEraser::Migan, ModelId::Migan), ("lama", CliEraser::Lama, ModelId::LaMaFp32), ("big-lama", CliEraser::BigLama, ModelId::BigLaMa)] {
+            assert_eq!(cli(&["--inpaint", "--eraser", name, "--mask", "m.png"]).eraser, Some(eraser));
+            assert_eq!(eraser.model_id(), model);
+        }
+        assert!(super::Cli::try_parse_from(["prunr", "--eraser", "lama", "photo.jpg"]).is_err(), "only with --inpaint");
     }
 
     /// `--preset` is the starting point; a flag given overrides it, and a

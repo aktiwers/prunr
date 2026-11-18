@@ -178,6 +178,7 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         .spacing([theme::SPACE_LG, theme::SPACE_SM])
                         .show(ui, |ui| {
                             opt_row(ui, "--inpaint", "Switch to Eraser mode");
+                            opt_row(ui, "--eraser <model>", "migan (built in, the default), lama or big-lama");
                             opt_row(ui, "--mask <path>", "Binary mask, must match input dimensions");
                             opt_row(ui, "--fill-scale <scale>", "auto, full, half or quarter: large areas fill more convincingly smaller");
                         });

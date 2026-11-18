@@ -125,7 +125,8 @@ What goes behind the cut-out; without one it stays transparent. When several are
 
 | Option | What it does |
 |---|---|
-| `--inpaint` | Fill the area the mask marks with LaMa. One input image |
+| `--inpaint` | Fill the area the mask marks with the eraser model. One input image |
+| `--eraser <MODEL>` | The eraser: `migan` (built in, the default: light, sharp on detail), `lama` (smoother on flat backgrounds) or `big-lama` (sharper fills); the last two are downloaded in the app's Model Store |
 | `--mask <PATH>` | The mask, the size of the image: white is filled, black is kept |
 | `--fill-scale <SCALE>` | How large the area is filled: `auto` (small areas at full size, large ones smaller), `full`, `half` or `quarter`. A large area fills more convincingly at a smaller scale, a little softer |
 
