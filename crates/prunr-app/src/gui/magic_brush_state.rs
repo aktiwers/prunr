@@ -80,11 +80,6 @@ impl MagicBrushState {
 
     pub fn set_encoder_pending(&mut self, pending: bool) {
         self.encoder_pending = pending;
-        if !pending {
-            // Stroke that arrived while encoder was pending is discarded;
-            // user can click/drag again now that the encoder is ready.
-            self.clear_stroke();
-        }
     }
 
     /// Record the image on screen; a change starts the encode settle.
@@ -176,11 +171,27 @@ mod tests {
         assert!(!m.is_active());
     }
 
+    /// The image's encode landing leaves a stroke in hand alone: let go,
+    /// it picks with the embedding now there. It was dropped, so a click
+    /// or drag under way as the image got ready picked nothing, with no
+    /// word; and an encode ending for another image dropped it too.
+    #[test]
+    fn an_encode_landing_keeps_the_stroke_in_hand() {
+        let mut m = MagicBrushState::default();
+        m.activate();
+        m.set_encoder_pending(true);
+        m.active_stroke.push((10.0, 20.0));
+        m.active_trail.push_spaced(100.0, 200.0, 8.0);
+        m.set_encoder_pending(false);
+        assert_eq!(m.active_stroke, [(10.0, 20.0)]);
+        assert!(m.active_trail.stamps().next().is_some());
+    }
+
     /// Pins that `active_stroke` and `active_trail` are cleared in
     /// lockstep — a stale trail on the next stroke would render a ghost
     /// from the previous gesture; a stale stroke would dispatch SAM on
-    /// the wrong path. Every entry point (deactivate, set_encoder_pending
-    /// false, drag-start, drag-release) must use `clear_stroke()`.
+    /// the wrong path. Every entry point (deactivate, drag-start,
+    /// drag-release) must use `clear_stroke()`.
     #[test]
     fn clear_stroke_clears_both_buffers() {
         let mut m = MagicBrushState::default();
