@@ -365,7 +365,7 @@ impl World {
                 settings: format!("{:?}", item.settings),
                 preset: item.applied_preset.clone(),
                 selection: item.selection_hash,
-                result: item.result_rgba.as_deref().map(pixels_hash),
+                result: shown_picture(item),
                 undo_steps: item.timeline.undo_steps(),
                 can_redo: item.timeline.can_redo(),
                 status: format!("{:?}", item.status()),
@@ -396,6 +396,12 @@ struct Pressable {
     rect: [f32; 4],
     role: String,
     on: Option<bool>,
+}
+
+/// The picture of the step `item` shows, unpacked or stored: a result
+/// not unpacked yet is the same picture.
+fn shown_picture(item: &crate::gui::item::BatchItem) -> Option<u64> {
+    item.result_pixels().and_then(|pixels| pixels.load()).map(|img| pixels_hash(&img))
 }
 
 fn pixels_hash(img: &image::RgbaImage) -> u64 {
@@ -565,7 +571,7 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
     let app = world.app();
     for item in &app.batch.items {
         let plain_cut = item.shows_cutout() && item.selection_mask.is_none() && item.edits.is_none();
-        let Some(here) = item.result_rgba.as_deref().filter(|_| plain_cut).map(pixels_hash) else { continue };
+        let Some(here) = shown_picture(item).filter(|_| plain_cut) else { continue };
         let Some(model) = cut_by(item) else { continue };
         let straight = straight_cut(model, item.settings, &item.filename)?;
         if straight != here {
@@ -594,7 +600,7 @@ fn straight_cut(model: SettingsModel, settings: ItemSettings, name: &str) -> Opt
     fresh.quiet();
     fresh.act(&Action::Click("Process".into()));
     fresh.quiet();
-    fresh.app().batch.find_by_id(id)?.result_rgba.as_deref().map(pixels_hash)
+    shown_picture(fresh.app().batch.find_by_id(id)?)
 }
 
 /// Every step of the image on the canvas undone, then redone: that image
