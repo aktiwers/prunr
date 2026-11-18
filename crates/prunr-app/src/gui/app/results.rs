@@ -770,10 +770,19 @@ impl PrunrApp {
             return CutLanding::Untold;
         }
         if !item.job_is_current() {
+            let step = item.job.as_ref().and_then(|j| j.step);
             // Nobody asked for a quiet run: a later edit simply supersedes it.
             if item.job.as_ref().is_some_and(|j| j.quiet) {
                 item.abandon_job();
                 self.refresh_batch_progress_status();
+            } else if is_selected {
+                // Its look moved while it ran (a preset picked, a knob):
+                // the answer is for the look before, so the image on
+                // screen is cut again for the one it shows. Process takes
+                // the shown image's settings, so only it is run again here.
+                item.abandon_job();
+                self.refresh_batch_progress_status();
+                self.process_items(|item| item.id == item_id, step);
             } else {
                 self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
             }
@@ -2678,25 +2687,40 @@ mod timeline_contract_tests {
     }
 
     /// A result for a state the image has since left (a knob change while
-    /// it ran) cannot land; the image shows its current state again
-    /// instead of staying "Processing" with nothing under way.
+    /// it ran) cannot land. The image on screen is cut again for the state
+    /// it shows; one off screen shows its current state again and says so
+    /// (Process takes the shown image's settings, so it is not run for
+    /// it). Neither stays "Processing" with nothing under way.
     #[test]
     fn a_result_for_a_state_the_image_has_left_ends_the_run() {
         let ctx = egui::Context::default();
-        let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
-        let item = &mut app.batch.items[0];
-        item.start_job(Some(StepKind::Process), Engine::Segment);
-        crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
-        item.settings.gamma = 1.8;
-        item.commit(StepKind::Adjust);
+        for on_screen in [true, false] {
+            let mut app = app_with_processed_item(SettingsModel::BiRefNetLite);
+            if !on_screen {
+                push_test_item(&mut app, 2);
+                app.batch.select_item(1);
+            }
+            let item = &mut app.batch.items[0];
+            item.start_job(Some(StepKind::Process), Engine::Segment);
+            crate::gui::tests::fixtures::put_in(item, BatchStatus::Processing);
+            let stale = item.job_run();
+            item.settings.gamma = 1.8;
+            item.commit(StepKind::Adjust);
 
-        let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
-        app.answer_for_test(&ctx, 1, Ok(late));
-        let item = &app.batch.items[0];
-        assert_eq!(item.status(), BatchStatus::Done, "shows its current state again");
-        assert!(item.job.is_none(), "nothing is awaited any more");
-        assert_eq!(shown(&app), Some(1), "the late result did not land");
-        assert!(!crate::gui::automation::state::dump(&app).busy);
+            let late = prunr_core::ProcessResult { rgba_image: (*px(9)).clone(), active_provider: String::new() };
+            app.answer_for_test(&ctx, 1, Ok(late));
+            let item = &app.batch.items[0];
+            assert_eq!(shown(&app), Some(1), "on screen {on_screen}: the late result did not land");
+            if on_screen {
+                assert!(item.job_is_current() && item.job_run() != stale, "cut again for the state it shows");
+                assert_eq!(app.toasts.asked_for_test(), 0, "nothing to tell");
+            } else {
+                assert_eq!(item.status(), BatchStatus::Done, "shows its current state again");
+                assert!(item.job.is_none(), "nothing is awaited any more");
+                assert!(!crate::gui::automation::state::dump(&app).busy);
+                assert_eq!(app.toasts.asked_for_test(), 1, "told that the result was dropped");
+            }
+        }
     }
 
     /// Leaves the shown state with new pixels, as a hand edit does.

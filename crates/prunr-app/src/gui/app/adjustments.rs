@@ -554,6 +554,35 @@ mod preset_switch_tests {
         assert!(!starts(SettingsModel::RealEsrganUpscale, picked()), "an upscaler runs when asked");
     }
 
+    /// A look picked while the photo's cut runs: the answer on its way is
+    /// for the look before. When it lands the photo is cut again for the
+    /// look shown. It was dropped with "Run it again" and the photo left
+    /// unprocessed.
+    #[test]
+    fn a_look_picked_while_the_cut_runs_is_cut_again() {
+        use crate::gui::worker::WorkerMessage;
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        push_test_item(&mut app, 1).dimensions = (4, 4);
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        app.process_items(|_| true, Some(crate::gui::timeline::StepKind::Process));
+        let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("the cut started") };
+
+        let before = app.batch.items[0].settings;
+        app.batch.items[0].settings.gamma = 1.6;
+        app.apply_toolbar_change(&ctx, ToolbarChange { preset_applied: true, preset_picked: true, ..Default::default() }, before);
+        assert!(rx.try_recv().is_err(), "nothing more starts while the cut runs");
+
+        let cut = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(cut), None, None);
+        assert!(matches!(rx.try_recv(), Ok(WorkerMessage::BatchProcess { .. })), "cut again for the look shown");
+        assert!(app.batch.items[0].is_busy() && !app.batch.items[0].has_result(), "the answer for the look before is not shown");
+        assert_eq!(app.toasts.asked_for_test(), 0, "nothing to tell: the photo is on its way");
+    }
+
     /// Picking the other face restorer takes its settings from the preset.
     #[test]
     fn another_face_restorer_takes_its_settings_from_the_preset() {
