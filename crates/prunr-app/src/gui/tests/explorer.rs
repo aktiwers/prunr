@@ -459,6 +459,14 @@ impl Seen {
 /// brush's strokes again.
 const BRUSH_SLIDERS: [&str; 6] = ["Size", "Hardness", "Opacity", "Feather", "Confidence", "Range"];
 
+/// A slider went from `before` to `after` by a tenth or more of the
+/// larger value: a move a stroke shows (Hardness 0.98 to 1.0 moves no
+/// cell of a small stroke).
+fn moved_enough(before: Option<&str>, after: Option<&str>) -> bool {
+    let (Some(before), Some(after)) = (before.and_then(|v| v.parse::<f64>().ok()), after.and_then(|v| v.parse::<f64>().ok())) else { return false };
+    (after - before).abs() >= 0.1 * before.abs().max(after.abs()).max(f64::EPSILON)
+}
+
 /// Why a press on `name` may change nothing here, when that is by design.
 /// `role` and `on`: how the control read before the press.
 fn quiet_by_design(name: &str, before: &Seen, role: &str, on: Option<bool>) -> Option<&'static str> {
@@ -521,7 +529,7 @@ fn run(actions: &[Action]) -> Option<Broken> {
         }
         if let Action::Slide(name, _) = action {
             let reaches = BRUSH_SLIDERS.contains(&name.as_str()) && world_before_reached;
-            let moved = slider_before.is_some() && world.slider_value(name) != slider_before;
+            let moved = moved_enough(slider_before.as_deref(), world.slider_value(name).as_deref());
             if reaches && moved {
                 world.quiet();
                 let after = world.seen();
