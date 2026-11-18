@@ -154,8 +154,6 @@ The app uses `ort` with `load-dynamic` — the ONNX Runtime shared library is re
 
 Every artifact ships an ORT in (3) so the app works on a clean machine. CI stages Microsoft's PyPI wheel via `cargo xtask install-runtime onnxruntime[-windowsml] <ver> --stage-to <dir>` — the same code path the GUI uses for the runtime store, so installer layout and "Settings → Hardware → Install runtime" can't drift. Linux artifacts (tar.gz / AppImage / .deb / .rpm) get the CPU-only runtime in `<exe>/runtime/`; Windows artifacts (.zip / installer) the Windows ML build (`onnxruntime.dll` + `DirectML.dll`); installing a store runtime makes it the one Prunr loads, and Settings › Hardware › Runtime switches between them; the macOS arm64 wheel carries **CoreML** and goes into `Prunr.app/Contents/Frameworks/` (next to the binary in the tar.gz). The CUDA and OpenVINO add-ons, which join the runtime Prunr ships, and the MIGraphX runtime install via Settings → Hardware.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for internals.
-
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
