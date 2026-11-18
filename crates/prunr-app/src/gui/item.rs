@@ -1207,15 +1207,21 @@ pub(crate) struct BatchItem {
     pub(crate) selection_texture: Option<SelectionTexture>,
 
     /// Cached SAM 2 image embedding, filled whenever Magic Brush is active
-    /// and this item is selected. Invalidated on source change.
+    /// and this item is selected. Read through `magic_embedding`: it is
+    /// the embedding of `magic_embedding_saw`.
     pub(crate) magic_brush_embedding: Option<std::sync::Arc<prunr_core::sam::SamEmbedding>>,
+    /// The picture `magic_brush_embedding` was made from (`None`: the photo).
+    magic_embedding_saw: Option<RunStart>,
     pub(crate) adjusting: Option<StrokeAdjustment>,
     /// A background pre-encode was refused (RAM gate or encoder error);
     /// not retried every frame. Cleared with the embedding.
     pub(crate) magic_preencode_refused: bool,
-    /// How near each part of the original photo is (~1 MB), measured when
-    /// a depth knob first needs it and kept until the source changes.
+    /// How near each part of the picture is (~1 MB), measured when a
+    /// depth knob first needs it, and again when picks read another
+    /// picture (`depth_saw`); the one kept is drawn with until then.
     pub(crate) depth: Option<Arc<prunr_core::depth::DepthMap>>,
+    /// The picture `depth` was measured from (`None`: the photo).
+    depth_saw: Option<RunStart>,
     /// Where the depth map's run stands; see `DepthRun`.
     pub(crate) depth_run: DepthRun,
     /// The previewed photo with the Depth chip's look on it, and what it
@@ -1510,9 +1516,48 @@ impl BatchItem {
         super::reclaim::later(self.colorize.take());
     }
 
-    /// A depth map is wanted and none is kept, under way or failed.
+    /// The stored picture a Magic Brush pick and the depth map read
+    /// (`None`: the photo): what a cut-out would start from now, when it
+    /// has the photo's size. That is what an erase left of the photo, also
+    /// under a cut-out made from it; an upscale's larger result is not
+    /// what picks are made on.
+    pub(crate) fn pick_start(&self) -> Option<RunStart> {
+        self.run_start(Engine::Segment).filter(|start| start.dims() == self.dimensions)
+    }
+
+    /// `pick_start`'s pixels for a thread to read, and which picture it is.
+    pub(crate) fn pick_image(&self) -> (Pixels, Option<RunStart>) {
+        match self.pick_start() {
+            Some(start) => (Pixels::Parked(Arc::clone(&start)), Some(start)),
+            None => (self.photo_pixels(), None),
+        }
+    }
+
+    /// The embedding of the picture picks read now.
+    pub(crate) fn magic_embedding(&self) -> Option<&Arc<prunr_core::sam::SamEmbedding>> {
+        self.magic_brush_embedding.as_ref().filter(|_| same_start(self.magic_embedding_saw.as_ref(), self.pick_start().as_ref()))
+    }
+
+    /// Keep `embedding`, made from `saw` (`None`: the photo). False when
+    /// picks read another picture by now: it is not kept.
+    pub(crate) fn keep_magic_embedding(&mut self, embedding: Arc<prunr_core::sam::SamEmbedding>, saw: Option<RunStart>) -> bool {
+        if !same_start(saw.as_ref(), self.pick_start().as_ref()) {
+            return false;
+        }
+        self.magic_brush_embedding = Some(embedding);
+        self.magic_embedding_saw = saw;
+        true
+    }
+
+    /// The depth map of the picture picks read now.
+    pub(crate) fn current_depth(&self) -> Option<&Arc<prunr_core::depth::DepthMap>> {
+        self.depth.as_ref().filter(|_| same_start(self.depth_saw.as_ref(), self.pick_start().as_ref()))
+    }
+
+    /// A depth map is wanted and none of the picture picks read is kept,
+    /// under way or failed.
     pub(crate) fn needs_depth_run(&self) -> bool {
-        self.depth.is_none() && !self.depth_run.pending && !self.depth_run.failed
+        self.current_depth().is_none() && !self.depth_run.pending && !self.depth_run.failed
     }
 
     /// The depth map is asked for by hand (a click that reads it, a Depth
@@ -1522,12 +1567,16 @@ impl BatchItem {
         self.depth_run.failed = false;
     }
 
-    /// Keep a depth map measured from the photo. True when it was kept.
-    pub(crate) fn land_depth(&mut self, result: Result<Arc<prunr_core::depth::DepthMap>, String>) -> bool {
+    /// Keep a depth map measured from `saw` (`None`: the photo). True when
+    /// it was kept; one of a picture the image has left (an erase landed,
+    /// an undo) is not, and the next frame asks for this picture's.
+    pub(crate) fn land_depth(&mut self, result: Result<Arc<prunr_core::depth::DepthMap>, String>, saw: Option<RunStart>) -> bool {
         self.depth_run.pending = false;
         match result {
+            Ok(_) if !same_start(saw.as_ref(), self.pick_start().as_ref()) => false,
             Ok(map) => {
                 self.depth = Some(map);
+                self.depth_saw = saw;
                 true
             }
             Err(_) => {
@@ -3390,6 +3439,8 @@ impl BatchItem {
             selection_tex_pending: None,
             selection_texture: None,
             magic_brush_embedding: None,
+            magic_embedding_saw: None,
+            depth_saw: None,
             adjusting: None,
             magic_preencode_refused: false,
             depth: None,
@@ -4963,6 +5014,64 @@ mod tests {
         for _ in 0..2 {
             let _ = item.redo_step();
         }
+    }
+
+    /// A Magic Brush pick and the depth map read the picture a cut-out
+    /// would start from now: the photo, or what an erase left of it, also
+    /// under a cut-out made from that. Both were always of the photo, so a
+    /// click where an erased person stood still picked their shape, and
+    /// depth blur and fog still followed it.
+    #[test]
+    fn picks_and_depth_read_the_picture_under_the_cut_out() {
+        use prunr_core::ModelKind::Silueta;
+        let embedding = || Arc::new(prunr_core::sam::SamEmbedding { image_embed: vec![0.0; 4], high_res_feats_0: vec![0.0; 4], high_res_feats_1: vec![0.0; 4] });
+        let map = || Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
+        let mut item = fixture_item(1);
+        item.dimensions = (2, 2);
+        assert!(item.pick_start().is_none(), "the photo");
+        assert!(item.keep_magic_embedding(embedding(), None));
+        assert!(item.land_depth(Ok(map()), None));
+        assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
+
+        item.start_job(Some(StepKind::Erase), Engine::Erase);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
+        item.finish_job();
+        let erased = item.pick_start().expect("what the erase left");
+        assert!(Arc::ptr_eq(&erased, item.timeline.current().result.as_ref().expect("the erase's result")));
+        assert!(item.magic_embedding().is_none(), "the photo's embedding still holds what was erased");
+        assert!(item.needs_depth_run(), "and so does its depth map");
+
+        // An answer made from the photo that lands now is not this picture's.
+        assert!(!item.keep_magic_embedding(embedding(), None));
+        item.depth_run.pending = true;
+        assert!(!item.land_depth(Ok(map()), None));
+        assert!(item.magic_embedding().is_none() && item.needs_depth_run());
+        assert!(item.keep_magic_embedding(embedding(), Some(Arc::clone(&erased))));
+        item.depth_run.pending = true;
+        assert!(item.land_depth(Ok(map()), Some(Arc::clone(&erased))));
+        assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
+
+        // A cut-out of the erased picture: picks correct that cut.
+        item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
+        let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+        item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, None, item.settings.current_recipe(Silueta));
+        item.finish_job();
+        assert!(item.pick_start().is_some_and(|start| Arc::ptr_eq(&start, &erased)));
+        assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
+
+        for _ in 0..2 {
+            item.undo_step().expect("a step back");
+        }
+        assert!(item.pick_start().is_none(), "back on the photo");
+        assert!(item.magic_embedding().is_none() && item.needs_depth_run());
+
+        // A result of another size (an upscale) is not what picks are made on.
+        let mut item = fixture_item(2);
+        item.dimensions = (2, 2);
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::new(8, 8)));
+        item.finish_job();
+        assert!(item.pick_start().is_none());
     }
 
     /// Kept lines are drawn again only over the image they were traced

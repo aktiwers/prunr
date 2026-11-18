@@ -514,11 +514,14 @@ impl PrunrApp {
         if !item.needs_depth_run() {
             return;
         }
+        let (input, saw) = item.pick_image();
         let job = crate::gui::processor::DepthJob {
             item_id: item.id,
-            input: item.photo_pixels(),
+            input,
+            // The faces found in the photo are the photo's, not an erased picture's.
+            faces: item.faces_found_in_original().filter(|_| saw.is_none()),
+            saw,
             cpu_only,
-            faces: item.faces_found_in_original(),
         };
         item.depth_run.pending = true;
         self.processor.dispatch_depth(job);
@@ -528,7 +531,7 @@ impl PrunrApp {
     /// the shown image's photo when something wants its map.
     pub(super) fn pump_depth(&mut self, ctx: &egui::Context) {
         for landed in self.processor.pump_depth_results() {
-            self.on_depth_measured(ctx, landed.item_id, landed.result);
+            self.on_depth_measured(ctx, landed.item_id, landed.result, landed.saw);
         }
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         if self.wants_depth_now(idx) {
@@ -538,10 +541,10 @@ impl PrunrApp {
 
     /// A depth measurement of `item_id` ended: its map is kept and read,
     /// or why it failed is told.
-    pub(crate) fn on_depth_measured(&mut self, ctx: &egui::Context, item_id: u64, result: Result<Arc<prunr_core::depth::DepthMap>, String>) {
+    pub(crate) fn on_depth_measured(&mut self, ctx: &egui::Context, item_id: u64, result: Result<Arc<prunr_core::depth::DepthMap>, String>, saw: Option<crate::gui::timeline::RunStart>) {
         let Some(idx) = self.batch.index_of(item_id) else { return };
         let error = result.as_ref().err().cloned();
-        if self.batch.items[idx].land_depth(result) {
+        if self.batch.items[idx].land_depth(result, saw) {
             tracing::info!(item_id, "depth map landed");
             self.on_depth_landed(idx);
             ctx.request_repaint();
@@ -3176,7 +3179,7 @@ mod depth_tests {
                 other => crate::gui::tests::fixtures::put_in(item, other),
             }
             set(&mut item.settings);
-            assert!(item.land_depth(Ok(map())));
+            assert!(item.land_depth(Ok(map()), None));
             app.after_depth_landed(0);
             assert_eq!(app.processor.live_preview.is_pending_for(1), reruns, "{name}");
         }
@@ -3215,7 +3218,7 @@ mod depth_tests {
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
         assert!(app.magic_brush_state.pending_depth_click.is_some(), "parked until the map is there");
         assert!(app.processor.pump_sam_decoder_results().is_empty());
-        assert!(app.batch.items[0].land_depth(Ok(map())));
+        assert!(app.batch.items[0].land_depth(Ok(map()), None));
         app.on_depth_landed(0);
         assert!(app.magic_brush_state.pending_depth_click.is_none());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

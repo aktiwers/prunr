@@ -376,7 +376,7 @@ impl PrunrApp {
             return;
         }
         let Some(item) = self.batch.selected_item() else { return };
-        if item.magic_brush_embedding.is_some() {
+        if item.magic_embedding().is_some() {
             return;
         }
         let active = self.magic_brush_state.is_active();
@@ -387,10 +387,13 @@ impl PrunrApp {
         {
             return;
         }
-        // Decode still pending: try again next frame.
-        let Some(source) = item.source_rgba.clone() else { return };
+        let (picture, saw) = item.pick_image();
+        // The photo's decode still pending: try again next frame.
+        if saw.is_none() && item.source_rgba.is_none() {
+            return;
+        }
         let item_id = item.id;
-        match self.processor.dispatch_sam_encoder(item_id, source, self.settings.cpu_only()) {
+        match self.processor.dispatch_sam_encoder(item_id, picture, saw, self.settings.cpu_only()) {
             Ok(()) => self.magic_brush_state.set_encoder_pending(true),
             Err(err) => self.on_encoder_failure(item_id, &err),
         }
@@ -401,7 +404,7 @@ impl PrunrApp {
     /// is on its way, since the brush asks for the shown image's map,
     /// and `pump_depth` runs the click when it lands.
     pub(crate) fn magic_depth_click(&mut self, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
-        let Some(depth) = self.batch.find_by_id(item_id).and_then(|i| i.depth.clone()) else {
+        let Some(depth) = self.batch.find_by_id(item_id).and_then(|i| i.current_depth().cloned()) else {
             // The click waits for the map: one that failed is measured again.
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.try_depth_again();
@@ -462,7 +465,7 @@ impl PrunrApp {
     }
 
     pub(crate) fn magic_brush_preparing(&self) -> bool {
-        let has_embedding = self.batch.selected_item().is_none_or(|i| i.magic_brush_embedding.is_some());
+        let has_embedding = self.batch.selected_item().is_none_or(|i| i.magic_embedding().is_some());
         self.magic_brush_state.preparing(has_embedding)
     }
 
@@ -594,9 +597,10 @@ impl PrunrApp {
             self.magic_brush_state.set_encoder_pending(false);
             match result.result {
                 Ok(embedding) => {
-                    if let Some(item) = self.batch.find_by_id_mut(result.item_id) {
-                        let embedding = Arc::new(embedding);
-                        item.magic_brush_embedding = Some(Arc::clone(&embedding));
+                    // One of a picture the image has left (an erase landed,
+                    // an undo) is dropped: the next frame encodes this one.
+                    let embedding = Arc::new(embedding);
+                    if self.batch.find_by_id_mut(result.item_id).is_some_and(|item| item.keep_magic_embedding(Arc::clone(&embedding), result.saw)) {
                         tracing::info!(item_id = result.item_id, "SAM encoder embedding cached");
                         let picks: Vec<_> = self.magic_brush_state.pending_sam_picks
                             .extract_if(.., |p| p.item_id == result.item_id)
@@ -961,7 +965,7 @@ mod tool_mutual_exclusion_tests {
         app.magic_depth_click(1, (2.0, 2.0), (8, 8), BrushMode::Add);
         assert_eq!(app.run_refusal(&app.batch.items[0]), Some(Reason::FinishingSelection), "a click waits for the depth map");
         app.batch.items[0].depth_run.pending = true;
-        app.on_depth_measured(&egui::Context::default(), 1, Err("short of memory".into()));
+        app.on_depth_measured(&egui::Context::default(), 1, Err("short of memory".into()), None);
         assert_eq!(app.run_refusal(&app.batch.items[0]), None, "the map failed: the click no longer waits");
     }
 
@@ -1005,7 +1009,7 @@ mod tool_mutual_exclusion_tests {
             app.reconcile_selected(&ctx);
             let item = &mut app.batch.items[0];
             item.depth_run.pending = true;
-            item.land_depth(Err("short of memory".into()));
+            item.land_depth(Err("short of memory".into()), None);
             assert!(!item.needs_depth_run(), "not on its own");
             app
         };

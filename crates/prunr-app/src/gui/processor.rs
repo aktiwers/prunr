@@ -140,6 +140,8 @@ pub(crate) struct LandedFill {
 /// The item_id routes the result even if the user switched images.
 pub(crate) struct SamEncoderResult {
     pub(crate) item_id: u64,
+    /// The picture that was encoded (`None`: the photo).
+    pub(crate) saw: Option<super::timeline::RunStart>,
     pub(crate) result: Result<prunr_core::sam::SamEmbedding, String>,
 }
 
@@ -433,6 +435,8 @@ pub(crate) struct SamDecodeRequest {
 /// A depth map landing for `item_id`.
 pub(crate) struct DepthResult {
     pub(crate) item_id: u64,
+    /// The picture that was measured (`None`: the photo).
+    pub(crate) saw: Option<super::timeline::RunStart>,
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
@@ -455,6 +459,8 @@ pub(crate) struct Admitted {
 pub(crate) struct DepthJob {
     pub(crate) item_id: u64,
     pub(crate) input: super::item::Pixels,
+    /// The picture `input` is (`None`: the photo); it comes back with the map.
+    pub(crate) saw: Option<super::timeline::RunStart>,
     pub(crate) cpu_only: bool,
     /// The faces a Faces search already found in this photo; `None`: the
     /// depth thread finds them.
@@ -481,12 +487,12 @@ impl DepthQueue {
             let mut look = None;
             let mut next = job_rx.recv().ok();
             while let Some(job) = next {
-                let item_id = job.item_id;
+                let (item_id, saw) = (job.item_id, job.saw.clone());
                 let result = caught(|| measure_depth(&engine_slot, &progress, job, &mut faces, &mut look)).unwrap_or_else(Err);
                 if let Err(err) = &result {
                     tracing::warn!(item_id, %err, "depth run failed");
                 }
-                let _ = done_tx.send(DepthResult { item_id, result });
+                let _ = done_tx.send(DepthResult { item_id, saw, result });
                 next = job_rx.try_recv().ok().or_else(|| {
                     look = None;
                     job_rx.recv().ok()
@@ -1049,7 +1055,7 @@ impl Processor {
     /// An encoder run finishing for `item_id`.
     #[cfg(test)]
     pub(crate) fn land_sam_encoder_for_test(&self, item_id: u64, embedding: prunr_core::sam::SamEmbedding) {
-        let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, result: Ok(embedding) });
+        let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, saw: None, result: Ok(embedding) });
     }
 
     /// An erase of `item_id` for `run` dispatched and ending with `outcome`.
@@ -2017,9 +2023,10 @@ impl Processor {
         self.colorize.done.drain()
     }
 
-    /// Runs once per source image; `Err(reason)` at once when the model
-    /// does not fit in memory.
-    pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: std::sync::Arc<image::RgbaImage>, cpu_only: bool) -> Result<(), String> {
+    /// Runs once per picture picks read (`source`, which is `saw`);
+    /// `Err(reason)` at once when the model does not fit in memory. A
+    /// stored picture is unpacked on the model's thread.
+    pub(crate) fn dispatch_sam_encoder(&self, item_id: u64, source: super::item::Pixels, saw: Option<super::timeline::RunStart>, cpu_only: bool) -> Result<(), String> {
         let descriptor = prunr_models::descriptor(prunr_models::ModelId::Sam21HieraSmall).ok_or("the model is not available")?;
         if !sam_sessions_built(&self.sam_sessions, cpu_only) {
             admitted(descriptor, cpu_only)?;
@@ -2027,9 +2034,9 @@ impl Processor {
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
-            let result = caught(|| ensure_sam_sessions(&sessions, cpu_only).and_then(|s| s.encode(&source)))
+            let result = caught(|| source.read().and_then(|picture| ensure_sam_sessions(&sessions, cpu_only)?.encode(&picture)))
                 .unwrap_or_else(Err);
-            let _ = tx.send(SamEncoderResult { item_id, result });
+            let _ = tx.send(SamEncoderResult { item_id, saw, result });
         });
         Ok(())
     }

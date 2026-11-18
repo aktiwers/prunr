@@ -298,7 +298,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     let item_id = item.id;
     let (source_w, source_h) = item.dimensions;
     // `None` while the encoder runs; a pick made then waits for it.
-    let embedding = item.magic_brush_embedding.clone();
+    let embedding = item.magic_embedding().cloned();
 
     let hover_pos_for_cursor = ui.ctx().input(|i| i.pointer.hover_pos());
 
