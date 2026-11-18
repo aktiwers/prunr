@@ -107,6 +107,14 @@ impl ItemFacts {
     }
 }
 
+impl ItemFacts {
+    /// The image shows what a run of `engine` made, as that run left it
+    /// or with knobs moved since.
+    pub(crate) fn shows_run_of(&self, engine: crate::gui::item::Engine) -> bool {
+        self.shown == Shown::Run(engine)
+    }
+}
+
 #[cfg(test)]
 impl ItemFacts {
     /// An unprocessed, decoded photo with nothing kept: tests change the

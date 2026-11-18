@@ -192,10 +192,15 @@ pub(crate) fn render(
 
         let model = app_settings.model;
         if shows(model, Surface::Upscale) {
-            row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, &defaults, state.source_dims, gate(Surface::Upscale)));
+            let upscale_gate = super::upscale_toolbar::UpscaleGate {
+                off: gate(Surface::Upscale),
+                refine_waits: crate::gui::capability::kept_run_gone(&state.facts, crate::gui::item::Engine::Upscale),
+            };
+            row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, &defaults, state.source_dims, upscale_gate));
         }
         if shows(model, Surface::Colorize) {
-            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings, defaults.color_strength_pct)));
+            let waits = crate::gui::capability::kept_run_gone(&state.facts, crate::gui::item::Engine::Colorize);
+            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings, defaults.color_strength_pct, waits)));
         }
         if shows(model, Surface::SdChips) && row.chip(ui, "sd", |ui| super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed)) {
             change.brush_settings_committed = true;
@@ -1205,7 +1210,9 @@ const POPUP_GAP: f32 = 4.0;
 /// The picker's last row: its title and description.
 const MORE_MODELS: (&str, &str) = ("Get more models", "Open the Model Store");
 
-fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings, default_pct: u8) {
+/// `waits`: the shown colorize's run is no longer kept, so Strength
+/// changes the image at the next Process.
+fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings, default_pct: u8, waits: bool) {
     let tuned = s.color_strength_pct != default_pct;
     let summary = fmt::percent(s.color_strength());
     let group = chip::GroupChip {
@@ -1213,7 +1220,11 @@ fn render_color_strength_chip(ui: &mut Ui, s: &mut ItemSettings, default_pct: u8
         icon: ICON_PALETTE.codepoint,
         label: "Strength",
         summary: &summary,
-        tooltip: "Color strength. 0% = black and white, 100% = the model's colors, up to 150%.",
+        tooltip: if waits {
+            "Color strength. 0% = black and white, 100% = the model's colors, up to 150%. Requires reprocessing."
+        } else {
+            "Color strength. 0% = black and white, 100% = the model's colors, up to 150%."
+        },
         tuned,
         at_default: !tuned,
         width: theme::POPOVER_WIDTH,

@@ -7,6 +7,10 @@ use crate::gui::views::adjustments_toolbar;
 use crate::gui::brush_state::Tool;
 use super::PrunrApp;
 
+/// The status when a knob moved on an upscale or a colorize that only a
+/// new run can change.
+pub(super) const PROCESS_TO_APPLY: &str = "Press Process to apply the change.";
+
 impl PrunrApp {
     /// Shift+H and an empty batch always hide it. `auto_hide_adjustments`
     /// hides it unless the cursor is in a peek zone near the top of the
@@ -236,6 +240,9 @@ impl PrunrApp {
         if let Some(kind) = self.wants_kept_run_refinish(idx).filter(|_| changed || toolbar_change.commit) {
             self.processor.live_preview.mark_tweak(item_id, kind);
             queued = true;
+        } else if changed && self.change_waits_for_process(idx) {
+            // Nothing on screen answers the knob: say what will.
+            self.status.text = PROCESS_TO_APPLY.to_string();
         }
         // A release settles the drag's render at once, also when the
         // release frame left the value as it was and queued nothing.
@@ -251,6 +258,24 @@ impl PrunrApp {
             // a no-op preset apply for the commit toast.
             ctx.request_repaint();
         }
+    }
+
+    /// The shown upscale or colorize takes the change only by being made
+    /// again: its model's settings moved, or the run that Refine and
+    /// Strength finish again was let go (a model switch, an undo).
+    fn change_waits_for_process(&self, idx: usize) -> bool {
+        use crate::gui::capability::ItemFacts;
+        use crate::gui::item::{Engine, KeptRunTier};
+        let Some(model) = self.settings.model.dispatch_model_kind() else { return false };
+        let engine = if model.is_upscale() {
+            Engine::Upscale
+        } else if self.settings.model.is_colorize() {
+            Engine::Colorize
+        } else {
+            return false;
+        };
+        let item = &self.batch.items[idx];
+        item.is_idle() && ItemFacts::of(item).shows_run_of(engine) && item.kept_run_tier(model) == KeptRunTier::Full
     }
 
     /// A preset picked for a photo with no cut-out yet starts the cut-out,
@@ -586,6 +611,39 @@ mod preset_switch_tests {
         assert!(matches!(rx.try_recv(), Ok(WorkerMessage::BatchProcess { .. })), "cut again for the look shown");
         assert!(app.batch.items[0].is_busy() && !app.batch.items[0].has_result(), "the answer for the look before is not shown");
         assert_eq!(app.toasts.asked_for_test(), 0, "nothing to tell: the photo is on its way");
+    }
+
+    /// A knob moved on an upscale that can no longer be finished again
+    /// (its run was let go) changes nothing on screen until Process makes
+    /// the upscale again: the status says so, where the slider moved and
+    /// nothing answered. A photo not upscaled yet says nothing: every
+    /// knob there is for the first run.
+    #[test]
+    fn a_knob_that_waits_for_process_says_so() {
+        use crate::gui::item::Engine;
+        let ctx = egui::Context::default();
+        let app_with = |upscaled: bool| {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::RealEsrganUpscale;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (4, 4);
+            if upscaled {
+                item.start_job(Some(crate::gui::timeline::StepKind::Upscale), Engine::Upscale);
+                item.result_rgba = Some(std::sync::Arc::new(image::RgbaImage::new(16, 16)));
+                item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
+                item.finish_job();
+            }
+            app.batch.select_item(0);
+            app
+        };
+        let sharpened = |app: &mut PrunrApp| {
+            let before = app.batch.items[0].settings;
+            app.batch.items[0].settings.sharpen = 0.4;
+            app.apply_toolbar_change(&ctx, ToolbarChange { commit: true, ..Default::default() }, before);
+            app.status.text.clone()
+        };
+        assert_eq!(sharpened(&mut app_with(true)), super::PROCESS_TO_APPLY);
+        assert_ne!(sharpened(&mut app_with(false)), super::PROCESS_TO_APPLY, "before the first upscale");
     }
 
     /// Picking the other face restorer takes its settings from the preset.

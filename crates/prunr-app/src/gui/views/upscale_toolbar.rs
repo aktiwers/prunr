@@ -11,13 +11,23 @@ use crate::gui::settings::Settings;
 
 /// `source_dims` is `(w, h)` of the image the next upscale starts from,
 /// resolved by the caller; `defaults` the default preset's settings.
+/// How the upscale chips stand.
+#[derive(Clone, Copy)]
+pub(crate) struct UpscaleGate {
+    /// Why they are all off, if they are.
+    pub(crate) off: Option<&'static str>,
+    /// The shown upscale's run is no longer kept: Refine's knobs for
+    /// after the model wait for Process too.
+    pub(crate) refine_waits: bool,
+}
+
 pub(crate) fn render_upscale_chips(
     ui: &mut Ui,
     app_settings: &Settings,
     item_settings: &mut ItemSettings,
     defaults: &ItemSettings,
     source_dims: (u32, u32),
-    gate: Option<&'static str>,
+    gate: UpscaleGate,
 ) {
     let factor = item_settings.output_scale.factor();
     let out_w = source_dims.0.saturating_mul(factor);
@@ -25,8 +35,8 @@ pub(crate) fn render_upscale_chips(
     if app_settings.model.to_model_id().is_none() {
         return;
     }
-    chip::gated(ui, gate, |ui| {
+    chip::gated(ui, gate.off, |ui| {
         render_output_scale_chip(ui, &mut item_settings.output_scale, defaults.output_scale, (out_w, out_h));
-        render_refine_group(ui, item_settings, defaults);
+        render_refine_group(ui, item_settings, defaults, gate.refine_waits);
     });
 }

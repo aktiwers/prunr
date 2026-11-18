@@ -5,7 +5,7 @@
 mod check;
 mod facts;
 
-pub(crate) use check::{check, Need, Reason, Verdict};
+pub(crate) use check::{check, kept_run_gone, Need, Reason, Verdict};
 pub(crate) use facts::{ItemFacts, Photo};
 #[cfg(test)]
 pub(crate) use facts::{Activity, Shown};

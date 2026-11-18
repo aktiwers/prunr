@@ -22,8 +22,9 @@ const REFINE_FIELDS: &[Field<ItemSettings>] = &[
 
 const PANEL_WIDTH: f32 = 400.0;
 
-/// `d`: the default preset's settings.
-pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings, d: &ItemSettings) {
+/// `d`: the default preset's settings. `waits`: the knobs for after the
+/// model change the image at the next Process, not as they move.
+pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings, d: &ItemSettings, waits: bool) {
     let tuned = chip::tuned_count(REFINE_FIELDS, s, d);
     let summary = chip::tuned_summary(tuned);
     let group = GroupChip {
@@ -31,7 +32,11 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings, d: &ItemSet
         icon: ICON_TUNE.codepoint,
         label: "Refine",
         summary: &summary,
-        tooltip: "Clean the photo before upscaling and tune the result after.",
+        tooltip: if waits {
+            "Clean the photo before upscaling and tune the result after. Requires reprocessing."
+        } else {
+            "Clean the photo before upscaling and tune the result after."
+        },
         tuned: tuned > 0,
         at_default: tuned == 0,
         width: PANEL_WIDTH,
@@ -50,7 +55,7 @@ pub(crate) fn render_refine_group(ui: &mut Ui, s: &mut ItemSettings, d: &ItemSet
             chip::panel_section(ui, "Before upscaling", Some("Requires reprocessing."));
             chip::slider_row_f32(ui, "Denoise", &mut s.pre_denoise, 0.0..=1.0, false, |v| fmt::off_or(v, f32::EPSILON, |v| fmt::plain(v, 2)));
             hint(ui, "Smooth grain and speckles first, so the upscaler does not sharpen them.");
-            chip::panel_section(ui, "After upscaling", None);
+            chip::panel_section(ui, "After upscaling", waits.then_some("Requires reprocessing."));
             sharpen(ui, s);
             hint(ui, "Negative softens, positive sharpens.");
             ai_blend(ui, s);
