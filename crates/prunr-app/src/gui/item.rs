@@ -549,6 +549,15 @@ pub(crate) enum Cutter {
     NoModel,
 }
 
+/// Two runs began from the same image (`None`: the photo).
+fn same_start(a: Option<&RunStart>, b: Option<&RunStart>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
 /// A lens-blur focus and what it was measured from.
 /// What an effect backdrop's thumbnail copy is made for: the effect, and
 /// by address the depth map a lens blur reads and the result a blur fills
@@ -1097,6 +1106,9 @@ pub(crate) struct BatchItem {
     pub(crate) applied_recipe: Option<prunr_core::ProcessingRecipe>,
     /// Compressed cached tensor from Tier 1 inference (for Tier 2 mask reruns).
     pub(crate) cached_tensor: Option<super::worker::CompressedTensor>,
+    /// The image `cached_tensor` segmented (`None`: the photo). The same
+    /// model's cut of another image is another segmentation.
+    cached_tensor_saw: Option<RunStart>,
     /// The last upscale run's model output and input, so Refine re-finishes
     /// it without a model run. Survives `reset_result_caches()`; cleared on a
     /// model swap. RAM: 4K × 4 ≈ 500 MB, double while AI blend or Color match
@@ -1110,6 +1122,8 @@ pub(crate) struct BatchItem {
     /// Every TEED scale (Tier 2 edge reruns read whichever scale the
     /// user has picked without re-inferring).
     pub(crate) cached_edge_tensors: Option<super::worker::CompressedEdgeTensors>,
+    /// The image `cached_edge_tensors` was traced on (`None`: the photo).
+    cached_edges_saw: Option<RunStart>,
     /// Decompressed hot copy of the active scale. Lets a slider drag reuse
     /// the same Arc instead of paying zstd per dispatch.
     pub(crate) volatile_edge_tensor: Option<(prunr_core::EdgeScale, Arc<Vec<f32>>)>,
@@ -1274,6 +1288,7 @@ impl BatchItem {
     /// tensor, so any tensor change invalidates all of them.
     pub(crate) fn invalidate_edge_cache(&mut self) {
         self.cached_edge_tensors = None;
+        self.cached_edges_saw = None;
         self.volatile_edge_tensor = None;
         self.edge_planes = Default::default();
     }
@@ -1313,7 +1328,7 @@ impl BatchItem {
         let cut_as_set = self.applied_recipe.as_ref().is_some_and(|applied| {
             prunr_core::resolve_tier(applied, &self.settings.current_recipe(model)) != prunr_core::RequiredTier::FullPipeline
         });
-        self.cached_tensor.is_some() && self.run_start(Engine::Segment).is_none() && cut_as_set && self.lines_traced_on_another_cut(action)
+        self.tensor_made_shown_step() && self.run_start(Engine::Segment).is_none() && cut_as_set && self.lines_traced_on_another_cut(action)
     }
 
     /// A cut-out's mask is kept to adjust it without the model; lines over
@@ -1349,7 +1364,13 @@ impl BatchItem {
 
     /// Replaces the compressed tensor and the decoded copy tied to it.
     pub(crate) fn set_cached_tensor(&mut self, tensor: Option<super::worker::CompressedTensor>) {
+        self.keep_segmentation(tensor, None);
+    }
+
+    /// Keep `tensor`, the segmentation of `saw` (`None`: the photo).
+    fn keep_segmentation(&mut self, tensor: Option<super::worker::CompressedTensor>, saw: Option<RunStart>) {
         self.cached_tensor = tensor;
+        self.cached_tensor_saw = saw;
         self.volatile_seg_tensor = None;
     }
 
@@ -2419,7 +2440,11 @@ impl BatchItem {
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
         self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
         self.edits = shown.edits.as_ref().and_then(|e| e.load());
-        if self.settings.line_mode != shown.settings.line_mode {
+        // Lines kept from a cut of another image (before or after an erase)
+        // are not the restored cut's to draw again.
+        let cut_began = shown.origin.as_ref().filter(|o| o.engine == Engine::Segment).map(|o| o.start.as_ref());
+        let traced_elsewhere = cut_began.is_some_and(|began| !same_start(began, self.cached_edges_saw.as_ref()));
+        if self.settings.line_mode != shown.settings.line_mode || traced_elsewhere {
             self.invalidate_edge_cache();
         }
         self.settings = shown.settings;
@@ -2995,7 +3020,7 @@ impl BatchItem {
         let tier = prunr_core::resolve_tier(old_recipe, &current);
         let impact = crate::gui::knob_catalog::cache_impact_for_recipe_diff(old_recipe, &current);
         self.apply_cache_impact(impact);
-        let has_tensor = self.cached_tensor.is_some();
+        let has_tensor = self.tensor_made_shown_step();
         if self.lines_need_only_a_retrace(model, action) {
             return RunTier::AddEdge;
         }
@@ -3065,13 +3090,21 @@ impl BatchItem {
                 self.applied_recipe = Some(recipe_snapshot);
                 // Keep the cache when the worker returned no fresh tensor (a
                 // rerun): clobbering it killed live preview after any rerun.
+                let saw = self.job.as_ref().and_then(|job| job.start.clone());
                 if let Some(new) = seg {
-                    self.set_cached_tensor(Some(new));
+                    self.keep_segmentation(Some(new), saw.clone());
                 }
-                if let Some(mut new) = edges {
-                    self.invalidate_edge_cache();
-                    new.traced_on = traced_on;
-                    self.cached_edge_tensors = Some(new);
+                match edges {
+                    Some(mut new) => {
+                        self.invalidate_edge_cache();
+                        new.traced_on = traced_on;
+                        self.cached_edge_tensors = Some(new);
+                        self.cached_edges_saw = saw;
+                    }
+                    // Lines kept from a run on another image are not this
+                    // result's to draw.
+                    None if !same_start(saw.as_ref(), self.cached_edges_saw.as_ref()) => self.invalidate_edge_cache(),
+                    None => {}
                 }
                 self.drop_kept_cut();
                 // source_rgba stays on every item: live preview re-cuts from it.
@@ -3108,10 +3141,15 @@ impl BatchItem {
     }
 
     /// The cached segmentation is what made the shown step: after an undo
-    /// to a step another model made (or an upscale), a re-cut from it would
-    /// rewrite that step with the wrong model's cut-out.
+    /// to a step another model made (or an upscale), or one the same model
+    /// cut from another image (before an erase), a re-cut from it would
+    /// rewrite that step with the wrong cut-out.
     pub(crate) fn tensor_made_shown_step(&self) -> bool {
         let Some(tensor) = &self.cached_tensor else { return false };
+        let began = self.timeline.current().origin.as_ref().filter(|o| o.engine == Engine::Segment).and_then(|o| o.start.as_ref());
+        if !same_start(began, self.cached_tensor_saw.as_ref()) {
+            return false;
+        }
         match self.shown_cutter() {
             Some(cutter) => cutter == Cutter::Model(tensor.model),
             // A cut step from before cutters were recorded: its recipe
@@ -3303,9 +3341,11 @@ impl BatchItem {
             settings,
             applied_recipe: None,
             cached_tensor: None,
+            cached_tensor_saw: None,
             upscale: None,
             colorize: None,
             cached_edge_tensors: None,
+            cached_edges_saw: None,
             volatile_edge_tensor: None,
             volatile_seg_tensor: None,
             edge_planes: Default::default(),
@@ -4862,6 +4902,86 @@ mod tests {
         let work = item.full_run_work(CutoutAction::Restore);
         assert_eq!(work.id, 1);
         assert!(item.awaits_cut() && !item.is_cutting() && item.failure.is_none(), "{:?}", item.status());
+    }
+
+    /// A kept segmentation re-cuts only the cut it was made for: the same
+    /// model's cut of another image (the result after an erase) is another
+    /// segmentation. Process, erase, Process again, then Undo back to the
+    /// first cut-out: a mask slider or Process re-cut it with the erased
+    /// image's segmentation, and what was erased dropped out of it.
+    #[test]
+    fn a_kept_segmentation_re_cuts_only_the_image_it_saw() {
+        use prunr_core::ModelKind::Silueta;
+        let cut = |item: &mut BatchItem| {
+            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
+            let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+            item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, None, item.settings.current_recipe(Silueta));
+            item.finish_job();
+        };
+        let mut item = fixture_item(1);
+        cut(&mut item);
+        assert!(item.tensor_made_shown_step(), "the cut it made");
+        item.settings.gamma = 1.4;
+        item.commit(StepKind::Adjust);
+        assert!(item.tensor_made_shown_step(), "a knob moved on that cut");
+
+        item.start_job(Some(StepKind::Erase), Engine::Erase);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
+        item.finish_job();
+        cut(&mut item);
+        assert!(item.tensor_made_shown_step(), "the cut of the erased image");
+
+        for _ in 0..2 {
+            item.undo_step().expect("a step back");
+        }
+        assert!(!item.tensor_made_shown_step(), "the first cut: the segmentation kept is the erased image's");
+        assert!(matches!(item.render_seg(), (None, None)), "no live re-cut from it");
+        item.settings.gamma = 1.8;
+        assert!(matches!(item.run_tier(Silueta, CutoutAction::Restore), RunTier::Full), "Process cuts again");
+        for _ in 0..2 {
+            let _ = item.redo_step();
+        }
+    }
+
+    /// Kept lines are drawn again only over the image they were traced
+    /// on. A cut of the erased image that traced none drops the lines of
+    /// the photo's cut (they brought the erased thing's lines back when
+    /// Sketch was turned on again); an undo to a cut of another image
+    /// drops them too, while one to the same cut keeps them.
+    #[test]
+    fn kept_lines_are_drawn_only_over_the_image_they_traced() {
+        use prunr_core::ModelKind::Silueta;
+        let cut = |item: &mut BatchItem, lines: bool| {
+            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
+            let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+            let edges = lines.then(|| crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None)).flatten();
+            item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, edges, item.settings.current_recipe(Silueta));
+            item.finish_job();
+        };
+        let erase = |item: &mut BatchItem| {
+            item.start_job(Some(StepKind::Erase), Engine::Erase);
+            item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
+            item.finish_job();
+        };
+
+        let mut item = fixture_item(1);
+        cut(&mut item, true);
+        erase(&mut item);
+        item.undo_step().expect("back to the cut");
+        assert!(item.cached_edge_tensors.is_some(), "the same cut: its lines stay");
+        let _ = item.redo_step();
+        cut(&mut item, false);
+        assert!(item.cached_edge_tensors.is_none(), "a cut of the erased image, no lines traced: the photo's lines go");
+
+        let mut item = fixture_item(2);
+        cut(&mut item, true);
+        erase(&mut item);
+        cut(&mut item, true);
+        assert!(item.cached_edge_tensors.is_some());
+        for _ in 0..2 {
+            item.undo_step().expect("a step back");
+        }
+        assert!(item.cached_edge_tensors.is_none(), "the photo's cut: the lines kept are the erased image's");
     }
 
     fn fixture_recipe() -> prunr_core::ProcessingRecipe {
