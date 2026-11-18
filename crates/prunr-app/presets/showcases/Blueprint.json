@@ -36,21 +36,19 @@
     },
     "Teed": {
       "item_settings": {
-        "edge_thickness": 1,
         "input_transform": "smooth",
-        "line_fade_pct": 60,
-        "line_strength": 0.25,
+        "line_strength": 0.2,
         "line_style": {
           "dual_scale": {
             "bold_color": [
-              255,
-              255,
+              235,
+              245,
               255
             ],
             "fine_color": [
-              130,
-              185,
-              255
+              110,
+              165,
+              245
             ]
           }
         }
