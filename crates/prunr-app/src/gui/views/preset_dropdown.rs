@@ -137,10 +137,27 @@ impl SaveDialog {
     }
 }
 
-/// Render the Preset dropdown. Returns `Some(name)` when the user applied a
-/// preset (click on a row, or Save that swaps in the new name), so the caller
-/// can update `BatchItem.applied_preset`. Returns `None` for no-op frames or
-/// non-apply interactions (saves, deletes, star toggles).
+/// How a preset became the applied one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Applied {
+    /// Clicked in the list: its settings were laid over the image's.
+    Picked(String),
+    /// Saved from the settings on screen, which it now names.
+    Saved(String),
+}
+
+impl Applied {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Picked(name) | Self::Saved(name) => name,
+        }
+    }
+}
+
+/// Render the Preset dropdown. Returns the preset the user applied (a click
+/// on a row, or a Save that swaps in the new name), so the caller can
+/// update `BatchItem.applied_preset`. Returns `None` for no-op frames or
+/// non-apply interactions (deletes, star toggles).
 // Legacy `toggle_popup` / `popup_below_widget` wiring: the Preset chip
 // opens like the chip popovers but draws no open-chip outline.
 #[allow(deprecated)]
@@ -150,7 +167,7 @@ pub(crate) fn render(
     current_item: &mut ItemSettings,
     presets: &mut PresetUi<'_>,
     request: &mut Option<PresetRequest>,
-) -> Option<String> {
+) -> Option<Applied> {
     let pop_id = egui::Id::new("preset_popover");
     // A delete armed in the list is forgotten once the list closes.
     let delete_scope = pop_id.with("delete_armed");
@@ -173,7 +190,7 @@ pub(crate) fn render(
         ui.memory_mut(|m| m.toggle_popup(pop_id));
     }
 
-    let mut applied: Option<String> = None;
+    let mut applied: Option<Applied> = None;
     egui::popup_below_widget(
         ui,
         pop_id,
@@ -198,7 +215,7 @@ pub(crate) fn render(
                         {
                             // Applying sets what Reset to this preset would.
                             settings.apply_preset(&name, current_item);
-                            applied = Some(name.clone());
+                            applied = Some(Applied::Picked(name.clone()));
                             egui::Popup::close_id(ui.ctx(), pop_id);
                         }
                         ui.with_layout(
@@ -383,7 +400,7 @@ pub(crate) fn render(
             crate::gui::presets_fs::queue_save(&name, &file);
             settings.presets.insert(name.clone(), file.into());
 
-            applied = Some(name);
+            applied = Some(Applied::Saved(name));
             cancel = true;
         }
         if cancel {
@@ -497,6 +514,28 @@ mod tests {
         h.run();
         assert_eq!(h.state().settings.default_preset, "Mine");
         assert_eq!(h.state().request, Some(PresetRequest::SaveSettings));
+    }
+
+    /// A click on a preset's row is a pick, which the toolbar tells from
+    /// a save: only a pick starts a photo's first cut.
+    #[test]
+    fn a_click_on_a_row_is_a_pick() {
+        use egui_kittest::kittest::Queryable;
+        struct State { settings: Settings, item: ItemSettings, applied: String, changes: Changes<ItemSettings>, dialog: Option<SaveDialog>, request: Option<PresetRequest>, got: Option<Applied> }
+        let mut settings = Settings::default();
+        settings.presets.insert("Mine".into(), PresetFile::default().into());
+        let state = State { settings, item: ItemSettings::default(), applied: PRUNR_PRESET.into(), changes: Changes::new(ItemSettings::default()), dialog: None, request: None, got: None };
+        let mut h = egui_kittest::Harness::new_ui_state(|ui, s: &mut State| {
+            let mut presets = PresetUi { applied: &mut s.applied, changes: &s.changes, save_dialog: &mut s.dialog };
+            if let Some(applied) = render(ui, &mut s.settings, &mut s.item, &mut presets, &mut s.request) {
+                s.got = Some(applied);
+            }
+        }, state);
+        h.get_by_label("Preset").click();
+        h.run();
+        h.get_by_label("Mine").click();
+        h.run();
+        assert_eq!(h.state().got, Some(Applied::Picked("Mine".into())));
     }
 
     /// Deleting a built-in preset hides it and writes no file; the

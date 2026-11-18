@@ -218,6 +218,8 @@ impl PrunrApp {
                 let role = self.settings.model.role();
                 if self.batch.items[idx].verdict(crate::gui::capability::Need::Processed, role).allows_request() {
                     self.process_items(|item| item.id == item_id, None);
+                } else if toolbar_change.preset_picked && self.a_picked_look_may_start_the_cut(idx) {
+                    self.process_items(|item| item.id == item_id, Some(StepKind::Process));
                 }
             }
         }
@@ -244,6 +246,18 @@ impl PrunrApp {
             // a no-op preset apply for the commit toast.
             ctx.request_repaint();
         }
+    }
+
+    /// A preset picked for a photo with no cut-out yet starts the cut-out,
+    /// as Process would: the look needs it, and on a cut-out the pick
+    /// already runs by itself. Only a cut-out model; an eraser, an
+    /// upscaler and Colorize run when asked, and one knob changed on a
+    /// photo starts nothing.
+    fn a_picked_look_may_start_the_cut(&self, idx: usize) -> bool {
+        let model = self.settings.model;
+        model.role() == crate::gui::knob_catalog::ModelRole::Cutout
+            && self.hardware_install_cache.has_model(model)
+            && self.run_may_start(&self.batch.items[idx])
     }
 
     /// Starts from the catalog dispatch (only `auto_trigger_on_commit`
@@ -513,6 +527,31 @@ mod preset_switch_tests {
         switch_to(&mut app, SettingsModel::BiRefNetLite);
         switch_to(&mut app, SettingsModel::Silueta);
         assert_eq!(app.batch.items[0].settings.gamma, 0.8, "Soft's again");
+    }
+
+    /// A preset picked for a photo with no cut-out yet starts the cut-out,
+    /// so its look shows; a save or the Reset button, one knob, and a
+    /// model that runs when asked start nothing.
+    #[test]
+    fn a_picked_preset_starts_the_photos_first_cut() {
+        use crate::gui::worker::WorkerMessage;
+        let starts = |model: SettingsModel, change: ToolbarChange| {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = model;
+            push_test_item(&mut app, 1).dimensions = (4, 4);
+            app.batch.select_item(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            let before = app.batch.items[0].settings;
+            app.apply_toolbar_change(&egui::Context::default(), change, before);
+            matches!(rx.try_recv(), Ok(WorkerMessage::BatchProcess { .. }))
+        };
+        let picked = || ToolbarChange { preset_applied: true, preset_picked: true, ..Default::default() };
+        assert!(starts(SettingsModel::BiRefNetLite, picked()), "a pick on the photo starts its cut");
+        assert!(!starts(SettingsModel::BiRefNetLite, ToolbarChange { preset_applied: true, ..Default::default() }), "a save or Reset starts nothing");
+        assert!(!starts(SettingsModel::BiRefNetLite, ToolbarChange { commit: true, ..Default::default() }), "one knob starts nothing");
+        assert!(!starts(SettingsModel::Inpaint, picked()), "an eraser runs when asked");
+        assert!(!starts(SettingsModel::RealEsrganUpscale, picked()), "an upscaler runs when asked");
     }
 
     /// Picking the other face restorer takes its settings from the preset.

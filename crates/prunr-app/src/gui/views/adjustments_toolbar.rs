@@ -39,6 +39,10 @@ pub struct ToolbarChange {
     /// A preset was applied; the app records it as an undo step.
     /// The dispatcher resolves subprocess vs skip from the recipe diff.
     pub preset_applied: bool,
+    /// The applied preset was picked from the list (not Reset, not a
+    /// save): on a photo with no cut-out yet the cut-out starts, so the
+    /// look shows.
+    pub preset_picked: bool,
     /// Previous `line_mode` when it changed this frame. Drives the
     /// context-sensitive `line_mode_spec(from, current, cached_edge)` path.
     pub line_mode_from: Option<LineMode>,
@@ -1176,8 +1180,9 @@ pub(super) fn render_reset_preset_cluster(
         mark_preset_apply(change);
     }
 
-    if let Some(name) = preset_dropdown::render(ui, app_settings, item_settings, presets, &mut change.preset_request) {
-        *presets.applied = name;
+    if let Some(applied) = preset_dropdown::render(ui, app_settings, item_settings, presets, &mut change.preset_request) {
+        change.preset_picked = matches!(applied, preset_dropdown::Applied::Picked(_));
+        *presets.applied = applied.name().to_owned();
         mark_preset_apply(change);
     }
 }
