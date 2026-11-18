@@ -1,0 +1,48 @@
+{
+  "format_version": 2,
+  "models": {
+    "BiRefNetLite": {
+      "item_settings": {
+        "bg_effect": "desaturated_source",
+        "fill_style": {
+          "color_splash": {
+            "keep_hue": 0,
+            "tolerance": 25
+          }
+        }
+      }
+    },
+    "NoModel": {
+      "item_settings": {
+        "fill_style": {
+          "color_splash": {
+            "keep_hue": 0,
+            "tolerance": 25
+          }
+        }
+      }
+    },
+    "Silueta": {
+      "item_settings": {
+        "bg_effect": "desaturated_source",
+        "fill_style": {
+          "color_splash": {
+            "keep_hue": 0,
+            "tolerance": 25
+          }
+        }
+      }
+    },
+    "U2net": {
+      "item_settings": {
+        "bg_effect": "desaturated_source",
+        "fill_style": {
+          "color_splash": {
+            "keep_hue": 0,
+            "tolerance": 25
+          }
+        }
+      }
+    }
+  }
+}

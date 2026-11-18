@@ -506,19 +506,19 @@ mod tests {
     fn deleting_a_built_in_preset_hides_it() {
         let mut s = Settings::default();
         let built_in = PresetFile::default();
-        s.presets.insert("Comic".into(), crate::gui::presets::Preset::from(built_in).built_in());
+        s.presets.insert("Noir".into(), crate::gui::presets::Preset::from(built_in).built_in());
         s.presets.insert("Mine".into(), PresetFile::default().into());
         assert_eq!(writable_preset_names(&s), ["Mine"]);
-        s.default_preset = "Comic".into();
-        delete_preset(&mut s, "Comic");
-        assert!(!s.presets.contains_key("Comic"));
-        assert!(s.hidden_showcases.contains("Comic"));
+        s.default_preset = "Noir".into();
+        delete_preset(&mut s, "Noir");
+        assert!(!s.presets.contains_key("Noir"));
+        assert!(s.hidden_showcases.contains("Noir"));
         assert_eq!(s.default_preset, PRUNR_PRESET);
 
         let mut s = Settings::default();
-        s.presets.insert("Comic".into(), PresetFile::default().into());
-        delete_preset(&mut s, "Comic");
-        assert!(s.hidden_showcases.contains("Comic"), "a file standing in for the built-in takes it along");
+        s.presets.insert("Noir".into(), PresetFile::default().into());
+        delete_preset(&mut s, "Noir");
+        assert!(s.hidden_showcases.contains("Noir"), "a file standing in for the built-in takes it along");
     }
 
     /// Prunr first, then the user's presets by name ignoring case

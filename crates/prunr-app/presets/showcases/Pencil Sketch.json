@@ -3,6 +3,12 @@
   "models": {
     "BiRefNetLite": {
       "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
         "fill_style": "desaturate",
         "gamma": 1.1,
         "line_mode": "SubjectOutline"
@@ -10,6 +16,12 @@
     },
     "Silueta": {
       "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
         "fill_style": "desaturate",
         "gamma": 1.1,
         "line_mode": "SubjectOutline"
@@ -22,6 +34,12 @@
     },
     "U2net": {
       "item_settings": {
+        "bg": [
+          250,
+          247,
+          240,
+          255
+        ],
         "fill_style": "desaturate",
         "gamma": 1.1,
         "line_mode": "SubjectOutline"

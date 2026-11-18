@@ -76,8 +76,8 @@ pub(crate) fn render(ctx: &egui::Context, toasts: &mut crate::gui::toasts::Toast
                         "Fast batch: 8 parallel, overwrite allowed");
                     example_row(ui, toasts, "prunr photo.jpg --bg-color ffffff",
                         "White background instead of transparent");
-                    example_row(ui, toasts, "prunr --preset Studio photo.jpg",
-                        "The settings of the built-in Studio look");
+                    example_row(ui, toasts, "prunr --preset Noir photo.jpg",
+                        "The settings of the built-in Noir look");
                 }
 
                 CliTab::Sketch => {

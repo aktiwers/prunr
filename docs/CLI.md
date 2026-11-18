@@ -19,7 +19,7 @@ prunr -m u2net portrait.jpg                  # another model
 prunr -j 4 *.jpg -o out/                     # 4 images at once
 prunr photo.jpg --bg-color ffffff            # white instead of transparent
 prunr photo.jpg --bg-effect lens:60          # lens-blur the photo behind the subject
-prunr --preset Studio *.jpg -o out/          # a built-in showcase from the app's Presets menu
+prunr --preset Noir *.jpg -o out/            # a built-in showcase from the app's Presets menu
 prunr -m none --preset "My look" photo.jpg   # your preset's whole-photo look, no cut-out
 prunr --lines logo.png                       # lines only
 prunr --inpaint photo.jpg --mask mask.png    # erase the white part of the mask
