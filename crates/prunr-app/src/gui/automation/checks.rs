@@ -144,15 +144,18 @@ pub fn clipped(clips: &[super::record::Clip]) -> Vec<Violation> {
 
 /// The first two controls of the open surface whose area is `region`
 /// that overlap. The surface is the node egui gives its area, with that
-/// rect; the window's controls under it are not its own.
-pub fn overlap_within(root: &ControlNode, region: [f32; 4]) -> Option<Violation> {
+/// rect; the window's controls under it are not its own. Each control
+/// counts by the part of it that shows (`shown`, its tree rect when it
+/// has no answer): the tree keeps a row its list scrolled out of view
+/// at the full rect it would have, under whatever sits there.
+pub fn overlap_within(root: &ControlNode, region: [f32; 4], shown: impl Fn(&ControlNode) -> Option<[f32; 4]>) -> Option<Violation> {
     let same = |r: &[f32; 4]| r.iter().zip(region).all(|(a, b)| (a - b).abs() <= 1.0);
     let surface = root.iter().find(|n| n.rect.as_ref().is_some_and(same))?;
     let controls: Vec<(String, [f32; 4])> = surface
         .iter()
         .filter(|n| n.is_control())
-        .filter_map(|n| Some((n.name.clone().unwrap_or_default(), n.rect?)))
-        .filter(|(_, r)| r[2] > r[0])
+        .filter_map(|n| Some((n.name.clone().unwrap_or_default(), shown(n).or(n.rect)?)))
+        .filter(|(_, r)| r[2] > r[0] && r[3] > r[1])
         .collect();
     first_overlap(&controls)
 }
@@ -215,10 +218,27 @@ mod tests {
         popup.children = vec![at(Role::Button, Some("a"), [110.0, 10.0, 200.0, 30.0]), at(Role::Button, Some("b"), [110.0, 40.0, 200.0, 60.0])];
         let mut root = test_node(Role::Window, None);
         root.children = vec![window, popup];
-        assert_eq!(overlap_within(&root, popup_rect), None, "the window's button under a is not the popup's");
+        let whole = |_: &ControlNode| None;
+        assert_eq!(overlap_within(&root, popup_rect, whole), None, "the window's button under a is not the popup's");
         root.children[1].children[1].rect = Some([150.0, 20.0, 250.0, 50.0]);
-        assert_eq!(overlap_within(&root, popup_rect).map(|v| v.rule), Some(Rule::Overlap));
-        assert_eq!(overlap_within(&root, [0.0, 0.0, 1.0, 1.0]), None, "no surface with that rect");
+        assert_eq!(overlap_within(&root, popup_rect, whole).map(|v| v.rule), Some(Rule::Overlap));
+        assert_eq!(overlap_within(&root, [0.0, 0.0, 1.0, 1.0], whole), None, "no surface with that rect");
+    }
+
+    /// A control scrolled out of view shows nothing, so it overlaps
+    /// nothing; one partly scrolled out counts by the part that shows.
+    #[test]
+    fn overlap_within_counts_what_shows() {
+        let at = |name: &str, rect: [f32; 4]| ControlNode { rect: Some(rect), ..test_node(Role::Button, Some(name)) };
+        let popup_rect = [0.0, 0.0, 200.0, 200.0];
+        let mut popup = ControlNode { rect: Some(popup_rect), ..test_node(Role::Unknown, None) };
+        popup.children = vec![at("row", [10.0, 150.0, 190.0, 180.0]), at("footer", [10.0, 160.0, 190.0, 190.0])];
+        let mut root = test_node(Role::Window, None);
+        root.children = vec![popup];
+        let row_shows = |part: [f32; 4]| move |n: &ControlNode| (n.name.as_deref() == Some("row")).then_some(part);
+        assert_eq!(overlap_within(&root, popup_rect, row_shows([10.0, 150.0, 190.0, 150.0])), None, "scrolled out");
+        assert_eq!(overlap_within(&root, popup_rect, row_shows([10.0, 150.0, 190.0, 160.0])), None, "clipped at the footer");
+        assert_eq!(overlap_within(&root, popup_rect, row_shows([10.0, 150.0, 190.0, 170.0])).map(|v| v.rule), Some(Rule::Overlap));
     }
 
     #[test]

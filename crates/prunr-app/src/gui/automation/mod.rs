@@ -500,7 +500,8 @@ pub fn check(root: &ControlNode, ctx: &egui::Context, expect: &[&str]) -> Vec<ch
     found.extend(checks::missing(root, expect));
     found.extend(checks::tooltip_copy(&tooltips));
     found.extend(checks::clipped(&clips));
-    found.extend(open_surface(ctx).and_then(|r| checks::overlap_within(root, r)));
+    let shown = |n: &ControlNode| shown_part(ctx, n.id).map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]);
+    found.extend(open_surface(ctx).and_then(|r| checks::overlap_within(root, r, shown)));
     found
 }
 

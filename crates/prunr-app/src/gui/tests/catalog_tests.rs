@@ -330,3 +330,33 @@ fn every_panel_reset_returns_to_the_default_preset() {
         assert_eq!(after, (panel.part)(&look, &brush), "{:?} {:?}: the default preset's", panel.model, panel.open);
     }
 }
+
+/// A list row scrolled out of view is not drawn, so it overlaps nothing:
+/// the preset list at a short window runs under its footer, and `check`
+/// counts only the part of each control that shows.
+#[test]
+fn a_row_scrolled_out_of_view_overlaps_nothing() {
+    crate::gui::automation::record::turn_on();
+    let mut h = super::harness::harness_sized(egui::vec2(1400.0, 600.0));
+    {
+        let app = h.state_mut();
+        super::fixtures::cut_out(super::fixtures::push_test_item(app, 1), prunr_core::ModelKind::Silueta);
+        app.batch.select_item(0);
+        let view = crate::gui::presets::prunr_view(app.settings.model, None);
+        for n in 0..30 {
+            let look = crate::gui::presets::PresetFile::default().with_settings(app.settings.model, &view.item_settings, &view.brush);
+            app.settings.presets.insert(format!("Look {n:02}"), look.into());
+        }
+    }
+    super::harness::settle_until_shown(&mut h);
+    super::harness::click(&mut h, "Preset");
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    let hidden = tree(&h)
+        .iter()
+        .filter(|n| n.is_control())
+        .any(|n| crate::gui::automation::shown_part(&ctx, n.id).is_some_and(|r| !r.is_positive()));
+    assert!(hidden, "the preset list scrolls at this height");
+    let overlaps: Vec<_> = check(&h, &[]).into_iter().filter(|v| v.rule == crate::gui::automation::checks::Rule::Overlap).collect();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+}
