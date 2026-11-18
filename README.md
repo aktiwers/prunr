@@ -60,7 +60,7 @@ All releases: [github.com/aktiwers/prunr/releases](https://github.com/aktiwers/p
 - **Hardware acceleration** — CUDA (NVIDIA), CoreML (Apple), DirectML (Windows), OpenVINO (Intel processors and graphics), MIGraphX (AMD on Linux), automatic CPU fallback
 - **Batch processing** — tick images and Process runs any model on each: cut-outs in parallel, upscales, colorize and erasers one after the other; switch between images while they work, chain background removal into lines or upscale
 - **Mask tuning** — removal strength, hard cutoff, edge shift, feather, guided filter for fine detail, all previewed live
-- **Presets and undo** — 18 built-in showcase looks to start from, your own per-model presets (import, export), Compare toggle, undo across strokes, results and presets
+- **Presets and undo** — 17 built-in showcase looks to start from, your own per-model presets (import, export), Compare toggle, undo across strokes, results and presets
 - **Drag-and-drop** — in and out of the window (drop into Finder/Explorer/Word/PowerPoint)
 - **No cloud** — everything runs locally, no telemetry, no API keys. Prunr sends nothing. One exception on Windows: DirectML, Microsoft's graphics-card library that comes with Prunr, can add which of your graphics card's features it could use to Windows' own diagnostic reports. Windows sends those only when **Send optional diagnostic data** is on (Settings › Privacy & security › Diagnostics & feedback); DirectML has no switch of its own.
 

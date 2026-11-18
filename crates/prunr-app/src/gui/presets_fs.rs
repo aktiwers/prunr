@@ -130,7 +130,6 @@ const SHOWCASES: &[(&str, &str)] = &[
     ("Golden Bokeh", include_str!("../../presets/showcases/Golden Bokeh.json")),
     ("Halftone Pop", include_str!("../../presets/showcases/Halftone Pop.json")),
     ("Ink Stamp", include_str!("../../presets/showcases/Ink Stamp.json")),
-    ("Misty Morning", include_str!("../../presets/showcases/Misty Morning.json")),
     ("Night Vision", include_str!("../../presets/showcases/Night Vision.json")),
     ("Noir", include_str!("../../presets/showcases/Noir.json")),
     ("Pencil Sketch", include_str!("../../presets/showcases/Pencil Sketch.json")),
