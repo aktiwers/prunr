@@ -13,13 +13,18 @@ const TOAST_LINE_CHARS: usize = 60;
 #[derive(Default)]
 pub(crate) struct Toasts(
     egui_notify::Toasts,
-    /// The latest captions and when each leaves, kept while a script
-    /// reads them.
-    std::collections::VecDeque<(String, Instant)>,
+    /// The latest toasts, their level and caption and when each leaves.
+    std::collections::VecDeque<Kept>,
     #[cfg(test)] Vec<(&'static str, String)>,
 );
 
-/// How many captions `Toasts` keeps for a script; more never show at once.
+struct Kept {
+    level: &'static str,
+    caption: String,
+    leaves: Instant,
+}
+
+/// How many toasts `Toasts` keeps track of; more never show at once.
 const KEPT_CAPTIONS: usize = 8;
 
 /// How long a success or a note stays.
@@ -41,42 +46,59 @@ impl Toasts {
         )
     }
 
-    pub fn success(&mut self, caption: impl Into<String>) -> &mut Toast {
+    pub fn success(&mut self, caption: impl Into<String>) {
         self.push("success", caption.into(), BRIEF, |toasts, text| toasts.success(text))
     }
-    pub fn info(&mut self, caption: impl Into<String>) -> &mut Toast {
+    pub fn info(&mut self, caption: impl Into<String>) {
         self.push("info", caption.into(), BRIEF, |toasts, text| toasts.info(text))
     }
-    pub fn warning(&mut self, caption: impl Into<String>) -> &mut Toast {
+    pub fn warning(&mut self, caption: impl Into<String>) {
         let caption = caption.into();
         self.push("warning", caption.clone(), reading_time(&caption), |toasts, text| toasts.warning(text))
     }
-    pub fn error(&mut self, caption: impl Into<String>) -> &mut Toast {
+    pub fn error(&mut self, caption: impl Into<String>) {
         let caption = caption.into();
         self.push("error", caption.clone(), reading_time(&caption), |toasts, text| toasts.error(text))
     }
 
-    #[cfg_attr(not(test), allow(unused_variables))] // the level is kept for tests only
-    fn push(&mut self, level: &'static str, caption: String, lasts: Duration, show: fn(&mut egui_notify::Toasts, String) -> &mut Toast) -> &mut Toast {
-        self.keep(&caption, lasts);
+    /// Shows `caption`, unless the same toast is still on screen: a
+    /// repeat would stack a copy under it. When the count on screen is not
+    /// the one kept here (the person closed one, hovering held one), the
+    /// repeat shows, so it is never lost.
+    fn push(&mut self, level: &'static str, caption: String, lasts: Duration, show: fn(&mut egui_notify::Toasts, String) -> &mut Toast) {
+        #[cfg(test)] self.2.push((level, caption.clone()));
+        let now = Instant::now();
+        let on_screen = || self.1.iter().filter(move |k| k.leaves > now);
+        let all_kept = on_screen().count() == self.0.len();
+        if all_kept && on_screen().any(|k| k.level == level && k.caption == caption) {
+            return;
+        }
         let text = wrap(&caption);
-        #[cfg(test)] self.2.push((level, caption));
-        show(&mut self.0, text).duration(lasts)
+        self.keep(level, caption, now + lasts);
+        show(&mut self.0, text).duration(lasts);
     }
     /// A success toast for `Ok`, an error toast for `Err`.
-    pub fn outcome(&mut self, outcome: Result<String, String>) -> &mut Toast {
+    pub fn outcome(&mut self, outcome: Result<String, String>) {
         match outcome {
             Ok(caption) => self.success(caption),
             Err(caption) => self.error(caption),
         }
     }
 
+    /// The toasts on screen.
     #[cfg(test)]
     pub fn len_for_test(&self) -> usize {
         self.0.len()
     }
 
-    /// The last toast shown: its level ("success", "error", …) and caption.
+    /// Every toast the app asked for, a repeat merged into one on screen
+    /// included.
+    #[cfg(test)]
+    pub fn asked_for_test(&self) -> usize {
+        self.2.len()
+    }
+
+    /// The last toast asked for: its level ("success", "error", …) and caption.
     #[cfg(test)]
     pub fn last_for_test(&self) -> Option<(&'static str, &str)> {
         self.2.last().map(|(level, caption)| (*level, caption.as_str()))
@@ -86,22 +108,22 @@ impl Toasts {
         self.0.show(ctx)
     }
 
-    fn keep(&mut self, caption: &str, lasts: Duration) {
-        if !crate::gui::automation::record::is_on() {
-            return;
-        }
+    fn keep(&mut self, level: &'static str, caption: String, leaves: Instant) {
         if self.1.len() == KEPT_CAPTIONS {
             self.1.pop_front();
         }
-        self.1.push_back((caption.to_owned(), Instant::now() + lasts));
+        self.1.push_back(Kept { level, caption, leaves });
     }
 
     /// The captions on screen, oldest first: those not yet due to leave,
     /// the latest as many as are shown. Empty unless a script turned
     /// recording on.
     pub fn shown(&self) -> Vec<String> {
+        if !crate::gui::automation::record::is_on() {
+            return Vec::new();
+        }
         let now = Instant::now();
-        let mut shown: Vec<String> = self.1.iter().rev().filter(|(_, leaves)| *leaves > now).take(self.0.len()).map(|(caption, _)| caption.clone()).collect();
+        let mut shown: Vec<String> = self.1.iter().rev().filter(|k| k.leaves > now).take(self.0.len()).map(|k| k.caption.clone()).collect();
         shown.reverse();
         shown
     }
@@ -201,6 +223,28 @@ mod tests {
         assert!(reading_time(long) > Duration::from_secs(10), "{:?}", reading_time(long));
         assert_eq!(reading_time(&"x".repeat(2000)), Duration::from_secs(20));
         assert!(BRIEF < reading_time(""));
+    }
+
+    /// The same toast again while it shows adds no copy; another caption,
+    /// another level, or the same one after the person closed it, does.
+    #[test]
+    fn a_repeat_of_a_toast_on_screen_adds_no_copy() {
+        let mut toasts = Toasts::default();
+        toasts.error("Could not save.");
+        toasts.error("Could not save.");
+        assert_eq!(toasts.len_for_test(), 1, "the same error twice");
+        toasts.warning("Could not save.");
+        toasts.info("Saved.");
+        assert_eq!(toasts.len_for_test(), 3, "another level, another caption");
+        toasts.0.dismiss_all_toasts();
+        let ctx = Context::default();
+        for frame in 0..120 {
+            let input = egui::RawInput { time: Some(f64::from(frame) / 60.0), ..Default::default() };
+            let _ = ctx.run_ui(input, |ui| toasts.show(ui.ctx()));
+        }
+        assert_eq!(toasts.len_for_test(), 0, "closed and gone");
+        toasts.error("Could not save.");
+        assert_eq!(toasts.len_for_test(), 1, "closed, so the repeat shows");
     }
 
     #[test]

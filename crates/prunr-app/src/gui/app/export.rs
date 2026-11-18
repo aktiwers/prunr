@@ -651,11 +651,11 @@ mod toast_kind_tests {
 
     /// The toast a save thread's answer turns into, once it lands.
     fn save_toast(app: &mut PrunrApp) -> (&'static str, String) {
-        let before = app.toasts.len_for_test();
+        let before = app.toasts.asked_for_test();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             app.drain_background_channels(&egui::Context::default());
-            if app.toasts.len_for_test() > before {
+            if app.toasts.asked_for_test() > before {
                 let (level, caption) = app.toasts.last_for_test().expect("a toast");
                 return (level, caption.to_string());
             }
