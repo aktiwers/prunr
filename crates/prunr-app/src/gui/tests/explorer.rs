@@ -495,6 +495,13 @@ fn run(actions: &[Action]) -> Option<Broken> {
         if !world.act(action) {
             continue;
         }
+        if world.app().brush_state.has_active_stroke() || !world.app().magic_brush_state.active_stroke.is_empty() {
+            return Some(Broken {
+                rule: "a stroke ends when the button is let go",
+                what: "in hand".into(),
+                detail: format!("after {action:?}, with the button up, a stroke is still in hand"),
+            });
+        }
         if let (Action::Click(name), Some(control)) = (action, pressed) {
             let after = world.seen();
             let nothing = after == before && busy_images(&world) == busy_before && !world.busy();

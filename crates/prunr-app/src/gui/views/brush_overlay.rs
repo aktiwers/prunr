@@ -73,6 +73,12 @@ pub(crate) fn handle_input(
         screen_radius * (model_w as f32 / img_rect.width().max(1.0))
     };
 
+    // The button came up where the brush could not see it (a run began, a
+    // dialog opened): the stroke is over, not waiting for the next click.
+    if !(primary_down || primary_released) {
+        brush_state.drop_stroke();
+    }
+
     if primary_pressed {
         if let Some(p) = pointer_on_img {
             tracing::debug!(model_w, model_h, "brush press — begin stroke");

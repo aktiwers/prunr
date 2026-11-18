@@ -156,16 +156,21 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
         }
     }
 
+    // A stroke in hand is followed until the button is let go, wherever
+    // the pointer is by then: over the strip egui wants the pointer, and
+    // a stroke not followed there stayed in hand.
+    let stroke_in_hand = app.brush_state.has_active_stroke() || !app.magic_brush_state.active_stroke.is_empty();
+    let brush_blocked = pointer_blocked && !stroke_in_hand;
     if picking_focus && !pointer_blocked {
         handle_focus_pick(ui, app, canvas_rect);
     } else {
-        if brush_active && !pointer_blocked {
+        if brush_active && !brush_blocked {
             handle_brush_input(ui, app, canvas_rect);
         }
 
         // Magic Brush click/stroke input; one made while the image is still
         // being prepared waits for it.
-        if magic_brush_active && !pointer_blocked {
+        if magic_brush_active && !brush_blocked {
             handle_magic_brush_input(ui, app, canvas_rect);
         }
     }
@@ -323,7 +328,7 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     // A stroke starts only where it is pressed on the image: a press on a
     // button carried onto it, or a release the window never got, picks
     // nothing. The stroke holds its points from that press on.
-    if pressed {
+    if pressed || !(down || released) {
         app.magic_brush_state.clear_stroke();
     }
     if down && on_image && (pressed || !app.magic_brush_state.active_stroke.is_empty()) {

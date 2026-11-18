@@ -713,6 +713,11 @@ impl BrushState {
     }
 
     /// The finished stroke's path; `None` when it was never extended.
+    /// Give up the stroke in hand: nothing of it lands.
+    pub fn drop_stroke(&mut self) {
+        self.active = None;
+    }
+
     pub fn commit_stroke(&mut self) -> Option<PaintPath> {
         self.active.take().map(|active| active.path).filter(|path| !path.samples.is_empty())
     }

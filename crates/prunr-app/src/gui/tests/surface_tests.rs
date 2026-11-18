@@ -213,6 +213,54 @@ fn a_brush_over_the_image_hides_the_system_cursor() {
     }
 }
 
+/// A stroke ends where the button is let go, over the strip or a toolbar
+/// too: let go there it stayed in hand, its trail drawn on, and the next
+/// click anywhere landed it.
+#[test]
+fn a_stroke_let_go_off_the_image_lands() {
+    for (magic, over_strip) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut h = harness();
+        {
+            let app = h.state_mut();
+            let item = push_test_item(app, 1);
+            item.dimensions = (800, 600);
+            super::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            item.magic_brush_embedding = Some(std::sync::Arc::new(prunr_core::sam::SamEmbedding {
+                image_embed: vec![0.0; 4],
+                high_res_feats_0: vec![0.0; 4],
+                high_res_feats_1: vec![0.0; 4],
+            }));
+            app.batch.select_item(0);
+            if magic { app.magic_brush_state.activate(); } else { app.brush_state.enable(); }
+        }
+        settle_until_shown(&mut h);
+        let let_go_at = if over_strip {
+            use egui_kittest::kittest::Queryable;
+            let name = if magic { "Confidence" } else { "Hardness" };
+            let slider = h.get_by(|n| n.label().as_deref().and_then(crate::gui::automation::tree::readable_name).as_deref() == Some(name) && n.role() == egui::accesskit::Role::Slider).rect();
+            egui::pos2(slider.min.x - 6.0, slider.center().y)
+        } else {
+            egui::pos2(40.0, 25.0)
+        };
+        let place = if over_strip { "the strip" } else { "the toolbar" };
+        let steps = h.state().batch.items[0].timeline.undo_steps();
+        let (from, on) = (egui::pos2(560.0, 470.0), egui::pos2(620.0, 500.0));
+        pointer_to(&mut h, from);
+        press(&mut h, from, true);
+        pointer_to(&mut h, on);
+        pointer_to(&mut h, let_go_at);
+        press(&mut h, let_go_at, false);
+        let in_hand = h.state().brush_state.has_active_stroke() || !h.state().magic_brush_state.active_stroke.is_empty();
+        assert!(!in_hand, "magic {magic}: let go over {place}, the stroke is no longer in hand");
+        if magic {
+            assert!(h.state().processor.selecting(1), "let go over {place}, the pick was asked for");
+        } else {
+            super::harness::settle_until_selection_lands(&mut h);
+            assert_eq!(h.state().batch.items[0].timeline.undo_steps(), steps + 1, "let go over {place}, the stroke landed as a step");
+        }
+    }
+}
+
 /// The strip draws on the foreground layer: under an open dialog it
 /// would sit on top of the dialog, so it leaves while one is up.
 #[test]
