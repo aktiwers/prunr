@@ -1037,6 +1037,9 @@ pub(crate) struct BatchItem {
     /// The unprocessed photo with restored faces, shown in its place; not
     /// a result. One texture while Restore faces is on before Process.
     pub(crate) photo_look: Option<super::image_texture::ImageTexture>,
+    /// The faces, their blend and the step the photo's look was last asked
+    /// for; `None` since the image came on screen.
+    pub(crate) photo_look_for: Option<(super::live_preview::FacedKey, u64)>,
     /// True while a background thread is building the source ColorImage.
     pub(crate) source_tex_pending: bool,
     /// True while a background thread is building the result ColorImage.
@@ -1774,6 +1777,7 @@ impl BatchItem {
             self.warm_neighbour_steps();
         } else {
             self.photo_look = None;
+            self.photo_look_for = None;
             let warm = std::mem::take(&mut *self.warm_steps.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
             super::reclaim::later(warm);
             self.quick.clear();
@@ -3274,6 +3278,7 @@ impl BatchItem {
             result_texture: None,
             quick: Default::default(),
             photo_look: None,
+            photo_look_for: None,
             source_tex_pending: false,
             result_tex_pending: false,
             unreadable_result: None,

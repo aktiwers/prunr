@@ -446,10 +446,31 @@ impl PrunrApp {
         if item.kept_upscale().is_some() {
             self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
         } else if !item.has_result() && self.settings.model.role() != ModelRole::Filters {
-            self.processor.live_preview.render_now(id, PreviewKind::Photo);
+            self.render_photo_look(idx);
         } else {
             self.dispatch_brush_rerun(idx);
         }
+    }
+
+    /// Render the unprocessed photo with its faces, noting what for.
+    fn render_photo_look(&mut self, idx: usize) {
+        let stage = self.face_stage();
+        let item = &mut self.batch.items[idx];
+        item.photo_look_for = item.faces_input(stage).map(|faces| (faces.key, item.timeline.version()));
+        self.processor.live_preview.render_now(item.id, crate::gui::live_preview::PreviewKind::Photo);
+    }
+
+    /// The unprocessed photo has faces to show, and its look was not asked
+    /// for them as they blend on this step: the image came back on screen,
+    /// or an undo moved the blend.
+    fn owes_photo_look(&self, idx: usize) -> bool {
+        let item = &self.batch.items[idx];
+        if item.has_result() || self.settings.model.role() == crate::gui::knob_catalog::ModelRole::Filters {
+            return false;
+        }
+        let Some(faces) = item.faces_input(self.face_stage()).filter(|faces| !faces.key.faces.is_empty()) else { return false };
+        let version = item.timeline.version();
+        !item.photo_look_for.as_ref().is_some_and(|(key, step)| key.matches(&faces.key) && *step == version)
     }
 
     /// A run's result landed (a cut-out, No model's photo, an upscale):
@@ -596,6 +617,8 @@ impl PrunrApp {
             let (id, blend) = (item.id, item.settings.faces.blend());
             self.batch.items[idx].begin_face_search(photo.clone(), model);
             self.processor.dispatch_find_faces(id, photo, model, blend, self.settings.cpu_only());
+        } else if self.owes_photo_look(idx) {
+            self.render_photo_look(idx);
         }
     }
 
@@ -1381,6 +1404,47 @@ mod faces_tests {
         let (mut app, _) = app_with_faces_on();
         app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { search: true, ..Default::default() });
         assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(crate::gui::live_preview::PreviewKind::Photo));
+    }
+
+    /// The unprocessed photo with its faces is a look the canvas holds
+    /// only while the image is on screen, made for the faces and blend of
+    /// the step shown. Shown again, or its blend moved by an undo, the
+    /// look is made again: the canvas showed the plain photo (or the
+    /// newer blend) while the chip said faces found and Save wrote them.
+    #[test]
+    fn the_photos_faces_are_shown_again_when_it_comes_back() {
+        use crate::gui::live_preview::PreviewKind;
+        let ctx = egui::Context::default();
+        let (mut app, source) = app_with_faces_on();
+        // Faces on is the photo's own step, so an undo keeps it.
+        app.batch.items[0].amend();
+        push_test_item(&mut app, 2);
+        searching(&mut app, &source);
+        let mut result = restored(&two_places());
+        result.photo = FacePhoto::Original(Arc::clone(&source));
+        app.land_faces(result);
+        let asked = |app: &mut super::PrunrApp| {
+            app.pump_faces();
+            let kind = app.processor.live_preview.pending_kind_for_test(1);
+            app.processor.live_preview.cancel(1);
+            kind
+        };
+        assert_eq!(asked(&mut app), Some(PreviewKind::Photo), "the faces landed: the photo shows them");
+        assert_eq!(asked(&mut app), None, "asked once for these faces on this step");
+
+        app.batch.select_item(1);
+        app.reconcile_selected(&ctx);
+        app.batch.select_item(0);
+        app.reconcile_selected(&ctx);
+        assert_eq!(asked(&mut app), Some(PreviewKind::Photo), "shown again");
+
+        let item = &mut app.batch.items[0];
+        item.settings.faces.strength_pct = 80;
+        item.commit(crate::gui::timeline::StepKind::Adjust);
+        assert_eq!(asked(&mut app), Some(PreviewKind::Photo), "another blend");
+        app.batch.items[0].undo_step().expect("the blend before");
+        assert_eq!(asked(&mut app), Some(PreviewKind::Photo), "the blend an undo brought back");
+        assert_eq!(asked(&mut app), None);
     }
 
     /// Undo / redo can bring back other face settings: the faced photo and
