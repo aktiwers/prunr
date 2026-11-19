@@ -2109,11 +2109,19 @@ impl BatchItem {
     }
 
     /// The decoded photo, its texture and the selection's go, made again
-    /// when the image is shown.
-    /// Whether it held a photo.
+    /// when the image is shown; whether a photo went. One the faces found
+    /// in it (or being found) hold stays: letting it go frees nothing, and
+    /// the faces would no longer know it as theirs.
     pub(crate) fn release_photo(&mut self) -> bool {
         self.source_texture = None;
         self.selection_texture = None;
+        let held_by_faces = self.source_rgba.as_ref().is_some_and(|photo| {
+            let theirs = |faces: &FacePhoto| matches!(faces, FacePhoto::Original(p) if Arc::ptr_eq(p, photo));
+            self.found_faces.as_ref().is_some_and(|f| theirs(&f.photo)) || self.faces_pending.as_ref().is_some_and(|f| theirs(&f.photo))
+        });
+        if held_by_faces {
+            return false;
+        }
         let photo = self.source_rgba.take();
         let held = photo.is_some();
         if held {
@@ -4589,6 +4597,28 @@ mod tests {
         assert!(item.source_rgba.is_some() && !item.decode_pending);
         assert!(!item.land_decode(Err("bad file".into())));
         assert_eq!(item.status(), BatchStatus::Error("bad file".into()));
+    }
+
+    /// Under memory pressure an image off screen lets its decoded photo
+    /// go, unless the faces found in it hold that photo anyway (a search
+    /// keeps the photo it read). Then letting it go freed nothing: the
+    /// photo's restored faces were left out of a Save or a drag, and were
+    /// searched for again when the image came back.
+    #[test]
+    fn a_photo_whose_faces_hold_it_is_kept() {
+        let photo = Arc::new(image::RgbaImage::new(4, 4));
+        let mut item = fixture_item(1);
+        item.source_rgba = Some(Arc::clone(&photo));
+        item.settings.faces.on = true;
+        let model = item.settings.faces.wanted().expect("a face model");
+        item.found_faces = Some(FoundFaces { photo: FacePhoto::Original(Arc::clone(&photo)), found_at: std::time::Instant::now(), model, faces: Arc::default(), failed: false, stopped: false });
+        assert!(!item.release_photo(), "the faces hold it: kept");
+        assert!(item.source_rgba.is_some());
+        assert!(item.faces_input(FaceStage::Photo).is_some(), "a Save still blends the faces in");
+
+        let mut plain = fixture_item(2);
+        plain.source_rgba = Some(photo);
+        assert!(plain.release_photo(), "nothing else holds it: it goes");
     }
 
     /// A failure belongs to the run or the read that failed, not to the
