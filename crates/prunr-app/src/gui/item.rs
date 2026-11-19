@@ -1353,10 +1353,11 @@ impl BatchItem {
         self.invalidate_edge_cache();
     }
 
-    /// The kept lines lack a scale the settings draw.
+    /// The settings draw lines and the kept lines lack a scale they draw,
+    /// or there are none (an undo to the photo let them go).
     pub(crate) fn lacks_drawn_scales(&self) -> bool {
         self.settings.line_mode != prunr_core::LineMode::Off
-            && self.cached_edge_tensors.as_ref().is_some_and(|c| !c.has_all(self.settings.edge_settings().drawn_scales()))
+            && !self.cached_edge_tensors.as_ref().is_some_and(|c| c.has_all(self.settings.edge_settings().drawn_scales()))
     }
 
     /// The kept lines lack a scale the settings draw and the worker is

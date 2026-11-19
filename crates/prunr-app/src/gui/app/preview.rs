@@ -817,6 +817,29 @@ mod drift_tests {
         assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "the image off screen");
     }
 
+    /// A re-cut that draws lines it has none of waits for them. Undone
+    /// to the photo (which has no lines) the kept lines go; a redo to a
+    /// stroke on the lined cut-out re-cut it with no lines, and wrote a
+    /// cut-out without its outline into the step. The check that a render
+    /// has every scale it draws let it through when none was kept at all.
+    #[test]
+    fn a_recut_without_the_lines_it_draws_waits() {
+        use crate::gui::capability::{Reason, Verdict};
+        use crate::gui::knob_catalog::ModelRole;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (2, 2);
+        item.source_rgba = Some(Arc::new(image::RgbaImage::new(2, 2)));
+        item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        crate::gui::tests::fixtures::cut_with_lines(item);
+        assert!(!item.lacks_drawn_scales());
+        item.invalidate_edge_cache();
+        assert!(item.lacks_drawn_scales(), "no lines kept lacks every scale drawn");
+        let refused = PrunrApp::build_preview_inputs(item, PreviewKind::Mask, ModelRole::Cutout, crate::gui::brush_state::CutoutAction::Restore);
+        assert_eq!(refused.err(), Some(Verdict::Never(Reason::LinesNotRun)));
+    }
+
     /// A drift render dropped because the image moved on (a stroke made a
     /// new step under it) is asked for again on the new step.
     #[test]
