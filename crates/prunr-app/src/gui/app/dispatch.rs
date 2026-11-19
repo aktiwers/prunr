@@ -287,6 +287,12 @@ impl PrunrApp {
             self.processor.defer_run(crate::gui::processor::HeldRun { ids, step, look });
             return;
         }
+        // A held run goes under the model picked by then: its look takes
+        // the lines that model can draw, as the images do.
+        let mut look = look;
+        if let Some(look) = &mut look {
+            look.settings.fit_line_mode_to(self.settings.model);
+        }
         let settings = look.as_ref().map(|look| look.settings).unwrap_or_default();
         self.batch.fit_line_modes_to(self.settings.model);
         // No model with line_mode Off skips inference; No model + EdgesOnly
@@ -560,6 +566,32 @@ mod process_targets_tests {
         assert_eq!(app.batch.items[1].settings.gamma, 0.7, "the image shown when it went is left alone");
         let Ok(WorkerMessage::BatchProcess { config, .. }) = rx.try_recv() else { panic!("the held run went") };
         assert_eq!(config.run.mask.gamma, 1.6, "and it runs with that look");
+    }
+
+    /// A held run's look is fitted to the model it runs under: Subject
+    /// lines picked under a cut-out model draw over the whole photo under
+    /// No model. The look went back onto the images unfitted, and the
+    /// batch asked for a subject outline with no model to find a subject.
+    #[test]
+    fn a_held_runs_look_is_fitted_to_the_model_it_runs_under() {
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::LineMode;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        push_test_item(&mut app, 1).dimensions = (4, 4);
+        app.batch.items[0].settings.line_mode = LineMode::SubjectOutline;
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        app.processor.hold_admission_for_test();
+        app.process_items(|item| item.id == 1, Some(StepKind::Process));
+
+        app.settings.model = SettingsModel::None;
+        app.processor.clear_admission();
+        app.run_deferred();
+        assert_eq!(app.batch.items[0].settings.line_mode, LineMode::EdgesOnly, "the image takes the fitted lines");
+        let config = rx.try_iter().find_map(|m| match m { WorkerMessage::BatchProcess { config, .. } => Some(config), _ => None }).expect("the held run went");
+        assert_eq!(config.run.line_mode, LineMode::EdgesOnly, "and the run asks for them");
     }
 
     fn two_images(model: SettingsModel) -> PrunrApp {
