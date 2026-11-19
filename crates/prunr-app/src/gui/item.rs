@@ -561,15 +561,6 @@ pub(crate) enum Cutter {
     NoModel,
 }
 
-/// Two runs began from the same image (`None`: the photo).
-fn same_start(a: Option<&RunStart>, b: Option<&RunStart>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-        _ => false,
-    }
-}
-
 /// A lens-blur focus and what it was measured from.
 /// What an effect backdrop's thumbnail copy is made for: the effect, and
 /// by address the depth map a lens blur reads and the result a blur fills
@@ -1544,13 +1535,13 @@ impl BatchItem {
 
     /// The embedding of the picture picks read now.
     pub(crate) fn magic_embedding(&self) -> Option<&Arc<prunr_core::sam::SamEmbedding>> {
-        self.magic_brush_embedding.as_ref().filter(|_| same_start(self.magic_embedding_saw.as_ref(), self.pick_start().as_ref()))
+        self.magic_brush_embedding.as_ref().filter(|_| same_arc(self.magic_embedding_saw.as_ref(), self.pick_start().as_ref()))
     }
 
     /// Keep `embedding`, made from `saw` (`None`: the photo). False when
     /// picks read another picture by now: it is not kept.
     pub(crate) fn keep_magic_embedding(&mut self, embedding: Arc<prunr_core::sam::SamEmbedding>, saw: Option<RunStart>) -> bool {
-        if !same_start(saw.as_ref(), self.pick_start().as_ref()) {
+        if !same_arc(saw.as_ref(), self.pick_start().as_ref()) {
             return false;
         }
         self.magic_brush_embedding = Some(embedding);
@@ -1560,7 +1551,7 @@ impl BatchItem {
 
     /// The depth map of the picture picks read now.
     pub(crate) fn current_depth(&self) -> Option<&Arc<prunr_core::depth::DepthMap>> {
-        self.depth.as_ref().filter(|_| same_start(self.depth_saw.as_ref(), self.pick_start().as_ref()))
+        self.depth.as_ref().filter(|_| same_arc(self.depth_saw.as_ref(), self.pick_start().as_ref()))
     }
 
     /// A depth map is wanted and none of the picture picks read is kept,
@@ -1582,7 +1573,7 @@ impl BatchItem {
     pub(crate) fn land_depth(&mut self, result: Result<Arc<prunr_core::depth::DepthMap>, String>, saw: Option<RunStart>) -> bool {
         self.depth_run.pending = false;
         match result {
-            Ok(_) if !same_start(saw.as_ref(), self.pick_start().as_ref()) => false,
+            Ok(_) if !same_arc(saw.as_ref(), self.pick_start().as_ref()) => false,
             Ok(map) => {
                 self.depth = Some(map);
                 self.depth_saw = saw;
@@ -2536,6 +2527,9 @@ impl BatchItem {
         self.faces_changed();
         self.subject = None;
         let shown = self.timeline.current().clone();
+        // Lines kept from a cut of another image (before or after an erase)
+        // are not the restored cut's to draw again.
+        let traced_elsewhere = shown.cut().is_some_and(|o| !same_arc(o.start.as_ref(), self.cached_edges_saw.as_ref()));
         // Off screen the restored step's result stays parked in the
         // timeline; on screen the neighbour warm-up has it unpacked, and
         // when it has not yet, the result texture's build unpacks it.
@@ -2544,10 +2538,6 @@ impl BatchItem {
         self.selection_mask = shown.selection.as_ref().and_then(|s| s.load());
         self.selection_hash = self.selection_mask.as_ref().and(shown.selection_hash);
         self.edits = shown.edits.as_ref().and_then(|e| e.load());
-        // Lines kept from a cut of another image (before or after an erase)
-        // are not the restored cut's to draw again.
-        let cut_began = shown.origin.as_ref().filter(|o| o.engine == Engine::Segment).map(|o| o.start.as_ref());
-        let traced_elsewhere = cut_began.is_some_and(|began| !same_start(began, self.cached_edges_saw.as_ref()));
         if self.settings.line_mode != shown.settings.line_mode || traced_elsewhere {
             self.invalidate_edge_cache();
         }
@@ -2693,7 +2683,7 @@ impl BatchItem {
 
     /// Who cut the step on screen, when a cut made it and that is known.
     pub(crate) fn shown_cutter(&self) -> Option<Cutter> {
-        self.timeline.current().origin.as_ref().filter(|o| o.engine == Engine::Segment).and_then(|o| o.cutter)
+        self.timeline.current().cut().and_then(|o| o.cutter)
     }
 
     /// Whether a run by `cutter` recording `step` builds on the cut-out on
@@ -3207,7 +3197,7 @@ impl BatchItem {
                     }
                     // Lines kept from a run on another image are not this
                     // result's to draw.
-                    None if !same_start(saw.as_ref(), self.cached_edges_saw.as_ref()) => self.invalidate_edge_cache(),
+                    None if !same_arc(saw.as_ref(), self.cached_edges_saw.as_ref()) => self.invalidate_edge_cache(),
                     None => {}
                 }
                 self.drop_kept_cut();
@@ -3250,8 +3240,8 @@ impl BatchItem {
     /// rewrite that step with the wrong cut-out.
     pub(crate) fn tensor_made_shown_step(&self) -> bool {
         let Some(tensor) = &self.cached_tensor else { return false };
-        let began = self.timeline.current().origin.as_ref().filter(|o| o.engine == Engine::Segment).and_then(|o| o.start.as_ref());
-        if !same_start(began, self.cached_tensor_saw.as_ref()) {
+        let began = self.timeline.current().cut().and_then(|o| o.start.as_ref());
+        if !same_arc(began, self.cached_tensor_saw.as_ref()) {
             return false;
         }
         match self.shown_cutter() {

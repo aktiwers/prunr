@@ -392,6 +392,11 @@ impl Origin {
 pub(crate) type RunStart = StoredImage;
 
 impl DocState {
+    /// What cut this step out, when a cut made it.
+    pub(crate) fn cut(&self) -> Option<&Origin> {
+        self.origin.as_ref().filter(|o| o.engine == Engine::Segment)
+    }
+
     /// Every stored part of the step can be read back.
     pub(crate) fn readable(&self) -> bool {
         let starts = self.origin.iter().flat_map(|o| o.start.iter().chain(&o.rendered_from));
