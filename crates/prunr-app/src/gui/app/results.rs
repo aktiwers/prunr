@@ -245,6 +245,12 @@ impl PrunrApp {
         }
         let name = item.filename.clone();
         item.abandon_job();
+        self.tell_run_lost(item_id, &name, run, why);
+        self.refresh_batch_progress_status();
+        self.admission_release_and_admit(item_id);
+    }
+
+    fn tell_run_lost(&mut self, item_id: u64, name: &str, run: &str, why: RunLost) {
         match why {
             RunLost::ImageChanged => {
                 tracing::warn!(item_id, run, "result dropped: the image changed while the run was under way");
@@ -255,8 +261,6 @@ impl PrunrApp {
                 self.toasts.warning(format!("{name} was not finished: the processing worker lost it. Run it again."));
             }
         }
-        self.refresh_batch_progress_status();
-        self.admission_release_and_admit(item_id);
     }
 
     /// An upscale or colorize ended without a result: its item stops
@@ -830,9 +834,18 @@ impl PrunrApp {
                 // the answer is for the look before, so the image on
                 // screen is cut again for the one it shows. Process takes
                 // the shown image's settings, so only it is run again here.
+                let name = item.filename.clone();
                 item.abandon_job();
                 self.refresh_batch_progress_status();
-                self.process_items(|item| item.id == item_id, step);
+                // One that may not start yet (a Magic Brush pick still
+                // lands) is an answer dropped, and says so.
+                let refused = !self.processor.admission_still_feeding()
+                    && self.batch.find_by_id(item_id).is_some_and(|item| !self.run_may_start(item));
+                if refused {
+                    self.tell_run_lost(item_id, &name, "processing", RunLost::ImageChanged);
+                } else {
+                    self.process_items(|item| item.id == item_id, step);
+                }
             } else {
                 self.end_run_without_result(item_id, "processing", RunLost::ImageChanged);
             }

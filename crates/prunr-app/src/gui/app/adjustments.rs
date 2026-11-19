@@ -686,6 +686,44 @@ mod preset_switch_tests {
         assert_eq!(config.run.line_mode, LineMode::EdgesOnly);
     }
 
+    /// An answer for the look before that cannot be cut again yet (a
+    /// Magic Brush pick still waits to land) says so, as one for an image
+    /// changed meanwhile does: it went with no word and the image showed
+    /// its old state.
+    #[test]
+    fn a_stale_answer_that_cannot_be_cut_again_says_so() {
+        use crate::gui::timeline::StepKind;
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::LineMode;
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (4, 4);
+        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::BiRefNetLite);
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite));
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+
+        app.batch.items[0].settings.line_mode = LineMode::SubjectOutline;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.process_items(|item| item.id == 1, None);
+        let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("the outline's run") };
+        app.batch.items[0].settings.line_mode = LineMode::EdgesOnly;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.magic_brush_state.pending_depth_clicks.push(crate::gui::magic_brush_state::PendingDepthClick {
+            item_id: 1, at: (1.0, 1.0), dims: (4, 4), mode: prunr_core::selection::BrushMode::Add, side: None,
+        });
+
+        let cut = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(cut), None, None);
+        assert!(rx.try_iter().all(|msg| !matches!(msg, WorkerMessage::BatchProcess { .. })), "no cut while the pick waits");
+        let (level, text) = app.toasts.last_for_test().expect("told");
+        assert_eq!(level, "warning");
+        assert!(text.contains("Run it again"), "{text}");
+    }
+
     /// A change the landed answer can still be re-drawn to keeps the
     /// answer: a line strength nudged while the cut ran is drawn from the
     /// lines it brings (as a mask change is), not a second full cut.
