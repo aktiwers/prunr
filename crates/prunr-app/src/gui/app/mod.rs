@@ -93,9 +93,9 @@ pub struct PrunrApp {
 
     title_state: TitleState,
 
-    /// Last `(item_id, timeline version, settings)` `recipe_drift_tripwire`
-    /// is done with: found drift-free, or asked a render for. A new step or
-    /// new settings check again.
+    /// Last `(item_id, timeline revision, settings)` `recipe_drift_tripwire`
+    /// is done with: found drift-free, or asked a render for. A new step, a
+    /// result filled in or new settings check again.
     last_drift_check: Option<(u64, u64, crate::gui::item_settings::ItemSettings)>,
 
     pub(crate) batch: super::batch_manager::BatchManager,
@@ -829,6 +829,11 @@ impl PrunrApp {
                 && !item.lines_traced_on_another_cut(self.settings.brush.cutout_action)
             {
                 self.dispatch_brush_rerun(idx);
+            } else {
+                // A step whose render was dropped as the image moved on
+                // shows the picture from before its settings; off screen
+                // too, which the per-frame check does not read.
+                self.render_drift(idx);
             }
             stepped.push(kind);
         }

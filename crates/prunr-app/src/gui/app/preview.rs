@@ -45,13 +45,41 @@ impl PrunrApp {
         self.quiet_background_work()
     }
 
-    /// Catch drift between the picture the active item shows and its
-    /// settings: a cut-out's applied mask against the mask its settings
-    /// make, or a kept upscale's or colorize's Refine or Strength moved
-    /// past its picture. A safety net for edits no knob dispatched (brush
-    /// commits, hotkeys) and for a step whose render was dropped as the
-    /// image moved on and that undo or redo comes back to. Active item
-    /// only: brush and undo/redo, the only drift sources, act on it.
+    /// The render that brings the picture of the image at `idx` back in
+    /// line with its settings, if it drifted: a cut-out's applied mask
+    /// against the mask its settings make, or a kept upscale's or
+    /// colorize's Refine or Strength moved past its picture. `None` when
+    /// in line, or when no render could land (a re-cut the render door
+    /// refuses: no cut-out shown, the photo after an undo).
+    fn drift_render(&self, idx: usize) -> Option<PreviewKind> {
+        let item = &self.batch.items[idx];
+        // Only a cut-out or the filters apply the mask settings; firing a
+        // mask preview over an erase or an upscale would clobber it with
+        // the source through `run_preview`'s no-tensor fallback.
+        if !shows(self.settings.model, Surface::Effect) {
+            return self.wants_kept_run_refinish(idx);
+        }
+        let applied = item.applied_recipe.as_ref()?;
+        // The mask as the run applies it: pinned to the defaults where the
+        // run uses none (Sketch on Full), so its settings never drift.
+        let current = item.settings.current_recipe(self.settings.model.recipe_kind()).mask;
+        let recut = item.verdict(crate::gui::capability::Need::Cutout, self.settings.model.role());
+        (applied.mask != current && recut.allows_request()).then_some(PreviewKind::Mask)
+    }
+
+    /// Re-render the image at `idx` when its picture drifted from its
+    /// settings and no render for it is under way: an undo or redo moved
+    /// it to a step whose own render was dropped as the image moved on.
+    pub(crate) fn render_drift(&mut self, idx: usize) {
+        let id = self.batch.items[idx].id;
+        if let Some(kind) = self.drift_render(idx).filter(|_| !self.processor.live_preview.works_on(id)) {
+            self.processor.live_preview.render_now(id, kind);
+        }
+    }
+
+    /// The drift check on the image on screen, every frame: a safety net
+    /// for edits no knob dispatched (brush commits, hotkeys). Asked once
+    /// per step and settings: a render refused for memory never lands.
     pub(crate) fn recipe_drift_tripwire(&mut self) {
         if self.processor.live_preview.has_in_flight() {
             return;
@@ -59,39 +87,23 @@ impl PrunrApp {
         let Some(idx) = self.batch.selected_idx_clamped() else { return };
         let item = &self.batch.items[idx];
         let id = item.id;
-        let checked_as = (id, item.timeline.version(), item.settings);
+        let checked_as = (id, item.timeline.revision(), item.settings);
         if self.last_drift_check == Some(checked_as) {
             return;
         }
-        // Only a cut-out or the filters apply the mask settings; firing a
-        // mask preview over an erase or an upscale would clobber it with
-        // the source through `run_preview`'s no-tensor fallback.
-        let (kind, mut checked) = if shows(self.settings.model, Surface::Effect) {
-            let Some(applied) = item.applied_recipe.as_ref() else { return };
-            // The mask as the run applies it: pinned to the defaults where
-            // the run uses none (Sketch on Full), so its settings never drift.
-            let model = self.settings.model.recipe_kind();
-            let current = item.settings.current_recipe(model).mask;
-            // Asked once per settings: a re-cut the render door would refuse
-            // (no cut-out on screen: an erase or an upscale shown, the photo
-            // after an undo), or a render refused for memory, never lands.
-            let recut = item.verdict(crate::gui::capability::Need::Cutout, self.settings.model.role());
-            (PreviewKind::Mask, applied.mask == current || !recut.allows_request())
-        } else {
-            match self.wants_kept_run_refinish(idx) {
-                Some(kind) => (kind, false),
-                None => (PreviewKind::Mask, true),
-            }
-        };
+        let drift = self.drift_render(idx);
+        let mut checked = drift.is_none();
         let live = &mut self.processor.live_preview;
-        if !checked && live.is_pending_for(id) {
-            // A drag under way: its queued frame goes now instead of at the
-            // throttle, and the drag settles on release or stillness, not here.
-            live.hurry(id);
-        } else if !checked && !live.works_on(id) {
-            tracing::debug!(item_id = id, ?kind, "recipe-drift tripwire fired — dispatching Tier-2");
-            live.render_now(id, kind);
-            checked = true;
+        if let Some(kind) = drift {
+            if live.is_pending_for(id) {
+                // A drag under way: its queued frame goes now instead of at
+                // the throttle, and the drag settles on release or stillness.
+                live.hurry(id);
+            } else if !live.works_on(id) {
+                tracing::debug!(item_id = id, ?kind, "recipe-drift tripwire fired — dispatching Tier-2");
+                live.render_now(id, kind);
+                checked = true;
+            }
         }
         self.last_drift_check = checked.then_some(checked_as);
     }
@@ -775,6 +787,34 @@ mod drift_tests {
             app.recipe_drift_tripwire();
             assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(preview), "{model:?}");
         }
+    }
+
+    /// Undo reaches every ticked image: one off screen that comes back to
+    /// a step whose Refine render was dropped is finished again too. The
+    /// drift check read only the image on screen.
+    #[test]
+    fn an_undo_finishes_an_off_screen_images_drift() {
+        use crate::gui::item::{Engine, UpscaleCache};
+        use crate::gui::timeline::StepKind;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::RealEsrganUpscale;
+        for id in [1, 2] {
+            let item = push_test_item(&mut app, id);
+            item.dimensions = (4, 4);
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
+            let img = Arc::new(image::RgbaImage::new(16, 16));
+            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+            item.result_rgba = Some(Arc::clone(&img));
+            item.land_upscale(UpscaleCache::new(Arc::clone(&img), img, None));
+            item.settings.sharpen = -0.5;
+            item.commit(StepKind::Adjust);
+            item.settings.sharpen = 0.0;
+            item.commit(StepKind::Preset);
+            item.ticked = true;
+        }
+        app.batch.select_item(1);
+        app.handle_undo(&egui::Context::default());
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "the image off screen");
     }
 
     /// A drift render dropped because the image moved on (a stroke made a
