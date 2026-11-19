@@ -93,10 +93,10 @@ pub struct PrunrApp {
 
     title_state: TitleState,
 
-    /// Last `(item_id, timeline version, MaskSettings)` `recipe_drift_tripwire`
+    /// Last `(item_id, timeline version, settings)` `recipe_drift_tripwire`
     /// is done with: found drift-free, or asked a render for. A new step or
     /// new settings check again.
-    last_drift_check: Option<(u64, u64, prunr_core::MaskSettings)>,
+    last_drift_check: Option<(u64, u64, crate::gui::item_settings::ItemSettings)>,
 
     pub(crate) batch: super::batch_manager::BatchManager,
     /// User explicitly hid the sidebar via Tab / configured hotkey.
