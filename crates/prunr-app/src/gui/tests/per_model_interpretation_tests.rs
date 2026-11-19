@@ -1133,6 +1133,63 @@ fn cutout_with_selection(app: &mut PrunrApp, id: u64) {
     item.commit_selection_mask(Arc::new(selection), StepKind::Stroke);
 }
 
+/// Escape and Clear selection drop the marks of a live Restore or Erase
+/// but never take back what it did: it is folded into the cut-out. Only
+/// Undo takes it back. With Select the marks only selected, so clearing
+/// them changes nothing else.
+#[test]
+fn escape_never_takes_back_a_live_correction() {
+    use crate::gui::brush_state::CutoutAction;
+    let ctx = egui::Context::default();
+    for (action, folded) in [(CutoutAction::Restore, true), (CutoutAction::Erase, true), (CutoutAction::Select, false)] {
+        let mut app = app_with_model(SettingsModel::Silueta);
+        cutout_with_selection(&mut app, 10);
+        app.batch.select_item(0);
+        app.settings.brush.cutout_action = action;
+        app.apply_cancel_shortcut(&ctx);
+        super::fixtures::settle_selection_edits(&mut app);
+        let item = &app.batch.items[0];
+        assert!(item.selection_mask.is_none(), "{action:?}: the marks go");
+        assert_eq!(item.edits.is_some(), folded, "{action:?}: what it did stays in the cut-out");
+        app.handle_undo(&ctx);
+        assert!(app.batch.items[0].selection_mask.is_some() && app.batch.items[0].edits.is_none(), "{action:?}: Undo takes it back");
+    }
+}
+
+/// What a live Restore or Erase did to a cut-out stays when another
+/// kind of model is picked: it is folded into the cut-out. Kept as a
+/// selection, it meant the eraser's region there, so clearing it (Esc)
+/// left the restore in the picture with nothing behind it, and back on
+/// the cut-out model the first mask slider took it out. Only Undo takes
+/// it back. A selection that only selects stays a selection: the
+/// eraser's region.
+#[test]
+fn a_live_correction_stays_when_another_kind_of_model_is_picked() {
+    use crate::gui::brush_state::CutoutAction;
+    use crate::gui::views::adjustments_toolbar::ToolbarChange;
+    let ctx = egui::Context::default();
+    for (action, folded) in [(CutoutAction::Restore, true), (CutoutAction::Erase, true), (CutoutAction::Select, false)] {
+        let mut app = app_with_model(SettingsModel::Silueta);
+        cutout_with_selection(&mut app, 10);
+        app.batch.select_item(0);
+        app.settings.brush.cutout_action = action;
+        assert!(app.batch.items[0].corrects_cutout(app.settings.model));
+        let edits_before = app.batch.items[0].edits.is_some();
+
+        let before = app.batch.items[0].settings;
+        let from = std::mem::replace(&mut app.settings.model, SettingsModel::MiganInpaint);
+        app.apply_toolbar_change(&ctx, ToolbarChange { model_switched_from: Some(from), ..Default::default() }, before);
+        super::fixtures::settle_selection_edits(&mut app);
+        let item = &app.batch.items[0];
+        if folded {
+            assert!(item.selection_mask.is_none(), "{action:?}: the marks are folded in");
+            assert!(item.edits.is_some() && !edits_before, "{action:?}: into the cut-out's edits");
+        } else {
+            assert!(item.selection_mask.is_some(), "{action:?}: a selection stays a selection");
+        }
+    }
+}
+
 /// The switch says what the selection does to the cut-out: Restore
 /// brings it back, Erase removes it, Select leaves the cut-out alone.
 #[test]

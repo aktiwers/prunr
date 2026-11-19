@@ -1152,7 +1152,7 @@ impl PrunrApp {
 
     /// Escape: the top-most modal first, then a run in flight, then
     /// the selection. One press does one thing.
-    fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
+    pub(crate) fn apply_cancel_shortcut(&mut self, ctx: &egui::Context) {
         // A modal Escape cannot close still keeps it from what is behind.
         if self.close_top_modal() || self.any_modal_open() {
             return;
@@ -1446,11 +1446,32 @@ impl eframe::App for PrunrApp {
 }
 
 impl PrunrApp {
+    /// A live Restore or Erase on a cut-out stays what it did when a model
+    /// that does not correct cut-outs is picked: each such selection is
+    /// folded into its cut-out before the new model takes the selection as
+    /// its own (an eraser's region). Only Undo takes it back. A selection
+    /// that only selects stays one.
+    fn fold_live_corrections(&mut self, from: super::settings::SettingsModel) {
+        use super::brush_state::CutoutAction;
+        let action = self.settings.brush.cutout_action;
+        if action == CutoutAction::Select || !from.edits_cutout() || self.settings.model.edits_cutout() {
+            return;
+        }
+        let live: Vec<u64> = self.batch.items.iter()
+            .filter(|item| item.corrects_cutout(from) && item.selection_mask.as_ref().is_some_and(|mask| !mask.is_blank()))
+            .map(|item| item.id)
+            .collect();
+        for item_id in live {
+            self.queue_selection_op(item_id, super::selection_queue::SelectionOp::Bake { action });
+        }
+    }
+
     /// What a switch from model `from` does whatever images are loaded:
     /// each image and the brush keep what was changed and take the rest
     /// from their preset, the brushes fit the model, and runs and cached
     /// sessions of the old one drop.
     fn on_model_changed(&mut self, from: super::settings::SettingsModel) {
+        self.fold_live_corrections(from);
         self.batch.switch_model(from, &self.settings);
         // The brush is the app's, not an image's: the shown image's preset
         // is the one in front of the user.
