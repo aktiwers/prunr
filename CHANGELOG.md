@@ -155,6 +155,17 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - One ONNX Runtime init and one session builder for the whole app: a missing or broken runtime now fails with a message instead of hanging.
 
 ### Fixed
+- **Each part of the app now waits for, and answers, its own image.** Found by running thousands of random click sequences against the app and checking everything it remembers between clicks:
+  - Removing an image from the list keeps the one on screen, and an image that takes a removed one's place is fitted to the window afresh.
+  - Changing a setting while a cut-out runs, or while a run waits behind a large batch, gives the look you asked for: the run is redone instead of landing the old look.
+  - Cancel stops the run it is pressed for (an upscale, Colorize, an erase, a face search) and nothing started after it; each run under way keeps its own progress. An erase asked for right after a Cancel runs instead of hanging.
+  - An old error mark no longer stays on an image after an undo or a successful retry, and a thumbnail made for an earlier state no longer replaces the current one.
+  - Restored faces show again when their image comes back on screen, also after memory ran short.
+- **Magic Brush and the depth looks read the picture as it is now.** After an erase they no longer pick or blur around what was erased, and a pick on a cut-out stays on the side it was made on instead of reaching into the removed background.
+- **Only Undo takes back what you did.** A live Restore or Erase stays when another kind of model is picked; picking a preset or a model no longer counts as moving a brush slider; a slider drag ended by switching images stays one undo step; brush sliders redraw the latest stroke after an undo too.
+- A stroke let go over the tool strip lands; a stroke redone while an erase fills stays as the next area; every click by depth made before the depth map is ready runs once it is, and a depth measurement that failed is made again when asked for.
+- Switching model with images still queued says how many were left; a No-model pass that fails says so.
+- Choice buttons (Restore/Erase/Select, the shape and background pickers) tell screen readers which one is picked.
 - A model or add-on download cut short (Prunr closed mid-download or mid-install) gives its disk space back at the next start; it used to stay until that same download ran again, for good for a model never fetched again.
 - A thumbnail keeps its image's effect background (blurred photo, black & white photo, lens blur) when another image is shown, and an image processed without being shown gets it too; the background disappeared from the thumbnail, though Save wrote it.
 
