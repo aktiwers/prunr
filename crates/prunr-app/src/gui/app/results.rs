@@ -811,11 +811,13 @@ impl PrunrApp {
             return CutLanding::Untold;
         }
         // Knob changes in a quick row join one step, so a run stays
-        // current through a second one: it made the look before.
+        // current through a second one: it made the look before. One that
+        // needs the model again (another Sketch mode, another model) is cut
+        // again; a mask or line change is re-drawn from what it brings.
         let wanted = item.settings.current_recipe(recipe_snapshot.inference.model);
         let made_another_look = matches!(
             prunr_core::resolve_tier(&recipe_snapshot, &wanted),
-            prunr_core::RequiredTier::FullPipeline | prunr_core::RequiredTier::EdgeRerun | prunr_core::RequiredTier::AddEdgeInference
+            prunr_core::RequiredTier::FullPipeline | prunr_core::RequiredTier::AddEdgeInference
         );
         if !item.job_is_current() || made_another_look {
             let step = item.job.as_ref().and_then(|j| j.step);

@@ -686,6 +686,38 @@ mod preset_switch_tests {
         assert_eq!(config.run.line_mode, LineMode::EdgesOnly);
     }
 
+    /// A change the landed answer can still be re-drawn to keeps the
+    /// answer: a line strength nudged while the cut ran is drawn from the
+    /// lines it brings (as a mask change is), not a second full cut.
+    #[test]
+    fn a_line_change_while_the_cut_runs_keeps_its_answer() {
+        use crate::gui::timeline::StepKind;
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::LineMode;
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (4, 4);
+        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::BiRefNetLite);
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite));
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+
+        app.batch.items[0].settings.line_mode = LineMode::SubjectOutline;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.process_items(|item| item.id == 1, None);
+        let Ok(WorkerMessage::BatchProcess { batch, .. }) = rx.try_recv() else { panic!("the outline's run") };
+        app.batch.items[0].settings.line_strength += 0.2;
+        app.batch.items[0].commit(StepKind::Adjust);
+
+        let cut = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(cut), None, None);
+        assert!(rx.try_iter().all(|msg| !matches!(msg, WorkerMessage::BatchProcess { .. })), "no second cut");
+        assert!(app.batch.items[0].job.is_none(), "the answer landed");
+    }
+
     /// Picking the other face restorer takes its settings from the preset.
     #[test]
     fn another_face_restorer_takes_its_settings_from_the_preset() {
