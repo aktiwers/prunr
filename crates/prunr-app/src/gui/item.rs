@@ -1861,7 +1861,17 @@ impl BatchItem {
                     let cells = painted.cells().iter().zip(now.cells()).zip(filled.cells())
                         .map(|((&mark, &shown), &from)| if mark != 0 { mark } else if shown != 0 && from == 0 { FULL } else { 0 })
                         .collect();
-                    MaskArtifact::from_cells(w, h, cells).with_fill_layer(painted.fill_layer().map(<[u8]>::to_vec))
+                    // A stroke the fill was not made from keeps the band its
+                    // fill reaches past its cells, as a painted one does.
+                    let fill = now.fill_layer().map(|shown_fill| {
+                        let from_fill = filled.fill_layer();
+                        (0..shown_fill.len()).map(|i| {
+                            let mark = painted.fill_layer().map_or(0, |f| f[i]);
+                            let not_filled = filled.cells()[i] == 0 && from_fill.is_none_or(|f| f[i] == 0);
+                            if mark != 0 { mark } else if not_filled { shown_fill[i] } else { 0 }
+                        }).collect::<Vec<u8>>()
+                    }).or_else(|| painted.fill_layer().map(<[u8]>::to_vec));
+                    MaskArtifact::from_cells(w, h, cells).with_fill_layer(fill)
                 }
                 None => painted,
             };

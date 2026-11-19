@@ -2082,7 +2082,11 @@ mod timeline_contract_tests {
         let mut both = vec![0i8; 16];
         both[5] = prunr_core::selection::FULL;
         both[10] = prunr_core::selection::FULL;
-        app.commit_selection_and_dispatch(1, prunr_core::selection::MaskArtifact::from_cells(4, 4, both), StepKind::Stroke);
+        // An eraser stroke's fill band reaches past its cells.
+        let mut band = vec![0u8; 16];
+        band[10] = prunr_core::selection::FILL_CORE;
+        band[11] = 100;
+        app.commit_selection_and_dispatch(1, prunr_core::selection::MaskArtifact::from_cells(4, 4, both).with_fill_layer(band), StepKind::Stroke);
         app.handle_undo(&ctx);
         app.batch.items[0].start_erase(None);
         let run = app.batch.items[0].job_run().expect("an erase");
@@ -2095,6 +2099,7 @@ mod timeline_contract_tests {
         let left = app.batch.items[0].selection_mask.as_ref().expect("the redone stroke is left");
         let selected: Vec<usize> = left.cells().iter().enumerate().filter(|(_, &c)| c != 0).map(|(i, _)| i).collect();
         assert_eq!(selected, [10], "the filled marks go, the redone stroke stays");
+        assert!(left.fill_layer().is_some_and(|fill| fill[11] == 100), "with the fill band it reaches past its cells");
     }
 
     /// An erase lands as one step that shows the filled image without its
