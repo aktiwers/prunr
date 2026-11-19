@@ -400,17 +400,19 @@ impl DispatchProgressSlot {
         }
     }
 
-    /// Every run of `kind` is stopping: each shows so until it ends.
-    pub fn mark_cancelling(&self, kind: ProgressKind) {
-        for live in self.lock().iter_mut().filter(|r| r.progress.kind == kind) {
-            live.progress.cancelling = true;
-        }
-    }
-
     /// Stop every run of `kind` under way: each one's flag is raised and
     /// it shows as stopping until it ends.
     pub fn stop(&self, kind: ProgressKind) {
-        for live in self.lock().iter_mut().filter(|r| r.progress.kind == kind) {
+        self.stop_where(|r| r.progress.kind == kind);
+    }
+
+    /// Stop the runs of `kind` working on image `item`, and no other.
+    pub fn stop_on(&self, kind: ProgressKind, item: u64) {
+        self.stop_where(|r| r.progress.kind == kind && r.progress.on == Some(item));
+    }
+
+    fn stop_where(&self, which: impl Fn(&LiveRun) -> bool) {
+        for live in self.lock().iter_mut().filter(|r| which(r)) {
             live.stop.store(true, Ordering::Release);
             live.progress.cancelling = true;
         }
@@ -594,16 +596,23 @@ mod tests {
         assert!(slot.read().is_none(), "set None clears");
     }
 
-    /// A Cancel marks every run of its kind as stopping, and no other.
+    /// A Cancel stops every run of its kind, and no other; one for an
+    /// image stops only the runs of its kind on that image.
     #[test]
-    fn a_cancel_marks_its_kinds_runs_stopping() {
+    fn a_cancel_stops_its_kinds_runs() {
         let slot = DispatchProgressSlot::new();
-        let _up = slot.begin(upscale((1, 10)));
-        let _faces = slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces"));
-        slot.mark_cancelling(ProgressKind::Faces);
+        let up = slot.begin(upscale((1, 10)));
+        let faces = slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces"));
+        slot.stop(ProgressKind::Faces);
+        assert!(faces.stopped() && !up.stopped());
         assert!(!slot.read().expect("the upscale").cancelling);
-        slot.mark_cancelling(ProgressKind::Upscale);
-        assert!(slot.read().expect("the upscale").cancelling);
+        slot.stop(ProgressKind::Upscale);
+        assert!(up.stopped() && slot.read().expect("the upscale").cancelling);
+
+        let a = slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(1));
+        let b = slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(2));
+        slot.stop_on(ProgressKind::Inpaint, 1);
+        assert!(a.stopped() && !b.stopped());
     }
 
     #[test]

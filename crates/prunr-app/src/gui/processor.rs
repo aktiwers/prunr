@@ -281,10 +281,10 @@ struct RunQueue {
     total: u32,
 }
 
-/// An in-process model run, one at a time (upscale, colorize).
+/// An in-process model run, one at a time (upscale, colorize). Its
+/// Cancel is its run's own, in the progress list.
 struct RunSlot<R> {
     active: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
     done: Chan<R>,
     warm: WarmEngine,
 }
@@ -293,7 +293,6 @@ impl<R> RunSlot<R> {
     fn new() -> Self {
         Self {
             active: Arc::new(AtomicBool::new(false)),
-            cancel: Arc::new(AtomicBool::new(false)),
             done: Chan::default(),
             warm: Arc::new(Mutex::new(None)),
         }
@@ -303,20 +302,10 @@ impl<R> RunSlot<R> {
         self.active.load(Ordering::Acquire)
     }
 
-    /// Raise the cancel flag of the run in flight; `false` when none is.
-    fn cancel(&self) -> bool {
-        if !self.in_flight() {
-            return false;
-        }
-        self.cancel.store(true, Ordering::Release);
-        true
-    }
-
-    /// A run starts: it is in flight, not cancelled, and reports to
-    /// `progress`. The run's thread ends it through the returned handle.
+    /// A run starts: it is in flight and reports to `progress`. The run's
+    /// thread ends it through the returned handle.
     fn begin(&self, progress: super::dispatch_progress::RunSink) -> RunDone<R> {
         self.active.store(true, Ordering::Release);
-        self.cancel.store(false, Ordering::Release);
         RunDone { active: Arc::clone(&self.active), tx: self.done.tx.clone(), progress }
     }
 
@@ -857,7 +846,6 @@ pub(crate) struct Processor {
     inpaint_latest: HashMap<u64, (u64, u64)>,
     inpaint_pending: HashMap<u64, u32>,
     /// Checked between LaMa tiles and between SD UNet steps.
-    inpaint_cancels: HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The run each in-flight eraser stroke reports to.
     inpaint_runs: HashMap<u64, PictureSink>,
     /// SD-family erasers only; the rest run in process. The bridge spawns
@@ -940,7 +928,6 @@ impl Processor {
             inpaint_done: Chan::default(),
             inpaint_latest: HashMap::new(),
             inpaint_pending: HashMap::new(),
-            inpaint_cancels: HashMap::new(),
             inpaint_runs: HashMap::new(),
             inpaint_bridge_tx,
             inpaint_bridge_rx,
@@ -1136,14 +1123,12 @@ impl Processor {
     ) {
         let generation = self.next_inpaint(item_id, run);
         *self.inpaint_pending.entry(item_id).or_insert(0) += 1;
-        // Fresh flag and sink: a stale cancel of the earlier stroke must
-        // not fire on this one.
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Its own run, so its own stop flag: a cancel of the earlier stroke
+        // never fires on this one.
         let initial = self.queued_initial(super::dispatch_progress::ProgressKind::Inpaint, item_id);
         let run = self.dispatch_progress.begin(initial);
         let sink = PictureSink::of_run(item_id, run.clone(), self.picture_sender());
-        let progress = sink.clone().into_progress().with_cancel(cancel.clone());
-        self.inpaint_cancels.insert(item_id, cancel.clone());
+        let progress = sink.clone().into_progress().with_cancel(run.stop_flag());
         self.inpaint_runs.insert(item_id, sink);
         if tuning.model.is_sd_family() {
             // The SD subprocess reports through the bridge to the run's sink.
@@ -1182,10 +1167,8 @@ impl Processor {
     }
 
     pub(crate) fn cancel_all_inpaints(&self) {
-        for flag in self.inpaint_cancels.values() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-        }
-        if !self.inpaint_cancels.is_empty() {
+        self.dispatch_progress.stop(super::dispatch_progress::ProgressKind::Inpaint);
+        if self.any_inpaint_in_flight() {
             let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel);
         }
     }
@@ -1193,16 +1176,8 @@ impl Processor {
     /// For SD the bridge kills the subprocess, ending every SD stroke; a
     /// LaMa stroke stops at its next tile (ORT has no per-op cancel).
     pub(crate) fn cancel_inpaint(&self, item_id: u64) {
-        if let Some(flag) = self.inpaint_cancels.get(&item_id) {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-        }
+        self.dispatch_progress.stop_on(super::dispatch_progress::ProgressKind::Inpaint, item_id);
         let _ = self.inpaint_bridge_tx.send(InpaintBridgeMsg::Cancel);
-        self.mark_cancelling(super::dispatch_progress::ProgressKind::Inpaint);
-    }
-
-    /// Show that the runs of `kind` are stopping, until each ends.
-    fn mark_cancelling(&self, kind: super::dispatch_progress::ProgressKind) {
-        self.dispatch_progress.mark_cancelling(kind);
     }
 
     /// Drop the bridge's idle SD subprocess (~200 MB even with the bundle
@@ -1418,10 +1393,8 @@ impl Processor {
             if let Some(c) = self.inpaint_pending.get_mut(&item_id) {
                 *c = c.saturating_sub(1);
             }
-            // Without this the entries pile up for the session and Esc
-            // after 50 strokes fires 50 no-op IPC cancels.
+            // Without this the entries pile up for the session.
             if self.inpaint_pending.get(&item_id).copied().unwrap_or(0) == 0 {
-                self.inpaint_cancels.remove(&item_id);
                 self.inpaint_runs.remove(&item_id);
             }
             let Some(run) = newest else {
@@ -1781,9 +1754,10 @@ impl Processor {
         let _ = run_options.unterminate();
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale, item_id));
         let done = self.upscale.begin(run.clone());
+        let stop = run.stop_flag();
         let progress = PictureSink::of_run(item_id, run, self.picture_sender())
             .into_progress()
-            .with_cancel(Arc::clone(&self.upscale.cancel));
+            .with_cancel(stop);
 
         let engine_slot = Arc::clone(&self.upscale.warm);
         let run_options_for_thread = Arc::clone(run_options);
@@ -1834,17 +1808,17 @@ impl Processor {
     /// rather than at the next tile (5-15 s on CPU); the flag covers a
     /// cancel landing between tiles. Idempotent.
     pub(crate) fn cancel_upscale(&self) {
-        if !self.upscale.cancel() {
+        if !self.upscale.in_flight() {
             return;
         }
+        // Not every EP honours terminate mid-run: OpenVINO measured 54 s
+        // from terminate() to return on a cold 512 px tile (it only checks
+        // the between-tiles flag). The run shows as stopping meanwhile.
+        self.dispatch_progress.stop(super::dispatch_progress::ProgressKind::Upscale);
         let terminate_ok = self
             .upscale_run_options
             .get()
             .is_some_and(|opts| opts.terminate().is_ok());
-        // Not every EP honours terminate mid-run: OpenVINO measured 54 s
-        // from terminate() to return on a cold 512 px tile (it only checks
-        // the between-tiles flag). Say so instead of looking frozen.
-        self.mark_cancelling(super::dispatch_progress::ProgressKind::Upscale);
         tracing::debug!(terminate_ok, "upscale cancel requested");
     }
 
@@ -1915,7 +1889,8 @@ impl Processor {
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize, item_id));
         let done = self.colorize.begin(run.clone());
-        let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(Arc::clone(&self.colorize.cancel));
+        let stop = run.stop_flag();
+        let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(stop);
         let engine_slot = Arc::clone(&self.colorize.warm);
         std::thread::spawn(move || {
             let key = WarmEngineKey { model: kind, cpu_only };
@@ -1938,8 +1913,8 @@ impl Processor {
     /// Cancel the colorize run in flight. The model's one run is not
     /// interrupted; its result is dropped when it returns. Idempotent.
     pub(crate) fn cancel_colorize(&self) {
-        if self.colorize.cancel() {
-            self.mark_cancelling(super::dispatch_progress::ProgressKind::Colorize);
+        if self.colorize.in_flight() {
+            self.dispatch_progress.stop(super::dispatch_progress::ProgressKind::Colorize);
         }
     }
 
@@ -3067,17 +3042,29 @@ mod tests {
         }
     }
 
+    /// A Cancel stops its own kind of run, and an erase's Cancel only
+    /// that image's erase: another image's erase went on but its capsule
+    /// read as stopping. A run started after a Cancel is not born stopped.
     #[test]
-    fn a_cancel_marks_only_its_own_kind_of_run_as_stopping() {
+    fn a_cancel_stops_only_its_own_run() {
         use super::super::dispatch_progress::{DispatchProgress, ProgressKind};
         let mut p = fixture();
         *p.inpaint_pending.entry(7).or_insert(0) += 1;
-        let _run = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing"));
-        p.mark_cancelling(ProgressKind::Upscale);
-        assert!(!p.dispatch_progress().unwrap().cancelling, "an upscale cancel leaves the eraser run alone");
+        *p.inpaint_pending.entry(8).or_insert(0) += 1;
+        let seven = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(7));
+        let eight = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(8));
+        p.set_upscale_in_flight_for_test(true);
+        let upscale = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling").on(9));
+        p.cancel_upscale();
+        assert!(upscale.stopped() && !seven.stopped() && !eight.stopped(), "an upscale cancel leaves the erases alone");
+        upscale.end();
         p.cancel_inpaint(7);
-        assert!(p.dispatch_progress().unwrap().cancelling);
+        assert!(seven.stopped() && !eight.stopped(), "only image 7's erase stops");
+        assert!(p.dispatch_progress_over(Some(7)).is_some_and(|d| d.cancelling));
+        assert!(p.dispatch_progress_over(Some(8)).is_some_and(|d| !d.cancelling), "image 8's erase does not read as stopping");
         assert!(p.is_inpaint_in_flight(7), "the stroke stays in flight until the worker stops");
+        let next = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling").on(9));
+        assert!(!next.stopped(), "a run after a Cancel starts with a flag of its own");
     }
 
     #[test]
