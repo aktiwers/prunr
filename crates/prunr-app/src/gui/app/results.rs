@@ -543,6 +543,14 @@ impl PrunrApp {
         if self.wants_depth_now(idx) {
             self.request_depth(idx);
         }
+        // A By depth click waits only for a map on its way: with none
+        // coming (By depth turned off, no depth model) it would hold
+        // Process and the selection actions for good.
+        let item = &self.batch.items[idx];
+        if !item.depth_run.pending && item.current_depth().is_none() {
+            let item_id = item.id;
+            self.magic_brush_state.pending_depth_clicks.retain(|c| c.item_id != item_id);
+        }
     }
 
     /// A depth measurement of `item_id` ended: its map is kept and read,
@@ -3319,6 +3327,29 @@ mod depth_tests {
         };
         assert_eq!(selected_columns((1.0, 4.0)), [0, 1, 2, 3], "a click on the subject stays on it");
         assert_eq!(selected_columns((6.0, 4.0)), [4, 5, 6, 7], "a click on what was taken away stays there");
+    }
+
+    /// A By depth click waits only for a map that is on its way. With none
+    /// coming (By depth turned off, the depth model not installed) it
+    /// goes; it held Process and the selection actions until the brush
+    /// was turned off.
+    #[test]
+    fn a_by_depth_click_with_no_map_coming_goes() {
+        use prunr_core::selection::BrushMode;
+        let ctx = egui::Context::default();
+        for (installed, by_depth, waits) in [(true, true, true), (false, true, false), (true, false, false)] {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            push_test_item(&mut app, 1).dimensions = (8, 8);
+            app.batch.select_item(0);
+            app.magic_brush_state.activate();
+            app.settings.brush.magic_depth = true;
+            app.hardware_install_cache.depth = installed;
+            app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
+            app.settings.brush.magic_depth = by_depth;
+            app.pump_depth(&ctx);
+            assert_eq!(app.selection_edit_pending(1), waits, "installed {installed}, by depth {by_depth}");
+        }
     }
 
     /// A Depth pick on an image whose map is not there yet waits for
