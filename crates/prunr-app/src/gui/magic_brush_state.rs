@@ -38,8 +38,9 @@ pub(crate) struct MagicBrushState {
     /// On at least once this session: from then on the shown image is
     /// encoded ahead, so the tool is ready whenever it comes back on.
     used: bool,
-    pub(crate) pending_depth_click: Option<PendingDepthClick>,
-    /// In the order they were made, all on the shown image.
+    /// Clicks by depth and SAM picks waiting for their image's depth map
+    /// or embedding: in the order they were made, all on the shown image.
+    pub(crate) pending_depth_clicks: Vec<PendingDepthClick>,
     pub(crate) pending_sam_picks: Vec<PendingSamPick>,
     /// An encode is in flight for the current item; cleared when its
     /// embedding lands.
@@ -71,7 +72,7 @@ impl MagicBrushState {
     /// result lands, so no second encode of the same image starts.
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.pending_depth_click = None;
+        self.pending_depth_clicks.clear();
         self.pending_sam_picks.clear();
         self.clear_stroke();
     }
@@ -92,7 +93,7 @@ impl MagicBrushState {
             // A held click is for the image it was made on; it would land
             // on that image off screen.
             self.pending_sam_picks.retain(|p| Some(p.item_id) == id);
-            self.pending_depth_click.take_if(|c| Some(c.item_id) != id);
+            self.pending_depth_clicks.retain(|c| Some(c.item_id) == id);
         }
     }
 
@@ -117,7 +118,7 @@ impl MagicBrushState {
 
     /// A pick on `item_id` waits for its embedding or its depth map.
     pub(crate) fn waits_on(&self, item_id: u64) -> bool {
-        self.pending_sam_picks.iter().any(|p| p.item_id == item_id) || self.pending_depth_click.as_ref().is_some_and(|c| c.item_id == item_id)
+        self.pending_sam_picks.iter().any(|p| p.item_id == item_id) || self.pending_depth_clicks.iter().any(|c| c.item_id == item_id)
     }
 
     /// Clearing one buffer without the other leaves a ghost trail or a

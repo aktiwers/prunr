@@ -552,17 +552,19 @@ impl PrunrApp {
             ctx.request_repaint();
         } else if let Some(err) = error {
             // A click that waited for the map has nothing to pick with.
-            self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id);
+            self.magic_brush_state.pending_depth_clicks.retain(|c| c.item_id != item_id);
             self.toasts.error(format!("Could not measure the depth: {}", prunr_core::plain::reason(err)));
         }
     }
 
-    /// The image's depth map landed: what reads it re-renders, and a By
-    /// depth click that waited for it runs (turning the brush off drops one).
+    /// The image's depth map landed: what reads it re-renders, and the
+    /// By depth clicks that waited for it run in order (turning the brush
+    /// off drops them).
     pub(crate) fn on_depth_landed(&mut self, idx: usize) {
         self.after_depth_landed(idx);
         let item_id = self.batch.items[idx].id;
-        if let Some(click) = self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id) {
+        let clicks: Vec<_> = self.magic_brush_state.pending_depth_clicks.extract_if(.., |c| c.item_id == item_id).collect();
+        for click in clicks {
             // The click waited for the map; a run started meanwhile holds edits.
             if self.batch.items[idx].is_idle() {
                 self.magic_depth_click(click.item_id, click.at, click.dims, click.mode, click.side);
@@ -3314,11 +3316,11 @@ mod depth_tests {
         app.batch.select_item(0);
         app.magic_brush_state.activate();
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
-        assert!(app.magic_brush_state.pending_depth_click.is_some(), "parked until the map is there");
+        assert!(!app.magic_brush_state.pending_depth_clicks.is_empty(), "parked until the map is there");
         assert!(app.processor.pump_sam_decoder_results().is_empty());
         assert!(app.batch.items[0].land_depth(Ok(map()), None));
         app.on_depth_landed(0);
-        assert!(app.magic_brush_state.pending_depth_click.is_none());
+        assert!(app.magic_brush_state.pending_depth_clicks.is_empty());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let result = loop {
             if let Some(r) = app.processor.pump_sam_decoder_results().pop() { break r; }
@@ -3330,7 +3332,30 @@ mod depth_tests {
         app.batch.items[0].depth = None;
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         app.magic_brush_state.deactivate();
-        assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
+        assert!(app.magic_brush_state.pending_depth_clicks.is_empty(), "the brush turned off drops the waiting click");
+    }
+
+    /// Every click by depth made before the map is there runs when it
+    /// lands, as every early SAM pick does: one slot kept only the last.
+    #[test]
+    fn every_click_by_depth_before_the_map_runs() {
+        use prunr_core::selection::BrushMode;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        push_test_item(&mut app, 1).dimensions = (8, 8);
+        app.batch.select_item(0);
+        app.magic_brush_state.activate();
+        app.magic_depth_click(1, (1.0, 1.0), (8, 8), BrushMode::Add, None);
+        app.magic_depth_click(1, (6.0, 6.0), (8, 8), BrushMode::Add, None);
+        assert!(app.batch.items[0].land_depth(Ok(map()), None));
+        app.on_depth_landed(0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut picks = 0;
+        while picks < 2 && std::time::Instant::now() < deadline {
+            picks += app.processor.pump_sam_decoder_results().len();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(picks, 2, "both clicks selected");
     }
 
     /// Undo pressed while a Magic Brush pick is still selecting waits for
@@ -3370,7 +3395,7 @@ mod depth_tests {
         app.batch.items[0].depth = None;
         app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         app.handle_undo(&ctx);
-        assert!(app.magic_brush_state.pending_depth_click.is_none(), "the waiting pick is taken back");
+        assert!(app.magic_brush_state.pending_depth_clicks.is_empty(), "the waiting pick is taken back");
         assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "and nothing else");
     }
 

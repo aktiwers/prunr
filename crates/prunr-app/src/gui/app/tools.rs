@@ -142,10 +142,10 @@ impl PrunrApp {
     /// image's embedding or depth map; whether there were any.
     pub(crate) fn take_back_waiting_picks(&mut self, ids: &[u64]) -> bool {
         let state = &mut self.magic_brush_state;
-        let held = state.pending_sam_picks.len();
+        let held = state.pending_sam_picks.len() + state.pending_depth_clicks.len();
         state.pending_sam_picks.retain(|p| !ids.contains(&p.item_id));
-        let depth = state.pending_depth_click.take_if(|c| ids.contains(&c.item_id)).is_some();
-        depth || state.pending_sam_picks.len() != held
+        state.pending_depth_clicks.retain(|c| !ids.contains(&c.item_id));
+        state.pending_sam_picks.len() + state.pending_depth_clicks.len() != held
     }
 
     pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp) {
@@ -411,7 +411,7 @@ impl PrunrApp {
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.try_depth_again();
             }
-            self.magic_brush_state.pending_depth_click = Some(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode, side });
+            self.magic_brush_state.pending_depth_clicks.push(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode, side });
             return;
         };
         let (w, h) = dims;
