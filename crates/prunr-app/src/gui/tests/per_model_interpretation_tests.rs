@@ -337,6 +337,25 @@ fn a_slider_redraws_the_latest_stroke_with_a_step_left_to_redo() {
     assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "which the slider goes on filling in");
 }
 
+/// A slider drag is one step, also when the image leaves the screen with
+/// a redraw still on its way: leaving dropped the drag, so the last
+/// redraw landed as a second step.
+#[test]
+fn a_drag_ended_by_another_image_is_one_step() {
+    let (mut app, _) = app_with_a_magic_pick();
+    // A step after the pick: the drag's redraw is a step of its own.
+    app.batch.items[0].commit(StepKind::Adjust);
+    let steps = app.batch.items[0].timeline.undo_steps();
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.9);
+    redraw_lands(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "the drag's step");
+    slide(&mut app, |b| b.magic_confidence_threshold = 0.7);
+    assert!(app.batch.selection_queue.any_pending(), "a redraw on its way");
+    app.batch.items[0].leave_screen(false);
+    super::fixtures::settle_selection_edits(&mut app);
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps + 1, "it fills in the same step");
+}
+
 /// A stroke is drawn again when its brush's slider moves, not when the
 /// brush's values come from somewhere else: a preset picked, or a model
 /// whose strokes have another edge (an eraser's Expand and Feather for a

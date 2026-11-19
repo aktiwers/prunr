@@ -1396,11 +1396,11 @@ impl BatchItem {
     /// Drop what slider drags keep unpacked while the image is shown: the
     /// decompressed tensors and the live-preview caches (edge planes,
     /// outline base, the run start read back). The compressed caches stay,
-    /// so the next drag rebuilds them once.
+    /// so the next drag rebuilds them once. A brush drag under way stays:
+    /// its last redraw, still on its way, fills in the drag's one step.
     pub(crate) fn drop_hot_tensors(&mut self) {
         self.volatile_seg_tensor = None;
         self.volatile_edge_tensor = None;
-        self.adjusting = None;
         super::reclaim::later((std::mem::take(&mut self.edge_planes), self.start_photo.take()));
         self.drop_kept_cut();
         self.drop_correction_cache();
