@@ -390,9 +390,13 @@ impl World {
     }
 
     /// Frames, the worker answering between them, until nothing is owed
-    /// or the rounds run out. Whether it went quiet.
+    /// or two minutes pass. Whether it went quiet. Time, not a count of
+    /// frames: a picture enlarged three times over (157 MP from these
+    /// photos) takes the debug build over a minute to make its texture
+    /// and thumbnail, which is slow, not stuck.
     fn quiet(&mut self) -> bool {
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             self.worker.answer(self.h.state());
             answer_models(self.h.state(), &self.models);
             self.h.step();
@@ -738,8 +742,9 @@ fn cut_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
 /// A cut-out's picture comes from its photo, the model that cut it and
 /// its settings: the same three on a fresh window, processed once, give
 /// the same picture, whatever route led here. (A model picked since
-/// leaves the cut as it is until Process.) Images with strokes are left
-/// out: their route is part of what they are.
+/// leaves the cut as it is until Process.) So does an upscale's or a
+/// colorize's made from the photo. Images with strokes are left out:
+/// their route is part of what they are.
 fn the_route_does_not_matter(world: &World) -> Option<Broken> {
     let app = world.app();
     for item in &app.batch.items {
@@ -748,10 +753,12 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
         // on in its picture (a restore painted live, its selection since
         // cleared under the eraser): part of its route.
         let touched = item.timeline.kinds_to_shown().any(|kind| matches!(kind, StepKind::Stroke | StepKind::Strokes | StepKind::Selection | StepKind::Edit));
-        let plain_cut = item.shows_cutout() && item.selection_mask.is_none() && item.edits.is_none() && !touched;
-        let Some(here) = shown_picture(item).filter(|_| plain_cut) else { continue };
-        let Some(model) = cut_by(item) else { continue };
-        let straight = straight_cut(model, item.settings, &item.filename)?;
+        if touched || item.selection_mask.is_some() || item.edits.is_some() {
+            continue;
+        }
+        let Some(model) = (if item.shows_cutout() { cut_by(item) } else { kept_run_by(item) }) else { continue };
+        let Some(here) = shown_picture(item) else { continue };
+        let straight = straight_run(model, item.settings, &item.filename)?;
         if straight != here {
             return Some(Broken {
                 rule: "the route does not matter",
@@ -763,9 +770,25 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
     None
 }
 
+/// The upscaler or Colorize whose run the image shows, when that run
+/// read the photo itself (an upscale of a cut-out or of an erase is part
+/// of its route).
+fn kept_run_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
+    use crate::gui::item::Engine;
+    let origin = item.timeline.current().origin.as_ref().filter(|o| o.start.is_none())?;
+    match origin.engine {
+        Engine::Upscale => {
+            let id = item.applied_recipe.as_ref()?.upscale.model?;
+            SettingsModel::ALL.into_iter().find(|m| m.to_model_id() == Some(id))
+        }
+        Engine::Colorize => Some(SettingsModel::ColorizeDdcolor),
+        _ => None,
+    }
+}
+
 /// The picture `settings` give `name`'s photo under `model` on a fresh
 /// window, processed once.
-fn straight_cut(model: SettingsModel, settings: ItemSettings, name: &str) -> Option<u64> {
+fn straight_run(model: SettingsModel, settings: ItemSettings, name: &str) -> Option<u64> {
     let mut fresh = World::new();
     let id = {
         let app = fresh.h.state_mut();
@@ -824,23 +847,32 @@ struct Reached {
 fn random_sequence(rng: &mut Rng, len: usize, reached: &mut Reached) -> Vec<Action> {
     let mut world = World::new();
     let mut actions = Vec::with_capacity(len);
-    // One sequence in four opens with an erase (the eraser picked, a
-    // region painted, Process), which a random walk seldom puts in order.
-    if rng.below(4) == 0 {
-        for step in ["Model", "Eraser (MI-GAN)", "Paint Brush", "", "Process"] {
-            // An eraser may come with the Paint Brush in hand: a click would put it down.
-            if step == "Paint Brush" && world.app().active_tool() == Some(crate::gui::brush_state::Tool::Paint) {
-                continue;
-            }
-            let action = if step.is_empty() {
-                Action::Stroke([rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20])
-            } else {
-                let name = world.offered().into_iter().map(|(name, _)| name).find(|name| name.starts_with(step)).unwrap_or_else(|| step.to_string());
-                Action::Click(name)
-            };
-            world.act(&action);
-            actions.push(action);
+    // Most sequences open with a run a random walk seldom puts in order:
+    // an erase (the eraser picked, a region painted, Process), an upscale,
+    // a colorize, or lines (Sketch on, Process). An empty step is a stroke;
+    // a step names the start of a control's name, one picked at random
+    // when several fit (the upscalers).
+    let opener: &[&str] = match rng.below(10) {
+        0 | 1 => &["Model", "Eraser (MI-GAN)", "Paint Brush", "", "Process"],
+        2 | 3 => &["Model", "Upscale (", "Process"],
+        4 => &["Model", "Colorize (", "Process"],
+        5 => &["Sketch", "Subject", "Process"],
+        6 => &["Sketch", "Whole photo", "Process"],
+        _ => &[],
+    };
+    for &step in opener {
+        // An eraser may come with the Paint Brush in hand: a click would put it down.
+        if step == "Paint Brush" && world.app().active_tool() == Some(crate::gui::brush_state::Tool::Paint) {
+            continue;
         }
+        let action = if step.is_empty() {
+            Action::Stroke([rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20])
+        } else {
+            let fits: Vec<String> = world.offered().into_iter().map(|(name, _)| name).filter(|name| name.starts_with(step)).collect();
+            Action::Click(if fits.is_empty() { step.to_string() } else { fits[rng.below(fits.len())].clone() })
+        };
+        world.act(&action);
+        actions.push(action);
     }
     while actions.len() < len {
         let offered = world.offered();
