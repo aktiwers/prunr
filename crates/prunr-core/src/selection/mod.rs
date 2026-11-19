@@ -648,9 +648,10 @@ impl MaskArtifact {
         if (self.width, self.height) != cutout.dimensions() {
             return None;
         }
-        let on_side: Vec<bool> = cutout.as_raw().chunks_exact(4).map(|px| if kept { px[3] > 0 } else { px[3] < u8::MAX }).collect();
-        let cells = self.data.iter().zip(&on_side).map(|(&cell, &side)| if side { cell } else { 0 }).collect();
-        let fill = self.fill.as_ref().map(|layer| layer.iter().zip(&on_side).map(|(&f, &side)| if side { f } else { 0 }).collect::<Vec<u8>>());
+        let on_side = |px: &[u8]| if kept { px[3] > 0 } else { px[3] < u8::MAX };
+        let pixels = || cutout.as_raw().chunks_exact(4);
+        let cells = self.data.iter().zip(pixels()).map(|(&cell, px)| if on_side(px) { cell } else { 0 }).collect();
+        let fill = self.fill.as_ref().map(|layer| layer.iter().zip(pixels()).map(|(&f, px)| if on_side(px) { f } else { 0 }).collect::<Vec<u8>>());
         Some(Self::from_cells(self.width, self.height, cells).with_fill_layer(fill))
     }
 

@@ -505,10 +505,7 @@ impl CutSide {
     /// `mask` kept to this side of the cut; as it is when the cut-out
     /// cannot be read or has another size.
     fn keep_to(&self, mask: MaskArtifact) -> MaskArtifact {
-        match self.cutout.load().and_then(|cutout| mask.on_side_of_cut(&cutout, self.kept)) {
-            Some(kept) => kept,
-            None => mask,
-        }
+        self.cutout.load().and_then(|cutout| mask.on_side_of_cut(&cutout, self.kept)).unwrap_or(mask)
     }
 }
 
