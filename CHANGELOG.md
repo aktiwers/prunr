@@ -166,6 +166,8 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - A stroke let go over the tool strip lands; a stroke redone while an erase fills stays as the next area; every click by depth made before the depth map is ready runs once it is, and a depth measurement that failed is made again when asked for.
 - Switching model with images still queued says how many were left; a No-model pass that fails says so.
 - Undo back to a Refine or Strength change shows that change's picture; one made just before the next change, or on a ticked image off screen, kept the picture from before it.
+- Redo after undoing back to the photo gives a Sketch look its lines back; a cut-out without its outline could take the step's place.
+- A brush slider moved over a stroke it cannot visibly change (a faint stroke has no edge to feather) still sets that stroke's value; it came back to the old value at the next slider move.
 - Choice buttons (Restore/Erase/Select, the shape and background pickers) tell screen readers which one is picked.
 - A model or add-on download cut short (Prunr closed mid-download or mid-install) gives its disk space back at the next start; it used to stay until that same download ran again, for good for a model never fetched again.
 - A thumbnail keeps its image's effect background (blurred photo, black & white photo, lens blur) when another image is shown, and an image processed without being shown gets it too; the background disappeared from the thumbnail, though Save wrote it.
