@@ -173,7 +173,14 @@ impl PrunrApp {
             let (kind, record) = done.op.step();
             // A stroke adjustment fills in its one step while the slider moves.
             let fills_in = replay.is_some() && item.adjustment().is_some_and(|a| a.landed);
-            let changed = item.land_selection_state(done.made, done.hash, (!fills_in).then_some(kind), record);
+            let kind = (!fills_in).then_some(kind);
+            let changed = item.land_selection_state(done.made, done.hash, kind, record.clone());
+            if replay.is_some() && !changed && kind.is_some() {
+                // A redraw that shows nothing new (a faint stroke has no edge
+                // to soften) makes no step, but the shown step records the
+                // strokes as drawn now: the next adjustment starts from them.
+                item.timeline.current_mut().made = record;
+            }
             if let (Some(replay), Some(adjusting)) = (replay, item.adjusting.as_mut()) {
                 adjusting.shown = Arc::clone(&replay.strokes.ops);
                 if changed {

@@ -418,6 +418,35 @@ fn the_first_slider_move_after_a_switch_redraws() {
     }
 }
 
+/// A redraw that shows nothing new still records the strokes as they
+/// are now drawn. Feather on strokes with nothing to soften against (no
+/// photo here; a faint stroke has no edge either) draws the same
+/// selection, and no step is made for it; the strokes kept the old
+/// Feather in their record, and the next adjustment started from it: the
+/// slider said 0 and the stroke came back feathered.
+#[test]
+fn a_redraw_that_shows_nothing_new_records_the_new_values() {
+    use crate::gui::brush_state::StrokeEdge;
+    use crate::gui::selection_queue::SelectionMade;
+    let feathers = |app: &PrunrApp| -> Vec<f32> {
+        app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| h.ops.iter().filter_map(|op| match op {
+            SelectionMade::Stroke(d) => match d.edge() {
+                StrokeEdge::Selection { feather } => Some(feather),
+                StrokeEdge::Eraser { .. } => None,
+            },
+            _ => None,
+        }).collect())
+    };
+    let mut app = app_for_strokes();
+    paint_down(&mut app, 4.0, 8.0);
+    paint_down(&mut app, 12.0, 8.0);
+    let (steps, selection) = (app.batch.items[0].timeline.undo_steps(), app.batch.items[0].selection_hash);
+    adjust_all(&mut app, |b| b.edge_feather = 3.0);
+    assert_eq!(app.batch.items[0].selection_hash, selection, "nothing to soften against: the same selection");
+    assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "no step for what shows nothing new");
+    assert_eq!(feathers(&app), [3.0, 3.0], "the strokes take the new Feather");
+}
+
 /// Each brush's sliders reach the strokes that brush drew: Last its
 /// latest one, even with the other brush's stroke after it, and All every
 /// one of its own; the other brush's strokes stay as drawn, also for
