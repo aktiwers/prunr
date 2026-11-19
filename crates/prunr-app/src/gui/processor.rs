@@ -527,8 +527,9 @@ fn measure_depth(
     let descriptor = prunr_models::descriptor(kind.into()).ok_or("the depth model is not registered")?;
     admitted_unless_warm(engine_slot, WarmEngineKey { model: kind, cpu_only }, descriptor)?;
     let initial = super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Depth, prunr_core::Step::EstimatingDepth.label()).on(item_id);
-    let run = slot.begin_if_idle(initial);
-    let progress = run.as_ref().map_or_else(prunr_core::Progress::none, |run| prunr_core::Progress::new(Arc::new(run.clone())));
+    // Under a second and started by itself: it shows only when nothing else runs.
+    let run = slot.begin_background(initial);
+    let progress = prunr_core::Progress::new(Arc::new(run.clone()));
     let threads = prunr_core::batch::ort_intra_threads(1);
     let result = input.read().map_err(prunr_core::CoreError::ImageFormat)
         .and_then(|photo| {
@@ -539,9 +540,7 @@ fn measure_depth(
         })
         .map(Arc::new)
         .map_err(|e| e.to_string());
-    if let Some(run) = run {
-        run.end();
-    }
+    run.end();
     result
 }
 
@@ -1050,8 +1049,15 @@ impl Processor {
         self.picks_selecting.contains_key(&item_id)
     }
 
+    /// The run the capsule shows, if any runs.
     pub(super) fn dispatch_progress(&self) -> Option<super::dispatch_progress::DispatchProgress> {
         self.dispatch_progress.read()
+    }
+
+    /// The run the capsule shows over image `shown`: one working on it
+    /// before another of the same standing.
+    pub(super) fn dispatch_progress_over(&self, shown: Option<u64>) -> Option<super::dispatch_progress::DispatchProgress> {
+        self.dispatch_progress.read_over(shown)
     }
 
     /// An encoder run finishing for `item_id`.
@@ -1205,13 +1211,9 @@ impl Processor {
         self.mark_cancelling(super::dispatch_progress::ProgressKind::Inpaint);
     }
 
-    /// Show that a run of `kind` is stopping, until it ends.
+    /// Show that the runs of `kind` are stopping, until each ends.
     fn mark_cancelling(&self, kind: super::dispatch_progress::ProgressKind) {
-        self.dispatch_progress.update(|p| {
-            if let Some(p) = p.as_mut().filter(|p| p.kind == kind) {
-                p.cancelling = true;
-            }
-        });
+        self.dispatch_progress.mark_cancelling(kind);
     }
 
     /// Drop the bridge's idle SD subprocess (~200 MB even with the bundle
@@ -2051,10 +2053,10 @@ impl Processor {
     pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend, cpu_only: bool) {
         let tx = self.faces_found.tx.clone();
         let (stop, current) = self.begin_faces_search();
-        // The capsule belongs to a batch or an upscale while one runs; a
-        // face search taking it would hide theirs and its Cancel.
-        let run = self.dispatch_progress.begin_if_idle(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id));
-        let progress = PictureSink::of_face_search(item_id, run.clone(), current, self.picture_sender())
+        // Started by itself: the capsule shows it once nothing the user
+        // started runs, so it never hides theirs or its Cancel.
+        let run = self.dispatch_progress.begin_background(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id));
+        let progress = PictureSink::of_face_search(item_id, Some(run.clone()), current, self.picture_sender())
             .into_progress()
             .with_cancel(Arc::clone(&stop));
         std::thread::spawn(move || {
@@ -2067,9 +2069,7 @@ impl Processor {
             })
             .unwrap_or_else(Err);
             tracing::info!(item_id, ?model, faces = result.as_ref().map_or(0, Vec::len), elapsed_ms = started.elapsed().as_millis() as u64, "face search ended");
-            if let Some(run) = run {
-                run.end();
-            }
+            run.end();
             let stopped = stop.load(Ordering::Acquire);
             let _ = tx.send(FacesResult { item_id, photo, model, result, stopped });
         });
@@ -2419,9 +2419,10 @@ mod tests {
     }
 
     /// A run's pictures reach the canvas's channel while the run says
-    /// they may land, and its steps reach the pill; a run another has
-    /// replaced sends neither; a run without the pill still sends its
-    /// pictures but leaves the pill to the run that has it.
+    /// they may land, and its steps reach its own entry; a run of another
+    /// kind leaves it current, a newer run of its kind on its image
+    /// replaces it; a run without the pill still sends its pictures but
+    /// leaves the pill to the runs that have one.
     #[test]
     fn a_picture_sink_sends_pictures_while_its_run_is_current() {
         use super::super::dispatch_progress::{DispatchProgress, DispatchProgressSlot, ProgressKind};
@@ -2436,11 +2437,15 @@ mod tests {
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![run(4)]);
         assert_eq!(slot.read().map(|p| p.step_label), Some(Step::Erasing.label().into()));
 
-        let second = PictureSink::of_run(5, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), tx.clone());
+        let second = PictureSink::of_run(5, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading").on(5)), tx.clone());
         first.report(tile());
         first.report(ProgressUpdate::Step(Step::Blending));
-        assert!(rx.try_recv().is_err(), "a replaced run's pictures are dropped");
-        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![run(4)], "another kind of run leaves it current");
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the newest run shows");
+
+        let _newer = PictureSink::of_run(4, slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Loading")), tx.clone());
+        first.report(tile());
+        assert!(rx.try_recv().is_err(), "a newer run of its kind on its image replaces it");
 
         let open = std::sync::Arc::new(AtomicBool::new(true));
         let flag = open.clone();

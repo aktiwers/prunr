@@ -269,61 +269,74 @@ impl DispatchProgress {
     }
 }
 
-/// Shared slot the dispatcher writes and the widgets read; `None` when no
-/// dispatch is in flight. A Mutex rather than atomics because the payload
-/// holds a heap `Cow`; the lock is held for microseconds.
+/// Every run under way, each with its progress, and which one the
+/// capsule shows. Runs report to their own entry and end only it, so a
+/// short run ending never hides a longer one that goes on. A Mutex rather
+/// than atomics because the entries hold a heap `Cow`; the lock is held
+/// for microseconds.
 #[derive(Debug, Clone, Default)]
 pub struct DispatchProgressSlot {
-    inner: Arc<Mutex<Option<DispatchProgress>>>,
-    /// Bumped by `begin`, so a finished run's late reports cannot
-    /// reach the run that replaced it.
-    run: Arc<AtomicU64>,
+    runs: Arc<Mutex<Vec<LiveRun>>>,
+    /// The number the next run takes.
+    next: Arc<AtomicU64>,
 }
 
-/// The listener `begin` hands a run: its reports reach the slot only
-/// while the slot still shows that run.
+#[derive(Debug)]
+struct LiveRun {
+    run: u64,
+    progress: DispatchProgress,
+    /// Started by itself (a face search, a depth measurement): shown only
+    /// while no run the user started goes on.
+    background: bool,
+}
+
+/// The listener `begin` hands a run, and its end. Clones share the run:
+/// it ends at `end`, or when its last handle goes (its thread stopped by
+/// a panic), whichever comes first.
 #[derive(Clone)]
 pub struct RunSink {
+    live: Arc<RunToken>,
+}
+
+struct RunToken {
     slot: DispatchProgressSlot,
     run: u64,
 }
 
+impl Drop for RunToken {
+    fn drop(&mut self) {
+        self.slot.remove(self.run);
+    }
+}
+
 impl RunSink {
-    /// The slot still shows this run.
-    pub(crate) fn current(&self) -> bool {
-        self.slot.run.load(Ordering::Acquire) == self.run
+    fn run(&self) -> u64 {
+        self.live.run
     }
 
-    /// The run is over: clear the slot unless a newer run took it.
+    /// The run goes on, and no newer run of its kind works on its image:
+    /// its pictures may still land.
+    pub(crate) fn current(&self) -> bool {
+        let runs = self.live.slot.lock();
+        let Some(me) = runs.iter().find(|r| r.run == self.run()) else { return false };
+        !runs.iter().any(|r| r.run > me.run && r.progress.kind == me.progress.kind && r.progress.on == me.progress.on)
+    }
+
+    /// The run is over: its entry goes, the others stay.
     pub fn end(&self) {
-        if self.current() {
-            self.slot.set(None);
-        }
+        self.live.slot.remove(self.run());
     }
 
     /// Show `text` as the step, for wording only the app can give
     /// (which models are loading).
     pub fn set_step_text(&self, text: String) {
-        if self.current() {
-            self.slot.update(|p| {
-                if let Some(p) = p {
-                    p.step_label = Cow::Owned(text);
-                }
-            });
-        }
+        self.live.slot.with_run(self.run(), |p| p.step_label = Cow::Owned(text));
     }
 }
 
 impl prunr_core::ProgressSink for RunSink {
     fn report(&self, update: prunr_core::ProgressUpdate) {
-        if !self.current() {
-            return;
-        }
-        self.slot.update(|p| {
-            if let Some(p) = p {
-                p.apply(&update);
-            }
-        });
+        self.live.slot.with_run(self.run(), |p| p.apply(&update));
     }
 }
 
@@ -332,41 +345,69 @@ impl DispatchProgressSlot {
         Self::default()
     }
 
-    /// Start showing a run and get the listener its pipeline reports to.
+    /// Start a run the user asked for and get the listener its pipeline
+    /// reports to.
     pub fn begin(&self, initial: DispatchProgress) -> RunSink {
-        let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
-        self.set(Some(initial));
-        RunSink { slot: self.clone(), run }
+        self.add(initial, false)
     }
 
-    /// `begin`, unless a run already shows: a run that cannot be cancelled
-    /// must not hide one that can. Checked and taken under one lock.
-    pub fn begin_if_idle(&self, initial: DispatchProgress) -> Option<RunSink> {
-        let mut shown = self.lock();
-        if shown.is_some() {
-            return None;
+    /// Start a run that started by itself (a face search, a depth
+    /// measurement): it shows only while nothing the user started runs,
+    /// so it never hides a run whose Cancel the user may want.
+    pub fn begin_background(&self, initial: DispatchProgress) -> RunSink {
+        self.add(initial, true)
+    }
+
+    fn add(&self, progress: DispatchProgress, background: bool) -> RunSink {
+        let run = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+        self.lock().push(LiveRun { run, progress, background });
+        RunSink { live: Arc::new(RunToken { slot: self.clone(), run }) }
+    }
+
+    fn remove(&self, run: u64) {
+        self.lock().retain(|r| r.run != run);
+    }
+
+    fn with_run(&self, run: u64, f: impl FnOnce(&mut DispatchProgress)) {
+        if let Some(live) = self.lock().iter_mut().find(|r| r.run == run) {
+            f(&mut live.progress);
         }
-        let run = self.run.fetch_add(1, Ordering::AcqRel) + 1;
-        *shown = Some(initial);
-        Some(RunSink { slot: self.clone(), run })
     }
 
-    /// `None` clears it when the dispatch finishes.
+    /// Show `progress` alone, with no run behind it; `None` shows none.
+    #[cfg(test)]
     pub fn set(&self, progress: Option<DispatchProgress>) {
-        *self.lock() = progress;
+        let mut runs = self.lock();
+        runs.clear();
+        if let Some(progress) = progress {
+            let run = self.next.fetch_add(1, Ordering::AcqRel) + 1;
+            runs.push(LiveRun { run, progress, background: false });
+        }
     }
 
-    pub fn update(&self, f: impl FnOnce(&mut Option<DispatchProgress>)) {
-        f(&mut self.lock());
+    /// Every run of `kind` is stopping: each shows so until it ends.
+    pub fn mark_cancelling(&self, kind: ProgressKind) {
+        for live in self.lock().iter_mut().filter(|r| r.progress.kind == kind) {
+            live.progress.cancelling = true;
+        }
     }
 
-    /// `None` when no dispatch is in flight.
+    /// The run the capsule shows; `None` when none is under way.
     pub fn read(&self) -> Option<DispatchProgress> {
-        self.lock().clone()
+        self.read_over(None)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<DispatchProgress>> {
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The run the capsule shows over image `shown`: a run the user
+    /// started before one that started by itself, then one working on
+    /// `shown`, then the newest.
+    pub fn read_over(&self, shown: Option<u64>) -> Option<DispatchProgress> {
+        let runs = self.lock();
+        let rank = |r: &LiveRun| (!r.background, shown.is_some() && r.progress.on == shown, r.run);
+        runs.iter().max_by_key(|r| rank(r)).map(|r| r.progress.clone())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<LiveRun>> {
+        self.runs.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -467,16 +508,53 @@ mod tests {
 
     /// A run that asks only when the slot is idle never takes it from the
     /// run showing, and shows once that run ends.
+    /// A run started by itself (a face search, a depth measurement)
+    /// shows only while nothing the user started runs, and a run the user
+    /// starts shows over it.
     #[test]
-    fn begin_if_idle_leaves_a_showing_run_alone() {
+    fn a_run_started_by_itself_shows_only_when_alone() {
         let slot = DispatchProgressSlot::new();
-        let shown = slot.begin(upscale((1, 4)));
-        assert!(slot.begin_if_idle(upscale((2, 9))).is_none(), "a run is showing");
-        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((1, 4)), "the showing run keeps the slot");
-        shown.end();
-        let idle = slot.begin_if_idle(upscale((2, 9))).expect("the slot is idle");
-        assert!(idle.current(), "the new run is the one shown");
-        assert_eq!(slot.read().and_then(|p| p.flat_counter()), Some((2, 9)));
+        let batch = slot.begin(upscale((1, 4)));
+        let search = slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces"));
+        assert_eq!(slot.read().map(|p| p.kind), Some(ProgressKind::Upscale), "the run started by hand stays shown");
+        batch.end();
+        assert_eq!(slot.read().map(|p| p.kind), Some(ProgressKind::Faces), "then the search shows");
+        let _next = slot.begin(DispatchProgress::new(ProgressKind::Colorize, "Loading"));
+        assert_eq!(slot.read().map(|p| p.kind), Some(ProgressKind::Colorize));
+        drop(search);
+    }
+
+    /// A short run ending while a longer one goes on shows the longer one
+    /// again, and the longer one's pictures go on landing meanwhile. One
+    /// slot held the newest run only: a cut-out landing in a second
+    /// blanked an erase's capsule and its tile previews for the rest of
+    /// the erase.
+    #[test]
+    fn a_short_run_ending_shows_the_longer_one_again() {
+        let slot = DispatchProgressSlot::new();
+        let erase = slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(1));
+        let cut = slot.begin(DispatchProgress::new(ProgressKind::Seg, "Finding the subject").on(2));
+        assert!(erase.current(), "another kind of run on another image leaves it current");
+        assert_eq!(slot.read_over(Some(1)).map(|p| p.kind), Some(ProgressKind::Inpaint), "over its own image, the erase");
+        assert_eq!(slot.read_over(Some(2)).map(|p| p.kind), Some(ProgressKind::Seg));
+        cut.end();
+        assert_eq!(slot.read().map(|p| p.kind), Some(ProgressKind::Inpaint), "the erase shows again");
+
+        let newer = slot.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(1));
+        assert!(!erase.current() && newer.current(), "a newer run of its kind on its image replaces it");
+    }
+
+    /// A run whose every handle goes without ending it (its thread
+    /// stopped by a panic) ends anyway: nothing stays up for good.
+    #[test]
+    fn a_run_whose_handles_all_go_ends() {
+        let slot = DispatchProgressSlot::new();
+        let run = slot.begin(upscale((0, 4)));
+        let copy = run.clone();
+        drop(run);
+        assert!(slot.read().is_some(), "a handle is left");
+        drop(copy);
+        assert!(slot.read().is_none());
     }
 
     #[test]
@@ -492,19 +570,16 @@ mod tests {
         assert!(slot.read().is_none(), "set None clears");
     }
 
+    /// A Cancel marks every run of its kind as stopping, and no other.
     #[test]
-    fn slot_update_mutates_in_place() {
+    fn a_cancel_marks_its_kinds_runs_stopping() {
         let slot = DispatchProgressSlot::new();
-        slot.set(Some(upscale((1, 10))));
-        slot.update(|p| {
-            if let Some(p) = p {
-                p.inner = (5, 10);
-                p.step_label = Cow::Borrowed("After update");
-            }
-        });
-        let p = slot.read().expect("read after update");
-        assert_eq!(p.inner, (5, 10));
-        assert_eq!(p.step_label.as_ref(), "After update");
+        let _up = slot.begin(upscale((1, 10)));
+        let _faces = slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces"));
+        slot.mark_cancelling(ProgressKind::Faces);
+        assert!(!slot.read().expect("the upscale").cancelling);
+        slot.mark_cancelling(ProgressKind::Upscale);
+        assert!(slot.read().expect("the upscale").cancelling);
     }
 
     #[test]

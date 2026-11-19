@@ -1699,9 +1699,9 @@ mod timeline_contract_tests {
 
     /// An erase's tiles, reported the way the SD bridge reports them, land
     /// on its image's preview while its run is the one shown, and the
-    /// fill reveals over them. A run another took the pill from sends
-    /// nothing more; an erase that ends without a fill drops its tiles,
-    /// and a new one starts clear.
+    /// fill reveals over them, also while another image's erase runs; an
+    /// erase that ends without a fill drops its tiles, and a new one
+    /// starts clear.
     #[test]
     fn an_erases_tiles_show_until_its_fill_reveals_over_them() {
         use prunr_core::{ProgressUpdate, TilePreview};
@@ -1722,14 +1722,14 @@ mod timeline_contract_tests {
         app.processor.report_inpaint(1, tile(3));
         app.pump_run_pictures(&ctx);
         assert_eq!(preview_size(&app, 0), Some([3, 2]), "the tile lands on the image's preview");
-        let preview = app.batch.items[0].tile_preview.as_ref().map(|t| t.id());
 
         erase(&mut app, 2);
         app.processor.report_inpaint(1, tile(5));
         app.processor.report_inpaint(2, tile(4));
         app.pump_run_pictures(&ctx);
-        assert_eq!(preview_size(&app, 0), Some([3, 2]), "a run another replaced shows nothing more");
+        assert_eq!(preview_size(&app, 0), Some([5, 2]), "another image's erase leaves this one's tiles landing");
         assert_eq!(preview_size(&app, 1), Some([4, 2]));
+        let preview = app.batch.items[0].tile_preview.as_ref().map(|t| t.id());
 
         let (first, second) = (app.batch.items[0].job_run().expect("an erase"), app.batch.items[1].job_run().expect("an erase"));
         app.processor.land_inpaint_for_test(1, first, (*px(7)).clone());

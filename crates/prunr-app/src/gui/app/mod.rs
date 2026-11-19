@@ -1178,7 +1178,7 @@ impl PrunrApp {
             Some(ProgressKind::Upscale)
         } else if processor.is_colorize_in_flight() {
             Some(ProgressKind::Colorize)
-        } else if processor.dispatch_progress().is_some_and(|p| p.kind == ProgressKind::Faces) {
+        } else if processor.dispatch_progress_over(self.batch.selected_id()).is_some_and(|p| p.kind == ProgressKind::Faces) {
             Some(ProgressKind::Faces)
         } else if processor.any_inpaint_in_flight() {
             Some(ProgressKind::Inpaint)

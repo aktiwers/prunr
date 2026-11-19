@@ -121,7 +121,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut PrunrApp) {
     };
     app.zoom_state.shown_at = img_rect;
 
-    if let Some(progress) = app.processor.dispatch_progress() {
+    if let Some(progress) = app.processor.dispatch_progress_over(app.batch.selected_id()) {
         // A one-image run's tile map belongs over its own image; over
         // another, only the capsule shows, naming the image it works on.
         let shown = app.batch.selected_id();
