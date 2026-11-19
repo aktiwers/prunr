@@ -516,6 +516,26 @@ impl World {
         }
     }
 
+    /// The values the strokes a brush slider draws again were drawn with:
+    /// the latest of the brush in hand under Last, all of them under All.
+    fn drawn_values(&self) -> Vec<String> {
+        use crate::gui::brush_state::StrokeReach;
+        use crate::gui::selection_queue::SelectionMade;
+        let app = self.app();
+        let (Some(tool), Some(item)) = (app.active_tool(), app.batch.selected_item()) else { return Vec::new() };
+        let strokes = match app.brush_state.reach {
+            StrokeReach::Next => None,
+            StrokeReach::Last => item.timeline.latest_stroke(tool),
+            StrokeReach::All => item.timeline.strokes_of(tool),
+        };
+        strokes.map_or_else(Vec::new, |history| {
+            history.ops.iter().filter(|op| op.drawn_by(tool)).filter_map(|op| match op {
+                SelectionMade::Stroke(drawn) => Some(format!("{:?}", drawn.values())),
+                _ => None,
+            }).collect()
+        })
+    }
+
     /// The value the slider named `name` shows, the last of that name.
     fn slider_value(&self, name: &str) -> Option<String> {
         tree(&self.h).iter().filter(|n| n.role == accesskit::Role::Slider && n.name.as_deref() == Some(name)).filter_map(|n| n.number.map(|v| format!("{v:.4}"))).last()
@@ -681,9 +701,9 @@ fn run(actions: &[Action]) -> Option<Broken> {
             Action::Click(name) => world.pressable(name),
             _ => None,
         };
-        let (slider_before, world_before_reached) = match action {
-            Action::Slide(name, _) => (world.slider_value(name), world.brush_reaches_strokes()),
-            _ => (None, false),
+        let (slider_before, world_before_reached, drawn_before) = match action {
+            Action::Slide(name, _) => (world.slider_value(name), world.brush_reaches_strokes(), world.drawn_values()),
+            _ => (None, false, Vec::new()),
         };
         if !world.act(action) {
             continue;
@@ -713,11 +733,14 @@ fn run(actions: &[Action]) -> Option<Broken> {
                 world.quiet();
                 let after = world.seen();
                 let shown = |seen: &Seen| seen.images.iter().find(|i| seen.selected == Some(i.id)).map(|i| (i.selection, i.overlay, i.result));
-                if shown(&after) == shown(&before) {
+                // A stroke under a wider one (a small stroke inside a large
+                // one's band) is drawn again with its new value and shows
+                // no change: its own record still has to take the value.
+                if shown(&after) == shown(&before) && world.drawn_values() == drawn_before {
                     return Some(Broken {
                         rule: "a brush slider reaches its strokes",
                         what: name.clone(),
-                        detail: format!("{name:?} moved from {slider_before:?} to {:?} with strokes of the brush in hand to draw again, and neither the selection, its overlay nor the picture changed", world.slider_value(name)),
+                        detail: format!("{name:?} moved from {slider_before:?} to {:?} with strokes of the brush in hand to draw again, and neither the selection, its overlay, the picture nor the strokes' values changed", world.slider_value(name)),
                     });
                 }
             }
