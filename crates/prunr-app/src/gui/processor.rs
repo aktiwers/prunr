@@ -425,6 +425,14 @@ pub(crate) struct DepthResult {
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
+/// A Process run held while admission lets another batch in: its images,
+/// the step its results record, and the look it was asked with.
+pub(crate) struct HeldRun {
+    pub(crate) ids: Vec<u64>,
+    pub(crate) step: Option<super::timeline::StepKind>,
+    pub(crate) look: Option<super::batch_manager::RunLook>,
+}
+
 /// The images a batch failed on: how many, and the first one's error.
 pub(crate) struct BatchFailures {
     pub(crate) count: usize,
@@ -816,7 +824,7 @@ pub(crate) struct Processor {
     /// Re-runs asked for while admission was still feeding a batch, run
     /// once it is through: a batch opened meanwhile would take the
     /// admitted images' answers and wait behind them for good.
-    deferred_runs: Vec<(Vec<u64>, Option<super::timeline::StepKind>)>,
+    deferred_runs: Vec<HeldRun>,
     /// The batches sent and not finished, oldest first: one queued behind
     /// a running one keeps its own images and recipe.
     in_flight: Vec<InFlightBatch>,
@@ -1548,8 +1556,8 @@ impl Processor {
     }
 
     /// Keep a re-run of `ids` for when admission is through.
-    pub(crate) fn defer_run(&mut self, ids: Vec<u64>, step: Option<super::timeline::StepKind>) {
-        self.deferred_runs.push((ids, step));
+    pub(crate) fn defer_run(&mut self, held: HeldRun) {
+        self.deferred_runs.push(held);
     }
 
     /// Cancel: the re-runs kept for when admission is through never run.
@@ -1563,14 +1571,14 @@ impl Processor {
     /// A Cancel of `ids`: the re-runs kept for them never run; those kept
     /// for other images still go once admission is through.
     pub(crate) fn drop_deferred_runs_of(&mut self, ids: &[u64]) {
-        for (held, _) in &mut self.deferred_runs {
-            held.retain(|id| !ids.contains(id));
+        for held in &mut self.deferred_runs {
+            held.ids.retain(|id| !ids.contains(id));
         }
-        self.deferred_runs.retain(|(held, _)| !held.is_empty());
+        self.deferred_runs.retain(|held| !held.ids.is_empty());
     }
 
     /// The re-runs kept while admission fed a batch, once it no longer does.
-    pub(crate) fn take_deferred_runs(&mut self) -> Vec<(Vec<u64>, Option<super::timeline::StepKind>)> {
+    pub(crate) fn take_deferred_runs(&mut self) -> Vec<HeldRun> {
         if self.admission_still_feeding() {
             return Vec::new();
         }
@@ -1646,6 +1654,17 @@ impl Processor {
     /// the RAM budget: a new batch opened now would orphan them.
     pub(crate) fn admission_still_feeding(&self) -> bool {
         self.admission.as_ref().is_some_and(|a| a.ctrl.has_pending())
+    }
+
+    /// A batch still being let in: one image of it waits for room.
+    #[cfg(test)]
+    pub(crate) fn hold_admission_for_test(&mut self) {
+        use crate::gui::memory::ImageMemCost;
+        let mut ctrl = AdmissionController::with_budget(1);
+        ctrl.enqueue(vec![ImageMemCost { item_id: 901, total: 2 }, ImageMemCost { item_id: 902, total: 1 }]);
+        let work = |id| Some(WorkItem { id, run: 0, source: crate::gui::item::ImageSource::Bytes(Arc::new(Vec::new())), image: None, correction: None });
+        let _ = self.open_admission(ctrl, work);
+        assert!(self.admission_still_feeding(), "one image waits for room");
     }
 
     /// Leaves the cancel registry untouched; the caller's cancel owns it.
@@ -2773,7 +2792,7 @@ mod tests {
         let ctrl = controller(1, &[(1, 2), (2, 1)]);
         let (first, _rx) = p.open_admission(ctrl, |id| Some(test_work(id)));
         p.track_dispatch(fixture_recipe(), first.iter().map(|w| (w.id, w.run)));
-        p.defer_run(vec![7], None);
+        p.defer_run(HeldRun { ids: vec![7], step: None, look: None });
         assert!(p.take_deferred_runs().is_empty(), "held while admission feeds");
         p.clear_admission();
         assert_eq!(p.take_deferred_runs().len(), 1, "then it goes");

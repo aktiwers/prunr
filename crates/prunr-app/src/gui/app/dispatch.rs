@@ -21,6 +21,15 @@ fn too_large_to_upscale(out: (u32, u32), needed: u64, free: u64) -> Option<Strin
     })
 }
 
+/// What a batch of cut-outs runs with: the model, how many images at
+/// once, and the settings of the look it was asked with.
+#[derive(Clone, Copy)]
+struct BatchRun {
+    model: prunr_core::ModelKind,
+    jobs: usize,
+    settings: crate::gui::item_settings::ItemSettings,
+}
+
 impl PrunrApp {
     /// The target images an erase runs on (those with a painted region),
     /// and how many targets have none.
@@ -262,20 +271,29 @@ impl PrunrApp {
     /// the undo step the results record, or `None` to fill in the shown
     /// one (a re-run a knob change asked for).
     pub(super) fn process_items(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
+        let look = self.batch.shown_look();
+        self.process_items_with(look, filter, step);
+    }
+
+    /// `process_items` applying `look` (`None`: factory settings, on an
+    /// empty batch) to the images it runs on.
+    fn process_items_with(&mut self, look: Option<crate::gui::batch_manager::RunLook>, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
         // One gate for every caller: a batch opened while admission still
         // feeds another would take its images' answers and wait behind it.
+        // The run keeps the look it was asked with for when it goes.
         if self.processor.admission_still_feeding() {
             let ids: Vec<u64> = self.batch.items.iter().filter(|item| filter(item)).map(|item| item.id).collect();
             tracing::info!(count = ids.len(), "run held until the batch's images are all started");
-            self.processor.defer_run(ids, step);
+            self.processor.defer_run(crate::gui::processor::HeldRun { ids, step, look });
             return;
         }
+        let settings = look.as_ref().map(|look| look.settings).unwrap_or_default();
         self.batch.fit_line_modes_to(self.settings.model);
         // No model with line_mode Off skips inference; No model + EdgesOnly
         // still needs TEED and falls through.
-        let is_pure_filter = self.settings.model.renders_photo_alone(self.run_settings().line_mode);
+        let is_pure_filter = self.settings.model.renders_photo_alone(settings.line_mode);
         if is_pure_filter {
-            self.process_filter_only(filter, step);
+            self.process_filter_only(look.as_ref(), filter, step);
             return;
         }
         // The placeholder never loads: `needs_segmentation` is false for EdgesOnly.
@@ -286,11 +304,13 @@ impl PrunrApp {
             .map(|i| i.id)
             .collect();
         if candidate_ids.is_empty() { return; }
-        // What you see is what you process: every target takes the shown
-        // image's settings first, so one that was up to date under its own
-        // reruns under these. A background image's result stays parked:
-        // the run starts from its stored step.
-        self.batch.share_shown_settings(&candidate_ids);
+        // What you see is what you process: every target takes the look
+        // the run was asked with first, so one that was up to date under
+        // its own reruns under it. A background image's result stays
+        // parked: the run starts from its stored step.
+        if let Some(look) = &look {
+            self.batch.give_look(look, &candidate_ids);
+        }
 
         let cutter = self.settings.model.to_model_kind().map_or(Cutter::NoModel, Cutter::Model);
         let action = self.settings.brush.cutout_action;
@@ -315,27 +335,30 @@ impl PrunrApp {
         let add_edge_work = self.batch.cached_tensor_work(&tiers.add_edge, Some(action));
 
         let engines = crate::gui::memory::CutoutEngines {
-            line_mode: self.run_settings().line_mode,
+            line_mode: settings.line_mode,
             ..crate::gui::memory::CutoutEngines::of_cutout(model, self.settings.parallel_jobs, self.settings.cpu_only())
         };
         let jobs = crate::gui::memory::jobs_for_run(engines, self.processor.warm_held_mb);
         self.update_on_screen();
+        let run = BatchRun { model, jobs, settings };
         if tiers.full.len() > 1 {
-            self.dispatch_with_admission(&tiers.full, mask_work, add_edge_work, model, jobs);
+            self.dispatch_with_admission(&tiers.full, mask_work, add_edge_work, run);
         } else {
-            self.dispatch_small_batch(&tiers.full, mask_work, add_edge_work, model, jobs);
+            self.dispatch_small_batch(&tiers.full, mask_work, add_edge_work, run);
         }
     }
 
     /// Filter-only Process (model `None`), off the UI thread so large
     /// batches stay responsive.
-    fn process_filter_only(&mut self, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
-        let settings = self.run_settings();
+    fn process_filter_only(&mut self, look: Option<&crate::gui::batch_manager::RunLook>, filter: impl Fn(&BatchItem) -> bool, step: Option<StepKind>) {
+        let settings = look.map(|look| look.settings).unwrap_or_default();
         let dispatches: Vec<(u64, ImageSource)> = self.batch.items.iter()
             .filter(|i| filter(i) && self.run_may_start(i))
             .map(|i| (i.id, i.source.clone()))
             .collect();
-        self.batch.share_shown_settings(&dispatches.iter().map(|(id, _)| *id).collect());
+        if let Some(look) = look {
+            self.batch.give_look(look, &dispatches.iter().map(|(id, _)| *id).collect());
+        }
         for (id, source) in dispatches {
             self.processor.live_preview.cancel(id);
             let Some(item) = self.batch.find_by_id_mut(id) else { continue };
@@ -369,12 +392,11 @@ impl PrunrApp {
         tier1_ids: &HashSet<u64>,
         mask_work: Vec<CachedTensorWork>,
         add_edge_work: Vec<CachedTensorWork>,
-        model: prunr_core::ModelKind,
-        jobs: usize,
+        run: BatchRun,
     ) {
         let first_look = self.processor.first_look.get().is_some_and(|id| tier1_ids.contains(&id));
-        let line_mode = self.run_settings().line_mode;
-        let engines = crate::gui::memory::CutoutEngines { model, jobs, cpu_only: self.settings.cpu_only(), first_look, line_mode, line_fade: false };
+        let BatchRun { model, jobs, settings } = run;
+        let engines = crate::gui::memory::CutoutEngines { model, jobs, cpu_only: self.settings.cpu_only(), first_look, line_mode: settings.line_mode, line_fade: false };
         let mut ctrl = crate::gui::memory::AdmissionController::new(engines);
         ctrl.enqueue(self.batch.full_run_costs(tier1_ids));
         let (batch, action) = (&mut self.batch, self.settings.brush.cutout_action);
@@ -388,7 +410,7 @@ impl PrunrApp {
             self.processor.clear_admission();
             return;
         }
-        let batch = self.dispatch_batch(initial_items, mask_work, add_edge_work, model, jobs, Some(additional_items_rx));
+        let batch = self.dispatch_batch(initial_items, mask_work, add_edge_work, run, Some(additional_items_rx));
         self.processor.admission_feeds(batch);
     }
 
@@ -398,20 +420,13 @@ impl PrunrApp {
         tier1_ids: &HashSet<u64>,
         mask_work: Vec<CachedTensorWork>,
         add_edge_work: Vec<CachedTensorWork>,
-        model: prunr_core::ModelKind,
-        jobs: usize,
+        run: BatchRun,
     ) {
         let items = self.batch.full_run_work(tier1_ids, self.settings.brush.cutout_action);
 
         if items.is_empty() && mask_work.is_empty() && add_edge_work.is_empty() { return; }
 
-        self.dispatch_batch(items, mask_work, add_edge_work, model, jobs, None);
-    }
-
-    /// The settings a batch runs with: the shown image's — what you see
-    /// is what you process. Factory defaults on an empty batch.
-    fn run_settings(&self) -> crate::gui::item_settings::ItemSettings {
-        self.batch.selected_idx_clamped().map(|i| self.batch.items[i].settings).unwrap_or_default()
+        self.dispatch_batch(items, mask_work, add_edge_work, run, None);
     }
 
     fn dispatch_batch(
@@ -419,13 +434,12 @@ impl PrunrApp {
         items: Vec<crate::gui::worker::WorkItem>,
         tier2_items: Vec<CachedTensorWork>,
         add_edge_items: Vec<CachedTensorWork>,
-        model: prunr_core::ModelKind,
-        jobs: usize,
+        run: BatchRun,
         additional_items_rx: Option<mpsc::Receiver<crate::gui::worker::WorkItem>>,
     ) -> u64 {
         self.processor.cancels.reset();
 
-        let current_settings = self.run_settings();
+        let BatchRun { model, jobs, settings: current_settings } = run;
         // Each answer lands only on the run that asked: a full run names
         // its own; a cached-tensor rerun is its image's job.
         let job_run = |id: u64| self.batch.find_by_id(id).and_then(BatchItem::job_run);
@@ -496,8 +510,8 @@ impl PrunrApp {
 
     /// The re-runs held back while admission fed a batch, once it is through.
     pub(super) fn run_deferred(&mut self) {
-        for (ids, step) in self.processor.take_deferred_runs() {
-            self.process_items(|item| ids.contains(&item.id), step);
+        for held in self.processor.take_deferred_runs() {
+            self.process_items_with(held.look, |item| held.ids.contains(&item.id), held.step);
         }
     }
 }
@@ -516,6 +530,36 @@ mod process_targets_tests {
         let mut cells = vec![0i8; 16];
         cells[5] = prunr_core::selection::FULL;
         std::sync::Arc::new(prunr_core::selection::MaskArtifact::from_cells(4, 4, cells))
+    }
+
+    /// A re-run asked for while a big batch is still being let in waits,
+    /// and runs with the look it was asked with. When it went it took the
+    /// image shown then, which may be another: that image's settings were
+    /// written into the first image and its run.
+    #[test]
+    fn a_held_rerun_runs_with_the_look_it_was_asked_with() {
+        use crate::gui::worker::WorkerMessage;
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        for id in 1..=2 {
+            push_test_item(&mut app, id).dimensions = (4, 4);
+        }
+        app.batch.items[0].settings.gamma = 1.6;
+        app.batch.items[1].settings.gamma = 0.7;
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        app.processor.hold_admission_for_test();
+        app.process_items(|item| item.id == 1, None);
+        assert!(rx.try_recv().is_err(), "held while the batch is let in");
+
+        app.batch.select_item(1);
+        app.processor.clear_admission();
+        app.run_deferred();
+        assert_eq!(app.batch.items[0].settings.gamma, 1.6, "the image keeps the look it was asked with");
+        assert_eq!(app.batch.items[1].settings.gamma, 0.7, "the image shown when it went is left alone");
+        let Ok(WorkerMessage::BatchProcess { config, .. }) = rx.try_recv() else { panic!("the held run went") };
+        assert_eq!(config.run.mask.gamma, 1.6, "and it runs with that look");
     }
 
     fn two_images(model: SettingsModel) -> PrunrApp {

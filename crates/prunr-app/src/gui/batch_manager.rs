@@ -118,6 +118,24 @@ pub(crate) enum BgLanded {
     Gone,
 }
 
+/// What a run applies to the images it runs on: the settings of the image
+/// shown when it was asked for, its background picture and its preset.
+/// Taken then, so a run held for later applies it, not the image shown
+/// when it goes.
+#[derive(Clone)]
+pub(crate) struct RunLook {
+    pub(crate) settings: super::item_settings::ItemSettings,
+    bg_image: Option<Arc<super::item::BgImage>>,
+    preset: String,
+    changes: super::preset_changes::Changes<super::item_settings::ItemSettings>,
+}
+
+impl RunLook {
+    fn of(item: &BatchItem) -> Self {
+        Self { settings: item.settings, bg_image: item.bg_image.clone(), preset: item.applied_preset.clone(), changes: item.preset_changes.clone() }
+    }
+}
+
 impl BatchManager {
     /// Compress every stored undo state nothing else holds, off-thread,
     /// behind the decode slots so a burst can't fan out N zstd encoders.
@@ -911,19 +929,29 @@ impl BatchManager {
     /// Give the images in `ids` the shown image's settings: Process
     /// applies what is shown to the images it runs on.
     pub fn share_shown_settings(&mut self, ids: &HashSet<u64>) {
-        if let Some(shown) = self.selected_idx_clamped() {
-            self.share_settings(shown, ids);
+        if let Some(look) = self.shown_look() {
+            self.give_look(&look, ids);
         }
     }
 
     /// Give the images in `ids` the settings of the image at `from`, with
-    /// its background picture: a run applies what is shown to the batch.
+    /// its background picture, as a run applies its look to the batch.
+    #[cfg(test)]
     pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
-        let Some(source) = self.items.get(from) else { return };
-        let (settings, bg_image) = (source.settings, source.bg_image.clone());
-        let (preset, changes) = (source.applied_preset.clone(), source.preset_changes.clone());
+        if let Some(look) = self.items.get(from).map(RunLook::of) {
+            self.give_look(&look, ids);
+        }
+    }
+
+    /// The look of the image on screen, which a run asked for now applies.
+    pub(crate) fn shown_look(&self) -> Option<RunLook> {
+        self.selected_item().map(RunLook::of)
+    }
+
+    /// Give the images in `ids` `look`.
+    pub(crate) fn give_look(&mut self, look: &RunLook, ids: &HashSet<u64>) {
         for item in self.in_set(ids) {
-            item.adopt_settings(settings, bg_image.clone(), &preset, &changes);
+            item.adopt_settings(look.settings, look.bg_image.clone(), &look.preset, &look.changes);
         }
     }
 
