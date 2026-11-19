@@ -814,18 +814,21 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
 
 /// The upscaler or Colorize whose run the image shows, when that run
 /// read the photo itself (an upscale of a cut-out or of an erase is part
-/// of its route).
+/// of its route) and the settings shown are its own or finish it again
+/// live. A knob that requires reprocessing (Scale) leaves the picture as
+/// it is until Process, as a model picked since leaves a cut-out.
 fn kept_run_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
-    use crate::gui::item::Engine;
+    use crate::gui::item::{Engine, KeptRunTier};
     let origin = item.timeline.current().origin.as_ref().filter(|o| o.start.is_none())?;
-    match origin.engine {
+    let model = match origin.engine {
         Engine::Upscale => {
             let id = item.applied_recipe.as_ref()?.upscale.model?;
-            SettingsModel::ALL.into_iter().find(|m| m.to_model_id() == Some(id))
+            SettingsModel::ALL.into_iter().find(|m| m.to_model_id() == Some(id))?
         }
-        Engine::Colorize => Some(SettingsModel::ColorizeDdcolor),
-        _ => None,
-    }
+        Engine::Colorize => SettingsModel::ColorizeDdcolor,
+        _ => return None,
+    };
+    (item.kept_run_tier(model.dispatch_model_kind()?) != KeptRunTier::Full).then_some(model)
 }
 
 /// The picture `settings` give `name`'s photo under `model` on a fresh
