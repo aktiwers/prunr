@@ -444,10 +444,14 @@ impl PrunrApp {
         use crate::gui::live_preview::PreviewKind;
         let item = &self.batch.items[idx];
         let id = item.id;
-        // A kept upscale is finished again only under an upscaler: its
-        // knobs are not another model's.
+        // A kept upscale is finished again only by the upscaler that made
+        // it, under the settings it ran with: another model's knobs are
+        // not its. Otherwise the blend waits for Process, as its knobs do.
         if item.kept_upscale().is_some() && self.settings.model.role() == ModelRole::Upscale {
-            self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
+            let own = self.settings.model.dispatch_model_kind().is_some_and(|model| item.kept_run_tier(model) != crate::gui::item::KeptRunTier::Full);
+            if own {
+                self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
+            }
         } else if !item.has_result() && self.settings.model.role() != ModelRole::Filters {
             self.render_photo_look(idx);
         } else {
@@ -1814,10 +1818,19 @@ mod timeline_contract_tests {
         app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
         assert_ne!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "nor do its faces");
 
+        let other = std::mem::replace(&mut app.settings.model, SettingsModel::Nomos2Upscale);
+        app.on_model_changed(other);
+        app.batch.items[0].settings.sharpen = 0.4;
+        assert_eq!(app.wants_kept_run_refinish(0), None, "another upscaler finishes nothing of it either");
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
+        assert_ne!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "nor its faces: its knobs would be the other's");
+
         let other = std::mem::replace(&mut app.settings.model, upscaler);
         app.on_model_changed(other);
         app.batch.items[0].settings.sharpen = 0.4;
         assert_eq!(app.wants_kept_run_refinish(0), Some(PreviewKind::UpscaleTier2), "back on its upscaler, Refine is live");
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "and so are its faces");
     }
 
     /// A Refine preview re-finishes the kept upscale run: it needs neither
