@@ -391,6 +391,33 @@ fn a_preset_or_a_model_switch_is_not_a_slider_move() {
     assert_ne!(app.batch.items[0].selection_hash, Some(pick), "a slider still redraws it");
 }
 
+/// The first slider move after a preset pick or a model switch draws the
+/// stroke again, also when no frame read the brush in between (the image
+/// busy, a selection edit landing): the switch left nothing to compare a
+/// move with, so the move was taken for where the values stood.
+#[test]
+fn the_first_slider_move_after_a_switch_redraws() {
+    use crate::gui::views::adjustments_toolbar::ToolbarChange;
+    let ctx = egui::Context::default();
+    for preset in [true, false] {
+        let (mut app, pick) = app_with_a_magic_pick();
+        app.adjust_strokes();
+        let before = app.batch.items[0].settings;
+        let change = if preset {
+            ToolbarChange { preset_applied: true, ..Default::default() }
+        } else {
+            let from = std::mem::replace(&mut app.settings.model, SettingsModel::Inpaint);
+            ToolbarChange { model_switched_from: Some(from), ..Default::default() }
+        };
+        app.apply_toolbar_change(&ctx, change, before);
+        app.settings.brush.magic_confidence_threshold = 0.9;
+        app.adjust_strokes();
+        assert!(app.batch.selection_queue.any_pending(), "preset {preset}: the move draws the stroke again");
+        super::fixtures::settle_selection_edits(&mut app);
+        assert_ne!(app.batch.items[0].selection_hash, Some(pick), "preset {preset}");
+    }
+}
+
 /// Each brush's sliders reach the strokes that brush drew: Last its
 /// latest one, even with the other brush's stroke after it, and All every
 /// one of its own; the other brush's strokes stay as drawn, also for

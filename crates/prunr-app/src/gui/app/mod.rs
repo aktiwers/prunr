@@ -1482,7 +1482,7 @@ impl PrunrApp {
         // is the one in front of the user.
         let preset = self.batch.selected_item().map_or_else(|| self.settings.default_preset.clone(), |i| i.applied_preset.clone());
         self.settings.switch_brush_model(from, &preset);
-        self.brush_state.values_set_elsewhere();
+        self.brush_values_set_elsewhere();
         // The Depth chip that asked for a focus may not be this model's.
         self.picking_depth_focus = None;
         self.fit_brush_models_to_model();

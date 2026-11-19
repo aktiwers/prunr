@@ -137,11 +137,11 @@ impl PrunrApp {
             // Applied or just saved: nothing is changed from it yet.
             item.preset_changes = crate::gui::preset_changes::Changes::new(item.settings);
             self.settings.restart_brush_changes();
-            self.brush_state.values_set_elsewhere();
             let shown = item.timeline.current();
             if item.settings != shown.settings || item.applied_preset != shown.applied_preset {
                 item.commit(StepKind::Preset);
             }
+            self.brush_values_set_elsewhere();
         }
         if let Some(from) = toolbar_change.model_switched_from {
             self.on_model_changed(from);

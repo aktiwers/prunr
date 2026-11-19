@@ -640,6 +640,19 @@ impl PrunrApp {
         }
     }
 
+    /// The brush's values were set by something other than its sliders (a
+    /// preset, another model's own values): that change draws no stroke
+    /// again, and the next slider move starts from these values, also when
+    /// no frame reads the brush before it (the image busy). An adjustment
+    /// under way ends: its strokes began from the values before.
+    pub(crate) fn brush_values_set_elsewhere(&mut self) {
+        let selected = self.batch.selected_id();
+        if let Some(item) = selected.and_then(|id| self.batch.find_by_id_mut(id)) {
+            item.adjusting = None;
+        }
+        self.brush_state.seen = selected.map(|id| (id, self.settings.stroke_values()));
+    }
+
     /// A brush slider moved on the selected image: with Last stroke on,
     /// the latest stroke takes the moved slider's value; with All strokes
     /// on, every stroke since the picture changed moves by as much. Either
