@@ -1848,17 +1848,29 @@ impl BatchItem {
         job.painted.push(PaintedStroke { step, patch });
     }
 
-    /// The fill landed: the marks it was made from go, those painted while
-    /// it ran (and not undone since) stay as the next area. Undoing the
-    /// fill brings both back.
+    /// The fill landed: the marks it was made from go; those painted while
+    /// it ran (and not undone since), and a stroke it was not made from
+    /// (one redone meanwhile), stay as the next area. Undoing the fill
+    /// brings all back.
     pub(crate) fn clear_filled_marks(&mut self) {
+        use prunr_core::selection::{MaskArtifact, FULL};
         let next = self.selection_mask.as_ref().zip(self.job.as_ref()).and_then(|(now, job)| {
-            let mut strokes = job.painted.iter()
-                .filter(|s| s.patch.plane == (now.width, now.height) && self.timeline.in_effect(s.step))
-                .map(|s| (s.patch.rect, &s.patch.cells))
-                .peekable();
-            strokes.peek()?;
-            now.within(&prunr_core::selection::MaskArtifact::from_patches(now.width, now.height, strokes))
+            let (w, h) = (now.width, now.height);
+            let strokes = job.painted.iter()
+                .filter(|s| s.patch.plane == (w, h) && self.timeline.in_effect(s.step))
+                .map(|s| (s.patch.rect, &s.patch.cells));
+            let painted = MaskArtifact::from_patches(w, h, strokes);
+            let filled = job.region.as_ref().and_then(|region| region.load()).filter(|f| (f.width, f.height) == (w, h));
+            let keep = match filled {
+                Some(filled) => {
+                    let cells = painted.cells().iter().zip(now.cells()).zip(filled.cells())
+                        .map(|((&mark, &shown), &from)| if mark != 0 { mark } else if shown != 0 && from == 0 { FULL } else { 0 })
+                        .collect();
+                    MaskArtifact::from_cells(w, h, cells).with_fill_layer(painted.fill_layer().map(<[u8]>::to_vec))
+                }
+                None => painted,
+            };
+            now.within(&keep)
         });
         self.invalidate_selection();
         if let Some(next) = next {

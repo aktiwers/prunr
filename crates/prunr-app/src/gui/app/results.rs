@@ -2021,6 +2021,32 @@ mod timeline_contract_tests {
         assert!([1, 4, 6, 9].iter().all(|&i| layer[i] == 1), "the band around it: {layer:?}");
     }
 
+    /// A stroke redone while an erase fills stays as the next area, as one
+    /// painted meanwhile does: only the marks the fill was made from go.
+    /// It went with them, unfilled; undoing the fill brought it back.
+    #[test]
+    fn a_stroke_redone_while_an_erase_fills_stays_as_the_next_area() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::Inpaint);
+        app.commit_selection_and_dispatch(1, mask(), StepKind::Stroke);
+        let mut both = vec![0i8; 16];
+        both[5] = prunr_core::selection::FULL;
+        both[10] = prunr_core::selection::FULL;
+        app.commit_selection_and_dispatch(1, prunr_core::selection::MaskArtifact::from_cells(4, 4, both), StepKind::Stroke);
+        app.handle_undo(&ctx);
+        app.batch.items[0].start_erase(None);
+        let run = app.batch.items[0].job_run().expect("an erase");
+        app.handle_redo(&ctx);
+        assert!(app.batch.items[0].awaits_run(run), "the redo leaves the erase running");
+
+        app.processor.land_inpaint_for_test(1, run, (*px(7)).clone());
+        app.pump_inpaint_results(&ctx);
+        assert_eq!(shown(&app), Some(7), "the fill landed");
+        let left = app.batch.items[0].selection_mask.as_ref().expect("the redone stroke is left");
+        let selected: Vec<usize> = left.cells().iter().enumerate().filter(|(_, &c)| c != 0).map(|(i, _)| i).collect();
+        assert_eq!(selected, [10], "the filled marks go, the redone stroke stays");
+    }
+
     /// An erase lands as one step that shows the filled image without its
     /// brush marks; undoing it brings back both the image and the marks.
     #[test]
