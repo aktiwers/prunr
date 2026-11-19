@@ -945,7 +945,9 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
     let mut found: Vec<(Vec<Action>, Broken)> = Vec::new();
     let mut reached = Reached::default();
     for n in 0..sequences {
-        let mut rng = Rng(seed.wrapping_add(n).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        // The seed in the high half: `seed + n` made sequence n of seed s
+        // the same as n - 1 of seed s + 1, so seeds mostly replayed each other.
+        let mut rng = Rng(((seed << 32) | n).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let actions = random_sequence(&mut rng, len, &mut reached);
         let Some(broken) = run(&actions) else { continue };
         if found.iter().any(|(_, known)| known.rule == broken.rule && known.what == broken.what) {
