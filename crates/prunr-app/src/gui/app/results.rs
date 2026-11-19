@@ -1220,7 +1220,7 @@ mod faces_tests {
         searching(&mut app, &source);
         let slot = DispatchProgressSlot::new();
         let run = PictureSink::of_run(1, slot.begin(DispatchProgress::new(ProgressKind::Upscale, "Loading")), app.processor.picture_sender());
-        let search = PictureSink::of_face_search(1, None, || true, app.processor.picture_sender());
+        let search = PictureSink::of_face_search(1, slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces").on(1)), app.processor.picture_sender());
 
         app.batch.items[0].start_job(Some(StepKind::Upscale), Engine::Upscale);
         search.report(face_tile());

@@ -14,7 +14,7 @@
 //! so it never swings back when the next outer unit starts.
 
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 
@@ -288,6 +288,9 @@ struct LiveRun {
     /// Started by itself (a face search, a depth measurement): shown only
     /// while no run the user started goes on.
     background: bool,
+    /// Raised by a Cancel; the run's pipeline reads it through its
+    /// `Progress` and stops at its next step.
+    stop: Arc<AtomicBool>,
 }
 
 /// The listener `begin` hands a run, and its end. Clones share the run:
@@ -301,6 +304,7 @@ pub struct RunSink {
 struct RunToken {
     slot: DispatchProgressSlot,
     run: u64,
+    stop: Arc<AtomicBool>,
 }
 
 impl Drop for RunToken {
@@ -320,6 +324,16 @@ impl RunSink {
         let runs = self.live.slot.lock();
         let Some(me) = runs.iter().find(|r| r.run == self.run()) else { return false };
         !runs.iter().any(|r| r.run > me.run && r.progress.kind == me.progress.kind && r.progress.on == me.progress.on)
+    }
+
+    /// The run's stop flag, for its `Progress` to read.
+    pub(crate) fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.live.stop)
+    }
+
+    /// A Cancel reached the run.
+    pub(crate) fn stopped(&self) -> bool {
+        self.live.stop.load(Ordering::Acquire)
     }
 
     /// The run is over: its entry goes, the others stay.
@@ -360,8 +374,9 @@ impl DispatchProgressSlot {
 
     fn add(&self, progress: DispatchProgress, background: bool) -> RunSink {
         let run = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-        self.lock().push(LiveRun { run, progress, background });
-        RunSink { live: Arc::new(RunToken { slot: self.clone(), run }) }
+        let stop = Arc::new(AtomicBool::new(false));
+        self.lock().push(LiveRun { run, progress, background, stop: Arc::clone(&stop) });
+        RunSink { live: Arc::new(RunToken { slot: self.clone(), run, stop }) }
     }
 
     fn remove(&self, run: u64) {
@@ -381,13 +396,22 @@ impl DispatchProgressSlot {
         runs.clear();
         if let Some(progress) = progress {
             let run = self.next.fetch_add(1, Ordering::AcqRel) + 1;
-            runs.push(LiveRun { run, progress, background: false });
+            runs.push(LiveRun { run, progress, background: false, stop: Arc::default() });
         }
     }
 
     /// Every run of `kind` is stopping: each shows so until it ends.
     pub fn mark_cancelling(&self, kind: ProgressKind) {
         for live in self.lock().iter_mut().filter(|r| r.progress.kind == kind) {
+            live.progress.cancelling = true;
+        }
+    }
+
+    /// Stop every run of `kind` under way: each one's flag is raised and
+    /// it shows as stopping until it ends.
+    pub fn stop(&self, kind: ProgressKind) {
+        for live in self.lock().iter_mut().filter(|r| r.progress.kind == kind) {
+            live.stop.store(true, Ordering::Release);
             live.progress.cancelling = true;
         }
     }

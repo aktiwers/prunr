@@ -625,16 +625,12 @@ pub(crate) struct PictureSink {
 }
 
 impl PictureSink {
-    /// A face search: its pictures for `item_id` land while `current`
-    /// holds. Without a `pill` (another run shows on it) steps and counts
-    /// go nowhere.
-    pub(crate) fn of_face_search(
-        item_id: u64,
-        pill: Option<super::dispatch_progress::RunSink>,
-        current: impl Fn() -> bool + Send + Sync + 'static,
-        pictures: mpsc::Sender<RunPicture>,
-    ) -> Self {
-        Self { item_id, from: PictureFrom::FaceSearch, pill, current: Arc::new(current), pictures }
+    /// A face search on `item_id`: its pictures land while it goes on, no
+    /// newer search works on that image and no Cancel reached it.
+    pub(crate) fn of_face_search(item_id: u64, run: super::dispatch_progress::RunSink, pictures: mpsc::Sender<RunPicture>) -> Self {
+        let search = run.clone();
+        let current = move || search.current() && !search.stopped();
+        Self { item_id, from: PictureFrom::FaceSearch, pill: Some(run), current: Arc::new(current), pictures }
     }
 
     /// A run on the pill: its pictures land while it is the run shown.
@@ -900,11 +896,6 @@ pub(crate) struct Processor {
     /// lost for every test after it.
     runs_models: bool,
     faces_found: Chan<FacesResult>,
-    /// The latest face search's stop flag, for Cancel and Esc.
-    faces_stop: Mutex<Arc<AtomicBool>>,
-    /// The latest face search's number: an earlier search's pictures are
-    /// dropped.
-    faces_latest: Arc<AtomicU64>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -965,8 +956,6 @@ impl Processor {
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
             faces_found: Chan::default(),
-            faces_stop: Mutex::default(),
-            faces_latest: Arc::default(),
             depth,
             seg_warm_due: None,
             first_look: Default::default(),
@@ -2052,13 +2041,8 @@ impl Processor {
     /// does not fit there.
     pub(crate) fn dispatch_find_faces(&self, item_id: u64, photo: super::item::FacePhoto, model: prunr_models::ModelId, blend: prunr_core::face::FaceBlend, cpu_only: bool) {
         let tx = self.faces_found.tx.clone();
-        let (stop, current) = self.begin_faces_search();
-        // Started by itself: the capsule shows it once nothing the user
-        // started runs, so it never hides theirs or its Cancel.
-        let run = self.dispatch_progress.begin_background(super::dispatch_progress::DispatchProgress::new(super::dispatch_progress::ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id));
-        let progress = PictureSink::of_face_search(item_id, Some(run.clone()), current, self.picture_sender())
-            .into_progress()
-            .with_cancel(Arc::clone(&stop));
+        let (run, pictures) = self.face_search_run(item_id);
+        let progress = pictures.into_progress().with_cancel(run.stop_flag());
         std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let result = caught(|| {
@@ -2070,25 +2054,24 @@ impl Processor {
             .unwrap_or_else(Err);
             tracing::info!(item_id, ?model, faces = result.as_ref().map_or(0, Vec::len), elapsed_ms = started.elapsed().as_millis() as u64, "face search ended");
             run.end();
-            let stopped = stop.load(Ordering::Acquire);
+            let stopped = run.stopped();
             let _ = tx.send(FacesResult { item_id, photo, model, result, stopped });
         });
     }
 
-    /// A stop flag for the face search starting now, which Cancel and Esc
-    /// reach, and whether its pictures may still land: while it is the
-    /// latest search and not stopped.
-    fn begin_faces_search(&self) -> (Arc<AtomicBool>, impl Fn() -> bool + Send + Sync + 'static) {
-        let stop = Arc::new(AtomicBool::new(false));
-        *self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&stop);
-        let search = self.faces_latest.fetch_add(1, Ordering::AcqRel) + 1;
-        let (latest, stopped) = (Arc::clone(&self.faces_latest), Arc::clone(&stop));
-        (stop, move || latest.load(Ordering::Acquire) == search && !stopped.load(Ordering::Acquire))
+    /// The run of a face search on `item_id` starting now, and where its
+    /// pictures go. Started by itself: the capsule shows it once nothing
+    /// the user started runs, so it never hides theirs or its Cancel.
+    fn face_search_run(&self, item_id: u64) -> (super::dispatch_progress::RunSink, PictureSink) {
+        use super::dispatch_progress::{DispatchProgress, ProgressKind};
+        let run = self.dispatch_progress.begin_background(DispatchProgress::new(ProgressKind::Faces, prunr_core::Step::FindingFaces.label()).on(item_id));
+        let pictures = PictureSink::of_face_search(item_id, run.clone(), self.picture_sender());
+        (run, pictures)
     }
 
-    /// Stop the face search under way; it ends after the face it is on.
+    /// Stop every face search under way; each ends after the face it is on.
     pub(crate) fn cancel_faces(&self) {
-        self.faces_stop.lock().unwrap_or_else(std::sync::PoisonError::into_inner).store(true, Ordering::Release);
+        self.dispatch_progress.stop(super::dispatch_progress::ProgressKind::Faces);
     }
 
     pub(crate) fn pump_faces_results(&mut self) -> Vec<FacesResult> {
@@ -2447,19 +2430,18 @@ mod tests {
         first.report(tile());
         assert!(rx.try_recv().is_err(), "a newer run of its kind on its image replaces it");
 
-        let open = std::sync::Arc::new(AtomicBool::new(true));
-        let flag = open.clone();
-        let no_pill = PictureSink::of_face_search(6, None, move || flag.load(Ordering::Acquire), tx);
-        no_pill.report(ProgressUpdate::Step(Step::Finishing));
-        no_pill.report(tile());
-        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "the pill stays with its run");
+        let search = slot.begin_background(DispatchProgress::new(ProgressKind::Faces, "Finding faces").on(6));
+        let in_background = PictureSink::of_face_search(6, search.clone(), tx);
+        in_background.report(ProgressUpdate::Step(Step::Finishing));
+        in_background.report(tile());
+        assert_eq!(slot.read().map(|p| p.step_label), Some("Loading".into()), "a search in the background leaves the capsule to the run shown");
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(6, PictureFrom::FaceSearch, tile())]);
-        let previews = no_pill.clone().into_progress();
+        let previews = in_background.clone().into_progress();
         assert!(previews.preview_edge().is_some());
-        open.store(false, Ordering::Release);
-        no_pill.report(tile());
-        assert!(rx.try_recv().is_err(), "its own check stops its pictures");
-        assert_eq!(previews.preview_edge(), None, "and stops a run making them");
+        slot.stop(ProgressKind::Faces);
+        in_background.report(tile());
+        assert!(rx.try_recv().is_err(), "a stopped search sends no more pictures");
+        assert_eq!(previews.preview_edge(), None, "and stops making them");
         second.report(tile());
         assert_eq!(rx.try_iter().count(), 1);
     }
@@ -2502,38 +2484,32 @@ mod tests {
         assert!(warmed(&rx).is_empty(), "a release clears it");
     }
 
-    /// Cancel reaches the face search under way, and a new search starts
-    /// with a flag of its own. A search's pictures land while it is the
-    /// latest and not stopped.
+    /// Cancel reaches every face search under way, also one a newer
+    /// search followed (that one could no longer be stopped: one flag was
+    /// kept, the newest search's), and a new search starts with a flag of
+    /// its own. A search's pictures land while no newer search works on
+    /// its image and it is not stopped.
     #[test]
-    fn cancel_stops_the_latest_face_search() {
-        let p = fixture();
-        let (first, first_current) = p.begin_faces_search();
-        assert!(first_current());
-        p.cancel_faces();
-        assert!(first.load(Ordering::Acquire));
-        assert!(!first_current(), "a stopped search's pictures are dropped");
-        let (next, next_current) = p.begin_faces_search();
-        assert!(!next.load(Ordering::Acquire), "a new search is not born cancelled");
-        assert!(next_current());
-        let (_, newest_current) = p.begin_faces_search();
-        assert!(!next_current() && newest_current(), "an earlier search's pictures are dropped");
-    }
-
-    /// A face search's pictures (the faces found, each one redrawn) reach
-    /// the canvas's channel while it is the latest search, with no pill
-    /// of its own when another run has it.
-    #[test]
-    fn a_face_searchs_pictures_flow_while_it_is_the_latest() {
+    fn cancel_stops_every_face_search() {
         use prunr_core::{ProgressSink, ProgressUpdate};
         let p = fixture();
-        let (_, current) = p.begin_faces_search();
-        let sink = PictureSink::of_face_search(3, None, current, p.picture_sender());
-        sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert_eq!(p.pictures.rx.try_iter().collect::<Vec<_>>(), vec![RunPicture::new(3, PictureFrom::FaceSearch, ProgressUpdate::Faces(Vec::new()))]);
-        let _next = p.begin_faces_search();
-        sink.report(ProgressUpdate::Faces(Vec::new()));
-        assert!(p.pictures.rx.try_recv().is_err(), "a newer search took over");
+        let faces = || ProgressUpdate::Faces(Vec::new());
+        let (first, first_pictures) = p.face_search_run(1);
+        let (second, _) = p.face_search_run(2);
+        first_pictures.report(faces());
+        assert_eq!(p.pictures.rx.try_iter().count(), 1, "the first search's pictures land");
+        p.cancel_faces();
+        assert!(first.stopped() && second.stopped(), "both stop");
+        first_pictures.report(faces());
+        assert!(p.pictures.rx.try_recv().is_err(), "a stopped search's pictures are dropped");
+
+        let (next, next_pictures) = p.face_search_run(1);
+        assert!(!next.stopped(), "a new search is not born stopped");
+        next_pictures.report(faces());
+        assert_eq!(p.pictures.rx.try_iter().count(), 1);
+        let (_newest, _) = p.face_search_run(1);
+        next_pictures.report(faces());
+        assert!(p.pictures.rx.try_recv().is_err(), "a newer search on its image took over");
     }
 
     /// A kept model goes once no run has held it for `IDLE_RELEASE`; a run
