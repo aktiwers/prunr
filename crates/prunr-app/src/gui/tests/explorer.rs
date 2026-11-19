@@ -525,6 +525,7 @@ impl World {
     /// what a rule compares before and after.
     fn seen(&self) -> Seen {
         let app = self.app();
+        let style = crate::gui::background_io::SelectionStyle::from_settings(&app.settings);
         let images = app
             .batch
             .items
@@ -535,6 +536,7 @@ impl World {
                 settings: format!("{:?}", item.settings),
                 preset: item.applied_preset.clone(),
                 selection: item.selection_hash,
+                overlay: item.selection_mask.as_ref().map(|mask| style.for_plane(mask).shown_region(mask).map_or_else(|| mask.content_hash(), |shown| shown.content_hash())),
                 result: shown_picture(item),
                 undo_steps: item.timeline.undo_steps(),
                 can_redo: item.timeline.can_redo(),
@@ -588,6 +590,10 @@ struct ImageSeen {
     settings: String,
     preset: String,
     selection: Option<u64>,
+    /// What the selection overlay shows: under an eraser, the area the
+    /// erase will touch, which a selection no eraser stroke drew takes
+    /// from the Expand and Feather set now.
+    overlay: Option<u64>,
     result: Option<u64>,
     undo_steps: usize,
     can_redo: bool,
@@ -706,12 +712,12 @@ fn run(actions: &[Action]) -> Option<Broken> {
             if reaches && moved {
                 world.quiet();
                 let after = world.seen();
-                let shown = |seen: &Seen| seen.images.iter().find(|i| seen.selected == Some(i.id)).map(|i| (i.selection, i.result));
+                let shown = |seen: &Seen| seen.images.iter().find(|i| seen.selected == Some(i.id)).map(|i| (i.selection, i.overlay, i.result));
                 if shown(&after) == shown(&before) {
                     return Some(Broken {
                         rule: "a brush slider reaches its strokes",
                         what: name.clone(),
-                        detail: format!("{name:?} moved from {slider_before:?} to {:?} with strokes of the brush in hand to draw again, and neither the selection nor the picture changed", world.slider_value(name)),
+                        detail: format!("{name:?} moved from {slider_before:?} to {:?} with strokes of the brush in hand to draw again, and neither the selection, its overlay nor the picture changed", world.slider_value(name)),
                     });
                 }
             }
