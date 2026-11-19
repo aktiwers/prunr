@@ -162,9 +162,10 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
   - An old error mark no longer stays on an image after an undo or a successful retry, and a thumbnail made for an earlier state no longer replaces the current one.
   - Restored faces show again when their image comes back on screen, also after memory ran short.
 - **Magic Brush and the depth looks read the picture as it is now.** After an erase they no longer pick or blur around what was erased, and a pick on a cut-out stays on the side it was made on instead of reaching into the removed background.
-- **Only Undo takes back what you did.** A live Restore or Erase stays when another kind of model is picked; picking a preset or a model no longer counts as moving a brush slider; a slider drag ended by switching images stays one undo step; brush sliders redraw the latest stroke after an undo too.
+- **Only Undo takes back what you did.** A live Restore or Erase stays when another kind of model is picked; picking a preset or a model no longer counts as moving a brush slider, and the first slider move after it redraws the stroke; a slider drag ended by switching images stays one undo step; brush sliders redraw the latest stroke after an undo too.
 - A stroke let go over the tool strip lands; a stroke redone while an erase fills stays as the next area; every click by depth made before the depth map is ready runs once it is, and a depth measurement that failed is made again when asked for.
 - Switching model with images still queued says how many were left; a No-model pass that fails says so.
+- Undo back to a Refine or Strength change shows that change's picture; one made just before the next change, or on a ticked image off screen, kept the picture from before it.
 - Choice buttons (Restore/Erase/Select, the shape and background pickers) tell screen readers which one is picked.
 - A model or add-on download cut short (Prunr closed mid-download or mid-install) gives its disk space back at the next start; it used to stay until that same download ran again, for good for a model never fetched again.
 - A thumbnail keeps its image's effect background (blurred photo, black & white photo, lens blur) when another image is shown, and an image processed without being shown gets it too; the background disappeared from the thumbnail, though Save wrote it.
