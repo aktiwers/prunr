@@ -646,6 +646,45 @@ mod preset_switch_tests {
         assert_ne!(sharpened(&mut app_with(false)), super::PROCESS_TO_APPLY, "before the first upscale");
     }
 
+    /// Two knob changes in a quick row join one step, so a run the first
+    /// started stays current: its answer is for the first value. It landed
+    /// under the second (a subject outline under "Whole photo"); now the
+    /// image is cut again for the look it shows.
+    #[test]
+    fn a_runs_answer_for_a_look_changed_since_in_the_same_step_is_cut_again() {
+        use crate::gui::timeline::StepKind;
+        use crate::gui::worker::WorkerMessage;
+        use prunr_core::LineMode;
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::BiRefNetLite;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (4, 4);
+        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::BiRefNetLite);
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::BiRefNetLite));
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+
+        app.batch.items[0].settings.line_mode = LineMode::SubjectOutline;
+        app.batch.items[0].commit(StepKind::Adjust);
+        app.process_items(|item| item.id == 1, None);
+        let Ok(WorkerMessage::BatchProcess { batch, config, .. }) = rx.try_recv() else { panic!("the outline's run") };
+        assert_eq!(config.run.line_mode, LineMode::SubjectOutline);
+        app.batch.items[0].settings.line_mode = LineMode::EdgesOnly;
+        app.batch.items[0].commit(StepKind::Adjust);
+        assert!(app.batch.items[0].job_is_current(), "the second change joined the step");
+
+        let cut = prunr_core::ProcessResult { rgba_image: image::RgbaImage::new(4, 4), active_provider: "CPU".into() };
+        app.on_batch_item_done(&ctx, batch, 1, Ok(cut), None, None);
+        let again = rx.try_iter().find_map(|msg| match msg {
+            WorkerMessage::BatchProcess { config, .. } => Some(config),
+            _ => None,
+        });
+        let config = again.expect("cut again for the look shown");
+        assert_eq!(config.run.line_mode, LineMode::EdgesOnly);
+    }
+
     /// Picking the other face restorer takes its settings from the preset.
     #[test]
     fn another_face_restorer_takes_its_settings_from_the_preset() {

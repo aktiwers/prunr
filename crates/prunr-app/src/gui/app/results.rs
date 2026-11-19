@@ -794,7 +794,14 @@ impl PrunrApp {
         if !item.is_cutting() {
             return CutLanding::Untold;
         }
-        if !item.job_is_current() {
+        // Knob changes in a quick row join one step, so a run stays
+        // current through a second one: it made the look before.
+        let wanted = item.settings.current_recipe(recipe_snapshot.inference.model);
+        let made_another_look = matches!(
+            prunr_core::resolve_tier(&recipe_snapshot, &wanted),
+            prunr_core::RequiredTier::FullPipeline | prunr_core::RequiredTier::EdgeRerun | prunr_core::RequiredTier::AddEdgeInference
+        );
+        if !item.job_is_current() || made_another_look {
             let step = item.job.as_ref().and_then(|j| j.step);
             // Nobody asked for a quiet run: a later edit simply supersedes it.
             if item.job.as_ref().is_some_and(|j| j.quiet) {
