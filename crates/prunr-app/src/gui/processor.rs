@@ -907,12 +907,8 @@ pub(crate) struct Processor {
     /// What a test app was asked to run, for a stand-in to answer.
     #[cfg(test)]
     asks: Mutex<Vec<ModelAsk>>,
-    /// The runs `set_upscale_in_flight_for_test` and
-    /// `set_colorize_in_flight_for_test` stand in with.
     #[cfg(test)]
-    test_upscale: Mutex<Option<super::dispatch_progress::RunSink>>,
-    #[cfg(test)]
-    test_colorize: Mutex<Option<super::dispatch_progress::RunSink>>,
+    stand_in_runs: Mutex<Vec<(super::dispatch_progress::ProgressKind, super::dispatch_progress::RunSink)>>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -975,9 +971,7 @@ impl Processor {
             #[cfg(test)]
             asks: Mutex::default(),
             #[cfg(test)]
-            test_upscale: Mutex::default(),
-            #[cfg(test)]
-            test_colorize: Mutex::default(),
+            stand_in_runs: Mutex::default(),
             depth,
             seg_warm_due: None,
             first_look: Default::default(),
@@ -1163,12 +1157,15 @@ impl Processor {
         }
     }
 
-    /// An upscale runs, or none does: one standing in for a run, for tests.
+    /// A run of `kind` goes on, or none does: one standing in for a run,
+    /// for tests.
     #[cfg(test)]
-    pub(crate) fn set_upscale_in_flight_for_test(&self, active: bool) {
-        use super::dispatch_progress::{DispatchProgress, ProgressKind};
-        let mut held = self.test_upscale.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = active.then(|| self.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling")));
+    pub(crate) fn stand_in_run_for_test(&self, kind: super::dispatch_progress::ProgressKind, active: bool) {
+        let mut held = self.stand_in_runs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.retain(|(k, _)| *k != kind);
+        if active {
+            held.push((kind, self.dispatch_progress.begin(super::dispatch_progress::DispatchProgress::new(kind, "Running"))));
+        }
     }
 
     /// `true` while an upscale dispatch is in flight.
@@ -1934,14 +1931,6 @@ impl Processor {
         self.dispatch_progress.runs(super::dispatch_progress::ProgressKind::Colorize)
     }
 
-    /// A colorize runs, or none does: one standing in for a run, for tests.
-    #[cfg(test)]
-    pub(crate) fn set_colorize_in_flight_for_test(&self, active: bool) {
-        use super::dispatch_progress::{DispatchProgress, ProgressKind};
-        let mut held = self.test_colorize.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = active.then(|| self.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Colorize, "Colorizing")));
-    }
-
     #[cfg(test)]
     pub(crate) fn land_run_for_test(&self, engine: super::item::Engine, item_id: u64, run_id: u64, shown: Arc<image::RgbaImage>, recipe: ProcessingRecipe) {
         match engine {
@@ -2698,9 +2687,9 @@ mod tests {
         p.queue_runs(vec![4, 5, 6]);
         assert_eq!(p.next_queued_run(), Some(4));
         assert_eq!(p.take_queue_position(4), Some((1, 3)));
-        p.set_upscale_in_flight_for_test(true);
+        p.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         assert_eq!(p.next_queued_run(), None, "the slot is taken");
-        p.set_upscale_in_flight_for_test(false);
+        p.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
         assert_eq!(p.next_queued_run(), Some(5));
         assert_eq!(p.take_queue_position(5), Some((2, 3)));
         p.cancel_upscale();
@@ -3174,7 +3163,7 @@ mod tests {
         *p.inpaint_pending.entry(8).or_insert(0) += 1;
         let seven = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(7));
         let eight = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Inpaint, "Erasing").on(8));
-        p.set_upscale_in_flight_for_test(true);
+        p.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         let upscale = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling").on(9));
         p.cancel_upscale();
         assert!(upscale.stopped() && !seven.stopped() && !eight.stopped(), "an upscale cancel leaves the erases alone");

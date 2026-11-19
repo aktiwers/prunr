@@ -934,15 +934,6 @@ impl BatchManager {
         }
     }
 
-    /// Give the images in `ids` the settings of the image at `from`, with
-    /// its background picture, as a run applies its look to the batch.
-    #[cfg(test)]
-    pub fn share_settings(&mut self, from: usize, ids: &HashSet<u64>) {
-        if let Some(look) = self.items.get(from).map(RunLook::of) {
-            self.give_look(&look, ids);
-        }
-    }
-
     /// The look of the image on screen, which a run asked for now applies.
     pub(crate) fn shown_look(&self) -> Option<RunLook> {
         self.selected_item().map(RunLook::of)
@@ -1370,7 +1361,8 @@ mod tests {
         }
         batch.items[0].set_bg_image(image::DynamicImage::new_rgba8(4, 4), None);
         batch.items[0].settings.gamma = 1.7;
-        batch.share_settings(0, &std::collections::HashSet::from([1, 2]));
+        let look = RunLook::of(&batch.items[0]);
+        batch.give_look(&look, &std::collections::HashSet::from([1, 2]));
         let shared = &batch.items[1];
         assert_eq!(shared.settings.gamma, 1.7);
         assert!(shared.bg_image.is_some(), "the picture came along");

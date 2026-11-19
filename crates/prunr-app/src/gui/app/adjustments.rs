@@ -515,7 +515,8 @@ mod preset_switch_tests {
     #[test]
     fn a_run_shares_the_preset_with_the_settings() {
         let mut app = app_with_presets();
-        app.batch.share_settings(0, &std::collections::HashSet::from([2]));
+        let look = app.batch.shown_look().expect("the first image is shown");
+        app.batch.give_look(&look, &std::collections::HashSet::from([2]));
         switch_to(&mut app, SettingsModel::Silueta);
         let gammas: Vec<f32> = app.batch.items.iter().map(|i| i.settings.gamma).collect();
         assert_eq!(gammas, [0.8, 0.8], "both on Soft's Silueta gamma");

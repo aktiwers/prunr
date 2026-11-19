@@ -412,7 +412,7 @@ fn an_upscale_run_holds_the_chips_it_reads() {
     for running in [false, true] {
         let harness = loaded_with(|app| {
             app.settings.model = SettingsModel::RealEsrganUpscale;
-            app.processor.set_upscale_in_flight_for_test(running);
+            app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, running);
         });
         let tree = tree(&harness);
         for chip in ["Scale", "Refine", "Faces"] {
@@ -430,7 +430,7 @@ fn a_colorize_run_holds_its_strength_chip() {
     for running in [false, true] {
         let harness = loaded_with(|app| {
             app.settings.model = SettingsModel::ColorizeDdcolor;
-            app.processor.set_colorize_in_flight_for_test(running);
+            app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Colorize, running);
         });
         let tree = tree(&harness);
         let node = tree.iter().find(|n| n.name.as_deref() == Some("Strength")).expect("Strength shown");

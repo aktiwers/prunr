@@ -639,10 +639,10 @@ mod process_targets_tests {
             // Too large to upscale in free memory: each turn ends at once, nothing runs.
             item.dimensions = (60_000, 60_000);
         }
-        app.processor.set_upscale_in_flight_for_test(true);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         app.process_kept_run_items();
         app.batch.select_item(2);
-        app.processor.set_upscale_in_flight_for_test(false);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
         app.dispatch_next_queued_run();
         assert_eq!(app.processor.next_queued_run(), None, "both turns came");
         for item in &app.batch.items[..2] {
@@ -754,10 +754,10 @@ mod process_targets_tests {
         for item in &mut app.batch.items {
             item.ticked = true;
         }
-        app.processor.set_upscale_in_flight_for_test(true);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         app.batch.items[0].settings.bg = Some([10, 20, 30, 255]);
         app.process_kept_run_items();
-        app.processor.set_upscale_in_flight_for_test(false);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
         assert_eq!(app.batch.items[1].settings.bg, Some([10, 20, 30, 255]), "it took the look, queued");
         app.cancel_runs();
         let other = &mut app.batch.items[1];
@@ -832,10 +832,10 @@ mod process_targets_tests {
     fn a_queued_image_that_is_gone_passes_its_turn_on() {
         let mut app = two_images(SettingsModel::RealEsrganUpscale);
         app.processor.queue_runs(vec![99, 98, 97]);
-        app.processor.set_upscale_in_flight_for_test(true);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         app.dispatch_next_queued_run();
         assert_eq!(app.processor.next_queued_run(), None, "the slot is taken: nothing moved");
-        app.processor.set_upscale_in_flight_for_test(false);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
         app.dispatch_next_queued_run();
         assert_eq!(app.processor.next_queued_run(), None, "every image that could not start passed its turn on; none is left waiting");
     }
@@ -860,12 +860,12 @@ mod process_targets_tests {
         // The slot is taken while Process runs, so the queue holds what it
         // sent; freed to read the queue back.
         let queued = |app: &PrunrApp| {
-            app.processor.set_upscale_in_flight_for_test(false);
+            app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
             let ids = std::iter::from_fn(|| app.processor.next_queued_run()).collect::<Vec<_>>();
-            app.processor.set_upscale_in_flight_for_test(true);
+            app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
             ids
         };
-        app.processor.set_upscale_in_flight_for_test(true);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         app.process_kept_run_items();
         assert_eq!(queued(&app), vec![1, 2], "both up to date: Process enlarges each again");
 
@@ -924,11 +924,11 @@ mod process_targets_tests {
         app.batch.items[0].ticked = true;
         app.batch.items[1].ticked = true;
         assert!(app.can_process_intent());
-        app.processor.set_upscale_in_flight_for_test(true);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, true);
         assert!(!app.can_process_intent(), "one at a time");
         app.processor.queue_runs(app.batch.items_to_process());
         app.dispatch_next_queued_run();
-        app.processor.set_upscale_in_flight_for_test(false);
+        app.processor.stand_in_run_for_test(crate::gui::dispatch_progress::ProgressKind::Upscale, false);
         assert_eq!(app.processor.next_queued_run(), Some(1), "the queue waited for the slot");
     }
 }

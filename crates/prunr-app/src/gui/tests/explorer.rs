@@ -633,13 +633,9 @@ fn busy_images(world: &World) -> usize {
 
 /// The model whose cut the image shows, if it shows one.
 fn cut_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
-    use crate::gui::item::Cutter;
-    use prunr_core::ModelKind;
     match item.timeline.current().origin.as_ref()?.cutter? {
-        Cutter::Model(ModelKind::BiRefNetLite) => Some(SettingsModel::BiRefNetLite),
-        Cutter::Model(ModelKind::Silueta) => Some(SettingsModel::Silueta),
-        Cutter::Model(ModelKind::U2net) => Some(SettingsModel::U2net),
-        _ => None,
+        crate::gui::item::Cutter::Model(kind) => SettingsModel::of_kind(kind),
+        crate::gui::item::Cutter::NoModel => None,
     }
 }
 

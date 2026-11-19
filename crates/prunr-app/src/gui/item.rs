@@ -5038,6 +5038,23 @@ mod tests {
         assert!(item.awaits_cut() && !item.is_cutting() && item.failure.is_none(), "{:?}", item.status());
     }
 
+    /// A Silueta cut-out landed by its run, with lines traced when `lines`.
+    fn cut_by_run(item: &mut BatchItem, lines: bool) {
+        use prunr_core::ModelKind::Silueta;
+        item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
+        let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
+        let edges = lines.then(|| crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None)).flatten();
+        item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, edges, item.settings.current_recipe(Silueta));
+        item.finish_job();
+    }
+
+    /// An erase's 2×2 grey result landed by its run.
+    fn erase_by_run(item: &mut BatchItem) {
+        item.start_job(Some(StepKind::Erase), Engine::Erase);
+        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
+        item.finish_job();
+    }
+
     /// A kept segmentation re-cuts only the cut it was made for: the same
     /// model's cut of another image (the result after an erase) is another
     /// segmentation. Process, erase, Process again, then Undo back to the
@@ -5046,23 +5063,15 @@ mod tests {
     #[test]
     fn a_kept_segmentation_re_cuts_only_the_image_it_saw() {
         use prunr_core::ModelKind::Silueta;
-        let cut = |item: &mut BatchItem| {
-            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
-            let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
-            item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, None, item.settings.current_recipe(Silueta));
-            item.finish_job();
-        };
         let mut item = fixture_item(1);
-        cut(&mut item);
+        cut_by_run(&mut item, false);
         assert!(item.tensor_made_shown_step(), "the cut it made");
         item.settings.gamma = 1.4;
         item.commit(StepKind::Adjust);
         assert!(item.tensor_made_shown_step(), "a knob moved on that cut");
 
-        item.start_job(Some(StepKind::Erase), Engine::Erase);
-        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
-        item.finish_job();
-        cut(&mut item);
+        erase_by_run(&mut item);
+        cut_by_run(&mut item, false);
         assert!(item.tensor_made_shown_step(), "the cut of the erased image");
 
         for _ in 0..2 {
@@ -5084,7 +5093,6 @@ mod tests {
     /// depth blur and fog still followed it.
     #[test]
     fn picks_and_depth_read_the_picture_under_the_cut_out() {
-        use prunr_core::ModelKind::Silueta;
         let embedding = || Arc::new(prunr_core::sam::SamEmbedding { image_embed: vec![0.0; 4], high_res_feats_0: vec![0.0; 4], high_res_feats_1: vec![0.0; 4] });
         let map = || Arc::new(prunr_core::depth::DepthMap::from_raw(1, 2, vec![0.0, 1.0]));
         let mut item = fixture_item(1);
@@ -5094,9 +5102,7 @@ mod tests {
         assert!(item.land_depth(Ok(map()), None));
         assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
 
-        item.start_job(Some(StepKind::Erase), Engine::Erase);
-        item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
-        item.finish_job();
+        erase_by_run(&mut item);
         let erased = item.pick_start().expect("what the erase left");
         assert!(Arc::ptr_eq(&erased, item.timeline.current().result.as_ref().expect("the erase's result")));
         assert!(item.magic_embedding().is_none(), "the photo's embedding still holds what was erased");
@@ -5113,10 +5119,7 @@ mod tests {
         assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
 
         // A cut-out of the erased picture: picks correct that cut.
-        item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
-        let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
-        item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, None, item.settings.current_recipe(Silueta));
-        item.finish_job();
+        cut_by_run(&mut item, false);
         assert!(item.pick_start().is_some_and(|start| Arc::ptr_eq(&start, &erased)));
         assert!(item.magic_embedding().is_some() && !item.needs_depth_run());
 
@@ -5142,33 +5145,19 @@ mod tests {
     /// drops them too, while one to the same cut keeps them.
     #[test]
     fn kept_lines_are_drawn_only_over_the_image_they_traced() {
-        use prunr_core::ModelKind::Silueta;
-        let cut = |item: &mut BatchItem, lines: bool| {
-            item.start_cut(Some(StepKind::Process), Cutter::Model(Silueta));
-            let seg = crate::gui::worker::CompressedTensor::from_raw(crate::gui::worker::RawSegTensor { data: vec![0.5; 4], height: 2, width: 2, model: Silueta });
-            let edges = lines.then(|| crate::gui::tests::fixtures::edge_lines(&prunr_core::EdgeScale::ALL, None)).flatten();
-            item.apply_tier_result(Ok(fixture_process_result("CPU")), seg, edges, item.settings.current_recipe(Silueta));
-            item.finish_job();
-        };
-        let erase = |item: &mut BatchItem| {
-            item.start_job(Some(StepKind::Erase), Engine::Erase);
-            item.result_rgba = Some(Arc::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))));
-            item.finish_job();
-        };
-
         let mut item = fixture_item(1);
-        cut(&mut item, true);
-        erase(&mut item);
+        cut_by_run(&mut item, true);
+        erase_by_run(&mut item);
         item.undo_step().expect("back to the cut");
         assert!(item.cached_edge_tensors.is_some(), "the same cut: its lines stay");
         let _ = item.redo_step();
-        cut(&mut item, false);
+        cut_by_run(&mut item, false);
         assert!(item.cached_edge_tensors.is_none(), "a cut of the erased image, no lines traced: the photo's lines go");
 
         let mut item = fixture_item(2);
-        cut(&mut item, true);
-        erase(&mut item);
-        cut(&mut item, true);
+        cut_by_run(&mut item, true);
+        erase_by_run(&mut item);
+        cut_by_run(&mut item, true);
         assert!(item.cached_edge_tensors.is_some());
         for _ in 0..2 {
             item.undo_step().expect("a step back");
