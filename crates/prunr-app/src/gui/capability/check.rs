@@ -169,18 +169,6 @@ pub(crate) fn check(facts: &ItemFacts, need: Need, role: ModelRole) -> Verdict {
     }
 }
 
-/// The image shows a run of `engine` (an upscale, a colorize) whose model
-/// output is no longer kept and is not being made: the knobs that would
-/// finish it again wait for Process, which makes it again.
-pub(crate) fn kept_run_gone(facts: &ItemFacts, engine: Engine) -> bool {
-    let kept = match engine {
-        Engine::Upscale => facts.kept_upscale,
-        Engine::Colorize => facts.kept_colorize,
-        _ => return false,
-    };
-    facts.shows_run_of(engine) && !kept && facts.activity != Activity::Running(engine)
-}
-
 fn kept(present: bool, activity: Activity, engine: Engine, missing: Reason) -> Verdict {
     if present {
         Verdict::Ready
@@ -242,24 +230,6 @@ mod tests {
         assert_eq!(check(&up(false, Activity::Running(Engine::Colorize)), Need::KeptUpscale, Upscale), Verdict::Never(Reason::UpscaleFirst));
         let col = ItemFacts { activity: Activity::Running(Engine::Colorize), ..ItemFacts::photo() };
         assert_eq!(check(&col, Need::KeptColorize, Colorize), Verdict::Wait(Reason::Running));
-    }
-
-    /// Refine and Strength finish a kept run again as their knobs move.
-    /// An image that shows the run without it kept (a model switch let it
-    /// go, or an undo went back to an earlier run) takes those knobs at
-    /// the next Process instead, and says so; a photo not yet run has
-    /// nothing to say: every knob there is for the first run.
-    #[test]
-    fn a_shown_run_no_longer_kept_takes_its_knobs_at_process() {
-        use crate::gui::capability::Shown;
-        let shows = |engine, kept_upscale, kept_colorize, activity| ItemFacts { shown: Shown::Run(engine), kept_upscale, kept_colorize, activity, ..ItemFacts::photo() };
-        assert!(kept_run_gone(&shows(Engine::Upscale, false, false, Activity::Idle), Engine::Upscale));
-        assert!(!kept_run_gone(&shows(Engine::Upscale, true, false, Activity::Idle), Engine::Upscale), "kept: live");
-        assert!(!kept_run_gone(&shows(Engine::Upscale, false, false, Activity::Running(Engine::Upscale)), Engine::Upscale), "being made");
-        assert!(!kept_run_gone(&ItemFacts::photo(), Engine::Upscale), "not run yet");
-        assert!(!kept_run_gone(&shows(Engine::Segment, false, false, Activity::Idle), Engine::Upscale), "a cut-out is no upscale");
-        assert!(kept_run_gone(&shows(Engine::Colorize, false, false, Activity::Idle), Engine::Colorize));
-        assert!(!kept_run_gone(&shows(Engine::Colorize, false, true, Activity::Idle), Engine::Colorize));
     }
 
     #[test]

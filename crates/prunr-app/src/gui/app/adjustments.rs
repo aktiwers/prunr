@@ -67,6 +67,7 @@ impl PrunrApp {
             .show_inside(ui, |ui| {
                 let can_compare = self.can_compare_intent();
                 let picking_focus = self.picking_focus();
+                let finishing_knobs_wait = self.finishing_knobs_wait(idx);
                 let selection_gates = crate::gui::views::selection_action_bar::SelectionGates::of(|a| self.selection_action_refusal(a));
                 // Split borrow: disjoint fields, so the toolbar edits the
                 // preset string in place without a clone + writeback.
@@ -106,6 +107,7 @@ impl PrunrApp {
                     facts: crate::gui::capability::ItemFacts::of(item),
                     faces_found: Self::face_search(item, crate::gui::item::FaceStage::of(settings_ref.model.role())),
                     picking_depth_focus: picking_focus,
+                    finishing_knobs_wait,
                 };
                 toolbar_change = adjustments_toolbar::render(
                     ui,
@@ -260,22 +262,44 @@ impl PrunrApp {
         }
     }
 
-    /// The shown upscale or colorize takes the change only by being made
-    /// again: its model's settings moved, or the run that Refine and
-    /// Strength finish again was let go (a model switch, an undo).
-    fn change_waits_for_process(&self, idx: usize) -> bool {
-        use crate::gui::capability::ItemFacts;
-        use crate::gui::item::{Engine, KeptRunTier};
-        let Some(model) = self.settings.model.dispatch_model_kind() else { return false };
+    /// The upscale or colorize on screen when the picked model makes one
+    /// and nothing runs on the image: that model and the run's engine.
+    fn shown_run_under_model(&self, idx: usize) -> Option<(prunr_core::ModelKind, crate::gui::item::Engine)> {
+        use crate::gui::item::Engine;
+        let model = self.settings.model.dispatch_model_kind()?;
         let engine = if model.is_upscale() {
             Engine::Upscale
         } else if self.settings.model.is_colorize() {
             Engine::Colorize
         } else {
-            return false;
+            return None;
         };
         let item = &self.batch.items[idx];
-        item.is_idle() && ItemFacts::of(item).shows_run_of(engine) && item.kept_run_tier(model) == KeptRunTier::Full
+        (item.is_idle() && crate::gui::capability::ItemFacts::of(item).shows_run_of(engine)).then_some((model, engine))
+    }
+
+    /// The shown upscale or colorize takes the change made only by being
+    /// made again: its model's settings moved, the picked model is another,
+    /// or the run that Refine and Strength finish again was let go.
+    fn change_waits_for_process(&self, idx: usize) -> bool {
+        self.shown_run_under_model(idx)
+            .is_some_and(|(model, _)| self.batch.items[idx].kept_run_tier(model) == crate::gui::item::KeptRunTier::Full)
+    }
+
+    /// Refine (upscale) or Strength (colorize) would take a change only
+    /// through Process: the run they finish again is not kept, is another
+    /// model's, or a setting that needs a new run moved since. What the
+    /// status says once such a change is made.
+    pub(crate) fn finishing_knobs_wait(&self, idx: usize) -> bool {
+        use crate::gui::item::Engine;
+        self.shown_run_under_model(idx).is_some_and(|(model, engine)| {
+            let item = &self.batch.items[idx];
+            let kept = match engine {
+                Engine::Upscale => item.kept_upscale().is_some(),
+                _ => item.kept_colorize().is_some(),
+            };
+            !kept || item.kept_run_tier(model) == crate::gui::item::KeptRunTier::Full
+        })
     }
 
     /// A preset picked for a photo with no cut-out yet starts the cut-out,
@@ -645,6 +669,45 @@ mod preset_switch_tests {
         };
         assert_eq!(sharpened(&mut app_with(true)), super::PROCESS_TO_APPLY);
         assert_ne!(sharpened(&mut app_with(false)), super::PROCESS_TO_APPLY, "before the first upscale");
+    }
+
+    /// Refine's tooltip says "Requires reprocessing." when a Refine change
+    /// would wait for Process, as the status then says: the upscale's run
+    /// let go, another upscaler picked, or a setting changed that needs a
+    /// new run. Two checks answered it: under another upscaler the status
+    /// asked for Process while the tooltip said nothing.
+    #[test]
+    fn the_finishing_knobs_wait_when_a_change_would() {
+        use crate::gui::item::{Engine, UpscaleCache};
+        use std::sync::Arc;
+        let kept = || {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::RealEsrganUpscale;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (4, 4);
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
+            let img = Arc::new(image::RgbaImage::new(16, 16));
+            item.start_job(Some(crate::gui::timeline::StepKind::Upscale), Engine::Upscale);
+            item.result_rgba = Some(Arc::clone(&img));
+            item.land_upscale(UpscaleCache::new(Arc::clone(&img), img, None));
+            app.batch.select_item(0);
+            app
+        };
+        let mut app = kept();
+        assert!(!app.finishing_knobs_wait(0), "kept and its own: Refine is live");
+        app.settings.model = SettingsModel::Nomos2Upscale;
+        assert!(app.finishing_knobs_wait(0), "another upscaler's knobs are not its");
+        let mut app = kept();
+        app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
+        assert!(app.finishing_knobs_wait(0), "a Scale change needs a new run");
+        let mut app = kept();
+        app.batch.items[0].upscale = None;
+        assert!(app.finishing_knobs_wait(0), "the run let go");
+
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::RealEsrganUpscale;
+        push_test_item(&mut app, 1).dimensions = (4, 4);
+        assert!(!app.finishing_knobs_wait(0), "nothing run yet: every knob is for the first run");
     }
 
     /// Two knob changes in a quick row join one step, so a run the first

@@ -117,6 +117,8 @@ pub(crate) struct ToolbarState<'a> {
     pub faces_found: super::faces_chip::FoundCount,
     /// The next click on the image sets the Depth chip's focus.
     pub picking_depth_focus: bool,
+    /// Refine or Strength would take a change only through Process.
+    pub finishing_knobs_wait: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -194,13 +196,12 @@ pub(crate) fn render(
         if shows(model, Surface::Upscale) {
             let upscale_gate = super::upscale_toolbar::UpscaleGate {
                 off: gate(Surface::Upscale),
-                refine_waits: crate::gui::capability::kept_run_gone(&state.facts, crate::gui::item::Engine::Upscale),
+                refine_waits: state.finishing_knobs_wait,
             };
             row.chip(ui, "upscale", |ui| super::upscale_toolbar::render_upscale_chips(ui, app_settings, item_settings, &defaults, state.source_dims, upscale_gate));
         }
         if shows(model, Surface::Colorize) {
-            let waits = crate::gui::capability::kept_run_gone(&state.facts, crate::gui::item::Engine::Colorize);
-            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings, defaults.color_strength_pct, waits)));
+            row.chip(ui, "colorize", |ui| chip::gated(ui, gate(Surface::Colorize), |ui| render_color_strength_chip(ui, item_settings, defaults.color_strength_pct, state.finishing_knobs_wait)));
         }
         if shows(model, Surface::SdChips) && row.chip(ui, "sd", |ui| super::eraser_chip::render(ui, app_settings, state.installed, state.shown_seed)) {
             change.brush_settings_committed = true;
