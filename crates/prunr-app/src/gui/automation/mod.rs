@@ -454,10 +454,15 @@ fn scroll_into_view(node: u64) -> egui::Event {
 /// The part of control `node` its scroll areas let through, in points;
 /// `None` when no widget of the last frames has that id.
 pub(crate) fn shown_part(ctx: &egui::Context, node: u64) -> Option<egui::Rect> {
+    response_of(ctx, node).map(|r| r.interact_rect)
+}
+
+/// The last frames' response of control `node`.
+fn response_of(ctx: &egui::Context, node: u64) -> Option<egui::Response> {
     // SAFETY: not a memory-safety contract; the value is a widget id egui
     // handed AccessKit, high-entropy as egui requires, and never zero.
     let id = (node != 0).then(|| unsafe { egui::Id::from_high_entropy_bits(node) })?;
-    ctx.read_response(id).map(|r| r.interact_rect)
+    ctx.read_response(id)
 }
 
 /// Where a press reaches control `node`: the middle of the part of it
@@ -465,9 +470,7 @@ pub(crate) fn shown_part(ctx: &egui::Context, node: u64) -> Option<egui::Rect> {
 /// covers that point. `None` for a control a person cannot press now.
 #[cfg(test)]
 pub(crate) fn reachable_at(ctx: &egui::Context, node: u64) -> Option<egui::Pos2> {
-    // SAFETY: as in `shown_part`: a widget id egui handed AccessKit.
-    let id = (node != 0).then(|| unsafe { egui::Id::from_high_entropy_bits(node) })?;
-    let response = ctx.read_response(id)?;
+    let response = response_of(ctx, node)?;
     let shown = response.interact_rect;
     if !shown.is_positive() {
         return None;
