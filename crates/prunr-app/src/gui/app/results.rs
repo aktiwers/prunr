@@ -762,12 +762,14 @@ impl PrunrApp {
     /// A re-run that failed on an image still showing a result leaves it
     /// Done: the user hears it failed rather than nothing. (With nothing
     /// to show, the image itself reads as failed.)
-    fn tell_failed_rerun(&mut self, item_id: u64, err: &str) {
-        let Some(item) = self.batch.find_by_id(item_id).filter(|item| item.has_result()) else { return };
+    /// Whether it was told: an image with no result to keep is told by
+    /// its own failure.
+    fn tell_failed_rerun(&mut self, item_id: u64, err: &str) -> bool {
+        let Some(item) = self.batch.find_by_id(item_id).filter(|item| item.has_result()) else { return false };
         let name = item.filename.clone();
         tracing::warn!(item_id, %err, "re-run failed; the image keeps its result");
         self.toasts.warning(format!("{name} could not be processed again, so it shows its last result: {}", prunr_core::plain::reason(err)));
-        self.processor.note_failed_rerun();
+        true
     }
 
     fn land_cut(
@@ -834,8 +836,9 @@ impl PrunrApp {
             item.reveal = None;
             item.subject = None;
         }
-        if let Some(err) = failure {
-            self.tell_failed_rerun(item_id, &err);
+        // The cut batch's end counts it in its status, and takes the count back.
+        if failure.is_some_and(|err| self.tell_failed_rerun(item_id, &err)) {
+            self.processor.note_failed_rerun();
         }
         let Some(item) = self.batch.find_by_id(item_id) else { return CutLanding::Untold };
         let landing = match item.error() {
@@ -1061,6 +1064,7 @@ impl PrunrApp {
                 }
                 Err(msg) => {
                     item.fail(msg.clone());
+                    // No cut batch ends to count it: the toast is all.
                     self.tell_failed_rerun(item_id, &msg);
                 }
             }
@@ -1911,6 +1915,7 @@ mod timeline_contract_tests {
         let (level, text) = app.toasts.last_for_test().expect("told");
         assert_eq!(level, "warning");
         assert!(text.contains("could not be processed again"), "{text}");
+        assert_eq!(app.processor.take_failed_reruns(), 0, "no cut batch ends to take a count back: the next one said this image failed");
     }
 
     /// A result that lands on an image not on screen is kept by its step
