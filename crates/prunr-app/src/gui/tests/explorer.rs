@@ -8,8 +8,7 @@
 //! as steps to paste into a test.
 //!
 //! Not picked yet, each for want of a stand-in for its engine: the Stable
-//! Diffusion erasers (their own process), upscalers, Colorize, Sketch,
-//! Faces and the depth looks.
+//! Diffusion erasers (their own process), Faces and the depth looks.
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -78,18 +77,11 @@ const LEFT_ALONE: &[(&str, &str)] = &[
     ("Set as default", "writes the settings file"),
     ("Eraser (Stable", "runs in a process of its own, which a test window does not start"),
     ("Eraser (RORem", "runs in a process of its own, which a test window does not start"),
-    ("Upscale (", "no stand-in for the upscale engines yet"),
-    ("Colorize (", "no stand-in for Colorize yet"),
-    ("Sketch", "no stand-in for the lines model yet"),
     ("Faces", "no stand-in for the face models yet"),
     ("Depth", "no stand-in for the depth model yet"),
     ("Lens", "a depth look"),
     ("Golden Bokeh", "a depth look"),
     ("Teal and Orange", "a depth look on No model"),
-    ("Blueprint", "a lines look"),
-    ("Pencil Sketch", "a lines look"),
-    ("Sunset Lines", "a lines look"),
-    ("X-Ray", "a lines look"),
     ("Pick image", "asks the system for a file"),
 ];
 
@@ -133,6 +125,75 @@ impl StandIn {
             .map_err(|e| e.to_string())
     }
 
+    /// The lines model's stand-in: at half the picture's size (the Fine
+    /// scale at twice that), how much each point's lightness differs from
+    /// its right and lower neighbours.
+    fn trace(image: &image::DynamicImage) -> Result<prunr_core::EdgeInferenceResult, prunr_core::CoreError> {
+        let grey = image.to_luma8();
+        let (height, width) = ((grey.height() / 2).max(1), (grey.width() / 2).max(1));
+        let tensors = prunr_core::EdgeScale::ALL.map(|scale| {
+            let (h, w) = prunr_core::edge_scale_dims(scale, height, width);
+            let small = image::imageops::resize(&grey, w, h, image::imageops::FilterType::Triangle);
+            let at = |x: u32, y: u32| f32::from(small.get_pixel(x.min(w - 1), y.min(h - 1))[0]);
+            (0..h * w).map(|i| {
+                let (x, y) = (i % w, i / w);
+                (((at(x + 1, y) - at(x, y)).abs() + (at(x, y + 1) - at(x, y)).abs()) / 64.0).min(1.0)
+            }).collect()
+        });
+        Ok(prunr_core::EdgeInferenceResult { tensors, height, width })
+    }
+
+    fn lines(traced: prunr_core::EdgeInferenceResult) -> Option<crate::gui::worker::CompressedEdgeTensors> {
+        crate::gui::worker::CompressedEdgeTensors::from_raw(crate::gui::worker::RawEdgeTensors { tensors: traced.tensors, height: traced.height, width: traced.width, spare: None })
+    }
+
+    /// Lines over the subject: the plain cut traced, its effect put on, the
+    /// lines drawn over it, as the worker composes them.
+    fn outline(subject: image::RgbaImage, effect: prunr_core::SubjectEffect, edge: &prunr_core::EdgeSettings) -> Result<(prunr_core::ProcessResult, Option<crate::gui::worker::CompressedEdgeTensors>), String> {
+        prunr_core::outline_subject(subject, effect, edge, None, Self::trace)
+            .map(|(rgba_image, traced)| (prunr_core::ProcessResult { rgba_image, active_provider: "CPU".into() }, Self::lines(traced)))
+            .map_err(|e| e.to_string())
+    }
+
+    /// A full run of `picture` (the photo, or the start it runs from when
+    /// `chained`) under `run`'s Sketch mode, as the worker makes it: the
+    /// result, the segmentation kept and the lines traced.
+    fn full_run(picture: image::RgbaImage, chained: bool, model: prunr_core::ModelKind, run: &crate::gui::worker::RunSettings) -> (Result<prunr_core::ProcessResult, String>, Option<CompressedTensor>, Option<crate::gui::worker::CompressedEdgeTensors>) {
+        use prunr_core::LineMode;
+        match run.line_mode {
+            LineMode::Off => {
+                let raw = Self::tensor(model);
+                (Self::cut(&picture, &raw, &run.mask), CompressedTensor::from_raw(raw), None)
+            }
+            LineMode::EdgesOnly => {
+                let picture = image::DynamicImage::ImageRgba8(picture);
+                match Self::trace(&prunr_core::apply_input_transform(&picture, run.edge.input_transform)) {
+                    Ok(traced) => {
+                        let rgba_image = prunr_core::compose_whole_photo(&traced, &picture, &run.edge, None);
+                        (Ok(prunr_core::ProcessResult { rgba_image, active_provider: "CPU".into() }), None, Self::lines(traced))
+                    }
+                    Err(e) => (Err(e.to_string()), None, None),
+                }
+            }
+            // A run on an earlier result: that image is the cut-out already.
+            LineMode::SubjectOutline if chained => match Self::outline(picture, prunr_core::SubjectEffect::None, &run.edge) {
+                Ok((result, lines)) => (Ok(result), None, lines),
+                Err(e) => (Err(e), None, None),
+            },
+            LineMode::SubjectOutline => {
+                let raw = Self::tensor(model);
+                let opts = prunr_core::PostprocessOpts::new(&run.mask, raw.model);
+                let made = prunr_core::cut_for_lines(&raw.data, raw.height as usize, raw.width as usize, &picture, &opts)
+                    .map_err(|e| e.to_string())
+                    .and_then(|subject| Self::outline(subject, run.mask.effect, &run.edge));
+                match made {
+                    Ok((result, lines)) => (Ok(result), CompressedTensor::from_raw(raw), lines),
+                    Err(e) => (Err(e), None, None),
+                }
+            }
+        }
+    }
+
     /// Answer every run asked for so far; how many images that was.
     fn answer(&self, app: &PrunrApp) -> usize {
         let mut answered = 0;
@@ -141,21 +202,45 @@ impl StandIn {
             let model = config.engines.model;
             let photo_of = |id: u64| app.batch.find_by_id(id).and_then(photo);
             for item in &items {
-                let raw = Self::tensor(model);
-                let result = photo_of(item.id).ok_or_else(|| "the photo could not be read".to_string()).and_then(|p| Self::cut(&p, &raw, &config.run.mask));
-                let _ = self.answers.send(WorkerResult::BatchItemDone { batch, item_id: item.id, result, seg: CompressedTensor::from_raw(raw), edges: None });
+                // What the bridge reads and sends: the start the run cuts
+                // from, and a chained cut's start, which it reports back.
+                let (result, seg, edges) = match item.inputs_for_test() {
+                    Err(err) => (Err(err), None, None),
+                    Ok((start, built)) => {
+                        if let Some(image) = built {
+                            let _ = self.answers.send(WorkerResult::ChainStart { item_id: item.id, run: item.run, image });
+                        }
+                        let chained = start.is_some();
+                        match start.map(|s| (*s).clone()).or_else(|| photo_of(item.id)) {
+                            Some(picture) => Self::full_run(picture, chained, model, &config.run),
+                            None => (Err("the photo could not be read".to_string()), None, None),
+                        }
+                    }
+                };
+                let _ = self.answers.send(WorkerResult::BatchItemDone { batch, item_id: item.id, result, seg, edges });
                 answered += 1;
             }
-            for work in tier2_items.iter().chain(&add_edge_items) {
-                let result = work
+            // A mask re-run is cut from its kept tensor; turning the
+            // outline on cuts it and traces the cut.
+            for (work, traces) in tier2_items.iter().map(|w| (w, false)).chain(add_edge_items.iter().map(|w| (w, true))) {
+                let made = work
                     .tensor
                     .bundle()
                     .ok_or_else(|| "the kept tensor could not be read".to_string())
                     .and_then(|raw| {
                         let photo = work.photo.as_deref().cloned().or_else(|| photo_of(work.item_id)).ok_or_else(|| "the photo could not be read".to_string())?;
-                        Self::cut(&photo, &raw, &work.mask)
+                        if !traces {
+                            return Self::cut(&photo, &raw, &work.mask).map(|result| (result, None));
+                        }
+                        let opts = prunr_core::PostprocessOpts::new(&work.mask, raw.model);
+                        let subject = prunr_core::cut_for_lines(&raw.data, raw.height as usize, raw.width as usize, &photo, &opts).map_err(|e| e.to_string())?;
+                        Self::outline(subject, work.mask.effect, &config.run.edge)
                     });
-                let _ = self.answers.send(WorkerResult::BatchItemDone { batch, item_id: work.item_id, result, seg: None, edges: None });
+                let (result, edges) = match made {
+                    Ok((result, edges)) => (Ok(result), edges),
+                    Err(e) => (Err(e), None),
+                };
+                let _ = self.answers.send(WorkerResult::BatchItemDone { batch, item_id: work.item_id, result, seg: None, edges });
                 answered += 1;
             }
             let _ = self.answers.send(WorkerResult::BatchComplete { batch });
@@ -170,12 +255,15 @@ impl StandIn {
 struct ModelsAnswered {
     erases: usize,
     picks: usize,
+    upscales: usize,
+    colorizes: usize,
 }
 
-/// The eraser's and the Magic Brush's stand-in: what the test app was
-/// asked to run, answered as the models would: a fill that greys the
-/// region, an encode, and a pick of a soft disc round the click, whose
-/// edge moves with the Confidence slider.
+/// The eraser's, the Magic Brush's, the upscalers' and Colorize's
+/// stand-in: what the test app was asked to run, answered as the models
+/// would: a fill that greys the region, an encode, a pick of a soft disc
+/// round the click (whose edge moves with the Confidence slider), the
+/// picture enlarged, and a warm colour.
 fn answer_models(app: &PrunrApp, answered: &std::cell::Cell<ModelsAnswered>) {
     use crate::gui::processor::ModelAsk;
     for ask in app.processor.take_asks_for_test() {
@@ -192,6 +280,14 @@ fn answer_models(app: &PrunrApp, answered: &std::cell::Cell<ModelsAnswered>) {
                 let drawn = crate::gui::brush_state::StrokeDrawn::Magic { output, mode, reading, edge, side };
                 app.processor.answer_decode_for_test(item_id, drawn);
                 count.picks += 1;
+            }
+            ModelAsk::Upscale { item_id, run, input, recipe } => {
+                app.processor.answer_upscale_for_test(item_id, run, &input, recipe);
+                count.upscales += 1;
+            }
+            ModelAsk::Colorize { item_id, run, input, recipe } => {
+                app.processor.answer_colorize_for_test(item_id, run, &input, recipe);
+                count.colorizes += 1;
             }
         }
         answered.set(count);
@@ -717,6 +813,8 @@ struct Reached {
     runs_answered: usize,
     erases: usize,
     picks: usize,
+    upscales: usize,
+    colorizes: usize,
     most_undo_steps: usize,
     cut_outs: usize,
 }
@@ -774,6 +872,8 @@ fn random_sequence(rng: &mut Rng, len: usize, reached: &mut Reached) -> Vec<Acti
     reached.runs_answered += world.worker.answered.get();
     reached.erases += world.models.get().erases;
     reached.picks += world.models.get().picks;
+    reached.upscales += world.models.get().upscales;
+    reached.colorizes += world.models.get().colorizes;
     for item in &world.app().batch.items {
         reached.most_undo_steps = reached.most_undo_steps.max(item.timeline.undo_steps());
         reached.cut_outs += usize::from(item.has_result());
@@ -825,7 +925,7 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
         found.push((short, broken));
     }
     eprintln!(
-        "\n[explorer] reached: {} presses on {} different controls, {} slides, {} strokes, {} cut-out runs, {} erases and {} Magic Brush picks answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
+        "\n[explorer] reached: {} presses on {} different controls, {} slides, {} strokes, {} cut-out runs, {} erases, {} Magic Brush picks, {} upscales and {} colorizes answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
         reached.presses,
         reached.pressed.len(),
         reached.slides,
@@ -833,6 +933,8 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
         reached.runs_answered,
         reached.erases,
         reached.picks,
+        reached.upscales,
+        reached.colorizes,
         reached.cut_outs,
         reached.most_undo_steps,
         reached.pressed,

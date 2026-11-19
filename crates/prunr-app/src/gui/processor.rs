@@ -316,6 +316,14 @@ struct RunDone<R> {
     progress: super::dispatch_progress::RunSink,
 }
 
+/// The asked run `run`'s answer handle, taken off the list.
+#[cfg(test)]
+fn take_asked<R>(asked: &Mutex<Vec<(u64, RunDone<R>)>>, run: u64) -> Option<RunDone<R>> {
+    let mut asked = asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let at = asked.iter().position(|(id, _)| *id == run)?;
+    Some(asked.remove(at).1)
+}
+
 impl<R> RunDone<R> {
     fn deliver(self, result: R) {
         // Send the result BEFORE ending the run. Reversed ordering would
@@ -441,6 +449,10 @@ pub(crate) enum ModelAsk {
         edge: super::brush_state::StrokeEdge,
         side: Option<super::brush_state::CutSide>,
     },
+    /// An upscale or a colorize: its run, the picture it reads and the
+    /// recipe it was asked with.
+    Upscale { item_id: u64, run: u64, input: super::item::Pixels, recipe: ProcessingRecipe },
+    Colorize { item_id: u64, run: u64, input: super::item::Pixels, recipe: ProcessingRecipe },
 }
 
 /// A Process run held while admission lets another batch in: its images,
@@ -909,6 +921,12 @@ pub(crate) struct Processor {
     asks: Mutex<Vec<ModelAsk>>,
     #[cfg(test)]
     stand_in_runs: Mutex<Vec<(super::dispatch_progress::ProgressKind, super::dispatch_progress::RunSink)>>,
+    /// The upscales and colorizes a test app was asked for, by run, with
+    /// what delivers their answer.
+    #[cfg(test)]
+    upscales_asked: Mutex<Vec<(u64, RunDone<UpscaleResult>)>>,
+    #[cfg(test)]
+    colorizes_asked: Mutex<Vec<(u64, RunDone<ColorizeResult>)>>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -972,6 +990,10 @@ impl Processor {
             asks: Mutex::default(),
             #[cfg(test)]
             stand_in_runs: Mutex::default(),
+            #[cfg(test)]
+            upscales_asked: Mutex::default(),
+            #[cfg(test)]
+            colorizes_asked: Mutex::default(),
             depth,
             seg_warm_due: None,
             first_look: Default::default(),
@@ -1823,6 +1845,14 @@ impl Processor {
         };
         admitted_unless_warm(&self.upscale.warm, WarmEngineKey { model: cache_model_kind, cpu_only }, descriptor)?;
 
+        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale, item_id));
+        let done = self.upscale.begin(run.clone());
+        #[cfg(test)]
+        if !self.runs_models {
+            self.ask(|| ModelAsk::Upscale { item_id, run: run_id, input, recipe });
+            self.upscales_asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((run_id, done));
+            return Ok(());
+        }
         // First dispatch initializes the shared RunOptions; subsequent
         // dispatches reuse it. ORT itself is initialised at app start.
         let run_options = self.upscale_run_options.get_or_init(|| {
@@ -1833,8 +1863,6 @@ impl Processor {
         });
         // A prior cancel's terminate flag is sticky.
         let _ = run_options.unterminate();
-        let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Upscale, item_id));
-        let done = self.upscale.begin(run.clone());
         let stop = run.stop_flag();
         let progress = PictureSink::of_run(item_id, run, self.picture_sender())
             .into_progress()
@@ -1947,6 +1975,47 @@ impl Processor {
         }
     }
 
+    /// Answer an upscale the test app was asked for as the model would:
+    /// the picture enlarged (nearest pixel) and finished by the real
+    /// Refine; a run stopped meanwhile ends cancelled, as the tile loop
+    /// does.
+    #[cfg(test)]
+    pub(crate) fn answer_upscale_for_test(&self, item_id: u64, run: u64, input: &super::item::Pixels, recipe: ProcessingRecipe) {
+        let Some(done) = take_asked(&self.upscales_asked, run) else { return };
+        let result = if done.progress.stopped() {
+            Err(prunr_core::CoreError::Cancelled)
+        } else {
+            input.read().map_err(prunr_core::CoreError::ImageFormat).map(|input| {
+                let input_for_inference = build_inference_input(&input, recipe.upscale.pre_denoise());
+                let factor = recipe.upscale.output_scale.factor();
+                let (w, h) = input_for_inference.dimensions();
+                let raw = Arc::new(image::imageops::resize(&*input_for_inference, w * factor, h * factor, image::imageops::FilterType::Nearest));
+                let knobs = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
+                let (shown, reference) = super::live_preview::finish_upscale(Arc::clone(&raw), &input_for_inference, None, &knobs, None);
+                RunOutput { run: super::item::UpscaleCache::new(raw, input_for_inference, reference), shown }
+            })
+        };
+        done.deliver(UpscaleResult { item_id, run, result, recipe });
+    }
+
+    /// Answer a colorize the test app was asked for as the model would:
+    /// a warm colour predicted everywhere, rendered by the real Strength.
+    /// Its one model run is not stopped by a Cancel, which drops what it
+    /// returns.
+    #[cfg(test)]
+    pub(crate) fn answer_colorize_for_test(&self, item_id: u64, run: u64, input: &super::item::Pixels, recipe: ProcessingRecipe) {
+        let Some(done) = take_asked(&self.colorizes_asked, run) else { return };
+        let result = input.read().map_err(prunr_core::CoreError::ImageFormat).map(|input| {
+            let n = (prunr_core::colorize::COLORIZE_INPUT * prunr_core::colorize::COLORIZE_INPUT) as usize;
+            let mut plane = vec![30.0f32; 2 * n];
+            plane[n..].fill(20.0);
+            let run = super::item::ColorizeCache::new(Arc::new(plane), input);
+            let shown = Arc::new(run.render(recipe.colorize.strength()));
+            RunOutput { run, shown }
+        });
+        done.deliver(ColorizeResult { item_id, run, result, recipe });
+    }
+
     /// Deliver an upscale or colorize for `item_id` that ended with `err`.
     #[cfg(test)]
     pub(crate) fn end_run_for_test(&self, engine: super::item::Engine, item_id: u64, run: u64, err: prunr_core::CoreError, recipe: ProcessingRecipe) {
@@ -1965,6 +2034,12 @@ impl Processor {
         let intra_threads = prunr_core::batch::ort_intra_threads(1);
         let run = self.dispatch_progress.begin(self.queued_initial(super::dispatch_progress::ProgressKind::Colorize, item_id));
         let done = self.colorize.begin(run.clone());
+        #[cfg(test)]
+        if !self.runs_models {
+            self.ask(|| ModelAsk::Colorize { item_id, run: run_id, input, recipe });
+            self.colorizes_asked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((run_id, done));
+            return Ok(());
+        }
         let stop = run.stop_flag();
         let progress = prunr_core::Progress::new(Arc::new(run)).with_cancel(stop);
         let engine_slot = Arc::clone(&self.colorize.warm);

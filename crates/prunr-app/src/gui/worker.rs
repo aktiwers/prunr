@@ -70,6 +70,13 @@ struct RunInputs {
 }
 
 impl WorkItem {
+    /// What a stand-in worker reads, as the bridge does: the start the run
+    /// cuts from (`None`: the file) and a chained cut's start built for it.
+    #[cfg(test)]
+    pub(crate) fn inputs_for_test(&self) -> Result<ResolvedStart, String> {
+        self.read_inputs().map(|inputs| (inputs.start, inputs.built))
+    }
+
     fn read_inputs(&self) -> Result<RunInputs, String> {
         let bytes = self.source.load_bytes().map_err(super::item::source_unreadable)?;
         let (start, built) = match &self.image {
