@@ -7,9 +7,9 @@
 //! breaks a rule is cut down to the shortest that still does and printed
 //! as steps to paste into a test.
 //!
-//! Not picked yet, each for want of a stand-in for its engine: erasers,
-//! upscalers, Colorize, the Magic Brush, Sketch, Faces and the depth
-//! looks.
+//! Not picked yet, each for want of a stand-in for its engine: the Stable
+//! Diffusion erasers (their own process), upscalers, Colorize, Sketch,
+//! Faces and the depth looks.
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -76,10 +76,10 @@ const LEFT_ALONE: &[(&str, &str)] = &[
     ("Help", "its pages change nothing"),
     ("Delete preset", "removes a preset file"),
     ("Set as default", "writes the settings file"),
-    ("Eraser (", "no stand-in for the eraser engines yet"),
+    ("Eraser (Stable", "runs in a process of its own, which a test window does not start"),
+    ("Eraser (RORem", "runs in a process of its own, which a test window does not start"),
     ("Upscale (", "no stand-in for the upscale engines yet"),
     ("Colorize (", "no stand-in for Colorize yet"),
-    ("Magic Brush", "no stand-in for the Magic Brush's model yet"),
     ("Sketch", "no stand-in for the lines model yet"),
     ("Faces", "no stand-in for the face models yet"),
     ("Depth", "no stand-in for the depth model yet"),
@@ -165,6 +165,66 @@ impl StandIn {
     }
 }
 
+/// How many erases and Magic Brush picks the stand-in answered.
+#[derive(Default, Clone, Copy)]
+struct ModelsAnswered {
+    erases: usize,
+    picks: usize,
+}
+
+/// The eraser's and the Magic Brush's stand-in: what the test app was
+/// asked to run, answered as the models would: a fill that greys the
+/// region, an encode, and a pick of a soft disc round the click, whose
+/// edge moves with the Confidence slider.
+fn answer_models(app: &PrunrApp, answered: &std::cell::Cell<ModelsAnswered>) {
+    use crate::gui::processor::ModelAsk;
+    for ask in app.processor.take_asks_for_test() {
+        let mut count = answered.get();
+        match ask {
+            ModelAsk::Erase { item_id, generation, image, region } => {
+                let fill = erase_fill(&image, &region);
+                app.processor.answer_erase_for_test(item_id, generation, fill);
+                count.erases += 1;
+            }
+            ModelAsk::Encode { item_id, saw } => app.processor.answer_encode_for_test(item_id, saw),
+            ModelAsk::Decode { item_id, at, mode, reading, edge, side } => {
+                let output = std::sync::Arc::new(disc_pick(at));
+                let drawn = crate::gui::brush_state::StrokeDrawn::Magic { output, mode, reading, edge, side };
+                app.processor.answer_decode_for_test(item_id, drawn);
+                count.picks += 1;
+            }
+        }
+        answered.set(count);
+    }
+}
+
+/// `image` with the cells `region` selects greyed out: a fill.
+fn erase_fill(image: &crate::gui::item::Pixels, region: &crate::gui::item::Region) -> image::RgbaImage {
+    let Ok(picture) = image.read() else { return image::RgbaImage::new(1, 1) };
+    let mut fill = (*picture).clone();
+    if let Some(mask) = region.load().filter(|m| (m.width, m.height) == fill.dimensions()) {
+        for (pixel, &cell) in fill.pixels_mut().zip(mask.cells()) {
+            if prunr_core::selection::MaskArtifact::is_selected(cell) {
+                *pixel = image::Rgba([128, 128, 128, 255]);
+            }
+        }
+    }
+    fill
+}
+
+/// A pick's decoder output: a disc round `at` (the decoder's 1024-wide
+/// space), sure at its middle and less so outward.
+fn disc_pick(at: (f32, f32)) -> prunr_core::sam::SamDecoderOutput {
+    let side = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
+    let (cx, cy) = (at.0 / 4.0, at.1 / 4.0);
+    let mut masks = vec![-9.0f32; 3 * side * side];
+    for (i, logit) in masks.iter_mut().take(side * side).enumerate() {
+        let (x, y) = ((i % side) as f32 - cx, (i / side) as f32 - cy);
+        *logit = 6.0 - (x * x + y * y).sqrt() / 6.0;
+    }
+    prunr_core::sam::SamDecoderOutput { masks, iou_predictions: [0.9, 0.1, 0.1] }.best_only()
+}
+
 /// The image's photo: decoded already, or from its bytes.
 fn photo(item: &crate::gui::item::BatchItem) -> Option<image::RgbaImage> {
     if let Some(decoded) = &item.source_rgba {
@@ -193,6 +253,7 @@ fn photo_png(seed: u8) -> Vec<u8> {
 struct World {
     h: Harness<'static, PrunrApp>,
     worker: StandIn,
+    models: std::cell::Cell<ModelsAnswered>,
 }
 
 impl World {
@@ -214,7 +275,7 @@ impl World {
             }
             app.batch.select_item(0);
         }
-        let mut world = Self { h, worker: StandIn { asked, answers, answered: std::cell::Cell::new(0) } };
+        let mut world = Self { h, worker: StandIn { asked, answers, answered: std::cell::Cell::new(0) }, models: Default::default() };
         world.quiet();
         world
     }
@@ -224,7 +285,12 @@ impl World {
     }
 
     fn busy(&self) -> bool {
-        crate::gui::automation::state::busy(self.app()) || self.app().batch.selection_queue.any_pending()
+        let app = self.app();
+        crate::gui::automation::state::busy(app)
+            || app.batch.selection_queue.any_pending()
+            || app.magic_brush_state.has_pending_encoder()
+            || app.processor.any_inpaint_in_flight()
+            || app.batch.items.iter().any(|item| app.processor.selecting(item.id))
     }
 
     /// Frames, the worker answering between them, until nothing is owed
@@ -232,10 +298,12 @@ impl World {
     fn quiet(&mut self) -> bool {
         for _ in 0..300 {
             self.worker.answer(self.h.state());
+            answer_models(self.h.state(), &self.models);
             self.h.step();
             if !self.busy() {
                 settle(&mut self.h);
                 self.worker.answer(self.h.state());
+                answer_models(self.h.state(), &self.models);
                 self.h.step();
                 if !self.busy() {
                     return true;
@@ -332,9 +400,11 @@ impl World {
         use crate::gui::brush_state::StrokeReach;
         let app = self.app();
         let (Some(tool), Some(item)) = (app.active_tool(), app.batch.selected_item()) else { return false };
+        // Selected at least half (a faint stroke at low Opacity leaves no
+        // edge for Feather to soften), and not all of it.
         let partly_selected = item.selection_mask.as_ref().is_some_and(|mask| {
             let cells = mask.cells();
-            cells.contains(&0) && cells.iter().any(|&c| c != 0)
+            cells.contains(&0) && cells.iter().any(|&c| prunr_core::selection::MaskArtifact::is_selected(c))
         });
         if !partly_selected {
             return false;
@@ -476,6 +546,9 @@ fn quiet_by_design(name: &str, before: &Seen, role: &str, on: Option<bool>) -> O
     if role == "RadioButton" && on == Some(true) {
         return Some("it is the choice already picked");
     }
+    if role == "SpinButton" {
+        return Some("a click on a number box starts typing into it, which the snapshot does not see");
+    }
     if name == "Reset" || name == "Reset the brush" {
         return Some("nothing differs from the preset");
     }
@@ -578,7 +651,12 @@ fn cut_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
 fn the_route_does_not_matter(world: &World) -> Option<Broken> {
     let app = world.app();
     for item in &app.batch.items {
-        let plain_cut = item.shows_cutout() && item.selection_mask.is_none() && item.edits.is_none();
+        use crate::gui::timeline::StepKind;
+        // A stroke or a selection anywhere before the shown step may live
+        // on in its picture (a restore painted live, its selection since
+        // cleared under the eraser): part of its route.
+        let touched = item.timeline.kinds_to_shown().any(|kind| matches!(kind, StepKind::Stroke | StepKind::Strokes | StepKind::Selection | StepKind::Edit));
+        let plain_cut = item.shows_cutout() && item.selection_mask.is_none() && item.edits.is_none() && !touched;
         let Some(here) = shown_picture(item).filter(|_| plain_cut) else { continue };
         let Some(model) = cut_by(item) else { continue };
         let straight = straight_cut(model, item.settings, &item.filename)?;
@@ -641,6 +719,8 @@ struct Reached {
     slides: usize,
     strokes: usize,
     runs_answered: usize,
+    erases: usize,
+    picks: usize,
     most_undo_steps: usize,
     cut_outs: usize,
 }
@@ -650,7 +730,25 @@ struct Reached {
 fn random_sequence(rng: &mut Rng, len: usize, reached: &mut Reached) -> Vec<Action> {
     let mut world = World::new();
     let mut actions = Vec::with_capacity(len);
-    for _ in 0..len {
+    // One sequence in four opens with an erase (the eraser picked, a
+    // region painted, Process), which a random walk seldom puts in order.
+    if rng.below(4) == 0 {
+        for step in ["Model", "Eraser (MI-GAN)", "Paint Brush", "", "Process"] {
+            // An eraser may come with the Paint Brush in hand: a click would put it down.
+            if step == "Paint Brush" && world.app().active_tool() == Some(crate::gui::brush_state::Tool::Paint) {
+                continue;
+            }
+            let action = if step.is_empty() {
+                Action::Stroke([rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20, rng.percent() / 2 + 20])
+            } else {
+                let name = world.offered().into_iter().map(|(name, _)| name).find(|name| name.starts_with(step)).unwrap_or_else(|| step.to_string());
+                Action::Click(name)
+            };
+            world.act(&action);
+            actions.push(action);
+        }
+    }
+    while actions.len() < len {
         let offered = world.offered();
         let sliders: Vec<&String> = offered.iter().filter(|(_, slider)| *slider).map(|(name, _)| name).collect();
         let buttons: Vec<&String> = offered.iter().filter(|(name, slider)| !slider && (!ends_things(name) || rng.below(10) == 0)).map(|(name, _)| name).collect();
@@ -678,6 +776,8 @@ fn random_sequence(rng: &mut Rng, len: usize, reached: &mut Reached) -> Vec<Acti
     }
     world.quiet();
     reached.runs_answered += world.worker.answered.get();
+    reached.erases += world.models.get().erases;
+    reached.picks += world.models.get().picks;
     for item in &world.app().batch.items {
         reached.most_undo_steps = reached.most_undo_steps.max(item.timeline.undo_steps());
         reached.cut_outs += usize::from(item.has_result());
@@ -729,12 +829,14 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
         found.push((short, broken));
     }
     eprintln!(
-        "\n[explorer] reached: {} presses on {} different controls, {} slides, {} strokes, {} runs answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
+        "\n[explorer] reached: {} presses on {} different controls, {} slides, {} strokes, {} cut-out runs, {} erases and {} Magic Brush picks answered, {} cut-outs at the ends, up to {} undo steps\n  controls: {:?}",
         reached.presses,
         reached.pressed.len(),
         reached.slides,
         reached.strokes,
         reached.runs_answered,
+        reached.erases,
+        reached.picks,
         reached.cut_outs,
         reached.most_undo_steps,
         reached.pressed,

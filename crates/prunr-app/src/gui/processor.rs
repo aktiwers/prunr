@@ -425,6 +425,24 @@ pub(crate) struct DepthResult {
     pub(crate) result: Result<Arc<prunr_core::depth::DepthMap>, String>,
 }
 
+/// What a test app (which runs no models) was asked to run, kept for a
+/// stand-in to answer as the model would.
+#[cfg(test)]
+pub(crate) enum ModelAsk {
+    Erase { item_id: u64, generation: u64, image: super::item::Pixels, region: super::item::Region },
+    Encode { item_id: u64, saw: Option<super::timeline::RunStart> },
+    /// A Magic Brush pick: where it was made (the decoder's 1024-wide
+    /// space), and what the stroke it lands as carries.
+    Decode {
+        item_id: u64,
+        at: (f32, f32),
+        mode: prunr_core::selection::BrushMode,
+        reading: prunr_core::MaskReading,
+        edge: super::brush_state::StrokeEdge,
+        side: Option<super::brush_state::CutSide>,
+    },
+}
+
 /// A Process run held while admission lets another batch in: its images,
 /// the step its results record, and the look it was asked with.
 pub(crate) struct HeldRun {
@@ -886,6 +904,9 @@ pub(crate) struct Processor {
     /// lost for every test after it.
     runs_models: bool,
     faces_found: Chan<FacesResult>,
+    /// What a test app was asked to run, for a stand-in to answer.
+    #[cfg(test)]
+    asks: Mutex<Vec<ModelAsk>>,
     /// The runs `set_upscale_in_flight_for_test` and
     /// `set_colorize_in_flight_for_test` stand in with.
     #[cfg(test)]
@@ -951,6 +972,8 @@ impl Processor {
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
             faces_found: Chan::default(),
+            #[cfg(test)]
+            asks: Mutex::default(),
             #[cfg(test)]
             test_upscale: Mutex::default(),
             #[cfg(test)]
@@ -1054,6 +1077,39 @@ impl Processor {
         let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, saw: None, result: Ok(embedding) });
     }
 
+    /// Keep what a test app was asked to run, which it does not run.
+    #[cfg(test)]
+    fn ask(&self, ask: impl FnOnce() -> ModelAsk) {
+        if !self.runs_models {
+            self.asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(ask());
+        }
+    }
+
+    /// What the test app was asked to run since the last call.
+    #[cfg(test)]
+    pub(crate) fn take_asks_for_test(&self) -> Vec<ModelAsk> {
+        std::mem::take(&mut *self.asks.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+
+    /// Answer an erase the test app was asked for with `rgba`.
+    #[cfg(test)]
+    pub(crate) fn answer_erase_for_test(&self, item_id: u64, generation: u64, rgba: image::RgbaImage) {
+        let _ = self.inpaint_done.tx.send((item_id, generation, InpaintOutcome::Done { rgba, fill_scale: 1.0 }));
+    }
+
+    /// Answer an encode the test app was asked for, of `saw`.
+    #[cfg(test)]
+    pub(crate) fn answer_encode_for_test(&self, item_id: u64, saw: Option<super::timeline::RunStart>) {
+        let embedding = prunr_core::sam::SamEmbedding { image_embed: vec![0.0; 4], high_res_feats_0: vec![0.0; 4], high_res_feats_1: vec![0.0; 4] };
+        let _ = self.sam_encoded.tx.send(SamEncoderResult { item_id, saw, result: Ok(embedding) });
+    }
+
+    /// Answer a pick the test app was asked for with the stroke `drawn`.
+    #[cfg(test)]
+    pub(crate) fn answer_decode_for_test(&self, item_id: u64, drawn: super::brush_state::StrokeDrawn) {
+        let _ = self.sam_decoded.tx.send(SamDecoderResult { item_id, result: Ok(drawn) });
+    }
+
     /// An erase of `item_id` for `run` dispatched and ending with `outcome`.
     #[cfg(test)]
     pub(crate) fn end_inpaint_for_test(&mut self, item_id: u64, run: u64, outcome: InpaintOutcome) {
@@ -1150,6 +1206,8 @@ impl Processor {
             self.dispatch_inpaint_sd(item_id, generation, image, correction, tuning, progress);
             return;
         }
+        #[cfg(test)]
+        self.ask(|| ModelAsk::Erase { item_id, generation, image: image.clone(), region: correction.clone() });
         let tx = self.inpaint_done.tx.clone();
         self.spawn_model(move || {
             let fill = caught(|| {
@@ -2031,6 +2089,8 @@ impl Processor {
         if !sam_sessions_built(&self.sam_sessions, cpu_only) {
             admitted(descriptor, cpu_only)?;
         }
+        #[cfg(test)]
+        self.ask(|| ModelAsk::Encode { item_id, saw: saw.clone() });
         let tx = self.sam_encoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {
@@ -2113,6 +2173,15 @@ impl Processor {
     /// its best candidate's logits, all a mask or a redraw reads.
     pub(crate) fn dispatch_sam_decoder(&mut self, req: SamDecodeRequest) {
         self.note_pick(req.item_id);
+        #[cfg(test)]
+        self.ask(|| ModelAsk::Decode {
+            item_id: req.item_id,
+            at: (req.prompt.point_coords.first().copied().unwrap_or(0.0), req.prompt.point_coords.get(1).copied().unwrap_or(0.0)),
+            mode: req.mode,
+            reading: req.reading,
+            edge: req.edge,
+            side: req.side.clone(),
+        });
         let tx = self.sam_decoded.tx.clone();
         let sessions = Arc::clone(&self.sam_sessions);
         self.spawn_model(move || {

@@ -619,6 +619,12 @@ impl Timeline {
         Some(self.states[self.cursor].kind)
     }
 
+    /// The kinds of the steps up to the one shown, oldest first.
+    #[cfg(test)]
+    pub(crate) fn kinds_to_shown(&self) -> impl Iterator<Item = StepKind> + '_ {
+        self.states.range(..=self.cursor).map(|s| s.kind)
+    }
+
     pub(crate) fn can_undo(&self) -> bool {
         self.cursor > 0
     }
