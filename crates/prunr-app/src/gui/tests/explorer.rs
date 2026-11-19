@@ -509,10 +509,23 @@ impl World {
         if !partly_selected {
             return false;
         }
+        // A stroke keeps the kind of edge it was drawn with: under a
+        // cut-out model the selection's Feather does not shape a stroke
+        // painted under an eraser (Expand and a fill band), nor the
+        // reverse. The sliders reach the strokes whose edge they shape.
+        use crate::gui::selection_queue::SelectionMade;
+        let kind = std::mem::discriminant(&app.settings.stroke_edge());
+        let shaped = |history: crate::gui::timeline::StrokeHistory, latest_only: bool| {
+            let mut own = history.ops.iter().filter(|op| op.drawn_by(tool)).filter_map(|op| match op {
+                SelectionMade::Stroke(drawn) => Some(std::mem::discriminant(&drawn.edge()) == kind),
+                _ => None,
+            });
+            if latest_only { own.next_back().unwrap_or(false) } else { own.any(|same| same) }
+        };
         match app.brush_state.reach {
             StrokeReach::Next => false,
-            StrokeReach::Last => item.timeline.latest_stroke(tool).is_some(),
-            StrokeReach::All => item.timeline.strokes_of(tool).is_some(),
+            StrokeReach::Last => item.timeline.latest_stroke(tool).is_some_and(|h| shaped(h, true)),
+            StrokeReach::All => item.timeline.strokes_of(tool).is_some_and(|h| shaped(h, false)),
         }
     }
 
