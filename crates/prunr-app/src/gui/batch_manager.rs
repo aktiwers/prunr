@@ -154,8 +154,9 @@ impl BatchManager {
 
     /// Under memory pressure, on a worker: the kept upscale runs of images
     /// not on screen go compressed to disk and let their reference go (the
-    /// image on screen keeps its run, so Refine answers at once), then the
-    /// compressed undo states follow. One move runs at a time; while it
+    /// image on screen keeps the run its step shows, so Refine answers at
+    /// once; one from another step goes too), then the compressed undo
+    /// states follow. One move runs at a time; while it
     /// does, another ask is skipped, and the next landing under pressure
     /// asks again.
     pub(crate) fn move_to_disk_under_pressure(&mut self) {
@@ -165,7 +166,7 @@ impl BatchManager {
         }
         let shown = self.selected_idx_clamped();
         let upscales: Vec<(super::timeline::StoredImage, super::timeline::CompressJob)> = self.items.iter_mut().enumerate()
-            .filter(|&(idx, _)| Some(idx) != shown)
+            .filter(|(idx, item)| Some(*idx) != shown || item.kept_upscale().is_none())
             .filter_map(|(_, item)| item.upscale.as_mut())
             .filter_map(|run| run.park().map(|job| (Arc::clone(&run.raw), job)))
             .collect();
@@ -1244,32 +1245,52 @@ mod tests {
 
     /// Under memory pressure only the images off screen let their kept
     /// upscale go to disk, and their reference with it; the one on screen
-    /// keeps both. A parked run reads back as it was.
+    /// keeps both while its step shows that upscale, and lets it go once
+    /// another step is shown (Refine cannot finish it again there). A
+    /// parked run reads back as it was.
     #[test]
     fn only_off_screen_kept_upscales_move_to_disk() {
-        use crate::gui::item::UpscaleCache;
+        use crate::gui::item::{Engine, UpscaleCache};
+        use crate::gui::timeline::StepKind;
         let mut batch = fixture();
         for id in 0..3 {
             let mut item = item_with_cache(id, 0);
             let raw = Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([id as u8, 7, 9, 255])));
             let reference = Some(Arc::new(prunr_core::upscale::Reference::new((*raw).clone())));
-            item.upscale = Some(UpscaleCache::new(raw, Arc::new(image::RgbaImage::new(8, 8)), reference));
+            item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+            // The finished result is its own image, not the model's output.
+            item.result_rgba = Some(Arc::new(image::RgbaImage::new(32, 32)));
+            item.land_upscale(UpscaleCache::new(raw, Arc::new(image::RgbaImage::new(8, 8)), reference));
             batch.items.push(item);
         }
         batch.select_item(1);
-        batch.move_to_disk_under_pressure();
         let run = |b: &BatchManager, idx: usize| b.items[idx].upscale.clone().expect("a kept run");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !(run(&batch, 0).raw.is_on_disk() && run(&batch, 2).raw.is_on_disk()) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let wait_for = |b: &BatchManager, moved: &[usize]| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !moved.iter().all(|&idx| run(b, idx).raw.is_on_disk()) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // The worker lets the next move start once it is done.
+            while b.demoting.load(std::sync::atomic::Ordering::Acquire) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        batch.move_to_disk_under_pressure();
+        wait_for(&batch, &[0, 2]);
         for idx in [0, 2] {
             let parked = run(&batch, idx);
             assert!(parked.raw.is_on_disk() && parked.reference.is_none(), "image {idx} is off screen");
             assert_eq!(parked.raw.load().expect("reads back").get_pixel(3, 3), &image::Rgba([idx as u8, 7, 9, 255]));
         }
         let shown = run(&batch, 1);
-        assert!(!shown.raw.is_compressed() && shown.reference.is_some(), "the image on screen keeps its run");
+        assert!(!shown.raw.is_compressed() && shown.reference.is_some(), "the image on screen keeps the run it shows");
+
+        // Another step on the shown image: its kept run is no longer what Refine finishes.
+        batch.items[1].result_rgba = Some(Arc::new(image::RgbaImage::new(32, 32)));
+        batch.items[1].commit(StepKind::Edit);
+        batch.move_to_disk_under_pressure();
+        wait_for(&batch, &[1]);
+        assert!(run(&batch, 1).raw.is_on_disk(), "a run its image no longer shows goes too");
     }
 
     /// A BatchItem with `tensor_floats` f32s of cached tensor (0 = none).

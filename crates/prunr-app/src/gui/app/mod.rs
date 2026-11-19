@@ -1466,12 +1466,9 @@ impl PrunrApp {
         if left > 0 {
             self.toasts.info(format!("{} left as they were: the model changed", crate::gui::views::fmt::count(left, "queued image", "queued images")));
         }
-        // The kept runs came from the old model; a Tier-2 tick would show
-        // them under the new model's knobs.
-        for item in &mut self.batch.items {
-            item.invalidate_upscale_cache();
-            item.invalidate_colorize_cache();
-        }
+        // The kept upscale and colorize runs stay: each is its step's own
+        // (`kept_upscale`), finished again only under the model that made
+        // it, and memory pressure moves them to disk.
         self.settings.save();
         self.toasts.info(format!(
             "{} loaded",

@@ -1122,9 +1122,10 @@ pub(crate) struct BatchItem {
     /// model's cut of another image is another segmentation.
     cached_tensor_saw: Option<RunStart>,
     /// The last upscale run's model output and input, so Refine re-finishes
-    /// it without a model run. Survives `reset_result_caches()`; cleared on a
-    /// model swap. RAM: 4K × 4 ≈ 500 MB, double while AI blend or Color match
-    /// keep the enlarged reference; outside the tensor budget.
+    /// it without a model run. Survives `reset_result_caches()` and a model
+    /// switch: it is its step's own (`kept_upscale`). RAM: 4K × 4 ≈ 500 MB,
+    /// double while AI blend or Color match keep the enlarged reference;
+    /// outside the tensor budget, moved to disk under memory pressure.
     pub(crate) upscale: Option<UpscaleCache>,
     /// The last colorize run, so Strength re-renders it without a model
     /// run. Not cleared by `reset_result_caches()`; cleared on a model
@@ -1504,14 +1505,14 @@ impl BatchItem {
         }
     }
 
-    /// Clear the kept upscale run, on a model switch and on item error. A knob
-    /// that re-runs the model need not: its landing overwrites it, but after a
-    /// switch it is the wrong model's and may never be replaced.
+    /// Clear the kept upscale run, when its image failed with nothing to
+    /// show. A knob that re-runs the model need not: its landing
+    /// overwrites it.
     pub(crate) fn invalidate_upscale_cache(&mut self) {
         super::reclaim::later(self.upscale.take());
     }
 
-    /// Clear the kept colorize run, on a model switch and on item error.
+    /// Clear the kept colorize run, when its image failed with nothing to show.
     pub(crate) fn invalidate_colorize_cache(&mut self) {
         super::reclaim::later(self.colorize.take());
     }
@@ -4127,9 +4128,9 @@ mod tests {
     }
 
     /// The upscale run survives a display reset (Refine re-finishes from
-    /// it) and goes on a model switch.
+    /// it) and goes when asked to.
     #[test]
-    fn the_upscale_run_outlives_a_display_reset_but_not_a_model_switch() {
+    fn the_upscale_run_outlives_a_display_reset() {
         let mut item = fixture_item(1);
         let img = Arc::new(image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])));
         item.upscale = Some(UpscaleCache::new(img.clone(), img.clone(), Some(Arc::new(prunr_core::upscale::Reference::new((*img).clone())))));

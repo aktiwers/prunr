@@ -444,7 +444,9 @@ impl PrunrApp {
         use crate::gui::live_preview::PreviewKind;
         let item = &self.batch.items[idx];
         let id = item.id;
-        if item.kept_upscale().is_some() {
+        // A kept upscale is finished again only under an upscaler: its
+        // knobs are not another model's.
+        if item.kept_upscale().is_some() && self.settings.model.role() == ModelRole::Upscale {
             self.processor.live_preview.render_now(id, PreviewKind::UpscaleTier2);
         } else if !item.has_result() && self.settings.model.role() != ModelRole::Filters {
             self.render_photo_look(idx);
@@ -1773,6 +1775,36 @@ mod timeline_contract_tests {
         assert_eq!(app.wants_kept_run_refinish(0), Some(PreviewKind::UpscaleTier2), "a Sharpen change re-finishes the kept run");
         app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
         assert_eq!(app.wants_kept_run_refinish(0), None, "a Scale change needs a new run");
+    }
+
+    /// An upscale's kept run is its step's own, whatever model is picked
+    /// meanwhile: back on its upscaler, Refine finishes it again as the
+    /// knobs move. Any model switch threw it away, so Sharpen moved and
+    /// nothing changed until the upscale was made again. Under another
+    /// model nothing finishes it: its knobs are not that model's.
+    #[test]
+    fn an_upscales_kept_run_outlives_a_model_switch() {
+        use crate::gui::item::UpscaleCache;
+        use crate::gui::live_preview::PreviewKind;
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        let item = &mut app.batch.items[0];
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus));
+        let img = Arc::new(image::RgbaImage::new(4, 4));
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        item.land_upscale(UpscaleCache::new(img.clone(), img, None));
+
+        let upscaler = std::mem::replace(&mut app.settings.model, SettingsModel::Silueta);
+        app.on_model_changed(upscaler);
+        assert!(app.batch.items[0].kept_upscale().is_some(), "kept under another model");
+        app.batch.items[0].settings.sharpen = 0.4;
+        assert_eq!(app.wants_kept_run_refinish(0), None, "which finishes nothing of it");
+        app.on_faces_change(0, crate::gui::views::faces_chip::FacesChange { blend: true, ..Default::default() });
+        assert_ne!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "nor do its faces");
+
+        let other = std::mem::replace(&mut app.settings.model, upscaler);
+        app.on_model_changed(other);
+        app.batch.items[0].settings.sharpen = 0.4;
+        assert_eq!(app.wants_kept_run_refinish(0), Some(PreviewKind::UpscaleTier2), "back on its upscaler, Refine is live");
     }
 
     /// A Refine preview re-finishes the kept upscale run: it needs neither
