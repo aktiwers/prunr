@@ -1856,9 +1856,13 @@ impl BatchItem {
         use prunr_core::selection::{MaskArtifact, FULL};
         let next = self.selection_mask.as_ref().zip(self.job.as_ref()).and_then(|(now, job)| {
             let (w, h) = (now.width, now.height);
-            let strokes = job.painted.iter()
+            let mut strokes = job.painted.iter()
                 .filter(|s| s.patch.plane == (w, h) && self.timeline.in_effect(s.step))
-                .map(|s| (s.patch.rect, &s.patch.cells));
+                .map(|s| (s.patch.rect, &s.patch.cells))
+                .peekable();
+            if strokes.peek().is_none() && job.region.is_none() {
+                return None;
+            }
             let painted = MaskArtifact::from_patches(w, h, strokes);
             let filled = job.region.as_ref().and_then(|region| region.load()).filter(|f| (f.width, f.height) == (w, h));
             let keep = match filled {
