@@ -138,15 +138,6 @@ impl PrunrApp {
         self.batch.selection_queue.is_pending(item_id) || self.processor.selecting(item_id) || self.magic_brush_state.waits_on(item_id)
     }
 
-    /// Take back the Magic Brush picks on `ids` still waiting for their
-    /// image's embedding or depth map; whether there were any.
-    pub(crate) fn take_back_waiting_picks(&mut self, ids: &[u64]) -> bool {
-        let state = &mut self.magic_brush_state;
-        let held = state.pending_sam_picks.len() + state.pending_depth_clicks.len();
-        state.pending_sam_picks.retain(|p| !ids.contains(&p.item_id));
-        state.pending_depth_clicks.retain(|c| !ids.contains(&c.item_id));
-        state.pending_sam_picks.len() + state.pending_depth_clicks.len() != held
-    }
 
     pub(crate) fn queue_selection_op(&mut self, item_id: u64, op: SelectionOp) {
         let Some(current) = self.batch.find_by_id(item_id).map(BatchItem::selection_state) else { return };

@@ -72,8 +72,7 @@ impl MagicBrushState {
     /// result lands, so no second encode of the same image starts.
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.pending_depth_clicks.clear();
-        self.pending_sam_picks.clear();
+        self.drop_waiting_picks(|_| true);
         self.clear_stroke();
     }
 
@@ -92,8 +91,7 @@ impl MagicBrushState {
             self.shown = id.map(|id| (id, now));
             // A held click is for the image it was made on; it would land
             // on that image off screen.
-            self.pending_sam_picks.retain(|p| Some(p.item_id) == id);
-            self.pending_depth_clicks.retain(|c| Some(c.item_id) == id);
+            self.drop_waiting_picks(|item| Some(item) != id);
         }
     }
 
@@ -114,6 +112,15 @@ impl MagicBrushState {
     pub(crate) fn settle_remaining(&self, now: Instant) -> Option<Duration> {
         let (_, since) = self.shown?;
         ENCODE_SETTLE.checked_sub(now.saturating_duration_since(since)).filter(|d| !d.is_zero())
+    }
+
+    /// Drop the picks waiting on the images `on` accepts; whether there
+    /// were any.
+    pub(crate) fn drop_waiting_picks(&mut self, on: impl Fn(u64) -> bool) -> bool {
+        let held = self.pending_sam_picks.len() + self.pending_depth_clicks.len();
+        self.pending_sam_picks.retain(|p| !on(p.item_id));
+        self.pending_depth_clicks.retain(|c| !on(c.item_id));
+        self.pending_sam_picks.len() + self.pending_depth_clicks.len() != held
     }
 
     /// A pick on `item_id` waits for its embedding or its depth map.

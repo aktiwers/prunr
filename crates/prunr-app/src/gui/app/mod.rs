@@ -772,7 +772,7 @@ impl PrunrApp {
     /// back a pick still waiting for its image's embedding or depth map.
     fn step_or_hold(&mut self, ctx: &egui::Context, action: crate::gui::views::shortcuts::Action) {
         let ids: Vec<u64> = self.batch.targeted_indices().into_iter().map(|i| self.batch.items[i].id).collect();
-        if action == crate::gui::views::shortcuts::Action::Undo && self.take_back_waiting_picks(&ids) {
+        if action == crate::gui::views::shortcuts::Action::Undo && self.magic_brush_state.drop_waiting_picks(|item| ids.contains(&item)) {
             self.toasts.info(step_toast(&[StepKind::Stroke], "undone"));
             return;
         }
@@ -989,8 +989,8 @@ impl PrunrApp {
     }
 
     /// Stop the upscale or colorize under way and the images queued after
-    /// it: the capsule's Cancel and the app's.
-    /// Returns how many queued images never ran.
+    /// it: the capsule's Cancel and the app's. Returns how many queued
+    /// images never ran.
     pub(crate) fn cancel_runs(&mut self) -> usize {
         let dropped = self.processor.cancel_runs();
         self.keep_dropped_looks(&dropped);
