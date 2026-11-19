@@ -279,6 +279,9 @@ struct RunQueue {
     waiting: std::collections::VecDeque<u64>,
     started: u32,
     total: u32,
+    /// The image last taken off the queue, whose run counts its place
+    /// once it begins.
+    taken: Option<u64>,
 }
 
 /// An in-process model run, one at a time (upscale, colorize). Whether
@@ -1958,6 +1961,7 @@ impl Processor {
     pub(crate) fn requeue_run(&self, item_id: u64) {
         let mut q = self.run_queue();
         q.started = q.started.saturating_sub(1);
+        q.taken = None;
         q.waiting.push_back(item_id);
     }
 
@@ -1970,14 +1974,16 @@ impl Processor {
         let mut q = self.run_queue();
         let next = q.waiting.pop_front()?;
         q.started += 1;
+        q.taken = Some(next);
         Some(next)
     }
 
-    /// Where the queue stands, as the capsule's outer count: none when
-    /// Process was pressed for one image.
-    fn queued_run_position(&self) -> Option<(u32, u32)> {
-        let q = self.run_queue();
-        (q.total > 1).then_some((q.started.max(1), q.total))
+    /// Where the queue stands, as the capsule's outer count of the run
+    /// on `item_id` beginning now: only for the image just taken off a
+    /// queue of several, and only once.
+    fn take_queue_position(&self, item_id: u64) -> Option<(u32, u32)> {
+        let mut q = self.run_queue();
+        (q.taken.take_if(|taken| *taken == item_id).is_some() && q.total > 1).then_some((q.started.max(1), q.total))
     }
 
     /// The images that were queued, which never run.
@@ -1989,7 +1995,7 @@ impl Processor {
     /// it is one of several queued.
     fn queued_initial(&self, kind: super::dispatch_progress::ProgressKind, item_id: u64) -> super::dispatch_progress::DispatchProgress {
         let mut initial = super::dispatch_progress::DispatchProgress::new(kind, prunr_core::Step::LoadingModel.label()).on(item_id);
-        initial.outer = self.queued_run_position();
+        initial.outer = self.take_queue_position(item_id);
         initial.outer_unit = initial.outer.map(|_| prunr_core::Unit::Image);
         initial
     }
@@ -2603,18 +2609,34 @@ mod tests {
         assert_eq!(p.next_queued_run(), None);
         p.queue_runs(vec![4, 5, 6]);
         assert_eq!(p.next_queued_run(), Some(4));
-        assert_eq!(p.queued_run_position(), Some((1, 3)));
+        assert_eq!(p.take_queue_position(4), Some((1, 3)));
         p.set_upscale_in_flight_for_test(true);
         assert_eq!(p.next_queued_run(), None, "the slot is taken");
         p.set_upscale_in_flight_for_test(false);
         assert_eq!(p.next_queued_run(), Some(5));
-        assert_eq!(p.queued_run_position(), Some((2, 3)));
+        assert_eq!(p.take_queue_position(5), Some((2, 3)));
         p.cancel_upscale();
         assert_eq!(p.next_queued_run(), Some(6), "one image's own cancel leaves the others queued");
         p.cancel_runs();
         assert_eq!(p.next_queued_run(), None, "cancel drops the queue");
         p.queue_runs(vec![9]);
-        assert_eq!(p.queued_run_position(), None, "one image counts nothing");
+        assert_eq!(p.next_queued_run(), Some(9));
+        assert_eq!(p.take_queue_position(9), None, "one image counts nothing");
+    }
+
+    /// The queue's count belongs to the run taken off it, once: a run
+    /// started another way after the queue ran out ("Try another") showed
+    /// "Image 3 of 3" while its model loaded.
+    #[test]
+    fn a_queues_count_goes_with_the_run_taken_off_it() {
+        let p = fixture();
+        p.queue_runs(vec![4, 5]);
+        assert_eq!(p.next_queued_run(), Some(4));
+        assert_eq!(p.take_queue_position(4), Some((1, 2)));
+        assert_eq!(p.next_queued_run(), Some(5));
+        assert_eq!(p.take_queue_position(5), Some((2, 2)));
+        assert_eq!(p.take_queue_position(5), None, "the same image's next run is not the queue's");
+        assert_eq!(p.take_queue_position(4), None, "nor another's");
     }
 
     /// Each image's newest stroke's outcome comes out with the run it
