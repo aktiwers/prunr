@@ -281,10 +281,9 @@ struct RunQueue {
     total: u32,
 }
 
-/// An in-process model run, one at a time (upscale, colorize). Its
-/// Cancel is its run's own, in the progress list.
+/// An in-process model run, one at a time (upscale, colorize). Whether
+/// it runs, and its Cancel, are its run's own, in the progress list.
 struct RunSlot<R> {
-    active: Arc<AtomicBool>,
     done: Chan<R>,
     warm: WarmEngine,
 }
@@ -292,21 +291,15 @@ struct RunSlot<R> {
 impl<R> RunSlot<R> {
     fn new() -> Self {
         Self {
-            active: Arc::new(AtomicBool::new(false)),
             done: Chan::default(),
             warm: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn in_flight(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-
-    /// A run starts: it is in flight and reports to `progress`. The run's
-    /// thread ends it through the returned handle.
+    /// A run starts and reports to `progress`, which is under way until
+    /// the run's thread ends it through the returned handle.
     fn begin(&self, progress: super::dispatch_progress::RunSink) -> RunDone<R> {
-        self.active.store(true, Ordering::Release);
-        RunDone { active: Arc::clone(&self.active), tx: self.done.tx.clone(), progress }
+        RunDone { tx: self.done.tx.clone(), progress }
     }
 
     fn take_engine(&self) -> Option<(WarmEngineKey, Arc<prunr_core::OrtEngine>)> {
@@ -316,18 +309,16 @@ impl<R> RunSlot<R> {
 
 /// The run thread's end of a `RunSlot`.
 struct RunDone<R> {
-    active: Arc<AtomicBool>,
     tx: mpsc::Sender<R>,
     progress: super::dispatch_progress::RunSink,
 }
 
 impl<R> RunDone<R> {
     fn deliver(self, result: R) {
-        // Send the result BEFORE clearing the active flag. Reversed
-        // ordering would let the UI thread see the run idle and enable
-        // Process before the result has landed in the channel.
+        // Send the result BEFORE ending the run. Reversed ordering would
+        // let the UI thread see the run idle and enable Process before
+        // the result has landed in the channel.
         let _ = self.tx.send(result);
-        self.active.store(false, Ordering::Release);
         self.progress.end();
     }
 }
@@ -884,6 +875,12 @@ pub(crate) struct Processor {
     /// lost for every test after it.
     runs_models: bool,
     faces_found: Chan<FacesResult>,
+    /// The runs `set_upscale_in_flight_for_test` and
+    /// `set_colorize_in_flight_for_test` stand in with.
+    #[cfg(test)]
+    test_upscale: Mutex<Option<super::dispatch_progress::RunSink>>,
+    #[cfg(test)]
+    test_colorize: Mutex<Option<super::dispatch_progress::RunSink>>,
     depth: DepthQueue,
     /// A cut-out model to load once the user stops switching, and when.
     seg_warm_due: Option<(std::time::Instant, EngineSpec)>,
@@ -943,6 +940,10 @@ impl Processor {
             sam_sessions: Arc::new(Mutex::new(None)),
             runs_models: true,
             faces_found: Chan::default(),
+            #[cfg(test)]
+            test_upscale: Mutex::default(),
+            #[cfg(test)]
+            test_colorize: Mutex::default(),
             depth,
             seg_warm_due: None,
             first_look: Default::default(),
@@ -1095,19 +1096,22 @@ impl Processor {
         }
     }
 
+    /// An upscale runs, or none does: one standing in for a run, for tests.
     #[cfg(test)]
     pub(crate) fn set_upscale_in_flight_for_test(&self, active: bool) {
-        self.upscale.active.store(active, Ordering::Release);
+        use super::dispatch_progress::{DispatchProgress, ProgressKind};
+        let mut held = self.test_upscale.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = active.then(|| self.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling")));
     }
 
     /// `true` while an upscale dispatch is in flight.
     pub fn is_upscale_in_flight(&self) -> bool {
-        self.upscale.in_flight()
+        self.dispatch_progress.runs(super::dispatch_progress::ProgressKind::Upscale)
     }
 
     /// `true` while an upscale or a colorize is in flight.
     pub fn is_run_in_flight(&self) -> bool {
-        self.upscale.in_flight() || self.colorize.in_flight()
+        self.is_upscale_in_flight() || self.is_colorize_in_flight()
     }
 
     /// A fresh stroke supersedes the one in flight by generation. SD runs
@@ -1808,7 +1812,7 @@ impl Processor {
     /// rather than at the next tile (5-15 s on CPU); the flag covers a
     /// cancel landing between tiles. Idempotent.
     pub(crate) fn cancel_upscale(&self) {
-        if !self.upscale.in_flight() {
+        if !self.is_upscale_in_flight() {
             return;
         }
         // Not every EP honours terminate mid-run: OpenVINO measured 54 s
@@ -1847,12 +1851,15 @@ impl Processor {
     }
 
     pub fn is_colorize_in_flight(&self) -> bool {
-        self.colorize.in_flight()
+        self.dispatch_progress.runs(super::dispatch_progress::ProgressKind::Colorize)
     }
 
+    /// A colorize runs, or none does: one standing in for a run, for tests.
     #[cfg(test)]
     pub(crate) fn set_colorize_in_flight_for_test(&self, active: bool) {
-        self.colorize.active.store(active, Ordering::Release);
+        use super::dispatch_progress::{DispatchProgress, ProgressKind};
+        let mut held = self.test_colorize.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *held = active.then(|| self.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Colorize, "Colorizing")));
     }
 
     #[cfg(test)]
@@ -1913,7 +1920,7 @@ impl Processor {
     /// Cancel the colorize run in flight. The model's one run is not
     /// interrupted; its result is dropped when it returns. Idempotent.
     pub(crate) fn cancel_colorize(&self) {
-        if self.colorize.in_flight() {
+        if self.is_colorize_in_flight() {
             self.dispatch_progress.stop(super::dispatch_progress::ProgressKind::Colorize);
         }
     }
@@ -2515,11 +2522,15 @@ mod tests {
             "idle Processor must not report an in-flight upscale");
     }
 
+    /// An upscale is in flight while its run is under way, not after.
     #[test]
-    fn is_upscale_in_flight_true_when_active_flag_set() {
+    fn an_upscale_is_in_flight_while_its_run_is_under_way() {
+        use super::super::dispatch_progress::{DispatchProgress, ProgressKind};
         let p = fixture();
-        p.upscale.active.store(true, Ordering::Release);
-        assert!(p.is_upscale_in_flight());
+        let run = p.dispatch_progress.begin(DispatchProgress::new(ProgressKind::Upscale, "Upscaling"));
+        assert!(p.is_upscale_in_flight() && p.is_run_in_flight() && !p.is_colorize_in_flight());
+        run.end();
+        assert!(!p.is_upscale_in_flight());
     }
 
     /// The batch's image count comes from its own bookkeeping, steps from

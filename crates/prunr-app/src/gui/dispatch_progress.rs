@@ -418,6 +418,11 @@ impl DispatchProgressSlot {
         }
     }
 
+    /// A run of `kind` is under way.
+    pub fn runs(&self, kind: ProgressKind) -> bool {
+        self.lock().iter().any(|r| r.progress.kind == kind)
+    }
+
     /// The run the capsule shows; `None` when none is under way.
     pub fn read(&self) -> Option<DispatchProgress> {
         self.read_over(None)
