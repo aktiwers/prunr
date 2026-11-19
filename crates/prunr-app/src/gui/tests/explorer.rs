@@ -816,6 +816,12 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
             continue;
         }
         let Some(model) = (if item.shows_cutout() { cut_by(item) } else { kept_run_by(item) }) else { continue };
+        // Under another model the picture stays as its model made it until
+        // that model is back (or Process): settings changed meanwhile (a
+        // Reset, Refine moved under another upscaler) show then.
+        if model != app.settings.model && !made_as_set(item, model) {
+            continue;
+        }
         let Some(here) = shown_picture(item) else { continue };
         let straight = straight_run(model, item.settings, &item.filename)?;
         if straight != here {
@@ -846,6 +852,18 @@ fn kept_run_by(item: &crate::gui::item::BatchItem) -> Option<SettingsModel> {
         _ => return None,
     };
     (item.kept_run_tier(model.dispatch_model_kind()?) != KeptRunTier::Full).then_some(model)
+}
+
+/// The image's settings are still those its picture was made with under
+/// `model`: a cut-out's recipe, or a kept run with nothing to finish again.
+fn made_as_set(item: &crate::gui::item::BatchItem, model: SettingsModel) -> bool {
+    use crate::gui::item::KeptRunTier;
+    let Some(kind) = model.dispatch_model_kind() else { return false };
+    if item.shows_cutout() {
+        item.applied_recipe.as_ref().is_some_and(|made| *made == item.settings.current_recipe(kind))
+    } else {
+        item.kept_run_tier(kind) == KeptRunTier::UpToDate
+    }
 }
 
 /// The picture `settings` give `name`'s photo under `model` on a fresh
