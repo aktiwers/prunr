@@ -565,7 +565,7 @@ impl PrunrApp {
         if let Some(click) = self.magic_brush_state.pending_depth_click.take_if(|c| c.item_id == item_id) {
             // The click waited for the map; a run started meanwhile holds edits.
             if self.batch.items[idx].is_idle() {
-                self.magic_depth_click(click.item_id, click.at, click.dims, click.mode);
+                self.magic_depth_click(click.item_id, click.at, click.dims, click.mode, click.side);
             }
         }
     }
@@ -3235,6 +3235,39 @@ mod depth_tests {
         assert!(app.batch.items[0].backdrop_tex_pending.is_some(), "it builds once the map is there");
     }
 
+    /// On a cut-out a Magic Brush pick stays on the side of the cut it was
+    /// made on. A click on the subject never reaches what the model took
+    /// away (it reached it through the photo, so removed things came back
+    /// or were selected); a click on what was taken away, to bring it back,
+    /// never reaches the subject.
+    #[test]
+    fn a_pick_on_a_cut_out_stays_on_its_side() {
+        use prunr_core::selection::BrushMode;
+        let selected_columns = |click: (f32, f32)| {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (8, 8);
+            crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            // The model kept the left half.
+            item.result_rgba = Some(Arc::new(image::RgbaImage::from_fn(8, 8, |x, _| image::Rgba([9, 9, 9, if x < 4 { 255 } else { 0 }]))));
+            item.amend();
+            item.depth = Some(Arc::new(prunr_core::depth::DepthMap::from_raw(8, 8, vec![0.5; 64])));
+            app.batch.select_item(0);
+            app.batch.items[0].set_on_screen(true);
+            app.magic_brush_state.activate();
+            assert!(app.batch.items[0].corrects_cutout(app.settings.model));
+            let side = app.cut_side(1, click);
+            app.magic_depth_click(1, click, (8, 8), BrushMode::Add, side);
+            app.pump_sam_results(&egui::Context::default());
+            crate::gui::tests::fixtures::settle_selection_edits(&mut app);
+            let mask = app.batch.items[0].selection_mask.clone().expect("a selection");
+            (0..8).filter(|&x| (0..8).any(|y| mask.cells()[y * 8 + x] != 0)).collect::<Vec<usize>>()
+        };
+        assert_eq!(selected_columns((1.0, 4.0)), [0, 1, 2, 3], "a click on the subject stays on it");
+        assert_eq!(selected_columns((6.0, 4.0)), [4, 5, 6, 7], "a click on what was taken away stays there");
+    }
+
     /// A Depth pick on an image whose map is not there yet waits for
     /// the map and selects when it lands; the brush turned off meanwhile
     /// drops it.
@@ -3247,7 +3280,7 @@ mod depth_tests {
         app.batch.items[0].dimensions = (8, 8);
         app.batch.select_item(0);
         app.magic_brush_state.activate();
-        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         assert!(app.magic_brush_state.pending_depth_click.is_some(), "parked until the map is there");
         assert!(app.processor.pump_sam_decoder_results().is_empty());
         assert!(app.batch.items[0].land_depth(Ok(map()), None));
@@ -3262,7 +3295,7 @@ mod depth_tests {
         assert!(matches!(result.result, Ok(crate::gui::brush_state::StrokeDrawn::Depth { .. })), "selected by depth");
 
         app.batch.items[0].depth = None;
-        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         app.magic_brush_state.deactivate();
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the brush turned off drops the waiting click");
     }
@@ -3287,7 +3320,7 @@ mod depth_tests {
         let steps = app.batch.items[0].timeline.undo_steps();
 
         app.batch.items[0].depth = Some(map());
-        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         app.handle_undo(&ctx);
         assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "held while the pick selects");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -3302,7 +3335,7 @@ mod depth_tests {
         assert_eq!(item.selection_mask.as_ref().map(|m| m.cells()[0]), Some(FULL), "the stroke before it stays");
 
         app.batch.items[0].depth = None;
-        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add);
+        app.magic_depth_click(1, (3.0, 3.0), (8, 8), BrushMode::Add, None);
         app.handle_undo(&ctx);
         assert!(app.magic_brush_state.pending_depth_click.is_none(), "the waiting pick is taken back");
         assert_eq!(app.batch.items[0].timeline.undo_steps(), steps, "and nothing else");
@@ -3330,8 +3363,8 @@ mod depth_tests {
         app.magic_brush_state.activate();
 
         app.magic_brush_state.note_shown(Some(1), std::time::Instant::now());
-        app.pick_with_sam(1, None, click(), BrushMode::Add);
-        app.pick_with_sam(1, None, click(), BrushMode::Subtract);
+        app.pick_with_sam(1, None, click(), BrushMode::Add, None);
+        app.pick_with_sam(1, None, click(), BrushMode::Subtract, None);
         assert_eq!(app.magic_brush_state.pending_sam_picks.len(), 2, "both held until the embedding is there");
         app.processor.land_sam_encoder_for_test(1, embedding());
         app.pump_sam_results(&ctx);
@@ -3339,12 +3372,12 @@ mod depth_tests {
         assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "they ran when the embedding landed");
 
         app.batch.items[0].magic_brush_embedding = None;
-        app.pick_with_sam(1, None, click(), BrushMode::Add);
+        app.pick_with_sam(1, None, click(), BrushMode::Add, None);
         app.magic_brush_state.note_shown(Some(2), std::time::Instant::now());
         assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "another image on screen drops the waiting pick");
 
         app.magic_brush_state.note_shown(Some(1), std::time::Instant::now());
-        app.pick_with_sam(1, None, click(), BrushMode::Add);
+        app.pick_with_sam(1, None, click(), BrushMode::Add, None);
         app.magic_brush_state.deactivate();
         assert!(app.magic_brush_state.pending_sam_picks.is_empty(), "the brush turned off drops the waiting pick");
     }

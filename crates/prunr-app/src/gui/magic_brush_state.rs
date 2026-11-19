@@ -12,13 +12,14 @@ pub(crate) const ENCODE_SETTLE: Duration = Duration::from_millis(250);
 
 /// A Depth pick made before the image's depth map was there; it runs
 /// when the map lands.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct PendingDepthClick {
     pub(crate) item_id: u64,
     /// The click in source pixels.
     pub(crate) at: (f32, f32),
     pub(crate) dims: (u32, u32),
     pub(crate) mode: prunr_core::selection::BrushMode,
+    pub(crate) side: Option<super::brush_state::CutSide>,
 }
 
 /// A Magic Brush click or stroke made before its image was encoded: it
@@ -28,6 +29,7 @@ pub(crate) struct PendingSamPick {
     pub(crate) item_id: u64,
     pub(crate) prompt: prunr_core::sam::prompt::SamPrompt,
     pub(crate) mode: prunr_core::selection::BrushMode,
+    pub(crate) side: Option<super::brush_state::CutSide>,
 }
 
 #[derive(Default)]

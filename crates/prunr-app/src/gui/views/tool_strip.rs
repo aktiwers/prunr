@@ -395,12 +395,12 @@ mod tests {
             (Tool::Paint, _) => crate::gui::tests::fixtures::painted_with_edge(prunr_core::brush::BrushShape::Circle, settings.brush.radius, &[(8.0, 8.0, 2.0)], settings.brush.stamp(), edge),
             (Tool::Magic, true) => StrokeDrawn::Depth {
                 depth: std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(4, 4, vec![0.5; 16])),
-                around: 0.5, mode, range: settings.brush.magic_depth_range, edge,
+                around: 0.5, mode, range: settings.brush.magic_depth_range, edge, side: None,
             },
             (Tool::Magic, false) => {
                 let m = prunr_core::sam::SAM_MASK_RESOLUTION as usize;
                 let output = prunr_core::sam::SamDecoderOutput { masks: vec![0.0; 3 * m * m], iou_predictions: [0.9, 0.1, 0.1] }.best_only();
-                StrokeDrawn::Magic { output: std::sync::Arc::new(output), mode, reading: settings.brush.magic_reading(), edge }
+                StrokeDrawn::Magic { output: std::sync::Arc::new(output), mode, reading: settings.brush.magic_reading(), edge, side: None }
             }
         }
     }

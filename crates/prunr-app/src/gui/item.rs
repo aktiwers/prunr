@@ -3238,6 +3238,22 @@ impl BatchItem {
         }
     }
 
+    /// The side of the cut-out on screen a Magic Brush press at `at`
+    /// (source pixels) lands on, under `model`: on what it keeps, or on
+    /// what it took away. `None` when it shows no cut-out to keep a pick
+    /// to one side of, or its picture is not unpacked (none is unpacked
+    /// here: the press is read on the UI thread).
+    pub(crate) fn cut_side_at(&self, model: super::settings::SettingsModel, at: (f32, f32)) -> Option<super::brush_state::CutSide> {
+        if !self.corrects_cutout(model) {
+            return None;
+        }
+        let cutout = self.timeline.current().result.clone()?;
+        let shown = cutout.loaded()?;
+        let (x, y) = (at.0.max(0.0) as u32, at.1.max(0.0) as u32);
+        let alpha = shown.get_pixel_checked(x, y)?[3];
+        Some(super::brush_state::CutSide { cutout, kept: alpha >= 128 })
+    }
+
     /// Whether the selection corrects the cut-out on screen under `model`,
     /// rather than acting on the image as a plain selection.
     pub(crate) fn corrects_cutout(&self, model: super::settings::SettingsModel) -> bool {

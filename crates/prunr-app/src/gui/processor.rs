@@ -401,6 +401,7 @@ pub(crate) struct DepthSelectRequest {
     pub(crate) range: f32,
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) edge: super::brush_state::StrokeEdge,
+    pub(crate) side: Option<super::brush_state::CutSide>,
 }
 
 /// Combine a stroke, painted or decoded, with the selection it was made
@@ -429,6 +430,7 @@ pub(crate) struct SamDecodeRequest {
     pub(crate) mode: prunr_core::selection::BrushMode,
     pub(crate) reading: prunr_core::MaskReading,
     pub(crate) edge: super::brush_state::StrokeEdge,
+    pub(crate) side: Option<super::brush_state::CutSide>,
     pub(crate) cpu_only: bool,
 }
 
@@ -1035,7 +1037,7 @@ impl Processor {
     pub(crate) fn dispatch_depth_select(&mut self, req: DepthSelectRequest) {
         self.note_pick(req.item_id);
         let around = req.depth.at(req.at.0, req.at.1);
-        let drawn = super::brush_state::StrokeDrawn::Depth { depth: req.depth, around, mode: req.mode, range: req.range, edge: req.edge };
+        let drawn = super::brush_state::StrokeDrawn::Depth { depth: req.depth, around, mode: req.mode, range: req.range, edge: req.edge, side: req.side };
         let _ = self.sam_decoded.tx.send(SamDecoderResult { item_id: req.item_id, result: Ok(drawn) });
     }
 
@@ -2129,7 +2131,7 @@ impl Processor {
                 .and_then(|s| s.decode(&req.embedding, &req.prompt))
                 .map(|out| {
                     tracing::debug!(item_id = req.item_id, decoder_ms = started.elapsed().as_millis() as u64, "SAM decoder ran");
-                    super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading, edge: req.edge }
+                    super::brush_state::StrokeDrawn::Magic { output: Arc::new(out.best_only()), mode: req.mode, reading: req.reading, edge: req.edge, side: req.side.clone() }
                 }))
                 .unwrap_or_else(Err);
             let _ = tx.send(SamDecoderResult { item_id: req.item_id, result });

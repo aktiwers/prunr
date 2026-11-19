@@ -156,7 +156,7 @@ fn app_with_a_magic_pick() -> (PrunrApp, u64) {
     item.dimensions = (8, 8);
     give_tensor(item);
     let reading = app.settings.brush.magic_reading();
-    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading, edge: crate::gui::brush_state::StrokeEdge::HARD });
+    land(&mut app, 9, StrokeDrawn::Magic { output, mode: prunr_core::selection::BrushMode::Add, reading, edge: crate::gui::brush_state::StrokeEdge::HARD, side: None });
     assert_eq!(app.batch.items[0].timeline.undo_steps(), 1);
     let hash = app.batch.items[0].selection_hash.expect("the pick");
     (app, hash)
@@ -254,7 +254,7 @@ fn each_brush_redraws_its_latest_stroke_in_place() {
     assert!(opacity > 0 && opacity < prunr_core::selection::FULL.unsigned_abs(), "Opacity halves it: {opacity}");
 
     let depth = std::sync::Arc::new(prunr_core::depth::DepthMap::from_raw(16, 16, (0..256).map(|i| (i % 16) as f32 / 15.0).collect()));
-    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD };
+    let drawn = StrokeDrawn::Depth { around: depth.at(0.5, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD, side: None };
     let mut app = app_with_landed_stroke(drawn, (16, 16));
     app.settings.brush.magic_depth_range = 0.05;
     let before = selected_cells(&app);
@@ -382,7 +382,7 @@ fn a_brushs_sliders_reach_only_its_own_strokes() {
     use crate::gui::selection_queue::SelectionMade;
     let depth_pick = |app: &mut PrunrApp| {
         let depth = depth_ramp();
-        land(app, 9, StrokeDrawn::Depth { around: depth.at(0.9, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
+        land(app, 9, StrokeDrawn::Depth { around: depth.at(0.9, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD, side: None });
     };
     let feathers = |app: &PrunrApp| -> Vec<(Tool, f32)> {
         app.batch.items[0].timeline.strokes_since_picture().map_or_else(Vec::new, |h| h.ops.iter().filter_map(|op| match op {
@@ -572,7 +572,7 @@ fn a_slider_moves_only_its_own_strokes() {
     let mut app = app_for_strokes();
     paint_down(&mut app, 8.0, 8.0);
     let depth = depth_ramp();
-    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD });
+    land(&mut app, 9, StrokeDrawn::Depth { around: depth.at(0.75, 0.5), depth, mode: prunr_core::selection::BrushMode::Add, range: 0.05, edge: crate::gui::brush_state::StrokeEdge::HARD, side: None });
     app.settings.brush.magic_depth_range = 0.05;
     adjust_all(&mut app, |b| b.magic_depth_range = 0.15);
     let ops = app.batch.items[0].timeline.strokes_since_picture().expect("strokes").ops;

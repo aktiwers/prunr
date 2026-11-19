@@ -476,9 +476,40 @@ impl StrokeEdge {
 /// them.
 #[derive(Clone)]
 pub(crate) enum StrokeDrawn {
-    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading, edge: StrokeEdge },
-    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32, edge: StrokeEdge },
+    Magic { output: std::sync::Arc<prunr_core::sam::SamDecoderOutput>, mode: BrushMode, reading: prunr_core::MaskReading, edge: StrokeEdge, side: Option<CutSide> },
+    Depth { depth: std::sync::Arc<prunr_core::depth::DepthMap>, around: f32, mode: BrushMode, range: f32, edge: StrokeEdge, side: Option<CutSide> },
     Paint { path: std::sync::Arc<PaintPath>, size: f32, stamp: Stamp, edge: StrokeEdge },
+}
+
+/// The side of a cut-out a Magic Brush pick was made on: the cut-out on
+/// screen at the click, and whether the click landed on what it keeps.
+/// The pick stays on that side. The model reads the whole photo, so a
+/// click on the subject reached what was taken away too (Restore brought
+/// it back); a click on what was taken away, to bring it back, reaches
+/// only that.
+#[derive(Clone)]
+pub(crate) struct CutSide {
+    /// Held as the step's stored image: it is read where the stroke is
+    /// drawn, and compressed meanwhile like any step's.
+    pub(crate) cutout: super::timeline::StoredImage,
+    pub(crate) kept: bool,
+}
+
+impl std::fmt::Debug for CutSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CutSide").field("kept", &self.kept).finish_non_exhaustive()
+    }
+}
+
+impl CutSide {
+    /// `mask` kept to this side of the cut; as it is when the cut-out
+    /// cannot be read or has another size.
+    fn keep_to(&self, mask: MaskArtifact) -> MaskArtifact {
+        match self.cutout.load().and_then(|cutout| mask.on_side_of_cut(&cutout, self.kept)) {
+            Some(kept) => kept,
+            None => mask,
+        }
+    }
 }
 
 impl StrokeDrawn {
@@ -532,9 +563,9 @@ impl StrokeDrawn {
         use std::sync::Arc;
         let edge = self.edge().at(values);
         match self {
-            Self::Magic { output, mode, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading, edge },
-            Self::Depth { depth, around, mode, .. } => {
-                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range, edge }
+            Self::Magic { output, mode, side, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: values.reading, edge, side: side.clone() },
+            Self::Depth { depth, around, mode, side, .. } => {
+                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: values.range, edge, side: side.clone() }
             }
             Self::Paint { path, stamp, .. } => Self::Paint {
                 path: Arc::clone(path),
@@ -549,6 +580,15 @@ impl StrokeDrawn {
     /// a selection's feathered against the photo `source` (none to feather
     /// against: as drawn), an eraser's grown and with its fill's band.
     pub(crate) fn mask(&self, width: u32, height: u32, source: Option<&image::RgbaImage>) -> MaskArtifact {
+        let mask = self.edged(width, height, source);
+        match self {
+            Self::Magic { side: Some(side), .. } | Self::Depth { side: Some(side), .. } => side.keep_to(mask),
+            _ => mask,
+        }
+    }
+
+    /// The stroke's mask with its edge, before it is kept to a side.
+    fn edged(&self, width: u32, height: u32, source: Option<&image::RgbaImage>) -> MaskArtifact {
         let drawn = match self {
             Self::Magic { output, mode, reading, .. } => prunr_core::sam::decode_to_mask_artifact(output, width, height, *reading, *mode),
             Self::Depth { depth, around, mode, range, .. } => prunr_core::depth::select_by_depth(depth, width, height, *around, *range, *mode),

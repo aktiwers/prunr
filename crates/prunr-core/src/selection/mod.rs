@@ -639,6 +639,21 @@ impl MaskArtifact {
         kept.then(|| Self::from_cells(self.width, self.height, cells).with_fill_layer(fill))
     }
 
+    /// The cells on one side of a cut-out: where `cutout` (an RGBA image of
+    /// this plane's size) shows the subject when `kept`, else where it
+    /// took the picture away; the rest go. A pixel it shows in part is on
+    /// both sides, so a soft edge is reached from either. `None` when the
+    /// sizes differ.
+    pub fn on_side_of_cut(&self, cutout: &image::RgbaImage, kept: bool) -> Option<MaskArtifact> {
+        if (self.width, self.height) != cutout.dimensions() {
+            return None;
+        }
+        let on_side: Vec<bool> = cutout.as_raw().chunks_exact(4).map(|px| if kept { px[3] > 0 } else { px[3] < u8::MAX }).collect();
+        let cells = self.data.iter().zip(&on_side).map(|(&cell, &side)| if side { cell } else { 0 }).collect();
+        let fill = self.fill.as_ref().map(|layer| layer.iter().zip(&on_side).map(|(&f, &side)| if side { f } else { 0 }).collect::<Vec<u8>>());
+        Some(Self::from_cells(self.width, self.height, cells).with_fill_layer(fill))
+    }
+
     /// The bounding rectangle of the non-zero cells, and of the fill an
     /// eraser stroke reaches past them with; `None` when it has neither.
     pub fn bounds(&self) -> Option<CellRect> {
@@ -728,6 +743,18 @@ impl MaskArtifact {
 mod tests {
     use super::*;
     use crate::brush::{paint_circle, Stamp};
+
+    /// A pick stays on the side of the cut it was made on: what the
+    /// cut-out keeps, or what it took away. A pixel it shows in part is on
+    /// both, so a soft edge is reached from either side.
+    #[test]
+    fn a_pick_stays_on_its_side_of_the_cut() {
+        let full = MaskArtifact::from_cells(3, 1, vec![FULL, FULL, FULL]);
+        let cut = image::RgbaImage::from_fn(3, 1, |x, _| image::Rgba([9, 9, 9, [255, 128, 0][x as usize]]));
+        assert_eq!(full.on_side_of_cut(&cut, true).expect("same size").cells(), [FULL, FULL, 0]);
+        assert_eq!(full.on_side_of_cut(&cut, false).expect("same size").cells(), [0, FULL, FULL]);
+        assert!(full.on_side_of_cut(&image::RgbaImage::new(2, 1), true).is_none(), "another size");
+    }
 
     fn mask(w: u32, h: u32, data: Vec<i8>) -> MaskArtifact {
         MaskArtifact::from_cells(w, h, data)

@@ -403,13 +403,15 @@ impl PrunrApp {
     /// Before the image's map is there the click waits for it; the map
     /// is on its way, since the brush asks for the shown image's map,
     /// and `pump_depth` runs the click when it lands.
-    pub(crate) fn magic_depth_click(&mut self, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode) {
+    /// `side`: the side of the cut-out the click landed on (`cut_side`),
+    /// which the pick stays on.
+    pub(crate) fn magic_depth_click(&mut self, item_id: u64, at: (f32, f32), dims: (u32, u32), mode: prunr_core::selection::BrushMode, side: Option<crate::gui::brush_state::CutSide>) {
         let Some(depth) = self.batch.find_by_id(item_id).and_then(|i| i.current_depth().cloned()) else {
             // The click waits for the map: one that failed is measured again.
             if let Some(item) = self.batch.find_by_id_mut(item_id) {
                 item.try_depth_again();
             }
-            self.magic_brush_state.pending_depth_click = Some(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode });
+            self.magic_brush_state.pending_depth_click = Some(super::super::magic_brush_state::PendingDepthClick { item_id, at, dims, mode, side });
             return;
         };
         let (w, h) = dims;
@@ -420,7 +422,15 @@ impl PrunrApp {
             range: self.settings.brush.magic_depth_range,
             mode,
             edge: self.settings.stroke_edge(),
+            side,
         });
+    }
+
+    /// The side of the cut-out on screen a Magic Brush press at `at`
+    /// (source pixels) on `item_id` lands on; `None` when it shows no
+    /// cut-out under the model.
+    pub(crate) fn cut_side(&self, item_id: u64, at: (f32, f32)) -> Option<crate::gui::brush_state::CutSide> {
+        self.batch.find_by_id(item_id)?.cut_side_at(self.settings.model, at)
     }
 
     /// Whether the selected model has brushes, so Magic Brush's models
@@ -573,9 +583,10 @@ impl PrunrApp {
         embedding: Option<Arc<prunr_core::sam::SamEmbedding>>,
         prompt: prunr_core::sam::prompt::SamPrompt,
         mode: prunr_core::selection::BrushMode,
+        side: Option<crate::gui::brush_state::CutSide>,
     ) {
         let Some(embedding) = embedding else {
-            self.magic_brush_state.pending_sam_picks.push(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode });
+            self.magic_brush_state.pending_sam_picks.push(crate::gui::magic_brush_state::PendingSamPick { item_id, prompt, mode, side });
             return;
         };
         self.processor.dispatch_sam_decoder(crate::gui::processor::SamDecodeRequest {
@@ -585,6 +596,7 @@ impl PrunrApp {
             mode,
             reading: self.settings.brush.magic_reading(),
             edge: self.settings.stroke_edge(),
+            side,
             cpu_only: self.settings.cpu_only(),
         });
     }
@@ -606,7 +618,7 @@ impl PrunrApp {
                             .extract_if(.., |p| p.item_id == result.item_id)
                             .collect();
                         for pick in picks {
-                            self.pick_with_sam(pick.item_id, Some(Arc::clone(&embedding)), pick.prompt, pick.mode);
+                            self.pick_with_sam(pick.item_id, Some(Arc::clone(&embedding)), pick.prompt, pick.mode, pick.side);
                         }
                     }
                     ctx.request_repaint();
@@ -956,13 +968,13 @@ mod tool_mutual_exclusion_tests {
         app.set_tool(Some(Tool::Magic));
         assert_eq!(app.run_refusal(&app.batch.items[0]), None, "nothing waits yet");
         let prompt = prunr_core::sam::prompt::build_click_prompt(2.0, 2.0, 8, 8);
-        app.pick_with_sam(1, None, prompt, BrushMode::Add);
+        app.pick_with_sam(1, None, prompt, BrushMode::Add, None);
         assert_eq!(app.run_refusal(&app.batch.items[0]), Some(Reason::FinishingSelection), "a pick waits for the embedding");
 
         let mut app = app_with_no_queue();
         app.settings.model = SettingsModel::Silueta;
         app.set_tool(Some(Tool::Magic));
-        app.magic_depth_click(1, (2.0, 2.0), (8, 8), BrushMode::Add);
+        app.magic_depth_click(1, (2.0, 2.0), (8, 8), BrushMode::Add, None);
         assert_eq!(app.run_refusal(&app.batch.items[0]), Some(Reason::FinishingSelection), "a click waits for the depth map");
         app.batch.items[0].depth_run.pending = true;
         app.on_depth_measured(&egui::Context::default(), 1, Err("short of memory".into()), None);
@@ -1015,7 +1027,7 @@ mod tool_mutual_exclusion_tests {
         };
 
         let mut app = failed();
-        app.magic_depth_click(1, (2.0, 2.0), (8, 8), prunr_core::selection::BrushMode::Add);
+        app.magic_depth_click(1, (2.0, 2.0), (8, 8), prunr_core::selection::BrushMode::Add, None);
         assert!(app.batch.items[0].needs_depth_run(), "a By depth click");
 
         let mut app = failed();

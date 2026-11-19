@@ -350,12 +350,14 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
     if released && app.magic_brush_state.active_stroke.len() > 1 {
         let stroke_pts = std::mem::take(&mut app.magic_brush_state.active_stroke);
         app.magic_brush_state.active_trail.clear();
+        // A stroke stays on the side of the cut it began on.
+        let side = app.cut_side(item_id, stroke_pts[0]);
         if by_depth {
             // With Depth on a stroke selects like a click where it began.
-            app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode);
+            app.magic_depth_click(item_id, stroke_pts[0], (source_w, source_h), mode, side);
         } else {
             match prunr_core::sam::prompt::build_stroke_prompt(&stroke_pts, source_w, source_h) {
-                Ok(prompt) => app.pick_with_sam(item_id, embedding, prompt, mode),
+                Ok(prompt) => app.pick_with_sam(item_id, embedding, prompt, mode, side),
                 Err(e) => tracing::warn!(item_id, "SAM stroke prompt failed: {e:?}"),
             }
         }
@@ -364,11 +366,12 @@ fn handle_magic_brush_input(ui: &mut egui::Ui, app: &mut PrunrApp, canvas_rect: 
             // A stroke's own release was taken by the branch above, so
             // what is left is a click, even when its press and release
             // fell in different frames and left one point behind.
+            let side = app.cut_side(item_id, (px, py));
             if by_depth {
-                app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode);
+                app.magic_depth_click(item_id, (px, py), (source_w, source_h), mode, side);
             } else {
                 let prompt = prunr_core::sam::prompt::build_click_prompt(px, py, source_w, source_h);
-                app.pick_with_sam(item_id, embedding, prompt, mode);
+                app.pick_with_sam(item_id, embedding, prompt, mode, side);
             }
         }
     }
