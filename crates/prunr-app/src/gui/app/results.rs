@@ -197,6 +197,8 @@ impl PrunrApp {
             if self.land_run(ctx, r, engine, tex_kind, keep) {
                 if engine == Engine::Upscale {
                     self.after_result_landed(item_id);
+                } else if let Some(idx) = self.batch.index_of(item_id) {
+                    self.render_drift(idx);
                 }
                 tracing::info!(item_id, "{tex_kind} result applied");
             }
@@ -503,6 +505,9 @@ impl PrunrApp {
                 self.request_depth(idx);
             }
         }
+        // Knobs moved while it ran: their queued render went if the image
+        // left the screen.
+        self.render_drift(idx);
     }
 
     /// Whether the image at `idx` needs its depth map now: a depth knob on
@@ -1816,6 +1821,30 @@ mod timeline_contract_tests {
         assert_eq!(app.wants_kept_run_refinish(0), Some(PreviewKind::UpscaleTier2), "a Sharpen change re-finishes the kept run");
         app.batch.items[0].settings.output_scale = prunr_core::OutputScale::X2;
         assert_eq!(app.wants_kept_run_refinish(0), None, "a Scale change needs a new run");
+    }
+
+    /// A run that lands after its knobs moved is finished as they now
+    /// stand, also off screen: AI blend moved while the upscale ran, then
+    /// another image shown, and the upscale landed with the AI blend it
+    /// was asked with. The move's queued re-finish went with the image
+    /// leaving the screen, and its picture, thumbnail and Save kept the
+    /// old look until it was shown again.
+    #[test]
+    fn a_run_landing_after_its_knobs_moved_is_finished_as_they_stand() {
+        use crate::gui::live_preview::PreviewKind;
+        let ctx = egui::Context::default();
+        let mut app = app_with_processed_item(SettingsModel::RealEsrganUpscale);
+        push_test_item(&mut app, 2).dimensions = (4, 4);
+        let item = &mut app.batch.items[0];
+        let recipe = item.settings.current_recipe(prunr_core::ModelKind::RealEsrganX4Plus);
+        item.start_job(Some(StepKind::Upscale), Engine::Upscale);
+        let run = item.job_run().expect("an upscale");
+        item.settings.ai_blend = 0.43;
+        app.batch.select_item(1);
+        app.processor.land_run_for_test(Engine::Upscale, 1, run, px(7), recipe);
+        app.pump_upscale_results(&ctx);
+        assert_eq!(shown(&app), Some(7), "the upscale landed");
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "and is finished with the AI blend set now");
     }
 
     /// An upscale's kept run is its step's own, whatever model is picked

@@ -833,7 +833,7 @@ impl PrunrApp {
                 // A step whose render was dropped as the image moved on
                 // shows the picture from before its settings; off screen
                 // too, which the per-frame check does not read.
-                self.render_drift(idx);
+                self.catch_up_step(idx);
             }
             stepped.push(kind);
         }

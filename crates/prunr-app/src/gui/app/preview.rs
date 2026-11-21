@@ -85,15 +85,25 @@ impl PrunrApp {
         (applied.mask != current.mask && recut.allows_request()).then_some(Drift::Render(PreviewKind::Mask))
     }
 
-    /// Bring the image at `idx` back in line with its settings when its
-    /// picture drifted and nothing for it is under way: an undo or redo
-    /// moved it to a step whose own render or run was dropped as the image
-    /// moved on. A run goes only for the image on screen, whose look a run
-    /// takes; one off screen runs when it is shown.
+    /// Re-render the image at `idx` live when its picture drifted from its
+    /// settings and no render for it is under way: a run landed, on screen
+    /// or off, after its knobs moved (the move's queued render goes when
+    /// the image leaves the screen).
     pub(crate) fn render_drift(&mut self, idx: usize) {
         let id = self.batch.items[idx].id;
+        if let Some(Drift::Render(kind)) = self.drift(idx).filter(|_| !self.processor.live_preview.works_on(id)) {
+            self.processor.live_preview.render_now(id, kind);
+        }
+    }
+
+    /// An undo or redo moved the image at `idx` to a step whose own render
+    /// or run was dropped as the image moved on: it renders again, and a
+    /// look that needs the model runs again for the image on screen, whose
+    /// look a run takes.
+    pub(crate) fn catch_up_step(&mut self, idx: usize) {
+        let id = self.batch.items[idx].id;
         match self.drift(idx) {
-            Some(Drift::Render(kind)) if !self.processor.live_preview.works_on(id) => self.processor.live_preview.render_now(id, kind),
+            Some(Drift::Render(_)) => self.render_drift(idx),
             Some(Drift::Run) if self.batch.is_selected(id) => self.process_items(|item| item.id == id, None),
             _ => {}
         }
