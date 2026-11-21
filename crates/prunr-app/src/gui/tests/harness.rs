@@ -10,10 +10,20 @@ use crate::gui::automation::tree::{readable_name, ControlNode};
 
 pub(super) const HARNESS_SIZE: egui::Vec2 = egui::vec2(1400.0, 900.0);
 
+/// These tests read the AccessKit tree and never draw. kittest's own
+/// renderer keeps every texture upload until a first draw, so a window
+/// that never draws held a copy of each picture it ever showed: 630 MB
+/// for each upload of a picture enlarged three times over.
+struct Undrawn;
+
+impl egui_kittest::TestRenderer for Undrawn {
+    fn handle_delta(&mut self, _delta: &egui::TexturesDelta) {}
+}
+
 /// A builder at the default window size, for tests that need one more
 /// option before `build_eframe(new_app)`.
 pub(super) fn harness_builder() -> HarnessBuilder<PrunrApp> {
-    Harness::builder().with_size(HARNESS_SIZE)
+    Harness::builder().with_size(HARNESS_SIZE).renderer(Undrawn)
 }
 
 /// The app as eframe would create it, with its icon font installed.
@@ -27,7 +37,7 @@ pub(super) fn harness() -> Harness<'static, PrunrApp> {
 }
 
 pub(super) fn harness_sized(size: egui::Vec2) -> Harness<'static, PrunrApp> {
-    Harness::builder().with_size(size).build_eframe(|cc| new_app(cc))
+    harness_builder().with_size(size).build_eframe(|cc| new_app(cc))
 }
 
 /// One finished item, selected.
