@@ -8,6 +8,14 @@ use crate::gui::background_io::TexTarget;
 use crate::gui::live_preview::PreviewKind;
 use super::{PrunrApp, BUSY_PILL_AFTER};
 
+/// What brings a picture that drifted from its settings back in line.
+enum Drift {
+    /// A live render.
+    Render(PreviewKind),
+    /// A run of the model, as a knob change that needs it starts one.
+    Run,
+}
+
 impl PrunrApp {
     /// Background work with nothing on the canvas to show for it: a live
     /// render, or a texture, thumbnail, decode or backdrop a thread owes
@@ -45,35 +53,48 @@ impl PrunrApp {
         self.quiet_background_work()
     }
 
-    /// The render that brings the picture of the image at `idx` back in
-    /// line with its settings, if it drifted: a cut-out's applied mask
-    /// against the mask its settings make, or a kept upscale's or
-    /// colorize's Refine or Strength moved past its picture. `None` when
-    /// in line, or when no render could land (a re-cut the render door
-    /// refuses: no cut-out shown, the photo after an undo).
-    fn drift_render(&self, idx: usize) -> Option<PreviewKind> {
+    /// What brings the picture of the image at `idx` back in line with
+    /// its settings, if it drifted: a live render for a cut-out's applied
+    /// mask against the mask its settings make, or for a kept upscale's or
+    /// colorize's Refine or Strength moved past its picture; a run of the
+    /// model for a look that needs it (another Sketch mode), as a knob
+    /// change on a processed cut-out runs it. `None` when in line, or when
+    /// nothing could land (a re-cut the render door refuses; a cut another
+    /// model made, which stays as it is until Process; a run that failed).
+    fn drift(&self, idx: usize) -> Option<Drift> {
+        use prunr_core::RequiredTier;
         let item = &self.batch.items[idx];
         // Only a cut-out or the filters apply the mask settings; firing a
         // mask preview over an erase or an upscale would clobber it with
         // the source through `run_preview`'s no-tensor fallback.
         if !shows(self.settings.model, Surface::Effect) {
-            return self.wants_kept_run_refinish(idx);
+            return self.wants_kept_run_refinish(idx).map(Drift::Render);
         }
         let applied = item.applied_recipe.as_ref()?;
+        let kind = self.settings.model.recipe_kind();
         // The mask as the run applies it: pinned to the defaults where the
         // run uses none (Sketch on Full), so its settings never drift.
-        let current = item.settings.current_recipe(self.settings.model.recipe_kind()).mask;
-        let recut = item.verdict(crate::gui::capability::Need::Cutout, self.settings.model.role());
-        (applied.mask != current && recut.allows_request()).then_some(PreviewKind::Mask)
+        let current = item.settings.current_recipe(kind);
+        let role = self.settings.model.role();
+        if applied.inference.model == kind && matches!(prunr_core::resolve_tier(applied, &current), RequiredTier::FullPipeline | RequiredTier::AddEdgeInference) {
+            let may_run = item.is_idle() && !item.last_run_failed() && item.verdict(crate::gui::capability::Need::Processed, role).allows_request();
+            return may_run.then_some(Drift::Run);
+        }
+        let recut = item.verdict(crate::gui::capability::Need::Cutout, role);
+        (applied.mask != current.mask && recut.allows_request()).then_some(Drift::Render(PreviewKind::Mask))
     }
 
-    /// Re-render the image at `idx` when its picture drifted from its
-    /// settings and no render for it is under way: an undo or redo moved
-    /// it to a step whose own render was dropped as the image moved on.
+    /// Bring the image at `idx` back in line with its settings when its
+    /// picture drifted and nothing for it is under way: an undo or redo
+    /// moved it to a step whose own render or run was dropped as the image
+    /// moved on. A run goes only for the image on screen, whose look a run
+    /// takes; one off screen runs when it is shown.
     pub(crate) fn render_drift(&mut self, idx: usize) {
         let id = self.batch.items[idx].id;
-        if let Some(kind) = self.drift_render(idx).filter(|_| !self.processor.live_preview.works_on(id)) {
-            self.processor.live_preview.render_now(id, kind);
+        match self.drift(idx) {
+            Some(Drift::Render(kind)) if !self.processor.live_preview.works_on(id) => self.processor.live_preview.render_now(id, kind),
+            Some(Drift::Run) if self.batch.is_selected(id) => self.process_items(|item| item.id == id, None),
+            _ => {}
         }
     }
 
@@ -91,19 +112,28 @@ impl PrunrApp {
         if self.last_drift_check == Some(checked_as) {
             return;
         }
-        let drift = self.drift_render(idx);
-        let mut checked = drift.is_none();
-        let live = &mut self.processor.live_preview;
-        if let Some(kind) = drift {
-            if live.is_pending_for(id) {
-                // A drag under way: its queued frame goes now instead of at
-                // the throttle, and the drag settles on release or stillness.
-                live.hurry(id);
-            } else if !live.works_on(id) {
-                tracing::debug!(item_id = id, ?kind, "recipe-drift tripwire fired — dispatching Tier-2");
-                live.render_now(id, kind);
-                checked = true;
+        let mut checked = true;
+        match self.drift(idx) {
+            Some(Drift::Render(kind)) => {
+                let live = &mut self.processor.live_preview;
+                if live.is_pending_for(id) {
+                    // A drag under way: its queued frame goes now instead of
+                    // at the throttle, and the drag settles on release or
+                    // stillness, not here.
+                    live.hurry(id);
+                    checked = false;
+                } else if !live.works_on(id) {
+                    tracing::debug!(item_id = id, ?kind, "recipe-drift tripwire fired — dispatching Tier-2");
+                    live.render_now(id, kind);
+                } else {
+                    checked = false;
+                }
             }
+            Some(Drift::Run) => {
+                tracing::debug!(item_id = id, "recipe-drift tripwire fired — the look needs the model again");
+                self.process_items(|item| item.id == id, None);
+            }
+            None => {}
         }
         self.last_drift_check = checked.then_some(checked_as);
     }
@@ -815,6 +845,37 @@ mod drift_tests {
         app.batch.select_item(1);
         app.handle_undo(&egui::Context::default());
         assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "the image off screen");
+    }
+
+    /// A cut-out step whose look needs the model again, and whose run was
+    /// dropped as the image moved on (Pencil Sketch picked, Reset before
+    /// its lines landed, then Undo), runs again when shown, as the pick
+    /// did: on a processed cut-out a knob change runs what it needs by
+    /// itself. Under another model it stays as it is until Process, and
+    /// after a failed run it waits for one asked for: or it would run
+    /// again on every failure.
+    #[test]
+    fn a_shown_look_whose_run_was_dropped_runs_again() {
+        use crate::gui::worker::WorkerMessage;
+        for (model, failed, runs) in [(SettingsModel::Silueta, false, true), (SettingsModel::BiRefNetLite, false, false), (SettingsModel::Silueta, true, false)] {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = model;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (4, 4);
+            crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+            item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
+            item.commit(crate::gui::timeline::StepKind::Preset);
+            if failed {
+                item.fail("the worker stopped".into());
+            }
+            app.batch.select_item(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            app.recipe_drift_tripwire();
+            let ran = rx.try_iter().any(|m| matches!(m, WorkerMessage::BatchProcess { .. }));
+            assert_eq!(ran, runs, "{model:?}, failed {failed}");
+        }
     }
 
     /// A re-cut that draws lines it has none of waits for them. Undone

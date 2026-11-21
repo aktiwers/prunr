@@ -1629,6 +1629,12 @@ impl BatchItem {
     }
 
     /// Why the image failed, while the failure is what it shows.
+    /// The last run or read of the image failed, also one over a result
+    /// it kept (which `error` does not say, the result being shown).
+    pub(crate) fn last_run_failed(&self) -> bool {
+        self.failure.is_some()
+    }
+
     pub(crate) fn error(&self) -> Option<&str> {
         self.failure.as_deref().filter(|_| !self.is_cutting() && !self.has_result())
     }
