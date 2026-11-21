@@ -166,6 +166,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - A stroke let go over the tool strip lands; a stroke redone while an erase fills stays as the next area; every click by depth made before the depth map is ready runs once it is, and a depth measurement that failed is made again when asked for.
 - Switching model with images still queued says how many were left; a No-model pass that fails says so.
 - Undo back to a Refine or Strength change shows that change's picture; one made just before the next change, or on a ticked image off screen, kept the picture from before it.
+- Undo back to a preset or Sketch change whose run had not finished (another change came first) runs it again, so the look shows; it showed the settings over the picture from before.
 - Redo after undoing back to the photo gives a Sketch look its lines back; a cut-out without its outline could take the step's place.
 - A brush slider reaches a stroke painted under another kind of model: the cut-out's Feather, Hardness and Opacity reach a stroke painted under an eraser (which loses its Expand margin as it takes them), and the eraser's Expand and Feather reach one painted as a selection. Each kept its own edge, so the slider did nothing.
 - A brush slider moved over a stroke it cannot visibly change (a faint stroke has no edge to feather) still sets that stroke's value; it came back to the old value at the next slider move.
