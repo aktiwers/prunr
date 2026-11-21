@@ -59,8 +59,9 @@ impl PrunrApp {
     /// colorize's Refine or Strength moved past its picture; a run of the
     /// model for a look that needs it (another Sketch mode), as a knob
     /// change on a processed cut-out runs it. `None` when in line, or when
-    /// nothing could land (a re-cut the render door refuses; a cut another
-    /// model made, which stays as it is until Process; a run that failed).
+    /// nothing could land or is wanted (a re-cut the render door refuses; a
+    /// cut another model made, which stays as it is until Process; a look
+    /// whose run was cancelled, which waits for Process).
     fn drift(&self, idx: usize) -> Option<Drift> {
         use prunr_core::RequiredTier;
         let item = &self.batch.items[idx];
@@ -77,7 +78,7 @@ impl PrunrApp {
         let current = item.settings.current_recipe(kind);
         let role = self.settings.model.role();
         if applied.inference.model == kind && matches!(prunr_core::resolve_tier(applied, &current), RequiredTier::FullPipeline | RequiredTier::AddEdgeInference) {
-            let may_run = item.is_idle() && !item.last_run_failed() && item.verdict(crate::gui::capability::Need::Processed, role).allows_request();
+            let may_run = item.is_idle() && !item.timeline.current().look_cancelled && item.verdict(crate::gui::capability::Need::Processed, role).allows_request();
             return may_run.then_some(Drift::Run);
         }
         let recut = item.verdict(crate::gui::capability::Need::Cutout, role);
@@ -100,7 +101,9 @@ impl PrunrApp {
 
     /// The drift check on the image on screen, every frame: a safety net
     /// for edits no knob dispatched (brush commits, hotkeys). Asked once
-    /// per step and settings: a render refused for memory never lands.
+    /// per step and settings: a render refused for memory never lands. It
+    /// renders only; a run waits for an undo or redo to the step, or for
+    /// Process, so a Cancel stays a Cancel.
     pub(crate) fn recipe_drift_tripwire(&mut self) {
         if self.processor.live_preview.has_in_flight() {
             return;
@@ -129,11 +132,9 @@ impl PrunrApp {
                     checked = false;
                 }
             }
-            Some(Drift::Run) => {
-                tracing::debug!(item_id = id, "recipe-drift tripwire fired — the look needs the model again");
-                self.process_items(|item| item.id == id, None);
-            }
-            None => {}
+            // Only an undo or redo that arrives on the step runs it again: a
+            // look whose run was cancelled keeps waiting for Process.
+            Some(Drift::Run) | None => {}
         }
         self.last_drift_check = checked.then_some(checked_as);
     }
@@ -849,15 +850,17 @@ mod drift_tests {
 
     /// A cut-out step whose look needs the model again, and whose run was
     /// dropped as the image moved on (Pencil Sketch picked, Reset before
-    /// its lines landed, then Undo), runs again when shown, as the pick
-    /// did: on a processed cut-out a knob change runs what it needs by
-    /// itself. Under another model it stays as it is until Process, and
-    /// after a failed run it waits for one asked for: or it would run
-    /// again on every failure.
+    /// its lines landed), runs again when an undo comes back to it, as the
+    /// pick did: on a processed cut-out a knob change runs what it needs
+    /// by itself. Under another model it stays as it is until Process,
+    /// and the per-frame check never runs it, so a look whose run was
+    /// cancelled waits for Process (and a failing run cannot repeat).
     #[test]
-    fn a_shown_look_whose_run_was_dropped_runs_again() {
+    fn an_undo_to_a_look_whose_run_was_dropped_runs_it_again() {
+        use crate::gui::timeline::StepKind;
         use crate::gui::worker::WorkerMessage;
-        for (model, failed, runs) in [(SettingsModel::Silueta, false, true), (SettingsModel::BiRefNetLite, false, false), (SettingsModel::Silueta, true, false)] {
+        let ctx = egui::Context::default();
+        for (model, runs) in [(SettingsModel::Silueta, true), (SettingsModel::BiRefNetLite, false)] {
             let mut app = PrunrApp::new_for_test();
             app.settings.model = model;
             let item = push_test_item(&mut app, 1);
@@ -865,17 +868,49 @@ mod drift_tests {
             crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
             item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
             item.settings.line_mode = prunr_core::LineMode::SubjectOutline;
-            item.commit(crate::gui::timeline::StepKind::Preset);
-            if failed {
-                item.fail("the worker stopped".into());
-            }
+            item.commit(StepKind::Preset);
             app.batch.select_item(0);
             let (tx, rx) = std::sync::mpsc::channel();
             app.processor.worker_tx = tx;
             app.recipe_drift_tripwire();
+            assert!(rx.try_iter().all(|m| !matches!(m, WorkerMessage::BatchProcess { .. })), "{model:?}: the per-frame check runs nothing");
+
+            let item = &mut app.batch.items[0];
+            item.settings.line_mode = prunr_core::LineMode::Off;
+            item.commit(StepKind::Preset);
+            app.handle_undo(&ctx);
             let ran = rx.try_iter().any(|m| matches!(m, WorkerMessage::BatchProcess { .. }));
-            assert_eq!(ran, runs, "{model:?}, failed {failed}");
+            assert_eq!(ran, runs, "{model:?}");
         }
+    }
+
+    /// A look whose run was cancelled stays a cancelled look: an undo
+    /// and a redo back to it give it back as it was, waiting for Process,
+    /// and do not run what Cancel stopped.
+    #[test]
+    fn a_cancelled_look_is_not_run_again_by_a_redo() {
+        use crate::gui::timeline::StepKind;
+        use crate::gui::worker::WorkerMessage;
+        let ctx = egui::Context::default();
+        let mut app = PrunrApp::new_for_test();
+        app.settings.model = SettingsModel::Silueta;
+        let item = push_test_item(&mut app, 1);
+        item.dimensions = (4, 4);
+        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+        app.batch.select_item(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.processor.worker_tx = tx;
+        app.batch.items[0].settings.line_mode = prunr_core::LineMode::SubjectOutline;
+        app.batch.items[0].commit(StepKind::Preset);
+        app.process_items(|item| item.id == 1, None);
+        assert!(rx.try_iter().any(|m| matches!(m, WorkerMessage::BatchProcess { .. })), "the look's run");
+        app.apply_cancel_shortcut(&ctx);
+        assert!(app.batch.items[0].job.is_none(), "Escape cancelled it");
+
+        app.handle_undo(&ctx);
+        app.handle_redo(&ctx);
+        assert!(rx.try_iter().all(|m| !matches!(m, WorkerMessage::BatchProcess { .. })), "the redo runs nothing Cancel stopped");
     }
 
     /// A re-cut that draws lines it has none of waits for them. Undone

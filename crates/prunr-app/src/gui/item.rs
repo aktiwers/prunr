@@ -1629,12 +1629,6 @@ impl BatchItem {
     }
 
     /// Why the image failed, while the failure is what it shows.
-    /// The last run or read of the image failed, also one over a result
-    /// it kept (which `error` does not say, the result being shown).
-    pub(crate) fn last_run_failed(&self) -> bool {
-        self.failure.is_some()
-    }
-
     pub(crate) fn error(&self) -> Option<&str> {
         self.failure.as_deref().filter(|_| !self.is_cutting() && !self.has_result())
     }
@@ -1789,6 +1783,7 @@ impl BatchItem {
             at: std::time::Instant::now(),
             id: super::timeline::next_step_id(),
             made: None,
+            look_cancelled: false,
         }
     }
 
@@ -2771,6 +2766,16 @@ impl BatchItem {
     /// run's that an undo left behind.
     pub(crate) fn awaits_run(&self, run: u64) -> bool {
         self.job_run() == Some(run)
+    }
+
+    /// A Cancel stopped the awaited run: as `abandon_job`, and the step it
+    /// was for remembers it, so an undo or redo back to it does not run
+    /// the look again.
+    pub(crate) fn cancel_job(&mut self) {
+        if self.job_is_current() {
+            self.timeline.current_mut().look_cancelled = true;
+        }
+        self.abandon_job();
     }
 
     /// The awaited run will not land (cancelled): the item shows its

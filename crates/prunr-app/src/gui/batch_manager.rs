@@ -386,13 +386,13 @@ impl BatchManager {
         self.selected_item().map(|_| self.selected_index)
     }
 
-    /// Abandon every cut, under way or waiting for a slot, after a
+    /// Cancel every cut, under way or waiting for a slot, after a
     /// Cancel-All: each image shows its own state again. Late arrivals
     /// from the worker are dropped by the job check in `on_batch_item_done`.
-    pub(crate) fn abandon_cuts(&mut self) {
+    pub(crate) fn cancel_cuts(&mut self) {
         for item in &mut self.items {
             if item.awaits_cut() {
-                item.abandon_job();
+                item.cancel_job();
             }
         }
     }

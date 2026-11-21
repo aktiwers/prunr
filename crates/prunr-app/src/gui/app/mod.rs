@@ -978,7 +978,7 @@ impl PrunrApp {
         self.handle_cancel();
         self.processor.clear_admission();
         self.processor.drop_deferred_runs();
-        self.batch.abandon_cuts();
+        self.batch.cancel_cuts();
         // The capsule reads the slot, not the app state, so the reset
         // has to clear it.
         self.processor.end_seg_run();
@@ -1053,7 +1053,7 @@ impl PrunrApp {
         // running it again takes it from the cancelled one's.
         for id in &targets {
             if let Some(item) = self.batch.find_by_id_mut(*id) {
-                item.abandon_job();
+                item.cancel_job();
             }
         }
         self.toasts.info(format!("Cancelling {}", crate::gui::views::fmt::count(targets.len(), "image", "images")));

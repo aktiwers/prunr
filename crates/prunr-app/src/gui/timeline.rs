@@ -345,6 +345,10 @@ pub(crate) struct DocState {
     pub(crate) id: u64,
     /// What the step did to the selection, for a replay of the strokes.
     pub(crate) made: Option<super::selection_queue::Made>,
+    /// The run for this step's look was cancelled: the look shows at the
+    /// next Process, not when an undo or redo comes back to the step. A
+    /// run that lands on the step makes it anew, without the mark.
+    pub(crate) look_cancelled: bool,
 }
 
 pub(crate) fn next_step_id() -> u64 {
@@ -421,6 +425,7 @@ impl DocState {
             at: Instant::now(),
             id: next_step_id(),
             made: None,
+            look_cancelled: false,
         }
     }
 }
@@ -692,6 +697,7 @@ mod tests {
             at: Instant::now(),
             id: next_step_id(),
             made: None,
+            look_cancelled: false,
         }
     }
 

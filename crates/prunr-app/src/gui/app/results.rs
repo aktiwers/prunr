@@ -266,11 +266,12 @@ impl PrunrApp {
     /// An upscale or colorize ended without a result: its item stops
     /// waiting, and a toast says whether it was cancelled or failed.
     fn end_unlanded_run(&mut self, item_id: u64, run: u64, engine: Engine, err: prunr_core::CoreError) {
+        let cancelled = matches!(err, prunr_core::CoreError::Cancelled);
         if let Some(item) = self.batch.find_by_id_mut(item_id).filter(|i| i.awaits_run(run)) {
-            item.abandon_job();
+            if cancelled { item.cancel_job() } else { item.abandon_job() }
         }
         let run = engine.label();
-        if matches!(err, prunr_core::CoreError::Cancelled) {
+        if cancelled {
             tracing::info!(item_id, run, "run cancelled by user");
             self.toasts.info(format!("{run} cancelled"));
         } else {
@@ -995,7 +996,7 @@ impl PrunrApp {
     /// The worker stopped batch `batch` for a Cancel. Only that batch
     /// ends: its word can come after the next Process started another.
     fn on_cancelled(&mut self, batch: u64) {
-        self.drop_batch(batch);
+        self.drop_batch(batch, true);
         if !self.batch.any_awaiting_cut() {
             self.status.text = "Cancelled".to_string();
         }
@@ -1004,7 +1005,7 @@ impl PrunrApp {
     /// The worker refused batch `batch` for memory before it ran: its
     /// images go back to what they showed, and why shows once.
     fn on_batch_refused(&mut self, batch: u64, why: String) {
-        self.drop_batch(batch);
+        self.drop_batch(batch, false);
         let why = prunr_core::plain::reason(why);
         if !self.batch.any_awaiting_cut() {
             self.status.text = why.clone();
@@ -1014,13 +1015,13 @@ impl PrunrApp {
     }
 
     /// Every image batch `batch` still held, sent or waiting for room,
-    /// stops waiting on it.
-    fn drop_batch(&mut self, batch: u64) {
+    /// stops waiting on it; `cancelled` when a Cancel stopped it.
+    fn drop_batch(&mut self, batch: u64, cancelled: bool) {
         self.processor.batch_dropped(batch);
         let mut never_answered = self.processor.finish_batch(batch);
         never_answered.extend(self.processor.end_admission_with(batch));
         for item in self.batch.items.iter_mut().filter(|i| never_answered.contains(&i.id) && i.awaits_cut()) {
-            item.abandon_job();
+            if cancelled { item.cancel_job() } else { item.abandon_job() }
         }
         // Counts held for the end of every batch end here when this was
         // the last: the next batch's end tells only its own.
