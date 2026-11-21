@@ -509,17 +509,12 @@ impl World {
     }
 
     /// The strokes the brush's sliders draw again: the latest of the brush
-    /// in hand under Last, all of them under All. A stroke keeps the kind
-    /// of edge it was drawn with: under a cut-out model the selection's
-    /// Feather does not shape a stroke painted under an eraser (Expand and
-    /// a fill band), nor the reverse, so the sliders reach only the strokes
-    /// whose edge they shape.
+    /// in hand under Last, all of them under All.
     fn reached(&self) -> Vec<crate::gui::brush_state::StrokeDrawn> {
         use crate::gui::brush_state::StrokeReach;
         use crate::gui::selection_queue::SelectionMade;
         let app = self.app();
         let (Some(tool), Some(item)) = (app.active_tool(), app.batch.selected_item()) else { return Vec::new() };
-        let kind = std::mem::discriminant(&app.settings.stroke_edge());
         let strokes = match app.brush_state.reach {
             StrokeReach::Next => None,
             StrokeReach::Last => item.timeline.latest_stroke(tool),
@@ -527,35 +522,27 @@ impl World {
         };
         let Some(history) = strokes else { return Vec::new() };
         let mut own = history.ops.iter().filter(|op| op.drawn_by(tool)).filter_map(|op| match op {
-            SelectionMade::Stroke(drawn) => Some(drawn),
+            SelectionMade::Stroke(drawn) => Some(drawn.clone()),
             _ => None,
         });
-        let shaped = |drawn: &&crate::gui::brush_state::StrokeDrawn| std::mem::discriminant(&drawn.edge()) == kind;
         match app.brush_state.reach {
-            StrokeReach::Last => own.next_back().filter(shaped).cloned().into_iter().collect(),
-            _ => own.filter(shaped).cloned().collect(),
+            StrokeReach::Last => own.next_back().into_iter().collect(),
+            _ => own.collect(),
         }
     }
 
     /// The slider values going from `from` to `to` draw a reached stroke
-    /// another way: Last sets the moved slider's value on the latest, All
-    /// moves each by as much, within its range (a stroke drawn at full
-    /// Opacity stays there as All raises Opacity). Compared as the app
-    /// compares a redraw.
+    /// another way, as the app draws it (`StrokeDrawn::moved_by`): within
+    /// each value's range (a stroke drawn at full Opacity stays there as
+    /// All raises Opacity), compared as a redraw is.
     fn would_change(&self, reached: &[crate::gui::brush_state::StrokeDrawn], from: crate::gui::brush_state::StrokeValues, to: crate::gui::brush_state::StrokeValues) -> bool {
-        use crate::gui::brush_state::StrokeReach;
         use crate::gui::selection_queue::{any_differ, SelectionMade};
-        let reach = self.app().brush_state.reach;
-        let redrawn = |drawn: &crate::gui::brush_state::StrokeDrawn| match reach {
-            StrokeReach::Last => drawn.at(drawn.values().moved(from, to)),
-            _ => drawn.at(drawn.values().adjusted(from, to)),
-        };
-        let reached: Vec<&crate::gui::brush_state::StrokeDrawn> = match reach {
-            StrokeReach::Next => return false,
-            StrokeReach::Last => reached.last().into_iter().collect(),
-            StrokeReach::All => reached.iter().collect(),
-        };
-        reached.into_iter().any(|drawn| any_differ(&[SelectionMade::Stroke(redrawn(drawn))], &[SelectionMade::Stroke(drawn.clone())]))
+        let app = self.app();
+        let (reach, edge) = (app.brush_state.reach, app.settings.stroke_edge());
+        if reach == crate::gui::brush_state::StrokeReach::Next {
+            return false;
+        }
+        reached.iter().any(|drawn| any_differ(&[SelectionMade::Stroke(drawn.moved_by(reach, from, to, edge))], &[SelectionMade::Stroke(drawn.clone())]))
     }
 
     /// The reached strokes' values as text, to tell whether a slider
