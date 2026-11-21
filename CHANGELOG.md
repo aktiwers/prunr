@@ -157,7 +157,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 ### Fixed
 - **Each part of the app now waits for, and answers, its own image.** Found by running thousands of random click sequences against the app and checking everything it remembers between clicks:
   - Removing an image from the list keeps the one on screen, and an image that takes a removed one's place is fitted to the window afresh.
-  - Changing a setting while a cut-out runs, or while a run waits behind a large batch, gives the look you asked for: the run is redone instead of landing the old look.
+  - Changing a setting while a cut-out runs, or while a run waits behind a large batch, gives the look you asked for: the run is redone instead of landing the old look. A Refine or Strength change made while an upscale or Colorize runs shows when the run finishes, also on an image no longer on screen; it kept the look from before the change until the image was opened again.
   - Cancel stops the run it is pressed for (an upscale, Colorize, an erase, a face search) and nothing started after it; each run under way keeps its own progress. An erase asked for right after a Cancel runs instead of hanging.
   - An old error mark no longer stays on an image after an undo or a successful retry, and a thumbnail made for an earlier state no longer replaces the current one.
   - Restored faces show again when their image comes back on screen, also after memory ran short.
