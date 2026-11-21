@@ -378,13 +378,26 @@ impl PrunrApp {
         if results.iter().any(|r| self.batch.find_by_id(r.item_id).is_some_and(|i| r.version == i.timeline.version())) {
             self.busy_since = None;
         }
+        let mut left_behind = Vec::new();
         for r in results {
             let (item_id, source, is_final, landed) = {
                 let Some(item) = self.batch.find_by_id_mut(r.item_id) else {
                     continue;
                 };
                 if r.version != item.timeline.version() {
-                    // Computed for a state the item has since left.
+                    // Computed for a state the item has since left. Undo
+                    // and redo cancel a render before it comes back, so
+                    // this one was left for a new step, which may draw
+                    // nothing of its own (a background pick after a
+                    // stroke): it is made again for that step, unless a run
+                    // under way will finish the look.
+                    if item.job.is_none() {
+                        let kind = match r.kind {
+                            PreviewKind::Mask | PreviewKind::Edge => PreviewKind::photo_rerun(item.settings.line_mode),
+                            other => other,
+                        };
+                        left_behind.push((item.id, kind));
+                    }
                     continue;
                 }
                 if let Some(start) = r.new_start.clone() {
@@ -501,6 +514,12 @@ impl PrunrApp {
                 if let Some(request) = self.batch.find_by_id_mut(item_id).map(|item| item.thumb.asked()) {
                     self.batch.request_thumbnail(item_id, request, &source, Some(crate::gui::item::Pixels::Resident(Arc::clone(&landed))));
                 }
+            }
+        }
+        let live = &mut self.processor.live_preview;
+        for (item_id, kind) in left_behind {
+            if !live.works_on(item_id) {
+                live.render_now(item_id, kind);
             }
         }
         ctx.request_repaint();
@@ -722,6 +741,53 @@ mod landing_tests {
             assert!(matches!(land_next_texture(&mut app, &ctx), TexTarget::LiveResult(_)), "{kind:?}");
             assert!(app.batch.items[0].quick.texture().is_none(), "{kind:?}: then goes");
         }
+    }
+
+    /// A render the image left for a new step that draws nothing of its
+    /// own (a background pick right after a stroke) is made again for that
+    /// step: nothing else would draw what it was asked for. A render
+    /// already queued for the new step stands, and a run under way finishes
+    /// the look itself.
+    #[test]
+    fn a_render_left_for_a_new_step_is_made_again_on_it() {
+        let ctx = egui::Context::default();
+        let bg_picked = |app: &mut PrunrApp| {
+            let item = &mut app.batch.items[0];
+            item.settings.bg = Some([123, 45, 142, 255]);
+            item.commit(StepKind::Adjust);
+        };
+        for kind in [PreviewKind::Mask, PreviewKind::UpscaleTier2, PreviewKind::ColorizeTier2, PreviewKind::Photo] {
+            let (mut app, result) = shown();
+            let left = render(&app, kind, false, Arc::new(RgbaImage::new(2, 2)));
+            bg_picked(&mut app);
+            app.apply_completed_previews(&ctx, vec![left]);
+            let item = &app.batch.items[0];
+            assert!(item.result_rgba.as_ref().is_some_and(|r| Arc::ptr_eq(r, &result)), "{kind:?}: it does not land on the new step");
+            assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(kind), "{kind:?}: it is asked for again");
+            assert_eq!(app.processor.live_preview.pending_settled_for_test(1), Some(true), "{kind:?}: at once");
+        }
+
+        // Lines over the whole photo turned on since: an Edge render draws them.
+        let (mut app, _) = shown();
+        let left = render(&app, PreviewKind::Mask, false, Arc::new(RgbaImage::new(2, 2)));
+        app.batch.items[0].settings.line_mode = prunr_core::LineMode::EdgesOnly;
+        bg_picked(&mut app);
+        app.apply_completed_previews(&ctx, vec![left]);
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::Edge), "the render for the state as it stands");
+
+        let (mut app, _) = shown();
+        let left = render(&app, PreviewKind::Mask, false, Arc::new(RgbaImage::new(2, 2)));
+        bg_picked(&mut app);
+        app.processor.live_preview.mark_tweak(1, PreviewKind::UpscaleTier2);
+        app.apply_completed_previews(&ctx, vec![left]);
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), Some(PreviewKind::UpscaleTier2), "the newer render stands");
+
+        let (mut app, _) = shown();
+        let left = render(&app, PreviewKind::Mask, false, Arc::new(RgbaImage::new(2, 2)));
+        bg_picked(&mut app);
+        app.batch.items[0].start_job(Some(StepKind::Process), crate::gui::item::Engine::Segment);
+        app.apply_completed_previews(&ctx, vec![left]);
+        assert_eq!(app.processor.live_preview.pending_kind_for_test(1), None, "the run under way finishes the look");
     }
 }
 
