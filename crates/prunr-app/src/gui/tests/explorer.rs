@@ -393,13 +393,15 @@ impl World {
     }
 
     /// Frames, the worker answering between them, until nothing is owed
-    /// or two minutes pass. Whether it went quiet. Time, not a count of
-    /// frames: a picture enlarged three times over (157 MP from these
-    /// photos) takes the debug build over a minute to make its texture
-    /// and thumbnail, which is slow, not stuck.
+    /// or the time a window this size may take passes. Whether it went
+    /// quiet. Time, not a count of frames, and more of it for a larger
+    /// picture: one enlarged three times over (157 MP from these photos)
+    /// takes the debug build a minute and a half to make its texture and
+    /// thumbnail and another minute to finish again with a moved Sharpen,
+    /// which is slow, not stuck.
     fn quiet(&mut self) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while std::time::Instant::now() < deadline {
+        let start = std::time::Instant::now();
+        while start.elapsed() < self.time_to_go_quiet() {
             self.worker.answer(self.h.state());
             answer_models(self.h.state(), &self.models);
             self.h.step();
@@ -415,6 +417,13 @@ impl World {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         false
+    }
+
+    /// Two minutes, and two seconds more for each megapixel of the largest
+    /// picture an image holds.
+    fn time_to_go_quiet(&self) -> std::time::Duration {
+        let largest = self.app().batch.items.iter().flat_map(|item| [Some(item.dimensions), item.timeline.current().result.as_ref().map(|r| r.dims())]).flatten().map(|(w, h)| u64::from(w) * u64::from(h)).max().unwrap_or(0);
+        std::time::Duration::from_secs(120 + 2 * largest / 1_000_000)
     }
 
     /// The controls a person could press now, by name, with whether each
