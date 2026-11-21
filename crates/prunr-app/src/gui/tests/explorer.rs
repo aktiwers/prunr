@@ -350,6 +350,9 @@ struct World {
     h: Harness<'static, PrunrApp>,
     worker: StandIn,
     models: std::cell::Cell<ModelsAnswered>,
+    /// Images whose run a Cancel stopped: Cancel keeps the look it took
+    /// for the run, which shows at the next Process.
+    cancelled: BTreeSet<u64>,
 }
 
 impl World {
@@ -371,7 +374,7 @@ impl World {
             }
             app.batch.select_item(0);
         }
-        let mut world = Self { h, worker: StandIn { asked, answers, answered: std::cell::Cell::new(0) }, models: Default::default() };
+        let mut world = Self { h, worker: StandIn { asked, answers, answered: std::cell::Cell::new(0) }, models: Default::default(), cancelled: BTreeSet::new() };
         world.quiet();
         world
     }
@@ -721,8 +724,18 @@ fn run(actions: &[Action]) -> Option<Broken> {
             _ => (None, false, Vec::new()),
         };
         let (reached_before, values_before) = (world.reached(), world.app().settings.stroke_values());
+        let busy: Vec<u64> = world.app().batch.items.iter().filter(|i| i.is_busy()).map(|i| i.id).collect();
         if !world.act(action) {
             continue;
+        }
+        let cancels = match action {
+            Action::Key(chord) => *chord == "Escape",
+            Action::Click(name) => name.starts_with("Cancel"),
+            _ => false,
+        };
+        if cancels {
+            let stopped: Vec<u64> = busy.into_iter().filter(|id| world.app().batch.find_by_id(*id).is_some_and(|i| !i.is_busy())).collect();
+            world.cancelled.extend(stopped);
         }
         if world.app().brush_state.has_active_stroke() || !world.app().magic_brush_state.active_stroke.is_empty() {
             return Some(Broken {
@@ -807,6 +820,10 @@ fn the_route_does_not_matter(world: &World) -> Option<Broken> {
         // that model is back (or Process): settings changed meanwhile (a
         // Reset, Refine moved under another upscaler) show then.
         if model != app.settings.model && !made_as_set(item, model) {
+            continue;
+        }
+        // A look whose run was cancelled shows at the next Process.
+        if world.cancelled.contains(&item.id) && !made_as_set(item, model) {
             continue;
         }
         let Some(here) = shown_picture(item) else { continue };
