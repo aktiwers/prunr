@@ -962,31 +962,40 @@ mod drift_tests {
 
     /// A look whose run was cancelled stays a cancelled look: an undo
     /// and a redo back to it give it back as it was, waiting for Process,
-    /// and do not run what Cancel stopped.
+    /// and do not run what Cancel stopped. Also a look that became a step
+    /// only as its run was cancelled (the shown image's look, carried to a
+    /// ticked one by Process).
     #[test]
     fn a_cancelled_look_is_not_run_again_by_a_redo() {
         use crate::gui::timeline::StepKind;
         use crate::gui::worker::WorkerMessage;
         let ctx = egui::Context::default();
-        let mut app = PrunrApp::new_for_test();
-        app.settings.model = SettingsModel::Silueta;
-        let item = push_test_item(&mut app, 1);
-        item.dimensions = (4, 4);
-        crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
-        item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
-        app.batch.select_item(0);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.processor.worker_tx = tx;
-        app.batch.items[0].settings.line_mode = prunr_core::LineMode::SubjectOutline;
-        app.batch.items[0].commit(StepKind::Preset);
-        app.process_items(|item| item.id == 1, None);
-        assert!(rx.try_iter().any(|m| matches!(m, WorkerMessage::BatchProcess { .. })), "the look's run");
-        app.apply_cancel_shortcut(&ctx);
-        assert!(app.batch.items[0].job.is_none(), "Escape cancelled it");
+        for look_was_a_step in [true, false] {
+            let mut app = PrunrApp::new_for_test();
+            app.settings.model = SettingsModel::Silueta;
+            let item = push_test_item(&mut app, 1);
+            item.dimensions = (4, 4);
+            crate::gui::tests::fixtures::cut_out(item, prunr_core::ModelKind::Silueta);
+            item.applied_recipe = Some(item.settings.current_recipe(prunr_core::ModelKind::Silueta));
+            app.batch.select_item(0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.processor.worker_tx = tx;
+            app.batch.items[0].settings.line_mode = prunr_core::LineMode::SubjectOutline;
+            if look_was_a_step {
+                app.batch.items[0].commit(StepKind::Preset);
+            }
+            app.process_items(|item| item.id == 1, None);
+            assert!(rx.try_iter().any(|m| matches!(m, WorkerMessage::BatchProcess { .. })), "{look_was_a_step}: the look's run");
+            app.apply_cancel_shortcut(&ctx);
+            let item = &app.batch.items[0];
+            assert!(item.job.is_none(), "{look_was_a_step}: Escape cancelled it");
+            assert_eq!(item.timeline.current().settings.line_mode, prunr_core::LineMode::SubjectOutline, "{look_was_a_step}: the look is a step");
 
-        app.handle_undo(&ctx);
-        app.handle_redo(&ctx);
-        assert!(rx.try_iter().all(|m| !matches!(m, WorkerMessage::BatchProcess { .. })), "the redo runs nothing Cancel stopped");
+            app.handle_undo(&ctx);
+            assert!(!app.batch.items[0].timeline.current().look_cancelled, "{look_was_a_step}: the step before it ran as it is");
+            app.handle_redo(&ctx);
+            assert!(rx.try_iter().all(|m| !matches!(m, WorkerMessage::BatchProcess { .. })), "{look_was_a_step}: the redo runs nothing Cancel stopped");
+        }
     }
 
     /// A re-cut that draws lines it has none of waits for them. Undone

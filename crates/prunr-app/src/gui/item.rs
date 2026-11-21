@@ -2770,12 +2770,14 @@ impl BatchItem {
 
     /// A Cancel stopped the awaited run: as `abandon_job`, and the step it
     /// was for remembers it, so an undo or redo back to it does not run
-    /// the look again.
+    /// the look again. That step may be made by `abandon_job` itself, from
+    /// a look no step held yet, so it is marked after.
     pub(crate) fn cancel_job(&mut self) {
-        if self.job_is_current() {
+        let for_this_step = self.job_is_current();
+        self.abandon_job();
+        if for_this_step {
             self.timeline.current_mut().look_cancelled = true;
         }
-        self.abandon_job();
     }
 
     /// The awaited run will not land (cancelled): the item shows its
