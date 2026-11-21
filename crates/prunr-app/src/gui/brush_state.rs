@@ -468,6 +468,26 @@ impl StrokeEdge {
             Self::Eraser { .. } => Self::Eraser { expand: values.expand, feather: values.fill_feather },
         }
     }
+
+    fn same_kind(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// One of this kind's edge sliders moved between `from` and `to`.
+    fn moved(self, from: StrokeValues, to: StrokeValues) -> bool {
+        match self {
+            Self::Selection { .. } => from.feather != to.feather,
+            Self::Eraser { .. } => from.expand != to.expand || from.fill_feather != to.fill_feather,
+        }
+    }
+
+    /// This kind of edge as a stroke had none of it: unsoftened, ungrown.
+    fn bare(self) -> Self {
+        match self {
+            Self::Selection { .. } => Self::Selection { feather: 0.0 },
+            Self::Eraser { .. } => Self::Eraser { expand: 0.0, feather: 0.0 },
+        }
+    }
 }
 
 /// A stroke as it was drawn, kept with its undo step so its brush's
@@ -552,6 +572,41 @@ impl StrokeDrawn {
     /// the Paint Brush's Hardness and Opacity, which its strip does not show.
     fn fills_whole(&self) -> bool {
         matches!(self, Self::Paint { edge: StrokeEdge::Eraser { .. }, .. })
+    }
+
+    /// The stroke a slider move from `from` to `to` draws: Last sets each
+    /// moved slider's value on it, All moves each by as much. A move of a
+    /// slider the stroke's own edge does not have, under a model that draws
+    /// strokes with `edge`, gives it that model's kind of edge first: the
+    /// cut-out's Feather (or Hardness and Opacity) reaches a stroke painted
+    /// under an eraser, the eraser's Expand one painted as a selection.
+    pub(crate) fn moved_by(&self, reach: StrokeReach, from: StrokeValues, to: StrokeValues, edge: StrokeEdge) -> Self {
+        let lacks_moved = edge.moved(from, to)
+            || (self.fills_whole() && matches!(edge, StrokeEdge::Selection { .. }) && (from.hardness != to.hardness || from.opacity != to.opacity));
+        let drawn = if !self.edge().same_kind(edge) && lacks_moved { self.with_edge_kind(edge) } else { self.clone() };
+        let values = match reach {
+            StrokeReach::All => drawn.values().adjusted(from, to),
+            StrokeReach::Last | StrokeReach::Next => drawn.values().moved(from, to),
+        };
+        drawn.at(values)
+    }
+
+    /// The stroke as drawn, with `kind`'s kind of edge, bare: an eraser's
+    /// paint stroke covered its area in full, so as a selection it starts
+    /// from full Hardness and Opacity.
+    fn with_edge_kind(&self, kind: StrokeEdge) -> Self {
+        use std::sync::Arc;
+        let edge = kind.bare();
+        match self {
+            Self::Magic { output, mode, reading, side, .. } => Self::Magic { output: Arc::clone(output), mode: *mode, reading: *reading, edge, side: side.clone() },
+            Self::Depth { depth, around, mode, range, side, .. } => {
+                Self::Depth { depth: Arc::clone(depth), around: *around, mode: *mode, range: *range, edge, side: side.clone() }
+            }
+            Self::Paint { path, size, stamp, .. } => {
+                let stamp = if self.fills_whole() { Stamp { hardness: 1.0, strength: 1.0, ..*stamp } } else { *stamp };
+                Self::Paint { path: Arc::clone(path), size: *size, stamp, edge }
+            }
+        }
     }
 
     /// The stroke drawn at `values`, keeping what made it (its mode, its

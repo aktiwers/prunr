@@ -1268,15 +1268,15 @@ pub(crate) struct StrokeAdjustment {
 }
 
 impl StrokeAdjustment {
-    /// The strokes as the sliders at `now` draw them: Last sets each
-    /// moved slider's value on the brush's latest stroke, All moves each of
-    /// its strokes by as much.
-    pub(crate) fn at(&self, now: crate::gui::brush_state::StrokeValues) -> super::timeline::StrokeHistory {
+    /// The strokes as the sliders at `now` draw them, under a model that
+    /// draws strokes with `edge`: Last changes the brush's latest stroke,
+    /// All each of its strokes (`StrokeDrawn::moved_by`).
+    pub(crate) fn at(&self, now: crate::gui::brush_state::StrokeValues, edge: crate::gui::brush_state::StrokeEdge) -> super::timeline::StrokeHistory {
         use crate::gui::brush_state::StrokeReach;
-        let (from, tool) = (self.from, self.tool);
-        match self.reach {
-            StrokeReach::Last => self.strokes.latest_changed(tool, |drawn| drawn.at(drawn.values().moved(from, now))),
-            StrokeReach::All => self.strokes.changed(tool, |drawn| drawn.at(drawn.values().adjusted(from, now))),
+        let (from, tool, reach) = (self.from, self.tool, self.reach);
+        match reach {
+            StrokeReach::Last => self.strokes.latest_changed(tool, |drawn| drawn.moved_by(reach, from, now, edge)),
+            StrokeReach::All => self.strokes.changed(tool, |drawn| drawn.moved_by(reach, from, now, edge)),
             // Next starts no adjustment: the strokes stay as drawn.
             StrokeReach::Next => self.strokes.clone(),
         }

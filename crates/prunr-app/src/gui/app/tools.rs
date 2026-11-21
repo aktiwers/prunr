@@ -696,7 +696,7 @@ impl PrunrApp {
             item.adjusting = Some(StrokeAdjustment { reach, tool, from, strokes, shown, step, landed });
         }
         let Some(adjusting) = item.adjustment() else { return };
-        let strokes = adjusting.at(now);
+        let strokes = adjusting.at(now, self.settings.stroke_edge());
         if !any_differ(&strokes.ops, &adjusting.shown) {
             return;
         }

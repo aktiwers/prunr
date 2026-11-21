@@ -418,6 +418,53 @@ fn the_first_slider_move_after_a_switch_redraws() {
     }
 }
 
+/// A stroke takes the edge of the model its slider moves under. One
+/// painted under an eraser (Expand and a fill band) takes the cut-out's
+/// Feather, or its Hardness and Opacity, as those move, starting from the
+/// full strength it covered its area with; one painted as a selection
+/// takes the eraser's Expand. Each kept the edge it was drawn with, so
+/// the slider shaped nothing.
+#[test]
+fn a_stroke_takes_the_edge_of_the_model_its_slider_moves_under() {
+    use crate::gui::brush_state::{StrokeEdge, StrokeReach};
+    let samples = [(16.0, 4.0, 2.0), (16.0, 28.0, 2.0)];
+    let eraser_stroke = |app: &mut PrunrApp| {
+        let drawn = super::fixtures::painted_with_edge(prunr_core::brush::BrushShape::Circle, 8.0, &samples, app.settings.brush.stamp(), StrokeEdge::Eraser { expand: 2.0, feather: 4.0 });
+        land(app, 9, drawn);
+        app.brush_state.reach = StrokeReach::Last;
+    };
+
+    let mut app = app_for_strokes();
+    give_photo(&mut app);
+    eraser_stroke(&mut app);
+    let selection = app.batch.items[0].selection_hash;
+    slide(&mut app, |b| b.edge_feather = 3.0);
+    redraw_lands(&mut app);
+    let drawn = latest(&app).expect("the stroke");
+    assert_eq!(drawn.edge(), StrokeEdge::Selection { feather: 3.0 }, "the cut-out's Feather");
+    assert_eq!((drawn.values().hardness, drawn.values().opacity), (1.0, 1.0), "at the full strength it covered its area with");
+    assert_ne!(app.batch.items[0].selection_hash, selection, "drawn again");
+
+    let mut app = app_for_strokes();
+    give_photo(&mut app);
+    eraser_stroke(&mut app);
+    slide(&mut app, |b| b.strength = 0.5);
+    redraw_lands(&mut app);
+    let drawn = latest(&app).expect("the stroke");
+    assert_eq!(drawn.edge(), StrokeEdge::Selection { feather: 0.0 }, "Opacity too: the cut-out's edge, unsoftened");
+    assert_eq!((drawn.values().hardness, drawn.values().opacity), (1.0, 0.5));
+
+    let mut app = app_with_model(SettingsModel::MiganInpaint);
+    push_test_item(&mut app, 9).dimensions = (32, 32);
+    let drawn = super::fixtures::painted(prunr_core::brush::BrushShape::Circle, 8.0, &samples, app.settings.brush.stamp());
+    land(&mut app, 9, drawn);
+    app.brush_state.reach = StrokeReach::Last;
+    let grow = app.settings.brush.inpaint_grow;
+    slide(&mut app, |b| b.inpaint_grow = grow + 3.0);
+    redraw_lands(&mut app);
+    assert_eq!(latest(&app).map(|d| d.edge()), Some(StrokeEdge::Eraser { expand: grow + 3.0, feather: 0.0 }), "the eraser's Expand");
+}
+
 /// A redraw that shows nothing new still records the strokes as they
 /// are now drawn. Feather on strokes with nothing to soften against (no
 /// photo here; a faint stroke has no edge either) draws the same
