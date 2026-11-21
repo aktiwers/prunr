@@ -313,7 +313,7 @@ impl PrunrApp {
         let base = item.edit_pixels();
         let from = item.result_pixels();
         let (item_id, version) = (item.id, item.timeline.version());
-        let tx = self.batch.bg_io.selection_edit.tx.clone();
+        let tx = self.batch.bg_io.selection_edit.owe();
         std::thread::spawn(move || {
             let Some(base) = base.load() else {
                 tracing::warn!(item_id, "selection edit skipped: the image could not be read");
@@ -743,7 +743,7 @@ mod selection_action_tests {
     /// frame loop does: the job, then its copy's outcome.
     fn land_edit(app: &mut super::PrunrApp) {
         let ctx = egui::Context::default();
-        let done = app.batch.bg_io.selection_edit.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        let done = app.batch.bg_io.selection_edit.wait_for_test(std::time::Duration::from_secs(10)).expect("the edit lands");
         app.land_selection_edit(done, &ctx);
         for (note, took) in app.system.take_copy_outcomes() {
             app.on_copy_done(note, took);
@@ -809,7 +809,7 @@ mod selection_action_tests {
         app.batch.items.push(item);
 
         app.handle_selection_action(0, SelectionAction::Cut, &egui::Context::default());
-        let done = app.batch.bg_io.selection_edit.rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the edit lands");
+        let done = app.batch.bg_io.selection_edit.wait_for_test(std::time::Duration::from_secs(10)).expect("the edit lands");
         let (copy, _) = done.copy.as_ref().expect("a copy");
         assert_eq!(copy.dimensions(), (5, 8), "the columns the selection reaches, every row");
         assert_eq!(copy.get_pixel(1, 7).0, [1, 7, 0, 255], "a selected pixel of the upscale, where it is");
@@ -821,6 +821,33 @@ mod selection_action_tests {
             let row: Vec<u8> = (0..8).map(|x| result.get_pixel(x, y).0[3]).collect();
             assert_eq!(row, [0, 0, 0, 64, 191, 255, 255, 255], "row {y}: cut on the left, kept on the right");
         }
+    }
+
+    /// A selection edit, and the copy it hands the clipboard, are work
+    /// under way until they land: the window polls for them (an idle
+    /// window can miss a thread's wake-up, and the result or "Copied"
+    /// waited for the next mouse move), and the control socket and the
+    /// explorer wait for them.
+    #[test]
+    fn an_edit_and_its_copy_are_waited_for_until_they_land() {
+        use crate::gui::automation::state::busy;
+        use crate::gui::views::selection_action_bar::SelectionAction;
+        let ctx = egui::Context::default();
+        let mut app = super::PrunrApp::new_for_test();
+        let mut item = make_item_done();
+        item.selection_mask = Some(Arc::new(make_mask(4, 4, true)));
+        app.batch.items.push(item);
+        assert!(!busy(&app));
+
+        app.handle_selection_action(0, SelectionAction::Copy, &ctx);
+        assert!(busy(&app), "the edit is under way");
+        let done = app.batch.bg_io.selection_edit.wait_for_test(std::time::Duration::from_secs(10)).expect("the edit lands");
+        app.land_selection_edit(done, &ctx);
+        assert!(busy(&app), "its copy is with the clipboard");
+        for (note, took) in app.system.take_copy_outcomes() {
+            app.on_copy_done(note, took);
+        }
+        assert!(!busy(&app), "both landed");
     }
 
     /// Cut through the real action path: the result is cut like Delete and

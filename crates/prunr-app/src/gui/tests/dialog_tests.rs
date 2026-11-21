@@ -113,7 +113,7 @@ fn save_as_answer_writes_that_image_to_the_picked_file() {
     let out = dir.path().join("out.png");
     answer(&mut app, Some(vec![out.clone()]));
 
-    let msg = app.batch.bg_io.save_done.rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
+    let msg = app.batch.bg_io.save_done.wait_for_test(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved".to_string()));
     assert_eq!(image::open(&out).expect("saved png").dimensions(), (3, 2));
 }
@@ -131,7 +131,7 @@ fn sidebar_save_answer_writes_that_rows_image() {
     let out = dir.path().join("row.png");
     answer(&mut app, Some(vec![out.clone()]));
 
-    app.batch.bg_io.save_done.rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome.expect("saved");
+    app.batch.bg_io.save_done.wait_for_test(LANDS_WITHIN).expect("save done").outcome.expect("saved");
     assert_eq!(image::open(&out).expect("saved png").dimensions(), (7, 7));
 }
 
@@ -147,7 +147,7 @@ fn save_layers_answer_writes_into_the_picked_folder() {
     let dir = tempfile::tempdir().unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
-    let msg = app.batch.bg_io.save_done.rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
+    let msg = app.batch.bg_io.save_done.wait_for_test(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved 1 file".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
 }
@@ -168,7 +168,7 @@ fn a_save_marks_what_it_wrote() {
     app.handle_save_selected();
     let dir = tempfile::tempdir().unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
-    let done = app.batch.bg_io.save_done.rx.recv_timeout(LANDS_WITHIN).expect("save done");
+    let done = app.batch.bg_io.save_done.wait_for_test(LANDS_WITHIN).expect("save done");
     assert!(done.outcome.is_err(), "one file failed");
     app.land_save(done);
     assert!(!app.batch.items[0].has_unsaved_work(), "written");
@@ -188,7 +188,7 @@ fn save_selected_answer_writes_each_into_the_picked_folder() {
     let dir = tempfile::tempdir().unwrap();
     answer(&mut app, Some(vec![dir.path().to_path_buf()]));
 
-    let msg = app.batch.bg_io.save_done.rx.recv_timeout(LANDS_WITHIN).expect("save done").outcome;
+    let msg = app.batch.bg_io.save_done.wait_for_test(LANDS_WITHIN).expect("save done").outcome;
     assert_eq!(msg, Ok("Saved 2 images".to_string()));
     assert!(dir.path().join("test1.prunr.png").is_file());
     assert!(dir.path().join("test2.prunr.png").is_file());
@@ -209,7 +209,7 @@ fn cancel_does_nothing_and_frees_the_dialog() {
     app.handle_save_selected();
     assert!(matches!(asked(&app), Some(DialogRequest::SaveImage { item_id: 1, .. })), "a cancel frees the slot");
     answer(&mut app, None);
-    assert!(app.batch.bg_io.save_done.rx.recv_timeout(NOTHING_WITHIN).is_err(), "a cancelled save writes nothing");
+    assert!(app.batch.bg_io.save_done.wait_for_test(NOTHING_WITHIN).is_none(), "a cancelled save writes nothing");
     assert!(!app.system.dialog_open());
 }
 
@@ -330,7 +330,7 @@ fn a_save_answered_after_its_image_was_removed_saves_nothing() {
     let out = dir.path().join("out.png");
     answer(&mut app, Some(vec![out.clone()]));
 
-    assert!(app.batch.bg_io.save_done.rx.recv_timeout(NOTHING_WITHIN).is_err());
+    assert!(app.batch.bg_io.save_done.wait_for_test(NOTHING_WITHIN).is_none());
     assert!(!out.exists(), "the other image was not saved in its place");
     assert!(!app.system.dialog_open());
 }

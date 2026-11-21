@@ -202,6 +202,68 @@ impl<T> Chan<T> {
     }
 }
 
+/// Answers owed by threads sent off with work, one answer each, each
+/// thread its own channel: what is still out is known, so the window
+/// polls until it lands (an idle Wayland window can drop a thread's
+/// wake-up), and a thread that ends without answering is not waited for.
+pub(crate) struct Owed<T>(Vec<mpsc::Receiver<T>>);
+
+impl<T> Default for Owed<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T> Owed<T> {
+    /// Where the thread sent off now gives its one answer.
+    pub(crate) fn owe(&mut self) -> mpsc::Sender<T> {
+        let (tx, rx) = mpsc::channel();
+        self.0.push(rx);
+        tx
+    }
+
+    /// The answers in since last asked, the oldest thread's first.
+    pub(crate) fn take(&mut self) -> Vec<T> {
+        let mut answers = Vec::new();
+        self.0.retain(|rx| match rx.try_recv() {
+            Ok(answer) => {
+                answers.push(answer);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => false,
+        });
+        answers
+    }
+
+    /// A thread sent off may still answer.
+    pub(crate) fn any_owed(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    /// The next answer in, waiting up to `timeout` for one; the others
+    /// stay owed.
+    #[cfg(test)]
+    pub(crate) fn wait_for_test(&mut self, timeout: std::time::Duration) -> Option<T> {
+        let until = std::time::Instant::now() + timeout;
+        loop {
+            let mut answer = None;
+            self.0.retain(|rx| match answer.is_none().then(|| rx.try_recv()) {
+                Some(Ok(got)) => {
+                    answer = Some(got);
+                    false
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => false,
+                Some(Err(mpsc::TryRecvError::Empty)) | None => true,
+            });
+            if answer.is_some() || std::time::Instant::now() >= until {
+                return answer;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
 /// Bundles all background thread communication channels.
 #[derive(Default)]
 pub struct BackgroundIO {
@@ -211,15 +273,15 @@ pub struct BackgroundIO {
     /// Pre-decoded source images for instant canvas switching
     pub decode: Chan<DecodeResult>,
     /// A finished save.
-    pub(crate) save_done: Chan<SaveDone>,
+    pub(crate) save_done: Owed<SaveDone>,
     /// A model or runtime removed off the UI thread: its toast text. The
     /// installed set is read again when it lands.
     pub(crate) removed: Chan<Result<String, String>>,
     /// A copy's image made off the UI thread (`None`: it could not be
     /// read), with the note to show once copied.
-    pub copy_ready: Chan<(Option<Arc<image::RgbaImage>>, Option<String>)>,
+    pub(crate) copy_ready: Owed<(Option<Arc<image::RgbaImage>>, Option<String>)>,
     /// Selection Delete / Cut / Copy made off the UI thread.
-    pub(crate) selection_edit: Chan<SelectionEditDone>,
+    pub(crate) selection_edit: Owed<SelectionEditDone>,
     /// Pre-built ColorImages ready for GPU upload.
     pub(crate) tex_prep: Chan<TexPrepMsg>,
     /// Prepared textures uploading a few tiles per frame, with what each
@@ -255,6 +317,12 @@ pub enum TexTarget {
 }
 
 impl BackgroundIO {
+    /// A save, a copy's image or a selection edit sent off the UI thread
+    /// has not answered yet.
+    pub(crate) fn answers_owed(&self) -> bool {
+        self.save_done.any_owed() || self.copy_ready.any_owed() || self.selection_edit.any_owed()
+    }
+
     pub fn tex_prep_handles(&self) -> TexPrepHandles {
         TexPrepHandles {
             tx: self.tex_prep.tx.clone(),
@@ -665,5 +733,29 @@ mod tests {
         // radius 1: the band reaches one pixel outside the block.
         assert_eq!(img.pixels[9].a(), 255); // (1, 1)
         assert_eq!(img.pixels[0].a(), 0);
+    }
+}
+
+#[cfg(test)]
+mod owed_tests {
+    use super::Owed;
+
+    /// What is owed is known until it is taken, and a thread that ends
+    /// without answering is not waited for.
+    #[test]
+    fn an_answer_is_owed_until_taken_and_a_silent_thread_not_at_all() {
+        let mut owed = Owed::<u8>::default();
+        let answers = owed.owe();
+        let silent = owed.owe();
+        answers.send(3).expect("open");
+        assert!(owed.any_owed());
+        drop(silent);
+        assert_eq!(owed.take(), vec![3]);
+        assert!(!owed.any_owed(), "the silent thread ended");
+        let late = owed.owe();
+        assert!(owed.take().is_empty() && owed.any_owed(), "still out");
+        late.send(4).expect("open");
+        assert_eq!(owed.take(), vec![4]);
+        assert!(!owed.any_owed());
     }
 }

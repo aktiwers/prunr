@@ -1386,9 +1386,10 @@ impl eframe::App for PrunrApp {
         if let Some(wait) = until_pill.filter(|wait| !wait.is_zero()) {
             ctx.request_repaint_after(wait);
         }
-        // Poll while async texture / decode work is pending: some compositors
-        // (notably Wayland) drop thread-initiated wake-ups on an idle window.
-        if self.batch.has_pending_work() {
+        // Poll while async texture / decode work is pending, or a thread
+        // owes an answer: some compositors (notably Wayland) drop
+        // thread-initiated wake-ups on an idle window.
+        if self.batch.has_pending_work() || self.awaits_background_answers() {
             ctx.request_repaint_after(ASYNC_POLL);
         }
         // Land finished work, then the live previews it may have queued,

@@ -30,6 +30,12 @@ impl PrunrApp {
         }
     }
 
+    /// Work sent off the UI thread (a save, a copy, a selection edit) has
+    /// not answered yet: the window polls until it lands.
+    pub(crate) fn awaits_background_answers(&self) -> bool {
+        self.batch.bg_io.answers_owed() || self.system.copying()
+    }
+
     /// Each frame: when quiet work started, if any is under way. A result
     /// landing restarts the clock, so a live drag whose renders keep up
     /// never shows the pill.

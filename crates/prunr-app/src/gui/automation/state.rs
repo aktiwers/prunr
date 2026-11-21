@@ -56,6 +56,7 @@ pub struct SettingsDump {
 /// Work still owed to the screen: what `wait_idle` waits out.
 pub fn busy(app: &PrunrApp) -> bool {
     app.quiet_background_work().is_some() || app.processor.is_run_in_flight() || app.batch.items.iter().any(|it| it.is_busy())
+        || app.awaits_background_answers()
 }
 
 pub fn dump(app: &PrunrApp) -> StateDump {

@@ -1111,7 +1111,7 @@ impl PrunrApp {
             self.after_result_landed(item_id);
         }
 
-        while let Ok((image, hint)) = self.batch.bg_io.copy_ready.rx.try_recv() {
+        for (image, hint) in self.batch.bg_io.copy_ready.take() {
             let note = crate::gui::system_bridge::CopyNote::Image { hint };
             match image {
                 Some(rgba) => self.system.copy_image(rgba, note),
@@ -1119,13 +1119,13 @@ impl PrunrApp {
             }
         }
         self.land_selection_edits(ctx);
-        while let Ok(done) = self.batch.bg_io.selection_edit.rx.try_recv() {
+        for done in self.batch.bg_io.selection_edit.take() {
             self.land_selection_edit(done, ctx);
         }
         for (note, took) in self.system.take_copy_outcomes() {
             self.on_copy_done(note, took);
         }
-        while let Ok(done) = self.batch.bg_io.save_done.rx.try_recv() {
+        for done in self.batch.bg_io.save_done.take() {
             self.land_save(done);
         }
         while let Ok(outcome) = self.batch.bg_io.removed.rx.try_recv() {
