@@ -162,6 +162,9 @@ pub(crate) struct PreparedImage {
     tiles: Vec<Tile<egui::ColorImage>>,
 }
 
+/// Copies of an image `PreparedImage::from_rgba` makes to show it.
+pub(crate) const COPIES_TO_SHOW: u64 = 1;
+
 impl PreparedImage {
     /// Each tile's pixels converted straight from the image's rows, a
     /// tile's rows in parallel.
@@ -339,6 +342,17 @@ mod tests {
         let direct = PreparedImage::from_rgba(&rgba);
         assert_eq!(direct.tiles.len(), 3);
         assert!(copied.tiles.iter().zip(&direct.tiles).all(|(a, b)| a.texture.size == b.texture.size && a.texture.pixels == b.texture.pixels));
+    }
+
+    /// What is made to show an image is `COPIES_TO_SHOW` copies of it, its
+    /// tiles' one-pixel overlap aside: the memory an upscale needs counts it.
+    #[test]
+    fn an_image_prepared_to_show_is_the_copies_counted() {
+        let (w, h) = (2 * TILE_STEP + 7, TILE_STEP + 3);
+        let prepared = PreparedImage::from_rgba(&image::RgbaImage::new(w as u32, h as u32));
+        let held = prepared.tiles.iter().map(|t| t.texture.pixels.len()).sum::<usize>() as u64;
+        let copy = (w * h) as u64;
+        assert!(held >= COPIES_TO_SHOW * copy && held < COPIES_TO_SHOW * copy + copy / 100, "{held} pixels for {copy}");
     }
 
     /// Tiles written straight into their buffers hold the very pixels and

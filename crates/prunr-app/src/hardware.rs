@@ -225,6 +225,14 @@ pub fn available_ram_reading_throttled() -> Option<u64> {
     throttled(&CACHE, prunr_core::sysmem::available_ram_bytes)
 }
 
+/// `prunr_core::sysmem::room_for_buffers_bytes` read at most once a
+/// second: reading swap on Windows walks the process table, and a queue
+/// of images too large to upscale reads it once for each.
+pub fn room_for_buffers_throttled() -> Option<u64> {
+    static CACHE: Reading<Option<u64>> = Mutex::new(None);
+    throttled(&CACHE, prunr_core::sysmem::room_for_buffers_bytes)
+}
+
 /// Free RAM and swap for the run watchdogs. RAM is read at most every
 /// quarter second, as a model can take gigabytes within a second; swap
 /// as often, but every two seconds on Windows, where reading it walks

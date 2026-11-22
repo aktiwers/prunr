@@ -45,7 +45,7 @@ pub const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(300
 pub use engine::OrtEngine;
 pub use recipe::{ProcessingRecipe, InferenceRecipe, EdgeRecipe, MaskRecipe, CompositeRecipe, UpscaleRecipe, ColorizeRecipe, OutputScale, RequiredTier, resolve_tier, DEFAULT_SHARPEN};
 pub use types::{
-    CoreError, ModelKind, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
+    CoreError, LargeWork, ModelKind, ProcessResult, MaskSettings, EdgeSettings, EdgeScale,
     InferenceResult, LineMode, LARGE_IMAGE_LIMIT, DOWNSCALE_TARGET,
 };
 pub use pipeline::{process_image, process_image_from_decoded, process_image_with_mask, room_for_photo, infer_only, infer_after_first_look};

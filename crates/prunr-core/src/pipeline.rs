@@ -259,7 +259,7 @@ mod tests {
         assert!(fits_in(12000, 8000, 5 * gb, 6 * gb).is_ok());
         assert!(fits_in(12000, 8000, 6 * gb, 6 * gb).is_ok(), "exactly what is free");
         match fits_in(12000, 8000, 7 * gb, 6 * gb) {
-            Err(CoreError::TooLarge { width: 12000, height: 8000, need_mb: 7168, free_mb: 6144 }) => {}
+            Err(CoreError::TooLarge { work: crate::LargeWork::Photo, width: 12000, height: 8000, need_mb: 7168, free_mb: 6144 }) => {}
             other => panic!("expected a refusal naming the photo and both sizes, got {other:?}"),
         }
     }

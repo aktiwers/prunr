@@ -1088,7 +1088,9 @@ impl UpscaleJob<'_> {
         } else {
             img
         };
-        prunr_core::upscale::room_for_upscale(self.model, model_input.dimensions(), self.scale.factor(), &self.refine, 0).map_err(|e| e.message())?;
+        prunr_core::upscale::need(self.model, model_input.dimensions(), self.scale.factor(), &self.refine, 0)
+            .fits(prunr_core::sysmem::room_for_buffers_bytes())
+            .map_err(|e| e.message())?;
         let progress = prunr_core::Progress::none();
         let (model, factor, engine, on_cpu) = (self.model, self.scale.factor(), self.engine, &mut self.on_cpu);
         let upscale = |engine: &prunr_core::OrtEngine| prunr_core::upscale::upscale_rgba_with_engine(&model_input, engine, model, factor, &progress, None);

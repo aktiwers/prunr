@@ -10,34 +10,32 @@ pub enum CoreError {
     Inference(String),
     #[error("Image format error: {0}")]
     ImageFormat(String),
-    #[error("{}", too_large_text(*.width, *.height, *.need_mb, *.free_mb))]
-    TooLarge { width: u32, height: u32, need_mb: u64, free_mb: u64 },
-    #[error("{}", too_large_to_upscale_text(*.width, *.height, *.need_mb, *.room_mb))]
-    TooLargeToUpscale { width: u32, height: u32, need_mb: u64, room_mb: u64 },
+    #[error("{}", too_large_text(*.work, *.width, *.height, *.need_mb, *.free_mb))]
+    TooLarge { work: LargeWork, width: u32, height: u32, need_mb: u64, free_mb: u64 },
     #[error("Processing cancelled")]
     Cancelled,
 }
 
-/// A photo too large for its work: on macOS the room is the machine's
-/// memory (`sysmem::room_for_buffers_bytes`), which closing apps does not
-/// change; elsewhere what is free now.
-fn too_large_text(width: u32, height: u32, need_mb: u64, room_mb: u64) -> String {
-    let gb = |mb: u64| mb as f64 / 1024.0;
-    if cfg!(target_os = "macos") {
-        format!("This photo is too large for this computer: {width}\u{00d7}{height} needs about {:.1} GB, more than its {:.1} GB of memory.", gb(need_mb), gb(room_mb))
-    } else {
-        format!("This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps and try again.", gb(need_mb), gb(room_mb))
-    }
+/// What a `CoreError::TooLarge` was too large for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LargeWork {
+    /// A photo's own work: decoding it, cutting it out.
+    Photo,
+    /// An upscale: the enlarged picture and what Refine makes of it.
+    Upscale,
 }
 
-/// An upscale to `width` × `height` too large for the room
-/// `sysmem::room_for_buffers_bytes` gives it.
-fn too_large_to_upscale_text(width: u32, height: u32, need_mb: u64, room_mb: u64) -> String {
+/// Work on a `width` × `height` picture too large for the room it has: on
+/// macOS the machine's memory, which closing apps does not change;
+/// elsewhere what is free now.
+fn too_large_text(work: LargeWork, width: u32, height: u32, need_mb: u64, room_mb: u64) -> String {
     let gb = |mb: u64| mb as f64 / 1024.0;
-    if cfg!(target_os = "macos") {
-        format!("Too large to upscale on this computer: {width}\u{00d7}{height} needs about {:.1} GB, more than its {:.1} GB of memory. Try a smaller image or Scale.", gb(need_mb), gb(room_mb))
-    } else {
-        format!("Too large to upscale in the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps, or try a smaller image or Scale.", gb(need_mb), gb(room_mb))
+    let (need, room) = (gb(need_mb), gb(room_mb));
+    match (work, cfg!(target_os = "macos")) {
+        (LargeWork::Photo, true) => format!("This photo is too large for this computer: {width}\u{00d7}{height} needs about {need:.1} GB, more than its {room:.1} GB of memory."),
+        (LargeWork::Photo, false) => format!("This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {need:.1} GB, {room:.1} GB is free. Close other apps and try again."),
+        (LargeWork::Upscale, true) => format!("Too large to upscale on this computer: {width}\u{00d7}{height} needs about {need:.1} GB, more than its {room:.1} GB of memory. Try a smaller image or Scale."),
+        (LargeWork::Upscale, false) => format!("Too large to upscale in the memory free now: {width}\u{00d7}{height} needs about {need:.1} GB, {room:.1} GB is free. Close other apps, or try a smaller image or Scale."),
     }
 }
 
@@ -45,13 +43,7 @@ impl CoreError {
     /// A `width` × `height` photo whose work needs `need` bytes with only
     /// `free` free.
     pub fn too_large(width: u32, height: u32, need: u64, free: u64) -> Self {
-        CoreError::TooLarge { width, height, need_mb: need >> 20, free_mb: free >> 20 }
-    }
-
-    /// An upscale to `width` × `height` that needs `need` bytes with
-    /// `room` to run in.
-    pub fn too_large_to_upscale(width: u32, height: u32, need: u64, room: u64) -> Self {
-        CoreError::TooLargeToUpscale { width, height, need_mb: need >> 20, room_mb: room >> 20 }
+        CoreError::TooLarge { work: LargeWork::Photo, width, height, need_mb: need >> 20, free_mb: free >> 20 }
     }
 
     /// The error for a person to read: the message alone, without the
@@ -1017,9 +1009,9 @@ mod tests {
         assert_eq!(CoreError::Model("test error".to_string()).to_string(), "Model error: test error");
         assert_eq!(CoreError::Inference("ort failed".into()).to_string(), "Inference error: ort failed");
         assert_eq!(CoreError::ImageFormat("bad format".into()).to_string(), "Image format error: bad format");
-        let msg = CoreError::TooLarge { width: 9000, height: 5000, need_mb: 5632, free_mb: 3072 }.to_string();
+        let msg = CoreError::TooLarge { work: LargeWork::Photo, width: 9000, height: 5000, need_mb: 5632, free_mb: 3072 }.to_string();
         assert!(msg.contains("9000\u{00d7}5000") && msg.contains("5.5 GB") && msg.contains("3.0 GB"), "{msg}");
-        let msg = CoreError::TooLargeToUpscale { width: 16000, height: 12000, need_mb: 4096, room_mb: 2048 }.to_string();
+        let msg = CoreError::TooLarge { work: LargeWork::Upscale, width: 16000, height: 12000, need_mb: 4096, free_mb: 2048 }.to_string();
         assert!(msg.starts_with("Too large to upscale") && msg.contains("16000\u{00d7}12000") && msg.contains("4.0 GB") && msg.contains("2.0 GB"), "{msg}");
     }
 

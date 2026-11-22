@@ -262,6 +262,31 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
     out
 }
 
+/// The memory an upscale needs free, and the size it makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpscaleNeed {
+    bytes: u64,
+    out: (u32, u32),
+}
+
+impl UpscaleNeed {
+    /// Refused unless it fits `room`, the memory a picture's buffers may
+    /// take now (free memory and swap; on macOS the machine's memory);
+    /// with no reading of it, it runs.
+    pub fn fits(self, room: Option<u64>) -> Result<(), CoreError> {
+        match room {
+            Some(room) if self.bytes > room => Err(CoreError::TooLarge {
+                work: crate::LargeWork::Upscale,
+                width: self.out.0,
+                height: self.out.1,
+                need_mb: self.bytes >> 20,
+                free_mb: room >> 20,
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
 /// needs free: the model's working set and the most its buffers hold at
 /// once, during the run, during `finish`, or as it lands: the output,
@@ -274,24 +299,12 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 /// | Sharpen                | 2             | 2      |
 /// | AI blend, Color match  | 3             | 3      |
 /// | AI blend and Sharpen   | 4             | 3      |
-pub fn needed_bytes(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> u64 {
+pub fn need(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> UpscaleNeed {
     let output = pixels(in_w, in_h, scale) * 4;
     let refining = output * (1 + finish.copies_while_refining());
     let landed = output * (1 + finish.returned_copies() + copies_after);
-    peak_bytes(model, in_w, in_h, scale).max(refining).max(landed) + working_set_bytes(model)
-}
-
-/// Refuses an upscale whose buffers at their peak (`needed_bytes`) do not
-/// fit the memory and swap free now (`sysmem::room_for_buffers_bytes`);
-/// with no reading of free memory it runs.
-pub fn room_for_upscale(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> Result<(), CoreError> {
-    let needed = needed_bytes(model, (in_w, in_h), scale, finish, copies_after);
-    crate::sysmem::room_for_buffers_bytes().map_or(Ok(()), |room| {
-        if needed <= room {
-            return Ok(());
-        }
-        Err(CoreError::too_large_to_upscale(in_w.saturating_mul(scale), in_h.saturating_mul(scale), needed, room))
-    })
+    let bytes = peak_bytes(model, in_w, in_h, scale).max(refining).max(landed) + working_set_bytes(model);
+    UpscaleNeed { bytes, out: (in_w.saturating_mul(scale), in_h.saturating_mul(scale)) }
 }
 
 /// The pixels of a `w` × `h` image enlarged `scale` times.
@@ -301,7 +314,7 @@ fn pixels(w: u32, h: u32, scale: u32) -> u64 {
 
 /// What a parted run may still take of `free`: the parts' sessions are
 /// in memory already (`resident`), so only the rest of the working set is
-/// still to come. Nothing readable: none, as the app's gates refuse then.
+/// still to come. Nothing readable: none, so the run holds the least it can.
 fn parted_room(free: Option<u64>, working_set: u64, resident: u64) -> u64 {
     free.map_or(0, |free| free.saturating_sub(working_set.saturating_sub(resident)))
 }
@@ -456,10 +469,10 @@ mod tests {
         // The features and the image (268 B a pixel), and half-precision
         // blocks' outputs or two bands of 250 of the 1000 rows: 128 B.
         let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
-        assert_eq!(needed_bytes(nomos2, (1000, 1000), 4, &off, 0), 1_000_000 * 268 + 2 * 250 * 1000 * 256 + working_set(nomos2));
-        assert_eq!(needed_bytes(nomos2, (1000, 1000), 2, &off, 0), needed_bytes(nomos2, (1000, 1000), 4, &off, 0), "the run at 4x outweighs the resample");
+        assert_eq!(need(nomos2, (1000, 1000), 4, &off, 0).bytes, 1_000_000 * 268 + 2 * 250 * 1000 * 256 + working_set(nomos2));
+        assert_eq!(need(nomos2, (1000, 1000), 2, &off, 0).bytes, need(nomos2, (1000, 1000), 4, &off, 0).bytes, "the run at 4x outweighs the resample");
         let x4 = ModelId::RealEsrganX4Plus;
-        assert_eq!(needed_bytes(x4, (4096, 4096), 4, &off, 0), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
+        assert_eq!(need(x4, (4096, 4096), 4, &off, 0).bytes, peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
     }
 
     /// After the run, Refine and what lands hold copies of the output too:
@@ -475,25 +488,27 @@ mod tests {
         let sharpen = Refine { sharpen: 0.5, ..off };
         let blend = Refine { ai_blend: 0.7, ..off };
         let all = Refine { sharpen: 0.5, ai_blend: 0.7, color_match: true, ..off };
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &off, 0), run + ws, "nothing to refine: the run");
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &off, 1), 2 * output + ws, "the output and its copy on screen");
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &sharpen, 0), 2 * output + ws, "the output and the sharpened one");
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &blend, 1), 4 * output + ws, "the output, the blend, the enlarged input and the copy on screen");
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 0), 4 * output + ws, "the output, the enlarged input, the blend and the blend sharpened");
-        assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 1), 4 * output + ws, "the blend goes before the copy on screen is made");
+        assert_eq!(need(nomos8k, photo, 4, &off, 0).bytes, run + ws, "nothing to refine: the run");
+        assert_eq!(need(nomos8k, photo, 4, &off, 1).bytes, 2 * output + ws, "the output and its copy on screen");
+        assert_eq!(need(nomos8k, photo, 4, &sharpen, 0).bytes, 2 * output + ws, "the output and the sharpened one");
+        assert_eq!(need(nomos8k, photo, 4, &blend, 1).bytes, 4 * output + ws, "the output, the blend, the enlarged input and the copy on screen");
+        assert_eq!(need(nomos8k, photo, 4, &all, 0).bytes, 4 * output + ws, "the output, the enlarged input, the blend and the blend sharpened");
+        assert_eq!(need(nomos8k, photo, 4, &all, 1).bytes, 4 * output + ws, "the blend goes before the copy on screen is made");
     }
 
-    /// An upscale too large for any computer is refused, naming its output;
-    /// a small one runs.
+    /// An upscale that does not fit the room is refused, naming its output;
+    /// one that fits, or with no reading of the room, runs.
     #[test]
-    fn an_upscale_too_large_for_the_memory_is_refused() {
-        let x4 = prunr_models::ModelId::RealEsrganX4Plus;
-        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
-        assert!(room_for_upscale(x4, (8, 8), 4, &off, 0).is_ok());
-        match room_for_upscale(x4, (60_000, 60_000), 4, &off, 0) {
-            Err(CoreError::TooLargeToUpscale { width: 240_000, height: 240_000, need_mb, .. }) => assert!(need_mb > 200_000, "{need_mb}"),
+    fn an_upscale_too_large_for_the_room_is_refused() {
+        let need = UpscaleNeed { bytes: 4 << 30, out: (16000, 12000) };
+        assert!(need.fits(Some(4 << 30)).is_ok());
+        assert!(need.fits(None).is_ok(), "no reading: it runs");
+        match need.fits(Some(2 << 30)) {
+            Err(CoreError::TooLarge { work: crate::LargeWork::Upscale, width: 16000, height: 12000, need_mb: 4096, free_mb: 2048 }) => {}
             other => panic!("{other:?}"),
         }
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        assert_eq!(super::need(prunr_models::ModelId::RealEsrganX4Plus, (60_000, 50_000), 4, &off, 0).out, (240_000, 200_000));
     }
 
     #[test]

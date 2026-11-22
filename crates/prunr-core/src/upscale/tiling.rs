@@ -16,7 +16,7 @@
 //!
 //! The band is freed before the alpha is made, so the total overstates
 //! by the alpha. What an upscale needs free counts this peak beside
-//! Refine's and the landing's (`super::needed_bytes`).
+//! Refine's and the landing's.
 
 use crate::progress::{Progress, Step, TileRect, Unit};
 

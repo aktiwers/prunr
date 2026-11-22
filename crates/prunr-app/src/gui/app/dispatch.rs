@@ -131,7 +131,8 @@ impl PrunrApp {
         let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims());
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
         let finish = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
-        if let Err(why) = prunr_core::upscale::room_for_upscale(run_model, (w, h), output_scale.factor(), &finish, super::textures::COPIES_TO_SHOW) {
+        let need = prunr_core::upscale::need(run_model, (w, h), output_scale.factor(), &finish, crate::gui::image_texture::COPIES_TO_SHOW);
+        if let Err(why) = need.fits(crate::hardware::room_for_buffers_throttled()) {
             tracing::warn!(item_id, %why, "upscale refused: too large for the memory");
             self.toasts.error(prunr_core::plain::error(&why.message()));
             return false;
