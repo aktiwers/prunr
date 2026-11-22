@@ -102,6 +102,12 @@ impl Reference {
     fn stats(&self) -> &LabStats {
         self.stats.get_or_init(|| LabStats::of(&self.image))
     }
+
+    /// Whether `refine` over `raw` uses this one instead of enlarging the
+    /// input again: it is already `raw`'s size.
+    pub fn reusable_for(&self, raw: &RgbaImage) -> bool {
+        self.dimensions() == raw.dimensions()
+    }
 }
 
 impl std::ops::Deref for Reference {
@@ -250,7 +256,7 @@ pub fn refine(
         return (Arc::clone(raw), reference);
     }
     let reference = knobs.needs_reference().then(|| {
-        reference.filter(|r| r.dimensions() == raw.dimensions()).unwrap_or_else(|| {
+        reference.filter(|r| r.reusable_for(raw)).unwrap_or_else(|| {
             Arc::new(Reference::new(crate::formats::resize_rgba(input, raw.width(), raw.height(), crate::formats::ResizeFilter::CatmullRom)))
         })
     });

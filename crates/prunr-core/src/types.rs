@@ -23,6 +23,8 @@ pub enum LargeWork {
     Photo,
     /// An upscale: the enlarged picture and what Refine makes of it.
     Upscale,
+    /// Refine changed on an upscale already made.
+    Refine,
 }
 
 /// Work on a `width` × `height` picture too large for the room it has: on
@@ -36,6 +38,8 @@ fn too_large_text(work: LargeWork, width: u32, height: u32, need_mb: u64, room_m
         (LargeWork::Photo, false) => format!("This photo is too large for the memory free now: {width}\u{00d7}{height} needs about {need:.1} GB, {room:.1} GB is free. Close other apps and try again."),
         (LargeWork::Upscale, true) => format!("Too large to upscale on this computer: {width}\u{00d7}{height} needs about {need:.1} GB, more than its {room:.1} GB of memory. Try a smaller image or Scale."),
         (LargeWork::Upscale, false) => format!("Too large to upscale in the memory free now: {width}\u{00d7}{height} needs about {need:.1} GB, {room:.1} GB is free. Close other apps, or try a smaller image or Scale."),
+        (LargeWork::Refine, true) => format!("Refine is too large for this computer: {width}\u{00d7}{height} needs about {need:.1} GB, more than its {room:.1} GB of memory. Turn off AI blend, Color match or Sharpen."),
+        (LargeWork::Refine, false) => format!("Refine is too large for the memory free now: {width}\u{00d7}{height} needs about {need:.1} GB more, {room:.1} GB is free. Close other apps, or turn off AI blend, Color match or Sharpen."),
     }
 }
 
@@ -1013,6 +1017,8 @@ mod tests {
         assert!(msg.contains("9000\u{00d7}5000") && msg.contains("5.5 GB") && msg.contains("3.0 GB"), "{msg}");
         let msg = CoreError::TooLarge { work: LargeWork::Upscale, width: 16000, height: 12000, need_mb: 4096, free_mb: 2048 }.to_string();
         assert!(msg.starts_with("Too large to upscale") && msg.contains("16000\u{00d7}12000") && msg.contains("4.0 GB") && msg.contains("2.0 GB"), "{msg}");
+        let msg = CoreError::TooLarge { work: LargeWork::Refine, width: 16000, height: 12000, need_mb: 4096, free_mb: 2048 }.to_string();
+        assert!(msg.starts_with("Refine is too large") && msg.to_lowercase().contains("turn off ai blend"), "{msg}");
     }
 
     #[test]

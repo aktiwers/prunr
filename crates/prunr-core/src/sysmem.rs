@@ -101,6 +101,14 @@ pub fn room_for_buffers_bytes() -> Option<u64> {
     reported_available(available, total).map(|available| available + free_swap)
 }
 
+/// What work needing `need` bytes more, beside `held` bytes it holds
+/// already, counts against `room_for_buffers_bytes`: on macOS, where the
+/// room is the machine's memory, both; elsewhere the room is what is free,
+/// which `held` is not part of.
+pub fn counted_beside(need: u64, held: u64) -> u64 {
+    if cfg!(target_os = "macos") { need + held } else { need }
+}
+
 /// Available memory, total memory and, with `swap`, free swap as
 /// `swap_room` counts it (else 0), from one reading. Swap is read only
 /// when asked: on Windows it walks the process table, and the run

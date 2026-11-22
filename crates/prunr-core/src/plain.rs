@@ -164,6 +164,7 @@ mod tests {
         for own in [
             crate::CoreError::TooLarge { work: crate::LargeWork::Photo, width: 21000, height: 14000, need_mb: 13414, free_mb: 12493 }.message(),
             crate::CoreError::TooLarge { work: crate::LargeWork::Upscale, width: 84000, height: 56000, need_mb: 70000, free_mb: 16384 }.message(),
+            crate::CoreError::TooLarge { work: crate::LargeWork::Refine, width: 84000, height: 56000, need_mb: 70000, free_mb: 16384 }.message(),
             "This eraser needs 15.6 GB of free memory to load, 2.0 GB of it kept spare for other apps; 13.0 GB is free.".to_string(),
             "The graphics card has no room for this eraser, and on the processor it needs about 900 MB of free memory, 400 MB is free.".to_string(),
             "Eraser (Big-LaMa) is not installed".to_string(),

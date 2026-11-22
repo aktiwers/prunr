@@ -265,7 +265,10 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 /// The memory an upscale needs free, and the size it makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpscaleNeed {
+    work: crate::LargeWork,
     bytes: u64,
+    /// What the work holds already, besides the `bytes` it still needs.
+    held: u64,
     out: (u32, u32),
 }
 
@@ -274,12 +277,13 @@ impl UpscaleNeed {
     /// take now (free memory and swap; on macOS the machine's memory);
     /// with no reading of it, it runs.
     pub fn fits(self, room: Option<u64>) -> Result<(), CoreError> {
+        let counted = crate::sysmem::counted_beside(self.bytes, self.held);
         match room {
-            Some(room) if self.bytes > room => Err(CoreError::TooLarge {
-                work: crate::LargeWork::Upscale,
+            Some(room) if counted > room => Err(CoreError::TooLarge {
+                work: self.work,
                 width: self.out.0,
                 height: self.out.1,
-                need_mb: self.bytes >> 20,
+                need_mb: counted >> 20,
                 free_mb: room >> 20,
             }),
             _ => Ok(()),
@@ -303,15 +307,18 @@ pub fn need(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, 
     let output = pixels(in_w, in_h, scale) * 4;
     let finished = output + finish_bytes(output, finish, false, copies_after);
     let bytes = peak_bytes(model, in_w, in_h, scale).max(finished) + working_set_bytes(model);
-    UpscaleNeed { bytes, out: (in_w.saturating_mul(scale), in_h.saturating_mul(scale)) }
+    UpscaleNeed { work: crate::LargeWork::Upscale, bytes, held: 0, out: (in_w.saturating_mul(scale), in_h.saturating_mul(scale)) }
 }
 
-/// What Refine over a kept upscale of `out` needs free: the model's
-/// output and the result shown are in memory already, and the enlarged
-/// input too when `reference_kept`; Refine's new copies and the caller's
-/// `copies_after` are not.
+/// What Refine over a kept upscale of `out` needs free: Refine's new
+/// copies and the caller's `copies_after`, beside what the upscale holds
+/// already (the model's output, and the enlarged input when
+/// `reference_kept`). The result shown is in the undo history, which no
+/// memory check counts.
 pub fn refinish_need(out: (u32, u32), finish: &Refine, reference_kept: bool, copies_after: u64) -> UpscaleNeed {
-    UpscaleNeed { bytes: finish_bytes(pixels(out.0, out.1, 1) * 4, finish, reference_kept, copies_after), out }
+    let output = pixels(out.0, out.1, 1) * 4;
+    let bytes = finish_bytes(output, finish, reference_kept, copies_after);
+    UpscaleNeed { work: crate::LargeWork::Refine, bytes, held: output * (1 + u64::from(reference_kept)), out }
 }
 
 /// The most Refine's new copies of an `output`-byte picture hold at once:
@@ -514,7 +521,7 @@ mod tests {
     /// one that fits, or with no reading of the room, runs.
     #[test]
     fn an_upscale_too_large_for_the_room_is_refused() {
-        let need = UpscaleNeed { bytes: 4 << 30, out: (16000, 12000) };
+        let need = UpscaleNeed { work: crate::LargeWork::Upscale, bytes: 4 << 30, held: 0, out: (16000, 12000) };
         assert!(need.fits(Some(4 << 30)).is_ok());
         assert!(need.fits(None).is_ok(), "no reading: it runs");
         match need.fits(Some(2 << 30)) {
@@ -536,6 +543,22 @@ mod tests {
         let sharpen = Refine { sharpen: 0.5, ai_blend: 1.0, color_match: false, ..all };
         assert_eq!(refinish_need((1000, 1000), &sharpen, true, 0).bytes, copy, "the result");
         assert_eq!(refinish_need((1000, 1000), &sharpen, true, 0).out, (1000, 1000));
+    }
+
+    /// On macOS a Refine change counts what the upscale holds too, as a
+    /// fresh upscale with the same knobs does; elsewhere what it holds is
+    /// not part of the free memory, so only its new copies count.
+    #[test]
+    fn a_refine_change_counts_what_the_upscale_holds_where_the_room_is_all_memory() {
+        let copy = 1000 * 1000 * 4;
+        let sharpen = Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        let need = refinish_need((1000, 1000), &sharpen, false, 0);
+        let room = if cfg!(target_os = "macos") { 2 * copy } else { copy };
+        assert!(need.fits(Some(room)).is_ok());
+        match need.fits(Some(room - 1)) {
+            Err(CoreError::TooLarge { work: crate::LargeWork::Refine, need_mb, .. }) => assert_eq!(need_mb, room >> 20),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

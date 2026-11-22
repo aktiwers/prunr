@@ -229,8 +229,24 @@ pub fn available_ram_reading_throttled() -> Option<u64> {
 /// second: reading swap on Windows walks the process table, and a queue
 /// of images too large to upscale reads it once for each.
 pub fn room_for_buffers_throttled() -> Option<u64> {
+    #[cfg(test)]
+    if let Some(room) = ROOM_FOR_TEST.with(std::cell::Cell::get) {
+        return room;
+    }
     static CACHE: Reading<Option<u64>> = Mutex::new(None);
     throttled(&CACHE, prunr_core::sysmem::room_for_buffers_bytes)
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROOM_FOR_TEST: std::cell::Cell<Option<Option<u64>>> = const { std::cell::Cell::new(None) };
+}
+
+/// `room_for_buffers_throttled` reads `room` on this thread until it is
+/// set back to `None`.
+#[cfg(test)]
+pub(crate) fn set_room_for_buffers_for_test(room: Option<Option<u64>>) {
+    ROOM_FOR_TEST.with(|cell| cell.set(room));
 }
 
 /// Free RAM and swap for the run watchdogs. RAM is read at most every

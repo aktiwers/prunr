@@ -1155,8 +1155,8 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
-        let reference_kept = upscale.reference.as_ref().is_some_and(|r| r.dimensions() == full.dimensions());
-        if let Some(why) = refinish_refusal(full.dimensions(), &knobs, reference_kept, faces.is_some(), prunr_core::sysmem::room_for_buffers_bytes()) {
+        let reference_kept = upscale.reference.as_ref().is_some_and(|r| r.reusable_for(&full));
+        if let Some(why) = refinish_refusal(full.dimensions(), &knobs, reference_kept, faces.is_some(), crate::hardware::room_for_buffers_throttled()) {
             return RunOutput { refused: Some(why), ..RunOutput::default() };
         }
         let (shown, reference) = finish_upscale(full, &upscale.input, upscale.reference, &knobs, faces);
@@ -1513,14 +1513,17 @@ mod tests {
         use prunr_core::upscale::Refine;
         let all = Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.7, color_match: true };
         let copy = 1000 * 1000 * 4;
+        // The room it takes: its new copies, beside the output (and the
+        // enlarged input when kept) on macOS, where the room is all memory.
+        let room = |new: u64, held: u64| prunr_core::sysmem::counted_beside(new * copy, held * copy);
         // The enlarged input, the blend and it sharpened; then the result,
         // the input and the copy to show it: three new copies.
-        assert_eq!(super::refinish_refusal((1000, 1000), &all, false, false, Some(3 * copy)), None);
-        let why = super::refinish_refusal((1000, 1000), &all, false, false, Some(3 * copy - 1)).expect("refused");
-        assert!(why.starts_with("Too large to upscale"), "{why}");
-        assert_eq!(super::refinish_refusal((1000, 1000), &all, true, false, Some(2 * copy)), None, "the enlarged input kept is not made again");
+        assert_eq!(super::refinish_refusal((1000, 1000), &all, false, false, Some(room(3, 1))), None);
+        let why = super::refinish_refusal((1000, 1000), &all, false, false, Some(room(3, 1) - 1)).expect("refused");
+        assert!(why.starts_with("Refine is too large"), "{why}");
+        assert_eq!(super::refinish_refusal((1000, 1000), &all, true, false, Some(room(2, 2))), None, "the enlarged input kept is not made again");
         let off = Refine { sharpen: 0.0, ai_blend: 1.0, color_match: false, ..all };
-        assert!(super::refinish_refusal((1000, 1000), &off, false, true, Some(2 * copy - 1)).is_some(), "faces over the plain output copy it");
+        assert!(super::refinish_refusal((1000, 1000), &off, false, true, Some(room(2, 1) - 1)).is_some(), "faces over the plain output copy it");
         assert_eq!(super::refinish_refusal((1000, 1000), &all, false, false, None), None, "no reading: it runs");
     }
 
@@ -2165,6 +2168,29 @@ mod tests {
         assert!(parked.raw.demote_to_disk());
         assert_eq!(render_of(parked), resident);
         assert!(resident.is_some());
+    }
+
+    /// A Refine render of a kept upscale whose new copies do not fit the
+    /// memory draws nothing and says why; with room it draws.
+    #[test]
+    fn a_refine_render_without_the_memory_is_refused() {
+        use crate::gui::item_settings::ItemSettings;
+        let raw = Arc::new(RgbaImage::from_pixel(6, 6, image::Rgba([120, 80, 40, 255])));
+        let input = Arc::new(RgbaImage::from_pixel(3, 3, image::Rgba([60, 60, 60, 255])));
+        let settings = ItemSettings { sharpen: 0.4, ai_blend: 0.5, ..ItemSettings::default() };
+        let render_with = |room| {
+            crate::hardware::set_room_for_buffers_for_test(Some(room));
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let run = crate::gui::item::UpscaleCache::new(Arc::clone(&raw), Arc::clone(&input), None);
+            let out = run_preview(DispatchInputs { upscale: Some(run), ..DispatchInputs::new(PreviewKind::UpscaleTier2, 0, Arc::clone(&raw), settings) }, &cancel);
+            crate::hardware::set_room_for_buffers_for_test(None);
+            out
+        };
+        let refused = render_with(Some(0));
+        assert!(refused.rgba.is_none(), "nothing drawn");
+        assert!(refused.refused.as_deref().is_some_and(|why| why.starts_with("Refine is too large")), "{:?}", refused.refused);
+        let drawn = render_with(Some(1 << 30));
+        assert!(drawn.rgba.is_some() && drawn.refused.is_none());
     }
 
     /// A render from packed tensors unpacks them on its thread and draws
