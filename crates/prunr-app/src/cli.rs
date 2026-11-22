@@ -1088,12 +1088,7 @@ impl UpscaleJob<'_> {
         } else {
             img
         };
-        let needed = prunr_core::upscale::needed_bytes(self.model, model_input.dimensions(), self.scale.factor(), &self.refine, 0);
-        let room = prunr_core::sysmem::room_for_buffers_bytes().unwrap_or(0);
-        if needed > room {
-            use prunr_core::memory::byte_size;
-            return Err(format!("too large to upscale: needs about {} of memory, {} is available", byte_size(needed), byte_size(room)));
-        }
+        prunr_core::upscale::room_for_upscale(self.model, model_input.dimensions(), self.scale.factor(), &self.refine, 0).map_err(|e| e.message())?;
         let progress = prunr_core::Progress::none();
         let (model, factor, engine, on_cpu) = (self.model, self.scale.factor(), self.engine, &mut self.on_cpu);
         let upscale = |engine: &prunr_core::OrtEngine| prunr_core::upscale::upscale_rgba_with_engine(&model_input, engine, model, factor, &progress, None);

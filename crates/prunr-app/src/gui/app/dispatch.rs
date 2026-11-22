@@ -9,25 +9,6 @@ use crate::gui::timeline::StepKind;
 use crate::gui::worker::{CachedTensorWork, WorkerMessage};
 use super::PrunrApp;
 
-/// Why an upscale to `out` that holds `needed` bytes cannot run in
-/// `room` bytes (`sysmem::room_for_buffers_bytes`: on macOS the machine's
-/// memory, which closing apps does not change); `None` when it fits.
-fn too_large_to_upscale(out: (u32, u32), needed: u64, room: u64) -> Option<String> {
-    (needed > room).then(|| {
-        use prunr_core::memory::byte_size;
-        let (w, h, needed, room) = (out.0, out.1, byte_size(needed), byte_size(room));
-        if cfg!(target_os = "macos") {
-            format!("Too large to upscale on this computer: {w}\u{00d7}{h} needs about {needed}, more than its {room} of memory. Undo to a smaller image.")
-        } else {
-            format!("Too large to upscale: {w}\u{00d7}{h} needs about {needed} of free memory, {room} is free. Close other apps or undo to a smaller image.")
-        }
-    })
-}
-
-/// Copies of an upscale's result the app makes as it lands: the one
-/// uploaded to show it.
-const COPIES_TO_SHOW: u64 = 1;
-
 /// What a batch of cut-outs runs with: the model, how many images at
 /// once, and the settings of the look it was asked with.
 #[derive(Clone, Copy)]
@@ -148,15 +129,11 @@ impl PrunrApp {
         let recipe = item.settings.current_recipe(model_kind);
         let start = item.next_upscale_start(model_kind);
         let (w, h) = start.as_ref().map_or(item.dimensions, |s| s.dims());
-        let factor = output_scale.factor();
-        let out = (w.saturating_mul(factor), h.saturating_mul(factor));
         let run_model = prunr_core::upscale::model_for_scale(model_id, output_scale, self.hardware_install_cache.x2plus);
         let finish = prunr_core::upscale::Refine::of_recipe(&recipe.upscale);
-        let needed = prunr_core::upscale::needed_bytes(run_model, (w, h), factor, &finish, COPIES_TO_SHOW);
-        let room = prunr_core::sysmem::room_for_buffers_bytes().unwrap_or(0);
-        if let Some(why) = too_large_to_upscale(out, needed, room) {
-            tracing::warn!(item_id, out_w = out.0, out_h = out.1, needed, room, "upscale refused: too large for free memory");
-            self.toasts.error(why);
+        if let Err(why) = prunr_core::upscale::room_for_upscale(run_model, (w, h), output_scale.factor(), &finish, super::textures::COPIES_TO_SHOW) {
+            tracing::warn!(item_id, %why, "upscale refused: too large for the memory");
+            self.toasts.error(prunr_core::plain::error(&why.message()));
             return false;
         }
         let input = item.pixels_from(start.as_ref());
@@ -946,15 +923,6 @@ mod process_targets_tests {
         assert!(app.batch.items[1].job.is_none() && !app.processor.is_colorize_in_flight(), "still nothing runs");
         assert_eq!(app.batch.items[1].settings.bg, Some([10, 20, 30, 255]));
         assert_eq!(app.batch.items[1].timeline.undo_steps(), steps + 1, "the look is a step of its own");
-    }
-
-    /// An upscale that would not fit in free memory is refused, saying so.
-    #[test]
-    fn an_upscale_too_large_for_free_memory_is_refused() {
-        let gb = 1024 * 1024 * 1024;
-        assert_eq!(super::too_large_to_upscale((4000, 3000), gb, 8 * gb), None);
-        let why = super::too_large_to_upscale((16000, 12000), 4 * gb, 2 * gb).expect("does not fit");
-        assert!(why.contains("16000\u{00d7}12000") && why.contains("4.0 GB") && why.contains("2.0 GB"), "{why}");
     }
 
     #[test]

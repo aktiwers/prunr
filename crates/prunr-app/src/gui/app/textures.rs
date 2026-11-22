@@ -5,6 +5,10 @@ use crate::gui::background_io::TexTarget;
 use crate::gui::item::Pixels;
 use super::PrunrApp;
 
+/// Copies of an image `spawn_tex_prep` makes to show it: the one in
+/// egui's pixels, uploaded tile by tile.
+pub(super) const COPIES_TO_SHOW: u64 = 1;
+
 impl PrunrApp {
     /// Run the selection-change work even though the selected id is
     /// unchanged: the result or history behind it was replaced.

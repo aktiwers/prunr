@@ -12,6 +12,8 @@ pub enum CoreError {
     ImageFormat(String),
     #[error("{}", too_large_text(*.width, *.height, *.need_mb, *.free_mb))]
     TooLarge { width: u32, height: u32, need_mb: u64, free_mb: u64 },
+    #[error("{}", too_large_to_upscale_text(*.width, *.height, *.need_mb, *.room_mb))]
+    TooLargeToUpscale { width: u32, height: u32, need_mb: u64, room_mb: u64 },
     #[error("Processing cancelled")]
     Cancelled,
 }
@@ -28,11 +30,28 @@ fn too_large_text(width: u32, height: u32, need_mb: u64, room_mb: u64) -> String
     }
 }
 
+/// An upscale to `width` × `height` too large for the room
+/// `sysmem::room_for_buffers_bytes` gives it.
+fn too_large_to_upscale_text(width: u32, height: u32, need_mb: u64, room_mb: u64) -> String {
+    let gb = |mb: u64| mb as f64 / 1024.0;
+    if cfg!(target_os = "macos") {
+        format!("Too large to upscale on this computer: {width}\u{00d7}{height} needs about {:.1} GB, more than its {:.1} GB of memory. Try a smaller image or Scale.", gb(need_mb), gb(room_mb))
+    } else {
+        format!("Too large to upscale in the memory free now: {width}\u{00d7}{height} needs about {:.1} GB, {:.1} GB is free. Close other apps, or try a smaller image or Scale.", gb(need_mb), gb(room_mb))
+    }
+}
+
 impl CoreError {
     /// A `width` × `height` photo whose work needs `need` bytes with only
     /// `free` free.
     pub fn too_large(width: u32, height: u32, need: u64, free: u64) -> Self {
         CoreError::TooLarge { width, height, need_mb: need >> 20, free_mb: free >> 20 }
+    }
+
+    /// An upscale to `width` × `height` that needs `need` bytes with
+    /// `room` to run in.
+    pub fn too_large_to_upscale(width: u32, height: u32, need: u64, room: u64) -> Self {
+        CoreError::TooLargeToUpscale { width, height, need_mb: need >> 20, room_mb: room >> 20 }
     }
 
     /// The error for a person to read: the message alone, without the
@@ -1000,6 +1019,8 @@ mod tests {
         assert_eq!(CoreError::ImageFormat("bad format".into()).to_string(), "Image format error: bad format");
         let msg = CoreError::TooLarge { width: 9000, height: 5000, need_mb: 5632, free_mb: 3072 }.to_string();
         assert!(msg.contains("9000\u{00d7}5000") && msg.contains("5.5 GB") && msg.contains("3.0 GB"), "{msg}");
+        let msg = CoreError::TooLargeToUpscale { width: 16000, height: 12000, need_mb: 4096, room_mb: 2048 }.to_string();
+        assert!(msg.starts_with("Too large to upscale") && msg.contains("16000\u{00d7}12000") && msg.contains("4.0 GB") && msg.contains("2.0 GB"), "{msg}");
     }
 
     #[test]

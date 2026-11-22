@@ -212,12 +212,16 @@ impl Refine {
         self.sharpen == 0.0 && !self.needs_reference()
     }
 
-    /// Copies of the output `refine` holds besides it: at its peak, and
-    /// those it returns (the result and the enlarged input).
-    pub(super) fn output_copies(&self) -> (u64, u64) {
-        let returned = u64::from(!self.change_nothing()) + u64::from(self.needs_reference());
-        // A blend being sharpened is held until the sharpened copy is made.
-        (returned + u64::from(self.blends() && self.sharpen != 0.0), returned)
+    /// Copies of the output `refine` returns besides it: the result and
+    /// the enlarged input.
+    pub(super) fn returned_copies(&self) -> u64 {
+        u64::from(!self.change_nothing()) + u64::from(self.needs_reference())
+    }
+
+    /// Copies of the output `refine` holds besides it at its peak: a blend
+    /// being sharpened is held until the sharpened copy is made.
+    pub(super) fn copies_while_refining(&self) -> u64 {
+        self.returned_copies() + u64::from(self.blends() && self.sharpen != 0.0)
     }
 }
 
@@ -281,6 +285,25 @@ mod tests {
         let (shown, reference) = refine(&raw, &input, None, &Refine { ai_blend: 0.0, ..off });
         assert_eq!(shown.get_pixel(1, 1).0, [40, 40, 40, 255]);
         assert!(reference.is_some_and(|r| r.dimensions() == (4, 4)), "the enlarged input comes back for reuse");
+    }
+
+    /// The memory check counts what `refine` gives back, for every
+    /// combination of its knobs.
+    #[test]
+    fn refine_returns_the_copies_the_memory_check_counts() {
+        use std::sync::Arc;
+        let raw = Arc::new(RgbaImage::from_pixel(4, 4, image::Rgba([200, 120, 60, 255])));
+        let input = RgbaImage::from_pixel(2, 2, image::Rgba([40, 90, 140, 255]));
+        for sharpen in [0.0, 0.5] {
+            for ai_blend in [1.0, 0.7] {
+                for color_match in [false, true] {
+                    let knobs = Refine { sharpen, sharpen_sigma: 2.0, ai_blend, color_match };
+                    let (shown, reference) = refine(&raw, &input, None, &knobs);
+                    let returned = u64::from(!Arc::ptr_eq(&shown, &raw)) + u64::from(reference.is_some());
+                    assert_eq!(knobs.returned_copies(), returned, "{knobs:?}");
+                }
+            }
+        }
     }
     use image::{Rgba, RgbaImage};
 

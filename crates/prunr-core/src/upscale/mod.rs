@@ -266,19 +266,37 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 /// needs free: the model's working set and the most its buffers hold at
 /// once, during the run, during `finish`, or as it lands: the output,
 /// what Refine returns and the `copies_after` copies the caller makes of
-/// the result (the app's to show it). In copies of the output:
+/// the result. In copies of the output, `copies_after` not counted:
 ///
-/// | Refine on              | During Refine | Landed and shown |
-/// |------------------------|---------------|------------------|
-/// | nothing                | 1             | 2                |
-/// | Sharpen                | 2             | 3                |
-/// | AI blend, Color match  | 3             | 4                |
-/// | AI blend and Sharpen   | 4             | 4                |
+/// | Refine on              | During Refine | Landed |
+/// |------------------------|---------------|--------|
+/// | nothing                | 1             | 1      |
+/// | Sharpen                | 2             | 2      |
+/// | AI blend, Color match  | 3             | 3      |
+/// | AI blend and Sharpen   | 4             | 3      |
 pub fn needed_bytes(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> u64 {
-    let output = u64::from(in_w) * u64::from(in_h) * u64::from(scale) * u64::from(scale) * 4;
-    let (refining, returned) = finish.output_copies();
-    let landed = output * (1 + returned + copies_after);
-    peak_bytes(model, in_w, in_h, scale).max(output * (1 + refining)).max(landed) + working_set_bytes(model)
+    let output = pixels(in_w, in_h, scale) * 4;
+    let refining = output * (1 + finish.copies_while_refining());
+    let landed = output * (1 + finish.returned_copies() + copies_after);
+    peak_bytes(model, in_w, in_h, scale).max(refining).max(landed) + working_set_bytes(model)
+}
+
+/// Refuses an upscale whose buffers at their peak (`needed_bytes`) do not
+/// fit the memory and swap free now (`sysmem::room_for_buffers_bytes`);
+/// with no reading of free memory it runs.
+pub fn room_for_upscale(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> Result<(), CoreError> {
+    let needed = needed_bytes(model, (in_w, in_h), scale, finish, copies_after);
+    crate::sysmem::room_for_buffers_bytes().map_or(Ok(()), |room| {
+        if needed <= room {
+            return Ok(());
+        }
+        Err(CoreError::too_large_to_upscale(in_w.saturating_mul(scale), in_h.saturating_mul(scale), needed, room))
+    })
+}
+
+/// The pixels of a `w` × `h` image enlarged `scale` times.
+fn pixels(w: u32, h: u32, scale: u32) -> u64 {
+    u64::from(w) * u64::from(h) * u64::from(scale) * u64::from(scale)
 }
 
 /// What a parted run may still take of `free`: the parts' sessions are
@@ -310,8 +328,7 @@ fn peak_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) ->
     if native == scale {
         return run;
     }
-    let pixels = |s: u32| u64::from(in_w) * u64::from(in_h) * u64::from(s) * u64::from(s);
-    run.max(pixels(native) * 4 + pixels(scale) * 5)
+    run.max(pixels(in_w, in_h, native) * 4 + pixels(in_w, in_h, scale) * 5)
 }
 
 /// Builds its own engine; for callers without a warm engine (CLI, tests).
@@ -464,6 +481,19 @@ mod tests {
         assert_eq!(needed_bytes(nomos8k, photo, 4, &blend, 1), 4 * output + ws, "the output, the blend, the enlarged input and the copy on screen");
         assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 0), 4 * output + ws, "the output, the enlarged input, the blend and the blend sharpened");
         assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 1), 4 * output + ws, "the blend goes before the copy on screen is made");
+    }
+
+    /// An upscale too large for any computer is refused, naming its output;
+    /// a small one runs.
+    #[test]
+    fn an_upscale_too_large_for_the_memory_is_refused() {
+        let x4 = prunr_models::ModelId::RealEsrganX4Plus;
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        assert!(room_for_upscale(x4, (8, 8), 4, &off, 0).is_ok());
+        match room_for_upscale(x4, (60_000, 60_000), 4, &off, 0) {
+            Err(CoreError::TooLargeToUpscale { width: 240_000, height: 240_000, need_mb, .. }) => assert!(need_mb > 200_000, "{need_mb}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
