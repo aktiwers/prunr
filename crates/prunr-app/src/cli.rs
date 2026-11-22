@@ -1088,11 +1088,11 @@ impl UpscaleJob<'_> {
         } else {
             img
         };
-        let needed = prunr_core::upscale::needed_bytes(self.model, model_input.width(), model_input.height(), self.scale.factor());
-        let free = prunr_app::hardware::available_ram_bytes_now();
-        if needed > free {
+        let needed = prunr_core::upscale::needed_bytes(self.model, model_input.dimensions(), self.scale.factor(), &self.refine, 0);
+        let room = prunr_core::sysmem::room_for_buffers_bytes().unwrap_or(0);
+        if needed > room {
             use prunr_core::memory::byte_size;
-            return Err(format!("too large to upscale: needs about {} of free memory, {} is free", byte_size(needed), byte_size(free)));
+            return Err(format!("too large to upscale: needs about {} of memory, {} is available", byte_size(needed), byte_size(room)));
         }
         let progress = prunr_core::Progress::none();
         let (model, factor, engine, on_cpu) = (self.model, self.scale.factor(), self.engine, &mut self.on_cpu);

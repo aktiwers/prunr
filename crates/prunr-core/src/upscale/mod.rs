@@ -263,9 +263,22 @@ fn fit_to_scale(native: RgbaImage, input: &RgbaImage, scale: u32) -> RgbaImage {
 }
 
 /// What an upscale of an `in_w` × `in_h` image by `scale` with `model`
-/// needs free: its buffers at their peak and the model's working set.
-pub fn needed_bytes(model: prunr_models::ModelId, in_w: u32, in_h: u32, scale: u32) -> u64 {
-    peak_bytes(model, in_w, in_h, scale) + working_set_bytes(model)
+/// needs free: the model's working set and the most its buffers hold at
+/// once, during the run, during `finish`, or as it lands: the output,
+/// what Refine returns and the `copies_after` copies the caller makes of
+/// the result (the app's to show it). In copies of the output:
+///
+/// | Refine on              | During Refine | Landed and shown |
+/// |------------------------|---------------|------------------|
+/// | nothing                | 1             | 2                |
+/// | Sharpen                | 2             | 3                |
+/// | AI blend, Color match  | 3             | 4                |
+/// | AI blend and Sharpen   | 4             | 4                |
+pub fn needed_bytes(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> u64 {
+    let output = u64::from(in_w) * u64::from(in_h) * u64::from(scale) * u64::from(scale) * 4;
+    let (refining, returned) = finish.output_copies();
+    let landed = output * (1 + returned + copies_after);
+    peak_bytes(model, in_w, in_h, scale).max(output * (1 + refining)).max(landed) + working_set_bytes(model)
 }
 
 /// What a parted run may still take of `free`: the parts' sessions are
@@ -425,10 +438,32 @@ mod tests {
         let nomos2 = ModelId::FourXNomos2RealPlksr;
         // The features and the image (268 B a pixel), and half-precision
         // blocks' outputs or two bands of 250 of the 1000 rows: 128 B.
-        assert_eq!(needed_bytes(nomos2, 1000, 1000, 4), 1_000_000 * 268 + 2 * 250 * 1000 * 256 + working_set(nomos2));
-        assert_eq!(needed_bytes(nomos2, 1000, 1000, 2), needed_bytes(nomos2, 1000, 1000, 4), "the run at 4x outweighs the resample");
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        assert_eq!(needed_bytes(nomos2, (1000, 1000), 4, &off, 0), 1_000_000 * 268 + 2 * 250 * 1000 * 256 + working_set(nomos2));
+        assert_eq!(needed_bytes(nomos2, (1000, 1000), 2, &off, 0), needed_bytes(nomos2, (1000, 1000), 4, &off, 0), "the run at 4x outweighs the resample");
         let x4 = ModelId::RealEsrganX4Plus;
-        assert_eq!(needed_bytes(x4, 4096, 4096, 4), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
+        assert_eq!(needed_bytes(x4, (4096, 4096), 4, &off, 0), peak_bytes(x4, 4096, 4096, 4) + working_set(x4));
+    }
+
+    /// After the run, Refine and what lands hold copies of the output too:
+    /// the most held at any one time is what an upscale needs.
+    #[test]
+    fn an_upscale_needs_what_refine_and_landing_hold() {
+        let nomos8k = prunr_models::ModelId::Nomos8kSchatL;
+        let (photo, ws) = ((6000, 4000), working_set_bytes(nomos8k));
+        let output = 6000 * 4000 * 16 * 4;
+        let run = peak_bytes(nomos8k, 6000, 4000, 4);
+        assert!(run < 2 * output, "the run holds the output and a band: {run}");
+        let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
+        let sharpen = Refine { sharpen: 0.5, ..off };
+        let blend = Refine { ai_blend: 0.7, ..off };
+        let all = Refine { sharpen: 0.5, ai_blend: 0.7, color_match: true, ..off };
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &off, 0), run + ws, "nothing to refine: the run");
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &off, 1), 2 * output + ws, "the output and its copy on screen");
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &sharpen, 0), 2 * output + ws, "the output and the sharpened one");
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &blend, 1), 4 * output + ws, "the output, the blend, the enlarged input and the copy on screen");
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 0), 4 * output + ws, "the output, the enlarged input, the blend and the blend sharpened");
+        assert_eq!(needed_bytes(nomos8k, photo, 4, &all, 1), 4 * output + ws, "the blend goes before the copy on screen is made");
     }
 
     #[test]

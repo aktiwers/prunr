@@ -211,6 +211,14 @@ impl Refine {
     fn change_nothing(&self) -> bool {
         self.sharpen == 0.0 && !self.needs_reference()
     }
+
+    /// Copies of the output `refine` holds besides it: at its peak, and
+    /// those it returns (the result and the enlarged input).
+    pub(super) fn output_copies(&self) -> (u64, u64) {
+        let returned = u64::from(!self.change_nothing()) + u64::from(self.needs_reference());
+        // A blend being sharpened is held until the sharpened copy is made.
+        (returned + u64::from(self.blends() && self.sharpen != 0.0), returned)
+    }
 }
 
 /// The upscale result to show, from the model's raw output and `input`, the

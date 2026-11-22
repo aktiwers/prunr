@@ -15,8 +15,8 @@
 //! reads `inferred` directly with an offset (no separate trimmed copy).
 //!
 //! The band is freed before the alpha is made, so the total overstates
-//! by the alpha. The upscale dispatch refuses to start when free RAM is
-//! below this peak (`super::peak_bytes`).
+//! by the alpha. What an upscale needs free counts this peak beside
+//! Refine's and the landing's (`super::needed_bytes`).
 
 use crate::progress::{Progress, Step, TileRect, Unit};
 
