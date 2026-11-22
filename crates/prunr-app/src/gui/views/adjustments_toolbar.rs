@@ -109,7 +109,7 @@ pub(crate) struct ToolbarState<'a> {
     pub installed: crate::gui::hardware_cache::HardwareInstallCache,
     pub show_original: bool,
     pub can_compare: bool,
-    /// The seed of the generated fill on screen, for Pin seed.
+    /// The seed of the generated fill on screen, for Keep this seed.
     pub shown_seed: Option<u64>,
     /// What the shown image is and holds, for the surfaces' gates.
     pub facts: crate::gui::capability::ItemFacts,

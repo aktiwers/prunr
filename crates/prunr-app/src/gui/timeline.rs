@@ -367,7 +367,7 @@ pub(crate) struct Origin {
     /// made this step, so another step never re-renders it. Run ids are
     /// unique across both kinds.
     pub(crate) kept_run: Option<u64>,
-    /// The seed a generated fill ran with, for Pin seed.
+    /// The seed a generated fill ran with, for Keep this seed.
     pub(crate) seed: Option<u64>,
     /// The region an erase filled, so "Try another" can fill it again
     /// (shared with the stroke step that painted it).

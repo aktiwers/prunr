@@ -4345,7 +4345,7 @@ mod tests {
         let _ = raw;
     }
 
-    /// Pin seed keeps the fill on screen: each fill's seed stays with its
+    /// Keep this seed keeps the fill on screen: each fill's seed stays with its
     /// step, so after an undo it is the earlier fill's.
     #[test]
     fn a_fills_seed_belongs_to_its_step() {

@@ -1,7 +1,7 @@
-//! Eraser chips: the SD eraser's Quality, Prompt and Advanced (the
+//! Eraser chips: the SD eraser's Quality, Prompt, Seed and Advanced (the
 //! fill's scale and sharpness, steps, guidance, denoising strength,
-//! sampler, seed, the fast decoder and the edge), RORem's Advanced, and
-//! the other erasers' Advanced (the fill's scale, sharpness and edge).
+//! sampler, the fast decoder and the edge), RORem's Seed and Advanced,
+//! and the other erasers' Advanced (the fill's scale, sharpness and edge).
 
 use egui::RichText;
 use egui_material_icons::icons::*;
@@ -17,7 +17,6 @@ use super::{differs, fmt, get_model, hint};
 
 const FILL_SCALE: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.inpaint_fill_scale != d.inpaint_fill_scale, reset: |s, d| s.inpaint_fill_scale = d.inpaint_fill_scale };
 const SHARPEN: Field<BrushSettings> = Field { knob: None, differs: |s, d| differs(s.inpaint_sharpen, d.inpaint_sharpen), reset: |s, d| s.inpaint_sharpen = d.inpaint_sharpen };
-const SEED: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.sd_seed != d.sd_seed, reset: |s, d| s.sd_seed = d.sd_seed };
 const SOFT_EDGE: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.sd_soft_edge != d.sd_soft_edge, reset: |s, d| s.sd_soft_edge = d.sd_soft_edge };
 const GENERATED_EDGE_COLOUR: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.edge_colour(true) != d.edge_colour(true), reset: |s, d| s.inpaint_edge_colour = d.inpaint_edge_colour };
 const FILL_EDGE_COLOUR: Field<BrushSettings> = Field { knob: None, differs: |s, d| s.edge_colour(false) != d.edge_colour(false), reset: |s, d| s.inpaint_edge_colour = d.inpaint_edge_colour };
@@ -29,7 +28,6 @@ const SD_ADVANCED: &[Field<BrushSettings>] = &[
     Field { knob: None, differs: |s, d| s.sd_steps != d.sd_steps, reset: |s, d| s.sd_steps = d.sd_steps },
     Field { knob: None, differs: |s, d| differs(s.sd_guidance_scale, d.sd_guidance_scale), reset: |s, d| s.sd_guidance_scale = d.sd_guidance_scale },
     Field { knob: None, differs: |s, d| differs(s.sd_strength, d.sd_strength), reset: |s, d| s.sd_strength = d.sd_strength },
-    SEED,
     Field { knob: None, differs: |s, d| s.sd_use_taesd != d.sd_use_taesd, reset: |s, d| s.sd_use_taesd = d.sd_use_taesd },
     Field { knob: None, differs: |s, d| s.sd_sampler != d.sd_sampler, reset: |s, d| s.sd_sampler = d.sd_sampler },
     SOFT_EDGE,
@@ -40,7 +38,6 @@ const ROREM_ADVANCED: &[Field<BrushSettings>] = &[
     FILL_SCALE,
     SHARPEN,
     Field { knob: None, differs: |s, d| s.rorem_steps != d.rorem_steps, reset: |s, d| s.rorem_steps = d.rorem_steps },
-    SEED,
     SOFT_EDGE,
     GENERATED_EDGE_COLOUR,
 ];
@@ -59,13 +56,14 @@ pub(crate) fn render(
     // The default preset's, for the quality in use.
     let defaults = crate::gui::presets::named(&app_settings.presets, &app_settings.default_preset).brush(app_settings.model, Some(app_settings.brush.sd_scheduler));
     committed |= render_prompt_chip(ui, &mut app_settings.brush, defaults);
-    committed |= render_advanced_group(ui, &mut app_settings.brush, defaults, installed.taesd, shown_seed);
+    committed |= render_seed_chip(ui, &mut app_settings.brush, shown_seed);
+    committed |= render_advanced_group(ui, &mut app_settings.brush, defaults, installed.taesd);
     committed
 }
 
-fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, taesd_installed: bool, shown_seed: Option<u64>) -> bool {
+fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, taesd_installed: bool) -> bool {
     let quality = brush.sd_scheduler;
-    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler, seed and how it meets the photo.";
+    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps, guidance, denoising strength, sampler and how it meets the photo.";
     advanced_group(ui, "eraser_advanced", tooltip, SD_ADVANCED, brush, defaults, |ui, brush| {
         let mut committed = fill_rows(ui, brush);
         committed |= chip::slider_row(ui, "Steps", &mut brush.sd_steps, quality.steps_range()).commit;
@@ -81,9 +79,6 @@ fn render_advanced_group(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults:
 
         committed |= chip::slider_row_f32(ui, "Denoising strength", &mut brush.sd_strength, 0.0..=1.0, false, fmt::percent).commit;
         hint(ui, "How much of the painted area is drawn anew. 100% replaces it; lower keeps its shapes and colors, to change something rather than remove it.");
-        ui.add_space(theme::SPACE_XS);
-
-        committed |= seed_row(ui, brush, shown_seed);
         ui.add_space(theme::SPACE_XS);
 
         let mut fast = brush.sd_use_taesd_effective_with_avail(taesd_installed);
@@ -196,31 +191,50 @@ fn fill_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
     committed
 }
 
-/// Pin the seed of the fill on screen, or let each fill draw its own.
-fn seed_row(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
-    let mut pinned = brush.sd_seed.is_some();
-    let seed_label = match brush.sd_seed {
-        Some(seed) => format!("Pin seed  \u{2026}{:06}", seed % 1_000_000),
-        None => "Pin seed".to_string(),
-    };
-    let changed = chip::toggle_row(ui, &seed_label, &mut pinned).changed;
-    if changed {
-        brush.sd_seed = pinned.then(|| shown_seed.unwrap_or_else(prunr_core::inpaint_sd::fresh_seed));
-    }
-    hint(ui, "Keeps the seed of the fill on screen, so the same settings give that fill again.");
+/// The Seed chip of an eraser that generates its fill (SD, RORem): Random
+/// draws a new fill each time; Keep this seed gives the fill on screen
+/// again.
+fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
+    let pop_id = egui::Id::new("eraser_seed_popover");
+    let face = brush.sd_seed.map_or_else(|| "Random".to_string(), |seed| format!("\u{2026}{:06}", seed % 1_000_000));
+    let resp = chip::tooltip(
+        chip::chip_button(ui, ICON_CASINO.codepoint, &face, brush.sd_seed.is_some()),
+        "Seed",
+        "Random draws a new fill each time; Keep this seed gives the fill on screen again with the same settings.",
+        None,
+    );
+    let mut changed = false;
+    chip::popup_for(ui, pop_id, &resp, |ui| {
+        chip::popover_header(ui, "Seed", None);
+        if chip::picker_row(ui, brush.sd_seed.is_none(), "Random", "A new fill each time").clicked() {
+            changed = brush.sd_seed.take().is_some();
+            egui::Popup::close_id(ui.ctx(), pop_id);
+        }
+        if chip::picker_row(ui, brush.sd_seed.is_some(), "Keep this seed", "The same settings give the fill on screen again").clicked() {
+            let kept = Some(seed_to_keep(shown_seed, brush.sd_seed));
+            changed = brush.sd_seed != kept;
+            brush.sd_seed = kept;
+            egui::Popup::close_id(ui.ctx(), pop_id);
+        }
+    });
     changed
 }
 
-/// RORem's Advanced group: steps, seed and the edge. Its prompt is baked
+/// The seed Keep this seed keeps: the fill on screen's, else the one kept
+/// already, else a new one for the fills to come.
+fn seed_to_keep(shown: Option<u64>, kept: Option<u64>) -> u64 {
+    shown.or(kept).unwrap_or_else(prunr_core::inpaint_sd::fresh_seed)
+}
+
+/// RORem's Seed and Advanced (steps and the edge). Its prompt is baked
 /// in, so there is nothing else to tell it.
 pub(crate) fn render_rorem(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &BrushSettings, shown_seed: Option<u64>) -> bool {
-    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps, seed and how it meets the photo.";
-    advanced_group(ui, "rorem_advanced", tooltip, ROREM_ADVANCED, brush, defaults, |ui, brush| {
+    let seed = render_seed_chip(ui, brush, shown_seed);
+    let tooltip = "How the eraser generates the fill: its scale and sharpness, steps and how it meets the photo.";
+    seed | advanced_group(ui, "rorem_advanced", tooltip, ROREM_ADVANCED, brush, defaults, |ui, brush| {
         let mut committed = fill_rows(ui, brush);
         committed |= chip::slider_row(ui, "Steps", &mut brush.rorem_steps, ROREM_STEPS_RANGE).commit;
         hint(ui, "Fewer steps are faster but rougher; past 4, the number the model was trained for, the fill barely changes.");
-        ui.add_space(theme::SPACE_XS);
-        committed |= seed_row(ui, brush, shown_seed);
         ui.add_space(theme::SPACE_XS);
         committed |= generated_edge_rows(ui, brush);
         committed
@@ -303,4 +317,15 @@ fn render_prompt_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, defaults: &B
         hint(ui, "What to keep out of the fill. Used when Guidance (under Advanced) is above 1.");
     });
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_this_seed_keeps_the_fill_on_screen() {
+        assert_eq!(seed_to_keep(Some(7), Some(3)), 7, "the fill on screen's, over one kept before");
+        assert_eq!(seed_to_keep(None, Some(3)), 3, "with no fill on screen, the one kept");
+    }
 }

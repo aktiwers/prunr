@@ -2246,7 +2246,7 @@ mod timeline_contract_tests {
 
     /// A No model render landing on a generated fill keeps the fill as the
     /// step's run: "Try another" still refills its region from the image
-    /// before the erase, Pin seed keeps its seed, and the next render
+    /// before the erase, Keep this seed keeps its seed, and the next render
     /// redoes from where the first began, not on its own output.
     #[test]
     fn a_render_on_a_fill_keeps_try_another_and_its_seed() {
@@ -2266,7 +2266,7 @@ mod timeline_contract_tests {
         let r = item.reroll().expect("the render keeps Try another");
         assert!(Arc::ptr_eq(&r.region, &painted), "the region painted for the fill");
         assert_eq!(r.start.as_ref().map(|s| s.dims()), erase_start, "from the image before the erase");
-        assert_eq!(item.shown_seed(), Some(7), "Pin seed keeps the fill's seed");
+        assert_eq!(item.shown_seed(), Some(7), "Keep this seed keeps the fill's seed");
         let next = item.run_start(Engine::Segment).expect("the next render's start");
         assert!(Arc::ptr_eq(&next, &render_start), "the next render redoes from the fill");
     }
