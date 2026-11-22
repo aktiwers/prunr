@@ -277,6 +277,12 @@ impl BrushSettings {
         self.fit_sd_to_quality();
     }
 
+    /// Keep `kept`, the seed the user kept, unless the brush now keeps its
+    /// own: a preset or a model that keeps none leaves the user's.
+    pub(crate) fn keep_seed(&mut self, kept: Option<u64>) {
+        self.sd_seed = self.sd_seed.or(kept);
+    }
+
     /// Steps and guidance inside what the quality is made for; a value
     /// saved under the other quality or a retired sampler can sit outside.
     pub fn fit_sd_to_quality(&mut self) {

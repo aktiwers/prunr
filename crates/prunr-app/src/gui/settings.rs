@@ -405,7 +405,9 @@ impl Settings {
     pub(crate) fn apply_preset(&mut self, name: &str, item: &mut ItemSettings) {
         let resolved = self.resolve_preset(name, None);
         *item = resolved.item_settings;
+        let kept = self.brush.sd_seed;
         self.brush = resolved.brush;
+        self.brush.keep_seed(kept);
     }
 
     /// After a switch from `from`: the brush settings changed since a
@@ -413,7 +415,8 @@ impl Settings {
     /// `name`.
     pub(crate) fn switch_brush_model(&mut self, from: SettingsModel, name: &str) {
         self.brush_changes.note(&self.brush, &super::preset_fields::brush_entries_of(from));
-        let brush = super::presets::take_untouched_brush(self.preset(name), self.model, self.brush.clone(), &self.brush_changes);
+        let mut brush = super::presets::take_untouched_brush(self.preset(name), self.model, self.brush.clone(), &self.brush_changes);
+        brush.keep_seed(self.brush.sd_seed);
         self.brush_changes.rebase(&brush);
         self.brush = brush;
     }
@@ -1233,6 +1236,33 @@ mod tests {
         s.model = SettingsModel::SdInpaint;
         s.switch_brush_model(SettingsModel::BigInpaint, "Foo");
         assert_eq!(s.brush.inpaint_sharpen, 0.0, "a generated fill keeps its own Sharpen 0");
+    }
+
+    /// A kept seed is the user's choice on the eraser, not part of a look:
+    /// a preset that keeps none leaves it, through the apply and the next
+    /// switch back to the eraser; a preset that keeps one sets its own.
+    #[test]
+    fn a_preset_without_a_seed_leaves_the_kept_one() {
+        let mut s = Settings::default();
+        s.model = SettingsModel::SdInpaint;
+        s.brush.sd_seed = Some(77);
+        s.model = SettingsModel::BiRefNetLite;
+        s.switch_brush_model(SettingsModel::SdInpaint, "Prunr");
+
+        let mut item = ItemSettings::default();
+        s.apply_preset("Prunr", &mut item);
+        s.restart_brush_changes();
+        assert_eq!(s.brush.sd_seed, Some(77), "applying a look keeps the seed");
+
+        s.model = SettingsModel::SdInpaint;
+        s.switch_brush_model(SettingsModel::BiRefNetLite, "Prunr");
+        assert_eq!(s.brush.sd_seed, Some(77), "and so does the switch back to the eraser");
+
+        s.presets.insert("Kept".to_string(), preset(serde_json::json!({ "format_version": 2, "models": {
+            "SdV15InpaintFp16": { "sd": { "seed": 5, "active_scheduler": "Lcm", "schedulers": {} } }
+        } })));
+        s.apply_preset("Kept", &mut item);
+        assert_eq!(s.brush.sd_seed, Some(5), "a preset that keeps a seed sets its own");
     }
 
     /// An eraser's own tuning that no longer reads (a value an older
