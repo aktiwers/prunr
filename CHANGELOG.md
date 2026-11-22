@@ -117,7 +117,7 @@ All notable user-facing changes. Releases on GitHub carry the full commit list.
 - Line color choices (Original, Solid color, styles) live in one list.
 - **Save as PNG, JPEG or WebP.** The arrow beside Save picks the format and, for a cut-out, Separate layers (moved from Settings). JPEG flattens transparency onto white; WebP is lossless and keeps it.
 - **Runs on: Auto or CPU only**, saved, for every model (was "Force CPU this session", which only reached background removal).
-- **SD memory guard: Relaxed, Balanced or Strict** replaces the GB safety-margin slider; the memory note in Settings uses the same rule as the erase.
+- **SD memory guard: Relaxed, Balanced or Strict** replaces the GB safety-margin slider; the memory note in Settings uses the same rule as the erase. Relaxed is the default: it leaves about 1 GB free for other apps, Balanced 2 GB and Strict 4 GB.
 - The Model picker shows in the empty window, and its last row opens the Model Store (which left the Help menu).
 - Reset to defaults keeps your presets, licence acceptances, background pictures and model, and the shipped hotkeys apply at once.
 - The Live preview switch is gone: changes always preview.
