@@ -196,7 +196,10 @@ fn fill_rows(ui: &mut egui::Ui, brush: &mut BrushSettings) -> bool {
 /// again.
 fn render_seed_chip(ui: &mut egui::Ui, brush: &mut BrushSettings, shown_seed: Option<u64>) -> bool {
     let pop_id = egui::Id::new("eraser_seed_popover");
-    let face = brush.sd_seed.map_or_else(|| "Random".to_string(), |seed| format!("\u{2026}{:06}", seed % 1_000_000));
+    let face: std::borrow::Cow<'static, str> = match brush.sd_seed {
+        Some(seed) => format!("\u{2026}{:06}", seed % 1_000_000).into(),
+        None => "Random".into(),
+    };
     let resp = chip::tooltip(
         chip::chip_button(ui, ICON_CASINO.codepoint, &face, brush.sd_seed.is_some()),
         "Seed",
