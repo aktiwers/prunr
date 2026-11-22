@@ -1391,6 +1391,15 @@ fn sendable_inputs(args: &Cli, out_paths: &[PathBuf], spinners: &[Option<Progres
     sendable
 }
 
+/// An image's spinner line in the terminal. indicatif draws a finished
+/// spinner with the last tick string, so that one is empty and each frame
+/// carries its own space: a done line reads "✓ name", nothing before it.
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("{spinner:.cyan}{msg}")
+        .expect("static indicatif template compiles")
+        .tick_strings(&["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ ", ""])
+}
+
 fn report_skipped(spinner: Option<&ProgressBar>, input: &std::path::Path, why: &str, quiet: bool) {
     match spinner {
         Some(pb) => pb.finish_with_message(format!("X {} — {why}", input.display())),
@@ -1461,11 +1470,7 @@ fn run_batch(args: &Cli, depth: &CliDepth, s: &ItemSettings) -> i32 {
     let spinners: Vec<Option<ProgressBar>> = args.inputs.iter().map(|input| {
         mp.as_ref().map(|m| {
             let pb = m.add(ProgressBar::new_spinner());
-            pb.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .expect("static indicatif template compiles")
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
+            pb.set_style(spinner_style());
             pb.set_message(format!("{} (waiting...)", input.display()));
             pb
         })
@@ -2112,6 +2117,16 @@ mod tests {
 
     use super::SettingsModel;
     use crate::gui::presets::command_line_settings;
+
+    /// indicatif draws a finished spinner with its last tick string: a
+    /// done line ("✓ name", "X name — why") keeps whatever that is in front
+    /// of it, so it must draw nothing, while each frame keeps its space.
+    #[test]
+    fn a_finished_spinner_line_shows_only_its_message() {
+        let style = super::spinner_style();
+        assert_eq!(style.get_final_tick_str(), "", "a done line has no frame in front");
+        assert_eq!(style.get_tick_str(0), "⠋ ", "a running one spins, one space before its message");
+    }
 
     fn cli(args: &[&str]) -> super::Cli {
         super::Cli::parse_from(["prunr", "a.png"].iter().chain(args).copied())
