@@ -301,10 +301,24 @@ impl UpscaleNeed {
 /// | AI blend and Sharpen   | 4             | 3      |
 pub fn need(model: prunr_models::ModelId, (in_w, in_h): (u32, u32), scale: u32, finish: &Refine, copies_after: u64) -> UpscaleNeed {
     let output = pixels(in_w, in_h, scale) * 4;
-    let refining = output * (1 + finish.copies_while_refining());
-    let landed = output * (1 + finish.returned_copies() + copies_after);
-    let bytes = peak_bytes(model, in_w, in_h, scale).max(refining).max(landed) + working_set_bytes(model);
+    let finished = output + finish_bytes(output, finish, false, copies_after);
+    let bytes = peak_bytes(model, in_w, in_h, scale).max(finished) + working_set_bytes(model);
     UpscaleNeed { bytes, out: (in_w.saturating_mul(scale), in_h.saturating_mul(scale)) }
+}
+
+/// What Refine over a kept upscale of `out` needs free: the model's
+/// output and the result shown are in memory already, and the enlarged
+/// input too when `reference_kept`; Refine's new copies and the caller's
+/// `copies_after` are not.
+pub fn refinish_need(out: (u32, u32), finish: &Refine, reference_kept: bool, copies_after: u64) -> UpscaleNeed {
+    UpscaleNeed { bytes: finish_bytes(pixels(out.0, out.1, 1) * 4, finish, reference_kept, copies_after), out }
+}
+
+/// The most Refine's new copies of an `output`-byte picture hold at once:
+/// while it refines, or once it has landed with `copies_after` made of it.
+fn finish_bytes(output: u64, finish: &Refine, reference_kept: bool, copies_after: u64) -> u64 {
+    let landed = finish.returned_copies(reference_kept) + copies_after;
+    output * finish.copies_while_refining(reference_kept).max(landed)
 }
 
 /// The pixels of a `w` × `h` image enlarged `scale` times.
@@ -509,6 +523,19 @@ mod tests {
         }
         let off = Refine { sharpen: 0.0, sharpen_sigma: 2.0, ai_blend: 1.0, color_match: false };
         assert_eq!(super::need(prunr_models::ModelId::RealEsrganX4Plus, (60_000, 50_000), 4, &off, 0).out, (240_000, 200_000));
+    }
+
+    /// Refine over a kept upscale needs only its new copies: the output is
+    /// in memory, and the enlarged input when it was kept.
+    #[test]
+    fn a_refine_over_a_kept_upscale_needs_its_new_copies() {
+        let copy = 1000 * 1000 * 4;
+        let all = Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.7, color_match: true };
+        assert_eq!(refinish_need((1000, 1000), &all, false, 1).bytes, 3 * copy, "the input enlarged, the blend and it sharpened");
+        assert_eq!(refinish_need((1000, 1000), &all, true, 1).bytes, 2 * copy, "the blend and it sharpened, or the result and its copy on screen");
+        let sharpen = Refine { sharpen: 0.5, ai_blend: 1.0, color_match: false, ..all };
+        assert_eq!(refinish_need((1000, 1000), &sharpen, true, 0).bytes, copy, "the result");
+        assert_eq!(refinish_need((1000, 1000), &sharpen, true, 0).out, (1000, 1000));
     }
 
     #[test]

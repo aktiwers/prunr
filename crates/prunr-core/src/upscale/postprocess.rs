@@ -208,20 +208,21 @@ impl Refine {
         self.blends() || self.color_match
     }
 
-    fn change_nothing(&self) -> bool {
+    /// Whether `refine` gives back the model's output as it is.
+    pub fn change_nothing(&self) -> bool {
         self.sharpen == 0.0 && !self.needs_reference()
     }
 
-    /// Copies of the output `refine` returns besides it: the result and
-    /// the enlarged input.
-    pub(super) fn returned_copies(&self) -> u64 {
-        u64::from(!self.change_nothing()) + u64::from(self.needs_reference())
+    /// Copies of the output `refine` makes and returns: the result, and
+    /// the enlarged input unless `reference_kept` (already at its size).
+    pub(super) fn returned_copies(&self, reference_kept: bool) -> u64 {
+        u64::from(!self.change_nothing()) + u64::from(self.needs_reference() && !reference_kept)
     }
 
-    /// Copies of the output `refine` holds besides it at its peak: a blend
+    /// Copies of the output `refine` makes and holds at its peak: a blend
     /// being sharpened is held until the sharpened copy is made.
-    pub(super) fn copies_while_refining(&self) -> u64 {
-        self.returned_copies() + u64::from(self.blends() && self.sharpen != 0.0)
+    pub(super) fn copies_while_refining(&self, reference_kept: bool) -> u64 {
+        self.returned_copies(reference_kept) + u64::from(self.blends() && self.sharpen != 0.0)
     }
 }
 
@@ -287,20 +288,25 @@ mod tests {
         assert!(reference.is_some_and(|r| r.dimensions() == (4, 4)), "the enlarged input comes back for reuse");
     }
 
-    /// The memory check counts what `refine` gives back, for every
-    /// combination of its knobs.
+    /// The memory check counts what `refine` makes and gives back, for
+    /// every combination of its knobs, with and without the enlarged input
+    /// kept from before.
     #[test]
     fn refine_returns_the_copies_the_memory_check_counts() {
         use std::sync::Arc;
         let raw = Arc::new(RgbaImage::from_pixel(4, 4, image::Rgba([200, 120, 60, 255])));
         let input = RgbaImage::from_pixel(2, 2, image::Rgba([40, 90, 140, 255]));
+        let kept = Arc::new(Reference::new(RgbaImage::from_pixel(4, 4, image::Rgba([40, 90, 140, 255]))));
         for sharpen in [0.0, 0.5] {
             for ai_blend in [1.0, 0.7] {
                 for color_match in [false, true] {
                     let knobs = Refine { sharpen, sharpen_sigma: 2.0, ai_blend, color_match };
-                    let (shown, reference) = refine(&raw, &input, None, &knobs);
-                    let returned = u64::from(!Arc::ptr_eq(&shown, &raw)) + u64::from(reference.is_some());
-                    assert_eq!(knobs.returned_copies(), returned, "{knobs:?}");
+                    for given in [None, Some(Arc::clone(&kept))] {
+                        let (shown, reference) = refine(&raw, &input, given.clone(), &knobs);
+                        let made = |r: &Arc<Reference>| !Arc::ptr_eq(r, &kept);
+                        let returned = u64::from(!Arc::ptr_eq(&shown, &raw)) + u64::from(reference.as_ref().is_some_and(made));
+                        assert_eq!(knobs.returned_copies(given.is_some()), returned, "{knobs:?}, kept: {}", given.is_some());
+                    }
                 }
             }
         }

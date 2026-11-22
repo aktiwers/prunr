@@ -86,6 +86,15 @@ fn cut_out(inputs: &DispatchInputs, seg: &Arc<SegTensor>) -> Result<(RgbaImage, 
     Ok((rgba, (!inputs.quick).then(|| KeptAlpha { mask: Arc::new(mask), made_of })))
 }
 
+/// Why Refine over a kept upscale of `out` is refused for memory, in the
+/// user's words; `None` when it fits `room`.
+fn refinish_refusal(out: (u32, u32), knobs: &prunr_core::upscale::Refine, reference_kept: bool, faces: bool, room: Option<u64>) -> Option<String> {
+    // Faces over the output as it is are drawn on a copy of it.
+    let faced = u64::from(faces && knobs.change_nothing());
+    let need = prunr_core::upscale::refinish_need(out, knobs, reference_kept, crate::gui::image_texture::COPIES_TO_SHOW + faced);
+    need.fits(room).err().and_then(refusal)
+}
+
 /// What a render that failed tells the user: a refusal for memory, in its
 /// own words. Any other failure is logged; its words are not theirs.
 fn refusal(error: prunr_core::CoreError) -> Option<String> {
@@ -1146,6 +1155,10 @@ fn render(inputs: DispatchInputs, cancel: &AtomicBool) -> RunOutput {
         }
         let had_reference = upscale.reference.is_some();
         let faces = inputs.faces.as_ref().map(|f| &f.key);
+        let reference_kept = upscale.reference.as_ref().is_some_and(|r| r.dimensions() == full.dimensions());
+        if let Some(why) = refinish_refusal(full.dimensions(), &knobs, reference_kept, faces.is_some(), prunr_core::sysmem::room_for_buffers_bytes()) {
+            return RunOutput { refused: Some(why), ..RunOutput::default() };
+        }
         let (shown, reference) = finish_upscale(full, &upscale.input, upscale.reference, &knobs, faces);
         let built_reference = reference.filter(|_| !had_reference);
         return RunOutput { rgba: Some(shown), built_reference, ..RunOutput::default() };
@@ -1492,6 +1505,24 @@ mod tests {
 
 
     use super::*;
+
+    /// Refine changed on a kept upscale is refused, saying so, when its new
+    /// copies do not fit the memory; one that fits runs.
+    #[test]
+    fn a_refine_change_too_large_for_the_memory_is_refused() {
+        use prunr_core::upscale::Refine;
+        let all = Refine { sharpen: 0.5, sharpen_sigma: 2.0, ai_blend: 0.7, color_match: true };
+        let copy = 1000 * 1000 * 4;
+        // The enlarged input, the blend and it sharpened; then the result,
+        // the input and the copy to show it: three new copies.
+        assert_eq!(super::refinish_refusal((1000, 1000), &all, false, false, Some(3 * copy)), None);
+        let why = super::refinish_refusal((1000, 1000), &all, false, false, Some(3 * copy - 1)).expect("refused");
+        assert!(why.starts_with("Too large to upscale"), "{why}");
+        assert_eq!(super::refinish_refusal((1000, 1000), &all, true, false, Some(2 * copy)), None, "the enlarged input kept is not made again");
+        let off = Refine { sharpen: 0.0, ai_blend: 1.0, color_match: false, ..all };
+        assert!(super::refinish_refusal((1000, 1000), &off, false, true, Some(2 * copy - 1)).is_some(), "faces over the plain output copy it");
+        assert_eq!(super::refinish_refusal((1000, 1000), &all, false, false, None), None, "no reading: it runs");
+    }
 
     #[test]
     fn edge_planes_keep_bold_and_the_newest_other_scale() {
