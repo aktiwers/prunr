@@ -346,6 +346,13 @@ fn photo_png(seed: u8) -> Vec<u8> {
     bytes
 }
 
+/// The largest picture, in pixels, the explorer enlarges to. The stand-in
+/// makes each enlargement at full size, and a fourth one by four of these
+/// photos is 2.5 gigapixels, 10 GB a copy; the app lets it start when the
+/// machine has the memory free, and explorers run side by side each see
+/// all of it.
+const LARGEST_ENLARGEMENT: u64 = 160_000_000;
+
 struct World {
     h: Harness<'static, PrunrApp>,
     worker: StandIn,
@@ -468,9 +475,21 @@ impl World {
         settle(&mut self.h);
     }
 
+    /// Whether Process would enlarge an image it reaches past `pixels`.
+    fn enlarges_past(&self, pixels: u64) -> bool {
+        let app = self.app();
+        let Some(kind) = app.settings.model.dispatch_model_kind().filter(|_| app.settings.model.is_upscale()) else { return false };
+        app.batch.process_targets().any(|item| {
+            let (w, h) = item.next_upscale_dims(kind);
+            let factor = u64::from(item.settings.output_scale.factor());
+            u64::from(w) * u64::from(h) * factor * factor > pixels
+        })
+    }
+
     /// Do `action`; false when it did not apply here.
     fn act(&mut self, action: &Action) -> bool {
         match action {
+            Action::Click(name) if name == "Process" && self.enlarges_past(LARGEST_ENLARGEMENT) => return false,
             Action::Click(name) => {
                 let Some(control) = self.pressable(name) else { return false };
                 self.drag(control.at, control.at);
@@ -1068,6 +1087,22 @@ fn explore(seed: u64, sequences: u64, len: usize) -> Vec<(Vec<Action>, Broken)> 
     );
     found
 }
+
+/// Process is left alone once it would enlarge an image past the budget,
+/// counting the scale each image is set to.
+#[test]
+fn the_explorer_enlarges_within_its_budget() {
+    let mut world = World::new();
+    assert!(!world.enlarges_past(1), "a cut-out model enlarges nothing");
+    for step in ["Model", "Upscale (Nomos2)\n4× fast, natural texture · 29 MB"] {
+        assert!(world.act(&Action::Click(step.into())), "{step} is pressed");
+    }
+    let enlarged = 240 * 160 * 4 * 4;
+    assert!(!world.enlarges_past(enlarged), "an enlargement to the budget is made");
+    assert!(world.enlarges_past(enlarged - 1), "one past the budget is not");
+}
+
+const _THREE_ENLARGEMENTS_BY_FOUR_STAY_WITHIN_IT: () = assert!(LARGEST_ENLARGEMENT >= 240 * 160 * 64 * 64);
 
 /// A few fixed sequences run with the suite: the explorer itself works,
 /// and the app holds its rules on them.
