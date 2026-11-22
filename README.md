@@ -7,7 +7,7 @@ Prunr removes backgrounds from images using ONNX neural networks running entirel
 Website: [prunr.io](https://prunr.io/)
 
 <p align="center">
-  <img src="img/demo.gif" alt="Prunr demo" width="720">
+  <img src="img/demo.gif" alt="Prunr demo" width="640">
 </p>
 
 ## Download
