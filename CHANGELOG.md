@@ -2,7 +2,7 @@
 
 All notable user-facing changes. Releases on GitHub carry the full commit list.
 
-## Unreleased — 0.5.0
+## 0.5.0 — 2026-11-23
 
 ### Added
 
