@@ -199,6 +199,12 @@ impl UpdateCheck {
         }
     }
 
+    /// Tests: the next look is now.
+    #[cfg(test)]
+    pub(crate) fn due_now(&mut self) {
+        self.look_at = Instant::now();
+    }
+
     /// The answer of the check on its way, once it is in: `Some(latest)`
     /// when the service answered.
     pub fn answer(&mut self) -> Option<Option<String>> {
