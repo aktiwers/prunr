@@ -123,9 +123,10 @@ pub struct Settings {
 /// of the model's need.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SdMemoryGuard {
-    /// About 1 GB: fits SD on a tight machine; other apps may be squeezed.
-    Relaxed,
+    /// About 1 GB, the free memory below which a fill is stopped anyway:
+    /// fits SD on a tight machine; other apps may be squeezed.
     #[default]
+    Relaxed,
     Balanced,
     /// About 4 GB: for machines where other apps grab memory mid-run.
     Strict,
@@ -776,7 +777,7 @@ impl Default for Settings {
             active_backend: "CPU".to_string(),
             brush: BrushSettings::default(),
             brush_changes: Default::default(),
-            sd_memory: SdMemoryGuard::Balanced,
+            sd_memory: SdMemoryGuard::Relaxed,
             hotkeys: BTreeMap::new(),
             keep_sd_loaded: false,
         }
@@ -948,7 +949,7 @@ mod tests {
         assert!(s.runtime_prompt_snoozed_until.is_empty());
         assert_eq!(s.processor, ComputeMode::Auto);
         assert_eq!(s.active_backend, "CPU");
-        assert_eq!(s.sd_memory, SdMemoryGuard::Balanced);
+        assert_eq!(s.sd_memory, SdMemoryGuard::Relaxed, "the eraser keeps only the free memory below which its fill is stopped");
     }
 
     /// A preset of `item` for the active model, saved as the app saves.
