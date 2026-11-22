@@ -117,6 +117,14 @@ pub struct Settings {
     /// How much free memory the SD eraser leaves for other apps.
     #[serde(default)]
     pub sd_memory: SdMemoryGuard,
+
+    /// Ask once a day whether a newer Prunr is out.
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+
+    /// What the update check keeps between runs.
+    #[serde(default)]
+    pub(crate) update_check: super::update_check::Kept,
 }
 
 /// The SD eraser's memory guard: the headroom its RAM gate adds on top
@@ -780,6 +788,8 @@ impl Default for Settings {
             sd_memory: SdMemoryGuard::Relaxed,
             hotkeys: BTreeMap::new(),
             keep_sd_loaded: false,
+            check_updates: true,
+            update_check: Default::default(),
         }
     }
 }
@@ -950,6 +960,8 @@ mod tests {
         assert_eq!(s.processor, ComputeMode::Auto);
         assert_eq!(s.active_backend, "CPU");
         assert_eq!(s.sd_memory, SdMemoryGuard::Relaxed, "the eraser keeps only the free memory below which its fill is stopped");
+        assert!(s.check_updates, "the update check is on until turned off");
+        assert_eq!(s.update_check, Default::default());
     }
 
     /// A preset of `item` for the active model, saved as the app saves.

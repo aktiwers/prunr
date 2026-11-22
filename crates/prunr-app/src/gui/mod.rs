@@ -30,6 +30,7 @@ pub mod knob_catalog;
 pub mod surface_catalog;
 pub mod system_bridge;
 pub mod download_manager;
+pub(crate) mod update_check;
 pub mod hardware_cache;
 pub mod machine_test;
 pub mod env_overrides;

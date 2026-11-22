@@ -4,7 +4,7 @@
 //! - **Images**: what happens when images arrive
 //! - **Editing**: how the canvas looks while editing
 //! - **Shortcuts**: the shortcut table, each chord rebindable in place
-//! - **Credits**: installed-model attribution (CC-BY compliance)
+//! - **About**: Prunr's version, the update check, installed-model attribution (CC-BY compliance)
 //!
 //! Per-image knobs (gamma, threshold, line mode, …) live on the persistent
 //! adjustments toolbar (rows 2 + 3), not here.
@@ -31,7 +31,7 @@ pub enum SettingsTab {
     Images,
     Editing,
     Shortcuts,
-    Credits,
+    About,
 }
 
 impl SettingsTab {
@@ -42,7 +42,7 @@ impl SettingsTab {
             Self::Images => "Images",
             Self::Editing => "Editing",
             Self::Shortcuts => "Shortcuts",
-            Self::Credits => "Credits",
+            Self::About => "About",
         }
     }
 
@@ -53,12 +53,12 @@ impl SettingsTab {
             Self::Images => ICON_IMAGE.codepoint,
             Self::Editing => ICON_EDIT.codepoint,
             Self::Shortcuts => ICON_KEYBOARD.codepoint,
-            Self::Credits => ICON_INFO.codepoint,
+            Self::About => ICON_INFO.codepoint,
         }
     }
 
     pub(crate) const ALL: [SettingsTab; 6] = [
-        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Shortcuts, Self::Credits,
+        Self::Performance, Self::Hardware, Self::Images, Self::Editing, Self::Shortcuts, Self::About,
     ];
 
     /// Parse a label string into a tab. Used by PRUNR_OPEN_TAB.
@@ -176,7 +176,7 @@ fn render_page(ui: &mut egui::Ui, app: &mut PrunrApp) -> Option<HardwareSectionI
         SettingsTab::Images => { render_page_images(ui, &mut app.settings); None }
         SettingsTab::Editing => { render_page_editing(ui, &mut app.settings); None }
         SettingsTab::Shortcuts => { render_tab_shortcuts(ui, app); None }
-        SettingsTab::Credits => { render_tab_model_credits(ui, &app.hardware_install_cache); None }
+        SettingsTab::About => { render_tab_about(ui, app); None }
     }
 }
 
@@ -912,6 +912,27 @@ fn sort_for_model_credits<'a>(
             .then_with(|| a.display_name.cmp(b.display_name))
     });
     out
+}
+
+/// Prunr's version, the update check, and the installed models' credits.
+fn render_tab_about(ui: &mut egui::Ui, app: &mut PrunrApp) {
+    use crate::gui::update_check;
+    group_heading(ui, &format!("Prunr {}", update_check::VERSION));
+    let newer = app.settings.update_check.newer().filter(|_| app.settings.check_updates).map(str::to_string);
+    group(ui, |rows| {
+        rows.row("Check for updates", "Once a day.", |ui| {
+            super::chip::switch(ui, "Check for updates", &mut app.settings.check_updates);
+        });
+        if let Some(newer) = newer {
+            rows.row(&format!("Prunr {newer} is out"), "Get it from its release page.", |ui| {
+                if button(ui, ButtonKind::Primary, "Download").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(update_check::release_page(&newer)));
+                }
+            });
+        }
+    });
+    group_heading(ui, "Models");
+    render_tab_model_credits(ui, &app.hardware_install_cache);
 }
 
 fn render_tab_model_credits(ui: &mut egui::Ui, installs: &crate::gui::hardware_cache::HardwareInstallCache) {

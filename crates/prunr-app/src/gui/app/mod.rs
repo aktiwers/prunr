@@ -79,6 +79,7 @@ pub struct PrunrApp {
     pub(crate) brush_state: super::brush_state::BrushState,
     pub(crate) magic_brush_state: super::magic_brush_state::MagicBrushState,
     pub(crate) download_manager: super::download_manager::DownloadManager,
+    pub(crate) update_check: super::update_check::UpdateCheck,
 
     // Before/After toggle
     pub(crate) show_original: bool,
@@ -293,6 +294,18 @@ impl PrunrApp {
         app
     }
 
+    /// Asks whether a newer Prunr is out when a check is due, and lands
+    /// its answer: kept in the settings, and told when it names one.
+    fn pump_update_check(&mut self, ctx: &egui::Context) {
+        if let Some(Some(latest)) = self.update_check.answer() {
+            if let Some(notice) = super::update_check::notice(&mut self.settings.update_check, &latest) {
+                self.toasts.info(notice);
+            }
+            self.save_settings_soon();
+        }
+        self.update_check.ask_when_due(self.settings.check_updates, &self.settings.update_check, ctx);
+    }
+
     /// Persists the settings once input has paused: a held key repeats
     /// at 30 Hz, and each save rewrites the whole file.
     fn save_settings_soon(&mut self) {
@@ -447,6 +460,7 @@ impl PrunrApp {
             brush_state: super::brush_state::BrushState::default(),
             magic_brush_state: super::magic_brush_state::MagicBrushState::default(),
             download_manager: super::download_manager::DownloadManager::new(),
+            update_check: super::update_check::UpdateCheck::new(),
             show_original: false,
             picking_depth_focus: None,
             busy_since: None,
@@ -1346,6 +1360,7 @@ impl eframe::App for PrunrApp {
         self.handle_drag_and_drop(ctx);
         self.pump_machine_test(ctx);
         self.pump_download_checks(ctx);
+        self.pump_update_check(ctx);
         if !self.handle_hotkey_capture(ctx) {
             self.handle_keyboard_shortcuts(ctx);
         }
@@ -1914,6 +1929,7 @@ mod field_list_tests {
             brush_state: _,
             magic_brush_state: _,
             download_manager: _,
+            update_check: _,
             show_original: _,
             picking_depth_focus: _,
             busy_since: _,
