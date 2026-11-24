@@ -11,7 +11,7 @@
 class Prunr < Formula
   desc "Local AI background removal — no cloud, no API keys"
   homepage "https://prunr.io"
-  version "0.5.0"
+  version "0.5.1"
   license "Apache-2.0"
 
   depends_on macos: :sonoma
