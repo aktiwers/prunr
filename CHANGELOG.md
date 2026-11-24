@@ -2,6 +2,12 @@
 
 All notable user-facing changes. Releases on GitHub carry the full commit list.
 
+## 0.5.1 — 2026-11-24
+
+### Fixed
+
+- **Installing CUDA works again** (Settings › Hardware, on Linux and Windows). Microsoft took down the page Prunr downloaded CUDA from, so installing it stopped with an error; the same files now come from Prunr's own downloads.
+
 ## 0.5.0 — 2026-11-23
 
 ### Added
