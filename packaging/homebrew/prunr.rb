@@ -9,7 +9,7 @@
 #   3. Update version + sha256 in the tap repo's Formula/prunr.rb
 
 class Prunr < Formula
-  desc "Local AI background removal — no cloud, no API keys"
+  desc "Remove backgrounds, erase, upscale and colorize photos on your own computer"
   homepage "https://prunr.io"
   version "0.5.1"
   license "Apache-2.0"
@@ -19,13 +19,13 @@ class Prunr < Formula
   on_macos do
     on_arm do
       url "https://github.com/aktiwers/prunr/releases/download/v#{version}/prunr-macos-aarch64.tar.gz"
-      sha256 "39904c12bbb9e1456cadb7ee40745f28f15fe0c73184c2cfdb07dc2dad1bf5a2"
+      sha256 "03532cb2d31ecaba979b625cd98bb0a24708f322f468538109be019a5b1e30bf"
     end
   end
 
-  # prunr loads libonnxruntime.dylib from beside its real path, so both
-  # stay together in libexec and bin only holds a link.
   def install
+    # prunr loads ONNX Runtime from beside its real path, so both stay in
+    # libexec and bin holds a link.
     libexec.install "prunr", "libonnxruntime.dylib"
     bin.install_symlink libexec/"prunr"
   end
