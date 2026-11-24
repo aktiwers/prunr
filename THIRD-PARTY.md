@@ -6,7 +6,7 @@ Prunr is built from the open-source Rust crates below (every platform's build co
 
 | Component | Licence | Source |
 |---|---|---|
-| ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; the OpenVINO and MIGraphX builds the app can download; and its CUDA provider plugin, downloaded on Linux and Windows) | MIT | https://github.com/microsoft/onnxruntime |
+| ONNX Runtime (the bundled builds: CPU on Linux, CoreML on macOS, Windows ML with DirectML on Windows; the OpenVINO and MIGraphX builds the app can download; and its CUDA provider plugin, downloaded on Linux and Windows) | MIT | https://onnxruntime.ai |
 | OpenVINO provider plugin for ONNX Runtime (downloaded on Linux and Windows; the components it carries are listed in the `third-party-programs.txt` kept beside it) | MIT | https://github.com/onnxruntime/onnxruntime-ep-openvino |
 | OpenVINO Toolkit (inside the OpenVINO build of ONNX Runtime, and downloaded with the OpenVINO plugin) | Apache-2.0 | https://github.com/openvinotoolkit/openvino |
 | oneTBB (downloaded with the OpenVINO plugin) | Apache-2.0 | https://github.com/uxlfoundation/oneTBB |

@@ -77,12 +77,13 @@ impl AddOn {
 /// Microsoft's CUDA provider as a plugin (CUDA 12, cuDNN 9), the release
 /// matched to ONNX Runtime 1.30, which the Windows ML build is. It brings
 /// no NVIDIA libraries; the app downloads those beside it. 0.3.0 is
-/// matched to 1.31 and CUDA 13 only.
+/// matched to 1.31 and CUDA 13 only. Served from Prunr's own release:
+/// Microsoft took down the repository it was published in.
 pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
     version: "0.2.0",
-    url: "https://github.com/microsoft/onnxruntime/releases/download/plugin-ep-cuda/v0.2.0/cuda_ep_cuda12_0.2.0_win-x64.zip",
-    sha256: "ba698427418129d0215c1d51367a1a97995cc1eed56056479288e3245d19947c",
-    size_bytes: 238_621_368,
+    url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_win-x64.zip",
+    sha256: "c977a09be2cce4b66e67cf56c32da8efb0b2716f57c3738b51cb4788ad89a2c5",
+    size_bytes: 239_738_509,
     library: "onnxruntime_providers_cuda.dll",
     folder: None,
     left_out: &[],
@@ -94,9 +95,9 @@ pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
 /// lack what it calls.
 pub const CUDA_ADDON_LINUX: AddOn = AddOn {
     version: "0.2.0",
-    url: "https://github.com/microsoft/onnxruntime/releases/download/plugin-ep-cuda/v0.2.0/cuda_ep_cuda12_0.2.0_linux-x64.tar.gz",
-    sha256: "22cfe716fad99d338cad73e325611f8ba59eb9b0d1932c43701ac998a5037ff3",
-    size_bytes: 436_640_825,
+    url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_linux-x64.tar.gz",
+    sha256: "fa77b2d589571d0c7aa1f676c9e710e7106a02b115a476efebecd84bdd5d6dac",
+    size_bytes: 436_431_608,
     library: "libonnxruntime_providers_cuda.so",
     folder: None,
     left_out: &[],
