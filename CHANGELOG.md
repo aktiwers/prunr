@@ -2,6 +2,12 @@
 
 All notable user-facing changes. Releases on GitHub carry the full commit list.
 
+## 0.5.2 — 2026-11-27
+
+### Changed
+
+- **Everything Prunr downloads comes from Prunr's own downloads:** the Stable Diffusion eraser, the NVIDIA libraries CUDA needs, OpenVINO and MIGraphX, as CUDA itself has since 0.5.1. A download can no longer stop working because another site moved its files, and Prunr no longer contacts PyPI or Hugging Face.
+
 ## 0.5.1 — 2026-11-24
 
 ### Fixed
