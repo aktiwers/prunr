@@ -108,6 +108,32 @@ fn only_the_cli_and_main_write_to_stderr() {
     report(found, "stderr written outside the CLI");
 }
 
+/// What Prunr downloads comes from its own releases or prunr.io, pinned
+/// by SHA-256: an address on someone else's host breaks every installed
+/// copy when they move the file, as Microsoft's CUDA plugin did.
+#[test]
+fn downloads_come_from_prunrs_own_releases() {
+    const OWN: [&str; 2] = ["https://github.com/aktiwers/prunr/releases/download/", "https://prunr.io/"];
+    const FOREIGN: [&str; 4] = ["pypi.org/pypi/", "files.pythonhosted.org", "/resolve/main/", "huggingface.co/api/"];
+    let mut found = Vec::new();
+    for (rel, text) in workspace_sources() {
+        for (n, line) in production_lines(text) {
+            let code = code_part(line);
+            for range in scan_line(code).0 {
+                let literal = &code[range.clone()];
+                let field = code[..range.start - 1].trim_end();
+                let url_field = field.strip_suffix("url:").is_some_and(|before| !before.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+                if url_field && literal.starts_with("http") && !OWN.iter().any(|own| literal.starts_with(own)) {
+                    found.push(format!("{rel}:{n}: put {literal} on a Prunr release and download it from there"));
+                } else if FOREIGN.iter().any(|foreign| literal.contains(foreign)) {
+                    found.push(format!("{rel}:{n}: pin the file {literal} finds on a Prunr release"));
+                }
+            }
+        }
+    }
+    report(found, "downloads from someone else's host");
+}
+
 /// A failure's own text put into a toast goes through
 /// `prunr_core::plain::error`, which turns a system, driver or model
 /// message ("os error 13", "Non-zero status code returned") into a plain

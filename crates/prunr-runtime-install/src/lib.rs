@@ -45,9 +45,7 @@ pub const WINDOWS_ML_VERSION: &str = "1.30.0.202609102321";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddOn {
     pub version: &'static str,
-    pub url: &'static str,
-    pub sha256: &'static str,
-    pub size_bytes: u64,
+    pub file: Pinned,
     /// The library inside the archive: at its root, or in `folder`.
     pub library: &'static str,
     /// The archive's folder the library loads its own libraries from,
@@ -67,8 +65,16 @@ pub enum Packing {
     TarGz,
 }
 
-impl AddOn {
-    /// Its download, checked as a wheel's is.
+/// A file Prunr downloads as it is, from its own releases, checked by its
+/// SHA-256 as a wheel is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pinned {
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size_bytes: u64,
+}
+
+impl Pinned {
     pub fn download(&self) -> WheelInfo {
         WheelInfo { url: self.url.to_string(), sha256: self.sha256.to_string(), size_bytes: self.size_bytes }
     }
@@ -81,9 +87,11 @@ impl AddOn {
 /// Microsoft took down the repository it was published in.
 pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
     version: "0.2.0",
-    url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_win-x64.zip",
-    sha256: "c977a09be2cce4b66e67cf56c32da8efb0b2716f57c3738b51cb4788ad89a2c5",
-    size_bytes: 239_738_509,
+    file: Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_win-x64.zip",
+        sha256: "c977a09be2cce4b66e67cf56c32da8efb0b2716f57c3738b51cb4788ad89a2c5",
+        size_bytes: 239_738_509,
+    },
     library: "onnxruntime_providers_cuda.dll",
     folder: None,
     left_out: &[],
@@ -95,25 +103,30 @@ pub const CUDA_ADDON_WINDOWS: AddOn = AddOn {
 /// lack what it calls.
 pub const CUDA_ADDON_LINUX: AddOn = AddOn {
     version: "0.2.0",
-    url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_linux-x64.tar.gz",
-    sha256: "fa77b2d589571d0c7aa1f676c9e710e7106a02b115a476efebecd84bdd5d6dac",
-    size_bytes: 436_431_608,
+    file: Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/cuda-addon-v0.2.0/cuda_ep_cuda12_0.2.0_linux-x64.tar.gz",
+        sha256: "fa77b2d589571d0c7aa1f676c9e710e7106a02b115a476efebecd84bdd5d6dac",
+        size_bytes: 436_431_608,
+    },
     library: "libonnxruntime_providers_cuda.so",
     folder: None,
     left_out: &[],
     packing: Packing::TarGz,
 };
 
-/// Intel's OpenVINO provider as a plugin, built against ONNX Runtime 1.30.
+/// Intel's OpenVINO provider as a plugin, built against ONNX Runtime 1.30:
+/// its PyPI wheel, served from Prunr's own release.
 /// It brings OpenVINO 2026.4.1 with oneTBB and hwloc in its folder, and
 /// finds them there; the Intel graphics also need Intel's own driver. Its
 /// NPU part is left out: the app names the processor and the graphics
 /// only, so OpenVINO never loads it.
 pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
     version: "1.8.1",
-    url: "https://files.pythonhosted.org/packages/88/01/4e72a8a65b584f01d6e59eb453bae397b82b2e51df1b5c94efa05e17800b/onnxruntime_ep_openvino-1.8.1-py3-none-manylinux_2_28_x86_64.whl",
-    sha256: "3832643158c8c187fcab6db661cde2a8c06a2b3559d95d0f2411ac0e51c5e924",
-    size_bytes: 52_587_628,
+    file: Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/openvino-addon-v1.8.1/onnxruntime_ep_openvino-1.8.1-py3-none-manylinux_2_28_x86_64.whl",
+        sha256: "3832643158c8c187fcab6db661cde2a8c06a2b3559d95d0f2411ac0e51c5e924",
+        size_bytes: 52_587_628,
+    },
     library: "libonnxruntime_providers_openvino_plugin.so",
     folder: Some("onnxruntime_ep_openvino"),
     left_out: &["libopenvino_intel_npu"],
@@ -125,9 +138,11 @@ pub const OPENVINO_ADDON_LINUX: AddOn = AddOn {
 /// Without its NPU part it keeps no networking import at all.
 pub const OPENVINO_ADDON_WINDOWS: AddOn = AddOn {
     version: "1.8.1",
-    url: "https://files.pythonhosted.org/packages/75/98/224ead07344390258ae0515ed285ba2951e9c1405f4507443a03bb7dd5c7/onnxruntime_ep_openvino-1.8.1-py3-none-win_amd64.whl",
-    sha256: "1acd878be173b02bb8b953460f2f59b121e5f6e47ebc6aad490c0590cf6718fb",
-    size_bytes: 75_824_318,
+    file: Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/openvino-addon-v1.8.1/onnxruntime_ep_openvino-1.8.1-py3-none-win_amd64.whl",
+        sha256: "1acd878be173b02bb8b953460f2f59b121e5f6e47ebc6aad490c0590cf6718fb",
+        size_bytes: 75_824_318,
+    },
     library: "onnxruntime_providers_openvino_plugin.dll",
     folder: Some("onnxruntime_ep_openvino"),
     left_out: &["openvino_intel_npu"],

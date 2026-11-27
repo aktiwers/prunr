@@ -13,7 +13,7 @@ pub const USER_AGENT: &str = concat!("prunr/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone)]
 pub enum InstallEvent {
-    /// Pre-download work: the PyPI metadata query.
+    /// Before the download: what is already in place.
     Preparing,
     Downloading { bytes_so_far: u64, total_bytes: u64 },
     Extracting,
@@ -115,11 +115,12 @@ impl RuntimeId {
         self.is_addon() && prunr_core::ort_runtime::BUILT_IN_HAS_GPU
     }
 
-    fn pypi_package(self) -> &'static str {
+    /// The runtime it installs where it is no add-on: MIGraphX's Linux
+    /// build.
+    fn runtime_download(self) -> Option<ri::Pinned> {
         match self {
-            Self::OpenVino => "onnxruntime-openvino",
-            Self::Cuda => "onnxruntime-gpu",
-            Self::MiGraphX => "onnxruntime-migraphx",
+            Self::MiGraphX if cfg!(all(target_os = "linux", target_arch = "x86_64")) => Some(MIGRAPHX_RUNTIME_LINUX),
+            _ => None,
         }
     }
 
@@ -232,7 +233,7 @@ impl RuntimeId {
     pub fn download_label(self, here: OnDisk) -> std::borrow::Cow<'static, str> {
         use std::borrow::Cow;
         let copies: u64 = if here.small_card_copies { 0 } else { self.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum() };
-        let addon = self.addon().map(|addon| Cow::Owned(prunr_core::memory::byte_size(addon.size_bytes + copies)));
+        let addon = self.addon().map(|addon| Cow::Owned(prunr_core::memory::byte_size(addon.file.size_bytes + copies)));
         match self {
             Self::OpenVino => addon.unwrap_or(Cow::Borrowed("80 MB")),
             Self::Cuda => addon.filter(|_| here.nvidia_libraries).unwrap_or(Cow::Borrowed("about 2 GB")),
@@ -369,17 +370,76 @@ impl RuntimeId {
 }
 
 /// NVIDIA's CUDA 12 and cuDNN 9 libraries the CUDA add-on links, as the
-/// PyPI wheels that carry them: (package, pinned version). ORT asks for
-/// any 12.x / 9.x; these are the newest at pinning. No cuRAND: neither
-/// add-on names it, and every model ran on CUDA without it, on Linux and
-/// on Windows.
-pub const NVIDIA_WHEELS: &[(&str, &str)] = &[
-    ("nvidia-cuda-runtime-cu12", "12.9.79"),
-    ("nvidia-cublas-cu12", "12.9.2.10"),
-    ("nvidia-cudnn-cu12", "9.27.0.42"),
-    ("nvidia-cufft-cu12", "11.4.1.4"),
-    ("nvidia-cuda-nvrtc-cu12", "12.9.86"),
+/// PyPI wheels that carry them (CUDA runtime 12.9.79, cuBLAS 12.9.2.10,
+/// cuDNN 9.27.0.42, cuFFT 11.4.1.4, NVRTC 12.9.86), served from Prunr's own
+/// release. ORT asks for any 12.x / 9.x; these were the newest at pinning.
+/// No cuRAND: neither add-on names it, and every model ran on CUDA without
+/// it, on Linux and on Windows.
+pub const NVIDIA_LIBRARIES: &[ri::Pinned] = if cfg!(windows) { NVIDIA_LIBRARIES_WINDOWS } else { NVIDIA_LIBRARIES_LINUX };
+
+const NVIDIA_LIBRARIES_LINUX: &[ri::Pinned] = &[
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        sha256: "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3",
+        size_bytes: 3_493_179,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_x86_64.whl",
+        sha256: "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702",
+        size_bytes: 581_240_110,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl",
+        sha256: "0a4aa3a7d2264256506c6857fc41fc0c499982f78d70195b1cfcc9055c1957cd",
+        size_bytes: 766_178_381,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cufft_cu12-11.4.1.4-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        sha256: "c67884f2a7d276b4b80eb56a79322a95df592ae5e765cf1243693365ccab4e28",
+        size_bytes: 200_877_592,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+        sha256: "210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4",
+        size_bytes: 89_568_129,
+    },
 ];
+
+const NVIDIA_LIBRARIES_WINDOWS: &[ri::Pinned] = &[
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+        sha256: "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
+        size_bytes: 3_591_604,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl",
+        sha256: "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661",
+        size_bytes: 553_162_896,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cudnn_cu12-9.27.0.42-py3-none-win_amd64.whl",
+        sha256: "06e9b0026f3bad97d2b58666330fabec04fe1672f776661ecb0ce0029c27f142",
+        size_bytes: 743_068_852,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl",
+        sha256: "8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80",
+        size_bytes: 200_067_309,
+    },
+    ri::Pinned {
+        url: "https://github.com/aktiwers/prunr/releases/download/nvidia-cuda12-v1/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl",
+        sha256: "72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349",
+        size_bytes: 76_408_187,
+    },
+];
+
+/// The MIGraphX runtime: ORT 1.24.2's `onnxruntime-migraphx` wheel for
+/// Python 3.13, served from Prunr's own release.
+const MIGRAPHX_RUNTIME_LINUX: ri::Pinned = ri::Pinned {
+    url: "https://github.com/aktiwers/prunr/releases/download/migraphx-runtime-v1.24.2/onnxruntime_migraphx-1.24.2-cp313-cp313-manylinux_2_34_x86_64.whl",
+    sha256: "20e497538362170af639b03a40249d7ed61b873ac354f20d732b90252206e320",
+    size_bytes: 20_342_422,
+};
 
 /// The first NVIDIA chip the pinned cuDNN runs on, as a PCI device id:
 /// cuDNN 9.11 and later dropped Maxwell, Pascal and Volta. NVIDIA numbers
@@ -668,10 +728,10 @@ fn run_install(
         }
     }
     let wheel = match rt.addon() {
-        Some(addon) => addon.download(),
-        None => query_pypi(rt, &cancel)?,
+        Some(addon) => addon.file.download(),
+        None => rt.runtime_download().ok_or_else(|| format!("{} is not made for this system", rt.display_name()))?.download(),
     };
-    let nvidia = if rt == RuntimeId::Cuda && !nvidia_libraries_installed() { nvidia_wheels(&cancel)? } else { Vec::new() };
+    let nvidia = if rt == RuntimeId::Cuda && !nvidia_libraries_installed() { nvidia_wheels() } else { Vec::new() };
     let copies = small_card_copies_missing(rt);
     let nvidia_bytes = nvidia.iter().map(|w| w.size_bytes).sum::<u64>();
     let total = wheel.size_bytes + nvidia_bytes + copies.iter().map(|(_, copy)| copy.size_bytes()).sum::<u64>();
@@ -823,15 +883,15 @@ fn run_nvidia_install(tx: &mpsc::Sender<InstallEvent>, cancel: Arc<AtomicBool>) 
     if !RuntimeId::Cuda.is_installed() {
         return Err(format!("install {} first", RuntimeId::Cuda.display_name()));
     }
-    let wheels = nvidia_wheels(&cancel)?;
+    let wheels = nvidia_wheels();
     let total = wheels.iter().map(|w| w.size_bytes).sum();
     fetch_nvidia_libraries(&wheels, &target, tx, &cancel, (0, total))?;
     let _ = tx.send(InstallEvent::Done { install_dir: target, started: None });
     Ok(())
 }
 
-fn nvidia_wheels(cancel: &Arc<AtomicBool>) -> Result<Vec<ri::WheelInfo>, String> {
-    NVIDIA_WHEELS.iter().map(|(package, version)| query_pypi_package(package, version, cancel)).collect()
+fn nvidia_wheels() -> Vec<ri::WheelInfo> {
+    NVIDIA_LIBRARIES.iter().map(ri::Pinned::download).collect()
 }
 
 /// `wheels`' libraries into `target`, through a staging folder moved into
@@ -866,36 +926,6 @@ fn fetch_nvidia_libraries(
         return Err(e);
     }
     move_into_place(&staging, target, &[])
-}
-
-fn query_pypi(rt: RuntimeId, cancel: &Arc<AtomicBool>) -> Result<ri::WheelInfo, String> {
-    query_pypi_package(rt.pypi_package(), rt.ort_version(), cancel)
-}
-
-/// The files PyPI lists at `url`, asked again after a dropped connection
-/// or a server error (5xx), as downloads are.
-fn pypi_files(url: &str, cancel: &Arc<AtomicBool>) -> Result<Vec<serde_json::Value>, String> {
-    ri::retry_with_backoff(cancel, ri::DOWNLOAD_ATTEMPTS, ri::DOWNLOAD_BACKOFF_BASE_MS, |_attempt| {
-        let client = ri::http_client(USER_AGENT)
-            .map_err(|e| ri::DlError::fatal(format!("HTTP client: {}", ri::with_causes(&e))))?;
-        let resp = client.get(url).send().map_err(|e| ri::DlError::request(&e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(ri::DlError::for_status(status, format!("PyPI answered {status}")));
-        }
-        let mut metadata: serde_json::Value = resp.json()
-            .map_err(|e| ri::DlError::transient(format!("PyPI JSON parse: {}", ri::with_causes(&e))))?;
-        match metadata["urls"].take() {
-            serde_json::Value::Array(urls) => Ok(urls),
-            _ => Err(ri::DlError::fatal("PyPI metadata missing `urls`")),
-        }
-    })
-    .map_err(|e| e.message)
-}
-
-/// `package` at `version`: its wheel for this host.
-fn query_pypi_package(package: &str, version: &str, cancel: &Arc<AtomicBool>) -> Result<ri::WheelInfo, String> {
-    ri::pick_wheel_for_host(&pypi_files(&format!("https://pypi.org/pypi/{package}/{version}/json"), cancel)?)
 }
 
 /// Extract into a hidden folder beside the install and move it into place
@@ -991,46 +1021,6 @@ fn move_into_place(staging: &Path, target: &Path, kept: &[&str]) -> Result<(), S
 mod tests {
     use super::*;
 
-    /// Answer each connection to the returned URL with the next of
-    /// `responses`; the handle tells how many were asked for.
-    fn serve(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<usize>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/pypi/onnxruntime/json", listener.local_addr().unwrap());
-        let served = std::thread::spawn(move || {
-            let mut served = 0;
-            // Replies first: zip asks its first side first, and the
-            // listener would wait for a connection past the last reply.
-            for (reply, stream) in responses.into_iter().zip(listener.incoming()) {
-                let mut stream = stream.unwrap();
-                let mut request = [0u8; 4096];
-                let _ = std::io::Read::read(&mut stream, &mut request);
-                let _ = std::io::Write::write_all(&mut stream, reply.as_bytes());
-                served += 1;
-            }
-            served
-        });
-        (url, served)
-    }
-
-    const UNAVAILABLE: &str = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
-    const LISTED: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"urls\":[]}";
-
-    /// PyPI's passing trouble (a 5xx) is asked again, as downloads are;
-    /// a refusal (a 4xx) says what PyPI answered, at once.
-    #[test]
-    fn the_pypi_query_retries_a_server_error_and_names_a_refusal() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (url, served) = serve(vec![UNAVAILABLE, LISTED]);
-        assert_eq!(pypi_files(&url, &cancel), Ok(Vec::new()));
-        assert_eq!(served.join().unwrap(), 2);
-
-        let (url, served) = serve(vec![NOT_FOUND]);
-        let refused = pypi_files(&url, &cancel).expect_err("a 404");
-        assert!(refused.contains("404"), "{refused}");
-        assert_eq!(served.join().unwrap(), 1, "a refusal is not asked again");
-    }
-
     /// The installer checks the extracted library under its name and the
     /// loader looks for it under core's; neither crate can see the other.
     #[test]
@@ -1114,8 +1104,8 @@ mod tests {
         let Some(addon) = RuntimeId::Cuda.addon() else { return };
         let here = |small_card_copies| OnDisk { nvidia_libraries: true, small_card_copies };
         let copies: u64 = RuntimeId::Cuda.small_card_copies().map(prunr_models::OnDemandVariant::size_bytes).sum();
-        assert_eq!(RuntimeId::Cuda.download_label(here(false)), prunr_core::memory::byte_size(addon.size_bytes + copies));
-        assert_eq!(RuntimeId::Cuda.download_label(here(true)), prunr_core::memory::byte_size(addon.size_bytes));
+        assert_eq!(RuntimeId::Cuda.download_label(here(false)), prunr_core::memory::byte_size(addon.file.size_bytes + copies));
+        assert_eq!(RuntimeId::Cuda.download_label(here(true)), prunr_core::memory::byte_size(addon.file.size_bytes));
     }
 
     /// CUDA's texts speak of DirectML only where it runs beside it.
