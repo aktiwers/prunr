@@ -11,7 +11,7 @@
 class Prunr < Formula
   desc "Remove backgrounds, erase, upscale and colorize photos on your own computer"
   homepage "https://prunr.io"
-  version "0.5.1"
+  version "0.5.2"
   license "Apache-2.0"
 
   depends_on macos: :sonoma
